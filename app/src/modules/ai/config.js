@@ -48,6 +48,27 @@ export const AI_CONFIG_FIELDS = Object.freeze([
 
 const str = (value) => (value === undefined || value === null ? undefined : String(value).trim());
 
+/**
+ * 早期版本用过的模型名，现在官方已不再接受（当前合法值只有 deepseek-flash / deepseek-v4-pro）。
+ * 老配置里存着它们的话，请求会被上游拒绝 —— 所以自动迁移。
+ */
+const LEGACY_MODEL_ALIASES = Object.freeze({
+  'deepseek-chat': 'deepseek-flash',
+  'deepseek-reasoner': 'deepseek-flash',
+});
+
+/**
+ * 只对**官方端点**做迁移。
+ * 自建/代理端点完全可能仍然提供名为 `deepseek-chat` 的模型，那就不能动人家的配置。
+ */
+function isOfficialDeepSeekEndpoint(baseUrl) {
+  try {
+    return new URL(baseUrl).hostname === 'api.deepseek.com';
+  } catch {
+    return false;
+  }
+}
+
 /** 宽松布尔：表单/环境变量传来的 "true"/"1"/"on" 都算真。 */
 function bool(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -88,6 +109,10 @@ export function normalizeAiConfig(input = {}, base = AI_DEFAULTS) {
   out.historyTurns = num(raw.historyTurns, { fallback: base.historyTurns, min: 0, max: 100 });
   // 布尔字段：pickAiConfig 已把它转成字符串，这里再解释一次
   out.drawMode = bool(raw.drawMode === undefined ? base.drawMode : raw.drawMode, base.drawMode);
+  // 旧模型名迁移：只在官方端点上做（自建端点可能有同名模型）
+  if (isOfficialDeepSeekEndpoint(out.baseUrl) && LEGACY_MODEL_ALIASES[out.model]) {
+    out.model = LEGACY_MODEL_ALIASES[out.model];
+  }
   return out;
 }
 
@@ -145,7 +170,10 @@ export class AiConfigStore {
   /** 读盘 + 合并三层来源；读盘失败也不阻塞启动（降级成默认配置）。 */
   async load() {
     const saved = (await this.file.read()) ?? {};
-    this.current = normalizeAiConfig({ ...aiConfigFromEnv(this.env), ...saved, ...this.options });
+    const before = { ...aiConfigFromEnv(this.env), ...saved, ...this.options };
+    this.current = normalizeAiConfig(before);
+    // 只记住"改过"这件事：配置文件里不写迁移痕迹，免得越攒越脏
+    this.migratedFrom = before.model && before.model !== this.current.model ? before.model : null;
     return this.current;
   }
 
@@ -156,7 +184,9 @@ export class AiConfigStore {
 
   /** 保存一份补丁（只认白名单字段），返回归一化后的新配置。 */
   async save(patch = {}) {
-    const next = normalizeAiConfig(pickAiConfig(patch), this.get());
+    const merged = { ...this.get(), ...pickAiConfig(patch) };
+    const next = normalizeAiConfig(merged);
+    this.migratedFrom = merged.model && merged.model !== next.model ? merged.model : null;
     this.current = next;
     await this.file.write(next);
     return next;

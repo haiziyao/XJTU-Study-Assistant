@@ -1805,10 +1805,19 @@ body.panel-collapsed .panel {
   color: var(--fg);
   border-color: var(--blue);
 }
+/*
+ * 顶栏的模型选择：徽标在窗口最上方，菜单必须**向下**开。
+ * 默认规则是向上展开（bottom: 100%）——那是给输入区那几个选择器用的，
+ * 对顶栏来说等于飞出窗口（用户看到的"朝上飞"就是这个）。
+ */
 .chat-head .compose-select .compose-menu {
+  top: calc(100% + 6px);
+  bottom: auto;
   left: auto;
   right: 0;
   min-width: 220px;
+  max-height: 60vh;
+  overflow-y: auto;
 }
 .compose-menu button .cm-model {
   flex: 1;
@@ -1901,4 +1910,9 @@ body.panel-collapsed .panel {
 }
 .usage-row.usage-total .usage-key {
   color: var(--fg);
+}
+
+/* 迁移提示（旧模型名被自动换掉时显示一次） */
+.ai-hint.ai-migrated {
+  color: var(--orange);
 }

@@ -106,6 +106,8 @@ export class AiChatService {
       configured: this.provider.configured(),
       provider: this.provider.configured() ? this.provider.name : null,
       config: maskAiConfig(this.config.get()),
+      /** 老配置里的旧模型名被自动换掉时，这里给出原名字（界面据此提示一次） */
+      modelMigratedFrom: this.config.migratedFrom ?? null,
       conversations: conversations.length,
       messages: messages.length,
       /** 前端据此决定聊天框上方显示「AI 未配置」还是模型名。 */

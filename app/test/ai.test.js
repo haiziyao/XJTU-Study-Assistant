@@ -17,7 +17,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, stat, readFile } from 'node:fs/promises';
+import { mkdtemp, stat, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -1009,5 +1009,37 @@ test('AI：Token 用量与缓存命中率按输入侧算（官方 prompt_cache_h
   } finally {
     await app.close();
     await mock.close();
+  }
+});
+
+test('AI：老配置里的旧模型名会被迁移（但只对官方端点，免得误伤自建代理）', async () => {
+  const { normalizeAiConfig } = await import('../src/modules/ai/config.js');
+
+  // 官方端点 + 已下线的旧名字 → 换成当前合法取值
+  assert.equal(normalizeAiConfig({ model: 'deepseek-chat' }).model, 'deepseek-flash');
+  assert.equal(normalizeAiConfig({ model: 'deepseek-reasoner' }).model, 'deepseek-flash');
+  // 自建/代理端点可能真的还有同名模型 → 一个字节都不动
+  assert.equal(
+    normalizeAiConfig({ baseUrl: 'http://127.0.0.1:9999/v1', model: 'deepseek-chat' }).model,
+    'deepseek-chat',
+  );
+  // 当前合法值不受影响
+  assert.equal(normalizeAiConfig({ model: 'deepseek-v4-pro' }).model, 'deepseek-v4-pro');
+
+  // 落盘的老配置会被读出来并迁移，同时 /ai/status 回显原名字
+  const dir = await mkdtemp(path.join(tmpdir(), 'potato-ai-migrate-'));
+  await writeFile(
+    path.join(dir, 'ai-config.json'),
+    JSON.stringify({ apiKey: 'sk-old', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' }),
+  );
+  const app = await createServer({ dataDir: dir });
+  const info = await app.listen({ port: 0 });
+  const response = await fetch(`${info.baseUrl}/ai/status`);
+  const status = await response.json();
+  try {
+    assert.equal(status.config.model, 'deepseek-flash', '读出老配置时应已迁移');
+    assert.equal(status.modelMigratedFrom, 'deepseek-chat', '要能告诉界面"原名字是什么"');
+  } finally {
+    await app.close();
   }
 });

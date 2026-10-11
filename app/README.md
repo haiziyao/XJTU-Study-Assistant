@@ -150,7 +150,7 @@ node_modules 里的 npm 包（导出二进制路径字符串），拿不到 `app
 | 区域 | 内容 |
 | --- | --- |
 | 左栏（约 10% 宽） | 日历 / 待办 / 思源学堂 / 学情 / 笔记系统 / 随手拍 / 消息，底部独立「设置」 |
-| 中栏 | 输入区：左侧「**+**」可加图片/文件（图片转多模态、文本内联、读不了的如实说明）；下面一行是「**思考模式**（无/低/高/最高，对应官方 `reasoning_effort` 的 none/low/high/max）」与「**权限**（自动审批/手动审批/全部确认）」，**菜单向上展开且不影响输入框那一行**；顶栏「**AI：<具体模型名>**」点开可选模型（列表问上游 `GET /models`，拿不到给内置候选）。对话：配了 AI 密钥就走模型（**边生成边渲染**）：回复按 Markdown + LaTeX 渲染（**公式排版**、可画 **```svg 图形**），安排渲染成**指令草稿确认卡** → 点「确认执行」才落库；查询/写入结果渲染成**默认折叠的操作卡**（日程橙 / 待办紫 / 事件蓝 / 写入绿，点开看明细）；**操作卡在上、回复正文在下** —— 结论永远是这一轮最后一个节点，卡片再多也挤不掉它；没配密钥则走本地规则解析 |
+| 中栏 | 输入区：左侧「**+**」可加图片/文件（图片转多模态、文本内联、读不了的如实说明）；下面一行是「**思考模式**（无/低/高/最高，对应官方 `reasoning_effort` 的 none/low/high/max）」与「**权限**（自动审批/手动审批/全部确认）」，**菜单向上展开且不影响输入框那一行**；顶栏「**AI：<具体模型名>**」点开可选模型（列表问上游 `GET /models`，拿不到给内置候选；顶栏在最上面，所以这个菜单**向下**展开，输入区那几个才是向上）。对话：配了 AI 密钥就走模型（**边生成边渲染**）：回复按 Markdown + LaTeX 渲染（**公式排版**、可画 **```svg 图形**），安排渲染成**指令草稿确认卡** → 点「确认执行」才落库；查询/写入结果渲染成**默认折叠的操作卡**（日程橙 / 待办紫 / 事件蓝 / 写入绿，点开看明细）；**操作卡在上、回复正文在下** —— 结论永远是这一轮最后一个节点，卡片再多也挤不掉它；没配密钥则走本地规则解析 |
 | 右栏 | 左栏所选功能的视图，右上角 `⟩` 可收起（收起后中间变宽，周视图置灰）；设置页内容超高时可滚动 |
 
 功能视图（本模块负责的部分）：
@@ -365,7 +365,8 @@ app/
 | **附件 / 思考强度 / 权限** | `app.js` 的 `readFile` / `composeSelect` + `chat-service.js` 的 `normalizeAttachments` / `buildUserContent` / `#autoExecuteWrites` | ✅ 附件：图片走多模态、文本内联（单文件 2 万字、合计 6 万字上限）、其它只登记文件名；**base64 不落库**。思考强度映射官方 `reasoning_effort`（none/low/high/max；默认 high = 官方默认，关闭思考必须显式传 `none`）。思维链 `reasoning_content` 收成默认折叠的「思考过程」卡。**看图只有 `deepseek-flash` 支持**，格式只认 JPEG/PNG/GIF/WebP。权限三档决定查询是否自动执行、写操作是否要确认（`auto` 会替你点确认，风险自负） |
 | **Files API** | `modules/ai/files.js` + `provider.js` 的 `uploadFile/listFiles/deleteFile` | ✅ 图片先上传再引用（`{type:"file", file_id}`），**按内容 sha256 去重**（同图多轮复用不重传）、本地只记元信息不存字节、上传失败退回内联 base64 并在 `warnings` 里说明；不受 48MiB 请求体 / 32MiB 单图内联限制 |
 | **用量与缓存命中率** | `GET /ai/usage` + `app.js` 的 `usageSelect()` | ✅ 对官方 `usage` 求和：总量 / 缓存命中率 / 未缓存输入 / 缓存读取 / 输出 / 思考 token；命中率按输入侧 `hit ÷ (hit + miss)` 算；**查询回灌那一次的用量也计入**（`calls` 会大于回复条数） |
-| **模型选择器** | `GET /ai/models` + `app.js` 的 `wireModelPicker()` | ✅ 顶栏显示**具体模型名**（不是 provider 名），点开选模型并即时 `POST /ai/config`；上游列不出模型时给内置候选并标明 |
+| **模型选择器** | `GET /ai/models` + `app.js` 的 `wireModelPicker()` | ✅ 顶栏显示**具体模型名**（不是 provider 名），点开选模型并即时 `POST /ai/config`；上游列不出模型时给内置候选并标明。顶栏在最上面，菜单**向下**展开（输入区那几个才向上） |
+| **旧模型名迁移** | `modules/ai/config.js` 的 `LEGACY_MODEL_ALIASES` | ✅ 老配置里的 `deepseek-chat` / `deepseek-reasoner`（官方已不接受）在**官方端点**上自动换成 `deepseek-flash`，`/ai/status.modelMigratedFrom` 回显原名、设置页提示一次；自建端点的同名模型不动 |
 | **操作卡折叠** | `app.js` 的 `opCard()` | ✅ 查询/写入结果默认折叠成一行（「查看日程 · 2026-10-12 · 点开看明细」），点击展开；按 target 配色：日程橙 / 待办紫 / 事件蓝 / 写入绿 |
 | provider 注册位 | `src/server/index.js` 的 `services = { store, commands, aiBridge, hub, broadcast }` | ✅ 模块在自己的 `createServices({ services })` 里就能注册 provider |
 

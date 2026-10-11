@@ -182,6 +182,13 @@ function aiCard(ai) {
       stateRows.baseUrl.set(config.baseUrl ?? '—');
       stateRows.chat.set(`${status.conversations ?? 0} 个会话 · ${status.messages ?? 0} 条消息`);
       stateRows.draw.set(config.drawMode !== false ? '已开启（```svg）' : '已关闭（说「画个图」仍可触发）');
+      // 旧模型名被自动迁移过：明说一次，别让人以为模型被偷偷改了
+      if (status.modelMigratedFrom) {
+        form.insertBefore(
+          mk('div', 'ai-hint ai-migrated', `旧配置里的模型名 ${status.modelMigratedFrom} 官方已不再接受，已自动换成 ${config.model}`),
+          form.firstChild,
+        );
+      }
       drawBox.checked = config.drawMode !== false;
       keyInput.placeholder = config.hasKey ? `API Key（已保存 ${config.keyHint}，留空不改）` : 'API Key（例如 sk-…）';
       modelInput.placeholder = `模型，留空不改（当前 ${config.model ?? '—'}）`;
