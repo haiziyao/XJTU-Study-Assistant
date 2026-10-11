@@ -344,6 +344,55 @@ test('★ 设置页里「统一身份认证」是第一张卡（排在外壳的�
   assert.ok(titles.indexOf('运行信息') > 0, '运行信息应当排在登录之后');
 });
 
+test('★ 学业视图：未登录时不再有密码表单，改为指向设置的引导', async () => {
+  const { api, calls } = makeApi({
+    '/academic/status': {
+      status: 'anonymous',
+      loggedIn: false,
+      syncing: false,
+      grades: { total: 0, active: 0, excluded: 0, terms: [] },
+      gpa: null,
+    },
+  });
+  const boot = bootRenderer({ api });
+  const mount = await boot.render('academic');
+
+  const text = textsOf(mount);
+  assert.equal(
+    inputsOf(mount).filter((node) => node.type === 'password').length,
+    0,
+    '★ 学业视图不该再出现密码输入框（登录只在设置里做一次）',
+  );
+
+  assert.match(text, /设置/, '要指向设置页');
+  assert.match(text, /同一个学校账号|统一身份认证/, '要说明两个模块共用一个账号');
+  assert.ok(findButton(mount, '去设置里登录'), '应给一个去设置的按钮');
+
+  assert.equal(
+    calls.some((entry) => /\/academic\/(login|mfa|captcha)/.test(entry)),
+    false,
+    `学业视图不该再调用登录类接口，实际：${calls.join(' | ')}`,
+  );
+});
+
+test('学业视图：引导按钮会切到设置页', async () => {
+  const opened = [];
+  const { api } = makeApi({
+    '/academic/status': {
+      status: 'anonymous',
+      loggedIn: false,
+      syncing: false,
+      grades: { total: 0, active: 0, excluded: 0, terms: [] },
+    },
+  });
+  const boot = bootRenderer({ api });
+  boot.PC.openView = (id) => opened.push(id);
+  const mount = await boot.render('academic');
+
+  findButton(mount, '去设置里登录').listeners.click[0]();
+  assert.deepEqual(opened, ['settings'], '点按钮应当切到设置页');
+});
+
 /* ------------------------------------------------------------------ 图形验证码 */
 
 test('auth 设置卡：被要求图形验证码时显示图片与输入框', async () => {

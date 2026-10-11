@@ -21,8 +21,6 @@
     loading: false,
     busy: null,
     error: null,
-    /** 登录表单的临时输入 */
-    login: { username: '', password: '', visible: false },
     status: null,
     grades: [],
     stats: null,
@@ -64,8 +62,9 @@
   /**
    * 有成绩却没有分析时，自动补一段。
    *
-   * 为什么需要这一步：**登录本身也会同步**（`/academic/login` 顺手拉一次成绩），
-   * 但那条路径不会生成分析，于是"第一次进来什么都没有、必须手动点一次同步"
+   * 为什么需要这一步：**登录本身也会同步成绩**（走设置页登录时由
+   * `academic/service.js` 的自动同步负责，走 `/academic/login` 时由那条路由负责），
+   * 但同步本身不生成分析，于是"第一次进来什么都没有、必须手动点一次同步"
    * —— 而用户刚登录完，最想看到的恰恰就是那段点评。
    * 这里以"有没有成绩"为准而不是"刚才有没有点同步"，所以无论数据是被谁、
    * 通过哪条路径同步进来的，进来都能看到分析。
@@ -123,21 +122,6 @@
       paint();
     }
   }
-
-  const doLogin = () =>
-    withBusy('login', async () => {
-      const result = await PC.api('/academic/login', {
-        method: 'POST',
-        body: { username: ui.login.username.trim(), password: ui.login.password },
-      });
-      ui.login.password = '';
-      if (result?.status !== 'ready') {
-        ui.error = new Error(result?.error ?? '登录未完成，请检查账号与密码');
-        return;
-      }
-      ui.login.visible = false;
-      await loadAll();
-    });
 
   const doSync = () =>
     withBusy('sync', async () => {
@@ -256,48 +240,53 @@
     return head;
   }
 
+  /**
+   * 未登录时的引导卡。
+   *
+   * 登录已收敛到「设置 → 统一身份认证」：教务与思源学堂用的是同一个学校账号，
+   * 在那里登录一次，两边都会自动完成各自的认证（共享 Cookie 罐里的 CAS 票据做单点登录）。
+   *
+   * 所以这里**刻意不再提供密码表单** —— 两个地方各输一次密码既多余，
+   * 也容易让人以为"要登录两次"。与学堂视图的做法保持一致。
+   */
   function loginCard() {
     const card = mk('section', 'ac-card');
-    card.appendChild(mk('h3', 'ac-card-title', '先登录教务系统'));
+    card.appendChild(mk('h3', 'ac-card-title', '需要登录'));
     card.appendChild(
-      mk('p', 'ac-muted', '登录用的是学校统一身份认证，账号密码只发往学校，本程序不保存。'),
+      mk(
+        'p',
+        'ac-muted',
+        '教务与思源学堂用的是同一个学校账号，登录入口已统一到「设置 → 统一身份认证」：在那里登录一次，两个模块都会自动完成认证，成绩也会自动同步。',
+      ),
     );
-    if (ui.status?.captchaRequired) {
-      card.appendChild(mk('p', 'ac-warn-inline', '登录失败次数较多，需要图形验证码（稍后版本支持）。'));
+
+    // 把"现在卡在哪一步"如实说出来，用户才知道去设置里要做什么
+    const step = ui.status?.status;
+    if (step === 'need_mfa') {
+      card.appendChild(mk('p', 'ac-warn-inline', '当前需要两步验证，请在设置里完成短信验证码校验。'));
+    } else if (step === 'need_captcha' || ui.status?.captchaRequired) {
+      card.appendChild(mk('p', 'ac-warn-inline', '当前需要图形验证码，请在设置里输入。'));
     }
 
-    const form = mk('div', 'ac-form');
-    const user = mk('input', 'ac-input');
-    user.type = 'text';
-    user.placeholder = '学号';
-    user.autocomplete = 'username';
-    user.value = ui.login.username;
-    user.addEventListener('input', () => {
-      ui.login.username = user.value;
+    // 复用已有的 `.ac-form`：它本来就是「一行 flex，gap 8，可换行」的按钮/输入行
+    const actions = mk('div', 'ac-form');
+    const go = mk('button', 'primary-btn', '去设置里登录');
+    go.type = 'button';
+    go.addEventListener('click', () => {
+      // openView 由外壳提供（shell/app.js 把 selectView 暴露到 PC 上）。
+      // 万一外壳版本较旧没有它，退化成文字指引，不要让按钮点了没反应。
+      if (typeof PC.openView === 'function') PC.openView('settings');
+      else PC.toast?.('请打开左侧的「设置」，在「统一身份认证」里登录');
     });
+    actions.appendChild(go);
 
-    const pass = mk('input', 'ac-input');
-    pass.type = 'password';
-    pass.placeholder = '密码';
-    pass.autocomplete = 'current-password';
-    pass.value = ui.login.password;
-    pass.addEventListener('input', () => {
-      ui.login.password = pass.value;
-    });
-    pass.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') void doLogin();
-    });
+    const retry = mk('button', 'ghost-btn', '刷新状态');
+    retry.type = 'button';
+    retry.disabled = Boolean(ui.busy);
+    retry.addEventListener('click', () => void loadAll());
+    actions.appendChild(retry);
 
-    form.appendChild(user);
-    form.appendChild(pass);
-
-    const submit = mk('button', 'primary-btn', ui.busy === 'login' ? '登录中…' : '登录并同步');
-    submit.type = 'button';
-    submit.disabled = ui.busy === 'login' || !ui.login.username.trim() || !ui.login.password;
-    submit.addEventListener('click', () => void doLogin());
-    form.appendChild(submit);
-
-    card.appendChild(form);
+    card.appendChild(actions);
     return card;
   }
 

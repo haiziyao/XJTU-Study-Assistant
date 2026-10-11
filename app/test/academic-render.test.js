@@ -109,20 +109,24 @@ const findButton = (mount, label) => buttonsOf(mount).find((node) => node.textCo
 
 /* ------------------------------------------------------------------ 用例 */
 
-test('学业视图：未登录时给登录表单，并说明凭据去向', async () => {
+test('学业视图：未登录时给的是引导卡，不是登录表单', async () => {
   const { api } = makeApi({ '/academic/status': { status: 'anonymous', loggedIn: false } });
   const { render } = bootRenderer({ api });
   const mount = await render('academic');
 
+  // 登录已收敛到「设置 → 统一身份认证」（教务与学堂用的是同一个学校账号），
+  // 所以这里**不该**再有密码输入框 —— auth-render.test.js 里有同类断言。
   const inputs = walk(mount).filter((node) => node.tagName === 'INPUT');
-  assert.equal(inputs.length, 2, '应有学号与密码两个输入框');
-  assert.equal(inputs[0].type, 'text');
-  assert.equal(inputs[1].type, 'password', '密码框必须是 password 类型');
-  assert.ok(findButton(mount, '登录'), '应有登录按钮');
+  assert.equal(
+    inputs.filter((node) => node.type === 'password').length,
+    0,
+    '学业视图不该再出现密码输入框',
+  );
+  assert.ok(findButton(mount, '去设置里登录'), '应当给一个去设置里登录的按钮');
 
   const text = textsOf(mount);
-  assert.match(text, /统一身份认证/);
-  assert.match(text, /不保存/, '要如实说明凭据不会被本程序保存');
+  assert.match(text, /统一身份认证/, '要说清登录入口在哪');
+  assert.match(text, /同一个学校账号/, '要说明为什么只需要登一次');
 });
 
 test('学业视图：登录后展示后端算出的学分绩等指标', async () => {
