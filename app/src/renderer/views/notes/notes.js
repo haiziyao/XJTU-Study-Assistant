@@ -5,10 +5,14 @@
   const CACHE_PREFIX = 'ai-study.notes.summary.v1.';
   const CACHE_TTL = 7 * 86400000;
   const CACHE_LIMIT = 100;
+  const IMPORT_ACCEPT = '.md,.markdown,.txt,.html,.htm,.pdf,.doc,.docx,.png,.jpg,.jpeg,.webp';
+  const MAX_IMPORT_FILES = 20;
+  const MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024;
+  const MAX_IMPORT_TOTAL_BYTES = 100 * 1024 * 1024;
   const STATUS = { draft: '草稿', processing: '整理中', ready: '已整理', failed: '处理失败' };
   const SOURCE = { manual: '手动', snapshot: '随手拍', import: '导入' };
-  const EMPTY_CAPS = { connected: false, search: false, markdown: false, export: false, capture: false, subscriptions: false };
-  const FORBIDDEN = /^(body|content|markdown|ocr|ocrText|image|images|imageUrl|filePath|path|attachment|attachments|blob|base64|data)$/i;
+  const EMPTY_CAPS = { connected: false, search: false, markdown: false, view: false, upload: false, aiRead: false, export: false, capture: false, subscriptions: false };
+  const FORBIDDEN = /^(body|content|markdown|ocr|ocrText|image|images|imageUrl|file|files|filePath|path|attachment|attachments|blob|base64|data)$/i;
   const state = {
     provider: null,
     caps: { ...EMPTY_CAPS },
@@ -210,6 +214,66 @@
     return state.provider.openNote(String(id));
   }
 
+  async function read(id) {
+    let result;
+    if (state.caps.view && typeof state.provider?.readNote === 'function') result = await state.provider.readNote(String(id));
+    else if (state.caps.markdown && typeof state.provider?.renderMarkdown === 'function') result = await state.provider.renderMarkdown(String(id));
+    else throw new Error('AI 智学主程序尚未提供查看笔记能力');
+    if (typeof result === 'string') return { format: 'markdown', text: result };
+    const text = [result?.text, result?.markdown, result?.content].find((value) => typeof value === 'string') ?? '';
+    return { format: result?.format === 'text' ? 'text' : 'markdown', text };
+  }
+
+  async function upload(files, input = {}) {
+    if (!state.provider || state.offline || !state.caps.upload || typeof state.provider.uploadNotes !== 'function') {
+      throw new Error('AI 智学主程序尚未提供手动上传能力');
+    }
+    const list = Array.from(files ?? []);
+    if (!list.length) throw new Error('请至少选择一个笔记文件');
+    if (list.length > MAX_IMPORT_FILES) throw new Error(`一次最多上传 ${MAX_IMPORT_FILES} 个文件`);
+    let total = 0;
+    for (const file of list) {
+      const size = Math.max(0, Number(file?.size) || 0); total += size;
+      if (size > MAX_IMPORT_FILE_BYTES) throw new Error(`“${file?.name ?? '文件'}”超过 50 MB`);
+    }
+    if (total > MAX_IMPORT_TOTAL_BYTES) throw new Error('本次上传文件总大小超过 100 MB');
+    const result = await state.provider.uploadNotes(list, {
+      title: String(input.title ?? '').trim(),
+      tags: Array.isArray(input.tags) ? input.tags.map(String).map((value) => value.trim()).filter(Boolean) : [],
+      anchor: anchorOf(input.anchor),
+    });
+    const values = Array.isArray(result) ? result : Array.isArray(result?.items) ? result.items : result?.summary ? [result.summary] : result ? [result] : [];
+    if (!values.length) throw new Error('主程序未返回上传后的笔记摘要');
+    const items = values.map((value) => merge({ ...value, source: 'import' }));
+    state.selected = items[0].id;
+    render();
+    return items;
+  }
+
+  async function readForAI(request = {}) {
+    if (!state.provider || state.offline || !state.caps.aiRead || typeof state.provider.readNotesForAI !== 'function') {
+      throw new Error('AI 智学主程序尚未提供 AI 读取笔记能力');
+    }
+    const options = request && typeof request === 'object' ? request : {};
+    const ids = [...new Set((Array.isArray(options.ids) ? options.ids : []).map(String).filter(Boolean))].slice(0, 20);
+    const query = String(options.query ?? '').trim().slice(0, 200);
+    const limit = Math.min(20, Math.max(1, Math.trunc(Number(options.limit) || 10)));
+    const result = await state.provider.readNotesForAI({ ids, query, limit });
+    const values = Array.isArray(result) ? result : Array.isArray(result?.items) ? result.items : result ? [result] : [];
+    return values.slice(0, limit).filter((value) => value && value.id).map((value) => {
+      const text = [value.text, value.markdown, value.content].find((candidate) => typeof candidate === 'string') ?? '';
+      return {
+        id: String(value.id),
+        title: String(value.title ?? '').trim() || '未命名笔记',
+        format: value.format === 'text' ? 'text' : 'markdown',
+        text: text.slice(0, 200000),
+        tags: Array.isArray(value.tags) ? value.tags.map(String).slice(0, 12) : [],
+        anchor: anchorOf(value.anchor),
+        updatedAt: String(value.updatedAt ?? ''),
+      };
+    });
+  }
+
   function ingestSnapshot(value) {
     if (unsafePayload(value)) throw new Error('随手拍挂载点只接受笔记摘要，不接受正文、图片或附件数据');
     const item = merge({ ...value, source: 'snapshot' });
@@ -268,11 +332,16 @@
     capture.disabled = !state.provider || state.offline || !state.caps.capture || !state.provider.startCapture;
     capture.title = capture.disabled ? '拍摄能力待 AI 智学主程序接入' : '拍下内容并保存为笔记';
     capture.addEventListener('click', () => openComposer('snapshot', capture));
+    const uploadButton = mk('button', 'ghost-btn notes-upload', '手动上传');
+    uploadButton.type = 'button';
+    uploadButton.disabled = !state.provider || state.offline || !state.caps.upload || !state.provider.uploadNotes;
+    uploadButton.title = uploadButton.disabled ? '上传能力待 AI 智学主程序接入' : '上传文档或图片为笔记';
+    uploadButton.addEventListener('click', () => openComposer('import', uploadButton));
     const create = mk('button', 'primary-btn notes-create', '+ 新建笔记');
     create.type = 'button';
     create.disabled = !state.provider || state.offline || !state.provider.createDraft;
     create.addEventListener('click', () => openComposer('manual', create));
-    first.append(seg, mk('span', 'spacer'), connection, capture, create);
+    first.append(seg, mk('span', 'spacer'), connection, capture, uploadButton, create);
 
     const second = mk('div', 'toolbar-row notes-filter-row');
     const search = mk('input', 'notes-search');
@@ -312,21 +381,20 @@
     host.appendChild(list);
   }
 
-  async function openMarkdownPreview(item, trigger) {
-    const mask = modal(`Markdown 预览 · ${item.title}`, trigger);
+  async function openNoteViewer(item, trigger) {
+    const mask = modal(`查看笔记 · ${item.title}`, trigger);
     const body = mask.querySelector('.modal-body');
     const foot = mask.querySelector('.modal-foot');
-    const preview = mk('div', 'notes-markdown-preview richtext');
+    const preview = mk('div', 'notes-note-viewer richtext');
     preview.appendChild(mk('div', 'loading', '正在由 AI 智学读取正文…'));
     body.appendChild(preview);
     const close = mk('button', 'ghost-btn', '关闭');
     close.type = 'button'; close.addEventListener('click', mask._close); foot.appendChild(close);
     try {
-      const result = await state.provider.renderMarkdown(item.id);
-      const text = typeof result === 'string' ? result : result?.text ?? result?.markdown ?? '';
+      const result = await read(item.id);
       preview.innerHTML = '';
-      if (window.PCRichText?.render) window.PCRichText.render(preview, text);
-      else preview.textContent = text;
+      if (result.format === 'markdown' && window.PCRichText?.render) window.PCRichText.render(preview, result.text);
+      else preview.textContent = result.text;
     } catch (reason) {
       preview.innerHTML = '';
       preview.appendChild(errorBox(`预览失败：${reason.message}`));
@@ -346,7 +414,7 @@
     const actions = mk('div', 'notes-actions');
     const openButton = mk('button', 'primary-btn', '在 AI 智学中打开'); openButton.type = 'button'; openButton.disabled = !state.provider?.openNote || state.offline;
     openButton.addEventListener('click', () => open(item.id).catch((error) => state.ctx?.toast?.(`打开失败：${error.message}`))); actions.appendChild(openButton);
-    if (state.caps.markdown && state.provider?.renderMarkdown) { const button = mk('button', 'ghost-btn', 'Markdown 预览'); button.type = 'button'; button.disabled = state.offline; button.addEventListener('click', () => openMarkdownPreview(item, button)); actions.appendChild(button); }
+    if ((state.caps.view && state.provider?.readNote) || (state.caps.markdown && state.provider?.renderMarkdown)) { const button = mk('button', 'ghost-btn', '查看笔记'); button.type = 'button'; button.disabled = state.offline; button.addEventListener('click', () => openNoteViewer(item, button)); actions.appendChild(button); }
     if (state.caps.export && state.provider?.exportNote) { const button = mk('button', 'ghost-btn', '导出'); button.type = 'button'; button.addEventListener('click', () => state.provider.exportNote(item.id, 'markdown')); actions.appendChild(button); }
     if (item.status === 'failed' && state.provider?.retryProcessing) { const button = mk('button', 'ghost-btn', '重新识别'); button.type = 'button'; button.addEventListener('click', async () => { await state.provider.retryProcessing(item.id); merge({ ...item, status: 'processing' }); render(); }); actions.appendChild(button); }
     detail.append(actions, mk('div', 'notes-boundary', '正文、图片和识别结果由 AI 智学主程序持有，本页面只展示摘要。'));
@@ -361,15 +429,19 @@
   }
 
   function openComposer(source, trigger) {
-    const capture = source === 'snapshot'; const mask = modal(capture ? '随手拍到笔记' : '新建笔记', trigger);
+    const capture = source === 'snapshot'; const importing = source === 'import';
+    const mask = modal(capture ? '随手拍到笔记' : importing ? '手动上传笔记' : '新建笔记', trigger);
     const body = mask.querySelector('.modal-body'); const foot = mask.querySelector('.modal-foot');
     const title = mk('input', 'notes-title-input'); title.placeholder = '未命名笔记';
     const tags = mk('input', 'notes-tags-input'); tags.placeholder = '标签用逗号分隔';
+    const files = mk('input', 'notes-file-input'); files.type = 'file'; files.multiple = true; files.accept = IMPORT_ACCEPT;
+    const fileSummary = mk('div', 'notes-file-summary', '支持 Markdown、文本、HTML、PDF、Word 和常见图片；最多 20 个文件。');
     const mode = mk('select', 'notes-anchor-mode'); mode.append(option('none', '不关联日历', true), option('date', '关联某一天'), option('schedule', '关联某条日程'));
     const date = mk('input', 'notes-anchor-date'); date.type = 'date'; date.value = today(); date.disabled = true;
     const schedules = mk('select', 'notes-schedule-select'); schedules.disabled = true; schedules.appendChild(option('', '请先选择日期'));
     const error = mk('div', 'modal-error hidden');
-    if (!capture) body.appendChild(field('标题', title));
+    if (importing) body.append(field('选择文件', files), fileSummary);
+    if (!capture) body.appendChild(field(importing ? '笔记标题（可选）' : '标题', title));
     body.append(field('标签', tags), field('关联方式', mode), field('日期', date), field('日程', schedules), error);
     async function loadSchedules() {
       schedules.disabled = true; schedules.innerHTML = ''; schedules.appendChild(option('', '正在读取日程…'));
@@ -383,7 +455,11 @@
     mode.addEventListener('change', () => { date.disabled = mode.value === 'none'; if (mode.value === 'schedule') loadSchedules(); else schedules.disabled = true; });
     date.addEventListener('change', () => { if (mode.value === 'schedule') loadSchedules(); });
     const cancel = mk('button', 'ghost-btn', '取消'); cancel.type = 'button'; cancel.addEventListener('click', mask._close);
-    const save = mk('button', 'primary-btn', capture ? '开始拍摄' : '创建并打开'); save.type = 'button'; foot.append(cancel, save);
+    const save = mk('button', 'primary-btn', capture ? '开始拍摄' : importing ? '上传并查看' : '创建并打开'); save.type = 'button'; save.disabled = importing; foot.append(cancel, save);
+    files.addEventListener('change', () => {
+      const selected = Array.from(files.files ?? []); save.disabled = !selected.length;
+      fileSummary.textContent = selected.length ? `已选择 ${selected.length} 个文件 · ${selected.map((file) => file.name).join('、')}` : '尚未选择文件';
+    });
     save.addEventListener('click', async () => {
       let anchor = null;
       if (mode.value === 'date') anchor = { type: 'date', date: date.value };
@@ -391,6 +467,11 @@
       save.disabled = cancel.disabled = true; error.classList.add('hidden');
       try {
         const input = { source, anchor, tags: tags.value.split(/[,，]/).map((v) => v.trim()).filter(Boolean) }; if (!capture) input.title = title.value.trim();
+        if (importing) {
+          const items = await upload(files.files, input); files.value = ''; mask._close();
+          if (items[0] && ((state.caps.view && state.provider?.readNote) || (state.caps.markdown && state.provider?.renderMarkdown))) await openNoteViewer(items[0], trigger);
+          return;
+        }
         const result = capture ? await state.provider.startCapture(input) : await state.provider.createDraft(input);
         if (!result) return mask._close();
         const item = merge({ ...result, source }); mask._close(); render(); if (!capture && state.provider.openNote) await state.provider.openNote(item.id);
@@ -418,7 +499,7 @@
     clear.addEventListener('click', () => { const store = localStore(); const key = cacheKey(); if (store && key) store.removeItem(key); window.PC?.toast?.('摘要缓存已清除，主程序笔记未受影响'); }); mount.appendChild(clear);
   }
 
-  window.PCModules.service('notes', { connectProvider, disconnectProvider, ingestSnapshot, refresh, open });
+  window.PCModules.service('notes', { connectProvider, disconnectProvider, ingestSnapshot, refresh, upload, read, readForAI, open });
   window.PCModules.registerSettingsSection({ id: 'notes.integration', title: '笔记接入', order: 50, render: renderSettings });
   window.PCModules.register({
     id: 'notes', label: '笔记系统', icon: '📝', order: 50, title: '笔记系统',
