@@ -34,7 +34,7 @@ npm run dev:server            # 带 --watch 自动重启
 npm install                   # electron 为 devDependency
 npm run dev:app
 
-# 3) 测试（零依赖，44 个用例；含思源学堂的本地 mock 端到端测试）
+# 3) 测试（零依赖，61 个用例；含思源学堂的本地 mock 与日历/待办端到端测试）
 npm test
 ```
 
@@ -307,12 +307,63 @@ app/
 `dschat 2`（同工作区）是「轻量单日事件」模型：无跨天、无状态、无提醒、重复规则较弱，AI 侧靠中文标记行而非 tool schema。
 本模块是更完整的日历 + 日程引擎，并**兼容**它的字段与标记行，因此可作为其日历后端的替代或补充。
 
+## AI 接入还差什么
+
+> 一句话现状：**契约是完整的、落库链路是通的、模型还没接**。
+> 没有注册 provider 时 `POST /ai/nl2command` 返回 `501 AI_UNAVAILABLE`（响应 details 里带完整契约），
+> `/health` 的 `ai.available` 为 `false`；界面右上角因此一直显示「AI 未接入」。
+> 补齐不需要改 `src/core`：`services.aiBridge` 已在全局服务表里，新模块能直接拿到。
+>
+> 模型要建**待办/日程**时的调用姿势（选哪个集合、哪些字段必填、四个常见错误写法）在
+> [接口文档.md 的「★ AI 速查」](docs/接口文档.md) 里，并有测试守着文档与工具清单不漂移。
+
+### 已经就绪的
+
+| 环节 | 位置 | 状态 |
+| --- | --- | --- |
+| 指令对象契约 | `src/core/ai/ai-bridge.js` 顶部注释 | `action / target / fields / filters / confidence / warnings / explain`，与本地规则解析器**同一种结构** |
+| 落库链路 | `modules/calendar/module.js` 里 `registerHandler('event' / 'schedule')` | ✅ 实测：`/ai/nl2command { fallback: "rules" }` 拿到 draft → `/commands/execute { draft }` 真的建出日程与待办 |
+| 降级解析 | `CommandService.tryParse`（约定不抛异常） | ✅ 传 `fallback: "rules"` 时 `provider` 标为 `rules`、`degraded: true`，AI 挂了也能用 |
+| 能力清单 | `GET /ai/capabilities` 聚合各模块 `aiTools` | ✅ 日历 **14** 个（`modules/calendar/tools.js`）+ 思源学堂 **8** 个，每项带 `module` |
+| 前端对话与确认卡 | `src/renderer/shell/app.js`（中栏，不属于日历视图） | ✅ 「自然语言 → 草稿确认卡 → 点确认才落库 → 可取消」，本地规则下就能用 |
+| provider 注册位 | `src/server/index.js` 的 `services = { store, commands, aiBridge, hub, broadcast }` | ✅ 模块在自己的 `createServices({ services })` 里就能注册 provider |
+
+### 还差的（按重要性）
+
+1. **provider 实现本身** —— 唯一的硬缺口。需要新建 `src/modules/ai/`，在 `createServices` 里注册：
+
+   ```js
+   services.aiBridge.registerProvider({
+     name: 'deepseek',
+     async nlToCommand(text, context) { /* 返回指令对象，不要直接写库 */ },
+   });
+   ```
+
+   模型调用、密钥管理、超时重试都该留在这个模块里。密钥建议放 `ctx.dataDir` 下的 `0600` 文件，
+   不要进 JsonStore（集合是 `0644` 的业务数据，语义不同）。
+
+2. **产出的 `source` 要标 `"ai"`**：本地规则解析器写 `"command"`，模型写的应是 `"ai"`
+   （`Event` / `Schedule` 的 `source` 枚举已含 `manual / command / ai / import`），
+   否则事后分不清哪些数据是模型加的。
+
+3. **没有上下文注入**：`/ai/nl2command` 的 `body.context` 目前原样透传，没人组装
+   「当前时间 / 当前视图 / 近期日程摘要」。要支持「把那个会推迟到明天」这类指代，得先有这一层。
+
+4. **没有工具调用循环**：`aiTools` 只是一份清单，框架不会替模型执行 tool call。
+   走 Agent 路线（而不是「一句话 → 一个指令对象」）需要自己实现「模型 → 调工具 → 回灌结果」的循环，
+   工具落点就是清单里那些已实现的 HTTP 接口。
+
+5. **没有多轮与流式**：provider 契约是「一次调用返回一个指令对象」，不带对话历史，前端也没有流式渲染。
+
+6. **没有写入权限边界**：目前任何调用方都能 `POST /commands/execute` 直接落库（本机 Electron 壳下可接受）。
+   真要开放 Agent，需要决定「谁能写」以及写操作是否强制先跑 `dryRun` 预览。
+
 ## 待办 / 扩展点
 
 > 下面这些「加一个功能」的活，都按 [模块开发指南.md](docs/模块开发指南.md) 的方式做：
 > 新建 `src/modules/<id>/` + `src/renderer/views/<id>.js`，不用修改 `src/core` 与外壳。
 
-- 接入 AI provider（`aiBridge.registerProvider`）实现自然语言理解；
+- 接入 AI provider（`aiBridge.registerProvider`）实现自然语言理解 —— 具体缺哪几块见上面「[AI 接入还差什么](#ai-接入还差什么)」；
 - 农历能力（建议接 `lunar-javascript`，不要移植旧查表实现）；
 - 导入 PotatoTimer 学习记录（`source: "import"` + `externalId` 去重）；
 - 移动教务（jwapp）课表导入：思源学堂没有上课时间/地点，真正的「自动生成课表」需要接这一路的接口；
