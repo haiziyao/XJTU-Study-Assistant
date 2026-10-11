@@ -117,7 +117,14 @@ export async function startMockSso(options = {}) {
       };
 
       // ------------------------------------------------------------ 业务站点
-      const site = Object.values(sites).find((item) => path === item.path || path.startsWith(item.path));
+      // 按路径匹配站点时**容忍尾斜杠**：真实配置里的 URL 常被去掉尾斜杠
+      // （resolveLmsConfig 就会 replace(/\/+$/, '')），而 mock 的 path 是带斜杠的。
+      // 不归一的话 `/site-a` 匹配不上 `/site-a/`，会掉到下面的 CAS 分支拿到 404，
+      // 而 404 页面没有登录表单，`begin()` 会把它当成"业务页"→ 误判成已登录。
+      const normalized = path.endsWith('/') ? path : `${path}/`;
+      const site = Object.values(sites).find(
+        (item) => normalized === item.path || normalized.startsWith(item.path),
+      );
       if (site) {
         if (cookies[site.cookie] === 'ok') {
           return html(200, businessHtml(site, state.username));

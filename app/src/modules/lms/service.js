@@ -78,7 +78,48 @@ export class LmsService {
 
   // ---------------------------------------------------------------- 对外状态
 
+  /**
+   * 把共享认证里「学堂」这个站点的状态投影到本模块。
+   *
+   * 为什么必须这么做：**登录态的唯一真相在 auth 模块**。用户在**设置页**登录时，
+   * 更新的是共享认证；本模块的 `state` 不会自己变，于是会出现
+   * 「设置里明明已登录，切到学堂页却还说未登录」。
+   *
+   * 只在两个方向上动：
+   *   - auth 说就绪 → 本模块跟着变就绪；
+   *   - 本模块**曾经声称已登录**而 auth 说不可用（比如在设置里退了）→ 降级为未登录。
+   * 刻意不碰 `need_mfa` / `need_captcha` / `error`：那是登录**进行中**的状态，
+   * 此时站点本来就还没就绪，擅自改成 anonymous 会把界面正在走的流程打断。
+   */
+  #syncAuthState() {
+    const site = this.sharedAuth.siteStatus('lms');
+    if (site?.ready) {
+      if (this.state.status !== 'ready') {
+        this.state.status = 'ready';
+        this.state.error = null;
+        this.state.mfa = null;
+      }
+      this.verified = true;
+      return;
+    }
+    if (this.state.status === 'ready') {
+      this.state.status = 'anonymous';
+      this.state.mfa = null;
+      this.verified = false;
+      return;
+    }
+    // 登录正在**设置页**进行中（需要两步验证 / 图形验证码）：跟着显示。
+    // 不跟的话，用户在设置页走到"输验证码"这一步，切到学堂页却看到"未登录"，
+    // 会以为登录根本没开始。登录是全局的一件事，状态也就该是全局的。
+    const global = this.sharedAuth.status();
+    if (global.status === 'need_mfa' || global.status === 'need_captcha') {
+      this.state.status = global.status;
+      this.state.mfa = global.mfa ?? null;
+    }
+  }
+
   status() {
+    this.#syncAuthState();
     const courses = this.store.lmsCourses.all();
     const activities = this.store.lmsActivities.all();
     const schedules = this.store.schedules.all().filter((item) => String(item.externalId ?? '').startsWith('lms:'));

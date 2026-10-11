@@ -25,6 +25,12 @@ const settingsView = {
       return box;
     };
 
+    // 置顶的模块区块（position: 'top'）先渲染。
+    // 为什么需要它：模块区块默认都排在外壳自带卡片之后，order 再小也到不了最上面；
+    // 而「统一身份认证」是不先做、别的都免谈的那一件 —— 登录之前课表与成绩都拉不到。
+    // 外壳不认识"登录"这个概念，只认 position 这个通用档位。
+    renderModuleSections(wrap, 'top');
+
     const info = PC.state.info ?? {};
     wrap.appendChild(
       card('运行信息', [
@@ -53,8 +59,8 @@ const settingsView = {
     themeCard.appendChild(exportBtn);
     wrap.appendChild(themeCard);
 
-    // 追加：各模块登记的设置区块（目前只有日历模块的「日程分类」）
-    renderModuleSections(wrap);
+    // 其余模块登记的设置区块（日程分类、笔记接入等）
+    renderModuleSections(wrap, 'normal');
 
     ctx.mount.appendChild(wrap);
   },
@@ -250,9 +256,12 @@ async function exportIcs() {
 /**
  * 追加：渲染各模块登记的设置区块（见 kit/registry.js 的 registerSettingsSection）。
  * 没有任何模块登记时，settingsSections() 为空数组，下方循环一次都不执行 —— 行为与以前完全一致。
+ *
+ * @param {HTMLElement} host
+ * @param {'top'|'normal'} position 渲染哪一档：置顶的排在外壳卡片之前，其余排在之后。
  */
-function renderModuleSections(host) {
-  const sections = window.PCModules.settingsSections?.() ?? [];
+function renderModuleSections(host, position) {
+  const sections = window.PCModules.settingsSections?.(position) ?? [];
   for (const section of sections) {
     const card = mk('div', 'card');
     card.appendChild(mk('div', 'card-title', section.title));

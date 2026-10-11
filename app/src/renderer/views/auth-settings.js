@@ -339,8 +339,15 @@
   window.PCModules.registerSettingsSection({
     id: 'auth.account',
     title: '统一身份认证',
-    // 10：排在日历（日程分类）之后、笔记接入（50）之前 —— 登录是各模块的前置条件，靠前更合理
+    /**
+     * 10：排在其它模块区块（笔记接入 50）之前。
+     * 注意 order 只管**模块区块之间**的先后 —— 要排到外壳自带卡片（运行信息 / AI 接入 / 主题色板）
+     * 之前，得靠 `position: 'top'`，见 kit/registry.js。
+     *
+     * 为什么登录值得置顶：它是不先做、别的都免谈的那一件 —— 没登录，课表和成绩都拉不到。
+     */
     order: 10,
+    position: 'top',
     render(mount) {
       ui.mount = mount;
       paint();

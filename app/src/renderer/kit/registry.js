@@ -76,6 +76,9 @@ window.PCModules = (function () {
      * @param {string} descriptor.id     唯一 id（如 `calendar.categories`）
      * @param {string} descriptor.title  区块标题
      * @param {number} [descriptor.order] 排序，小者在前（默认 100）
+     * @param {'top'|'normal'} [descriptor.position] `top` = 排在外壳自带卡片（AI 接入等）**之前**。
+     *   模块区块默认都在外壳卡片之后，所以 order 再小也到不了最上面；
+     *   只有"不先做这件事，别的都免谈"的区块才该用 `top`（目前只有登录）。
      * @param {(mount: HTMLElement) => void} descriptor.render 渲染函数，mount 是已清空的卡片容器
      */
     registerSettingsSection(descriptor) {
@@ -85,13 +88,19 @@ window.PCModules = (function () {
       if (typeof descriptor.render !== 'function') {
         throw new Error(`PCModules.registerSettingsSection: ${descriptor.id} 缺少 render 函数`);
       }
-      sections.set(descriptor.id, { order: 100, ...descriptor });
+      sections.set(descriptor.id, { order: 100, position: 'normal', ...descriptor });
       return descriptor.id;
     },
 
-    /** 按 order 升序返回全部设置页区块（同 order 按 id 字典序，保证顺序稳定）。 */
-    settingsSections() {
-      return [...sections.values()].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+    /**
+     * 按 order 升序返回设置页区块（同 order 按 id 字典序，保证顺序稳定）。
+     * @param {'top'|'normal'} [position] 只取某一档；不传则返回全部（top 在前）。
+     */
+    settingsSections(position) {
+      const sorted = [...sections.values()].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+      if (position) return sorted.filter((section) => (section.position ?? 'normal') === position);
+      // 不传 position 时保持"置顶优先"的整体顺序，调用方无需自己拼
+      return [...sorted.filter((s) => s.position === 'top'), ...sorted.filter((s) => s.position !== 'top')];
     },
 
     /** 提供一项跨模块能力。 */

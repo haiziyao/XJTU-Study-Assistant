@@ -67,7 +67,7 @@ export default defineModule({
     if (!auth) {
       throw new Error('academic 需要 auth 模块（order=5）先装配，请检查 src/modules/auth/module.js 是否存在');
     }
-    const config = resolveAcademicConfig(options ?? {});
+    const config = resolveSiteConfig(options);
     // 登记教务为一个需要认证的站点：之后 auth 会用共享罐里的 CAS 票据替它完成
     // OAuth2 四跳认证 —— 只要用户在设置页登录过一次（哪怕是从学堂那个入口登的）。
     auth.registerSite({
@@ -84,7 +84,9 @@ export default defineModule({
       store,
       broadcast,
       services,
-      config: options ?? {},
+      // 传原始切片而不是 config：AcademicService 自己也走 resolveAcademicConfig，
+      // 两边解析同一份输入，避免出现"注册站点用的 mock、发请求用的真实站点"这种割裂。
+      config: nestedConfigOf(options),
       dataDir,
       auth,
     });
@@ -258,3 +260,26 @@ export default defineModule({
     grade: ['id', 'courseName', 'credit', 'score', 'gradePoint', 'term', 'natureLabel', 'included'],
   },
 });
+
+/**
+ * 取该站点自己的配置。
+ *
+ * `createServer({ academic: {...} })` 传进来的形状有两种（历史原因，lms 那边也一样）：
+ * 直接给扁平切片，或包一层 `{ config: {...} }`。两者都认。
+ *
+ * 这一步不能省：`registerSite` 拿到的 `loginUrl`/`casOrigin` 必须与
+ * `AcademicService` 实际发请求用的那份**完全一致**。否则会出现
+ * 「注册的站点指向 mock、真正的请求打到真实教务」这种割裂 ——
+ * 表现为 SSO 永远不就绪，而且要排查很久。
+ */
+function resolveSiteConfig(options = {}) {
+  const slice = options && typeof options === 'object' ? options : {};
+  const nested = slice.config && typeof slice.config === 'object' ? slice.config : null;
+  return resolveAcademicConfig(nested ?? slice);
+}
+
+/** 交给 AcademicService 的原始切片（它自己会再解析一次，保持单一解析入口）。 */
+function nestedConfigOf(options = {}) {
+  const slice = options && typeof options === 'object' ? options : {};
+  return slice.config && typeof slice.config === 'object' ? slice.config : slice;
+}

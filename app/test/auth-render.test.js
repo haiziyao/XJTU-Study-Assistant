@@ -300,6 +300,50 @@ test('学堂视图：引导按钮会切到设置页（走外壳的 openView）',
   assert.deepEqual(opened, ['settings'], '点按钮应当切到设置页');
 });
 
+test('auth 设置卡：登记为 order 10 且 position=top（要排到外壳卡片之前）', () => {
+  const boot = bootRenderer({ api: async () => ({}) });
+  const section = boot.PCModules.settingsSections().find((item) => item.id === SECTION_ID);
+  assert.ok(section);
+  assert.equal(section.title, '统一身份认证');
+  assert.equal(section.order, 10);
+  assert.equal(section.position, 'top', '★ 登录必须置顶 —— 不先登录，课表和成绩都拉不到');
+  assert.equal(typeof section.render, 'function');
+
+  // vm 里造的数组原型属于另一个 realm，断言前用 Array.from 归一到宿主 realm
+  // （renderer.test.js 里也踩过这个坑）
+  const ordered = Array.from(boot.PCModules.settingsSections()).map((item) => item.order);
+  assert.deepEqual(ordered, [...ordered].sort((a, b) => a - b), '设置区块应按 order 升序返回');
+  assert.ok(ordered.includes(10), '认证卡应当在列表里');
+
+  // ★ 不传 position 时，置顶的必须排在整体列表最前面
+  const all = Array.from(boot.PCModules.settingsSections());
+  assert.equal(all[0].id, SECTION_ID, '★ 不传 position 时，置顶区块要排在第一个');
+
+  // 分档查询也要正确
+  const top = Array.from(boot.PCModules.settingsSections('top')).map((item) => item.id);
+  const normal = Array.from(boot.PCModules.settingsSections('normal')).map((item) => item.id);
+  assert.deepEqual(top, [SECTION_ID]);
+  assert.ok(!normal.includes(SECTION_ID), '置顶区块不该出现在普通档里');
+});
+
+test('★ 设置页里「统一身份认证」是第一张卡（排在外壳的运行信息/AI/主题之前）', async () => {
+  const { api } = makeApi({});
+  const boot = bootRenderer({ api });
+  const mount = await boot.render('settings');
+
+  const cards = findByClass(mount, 'card');
+  assert.ok(cards.length >= 2, `设置页应当有多张卡片，实际 ${cards.length}`);
+
+  const titles = cards.map((card) => {
+    const title = findByClass(card, 'card-title')[0];
+    return title ? title.textContent.trim() : '';
+  });
+  assert.equal(titles[0], '统一身份认证', `★ 第一张卡应当是登录，实际顺序：${titles.join(' → ')}`);
+  // 外壳自己的卡片应当在它后面
+  assert.ok(titles.includes('运行信息'), '外壳的运行信息卡应当还在');
+  assert.ok(titles.indexOf('运行信息') > 0, '运行信息应当排在登录之后');
+});
+
 /* ------------------------------------------------------------------ 图形验证码 */
 
 test('auth 设置卡：被要求图形验证码时显示图片与输入框', async () => {

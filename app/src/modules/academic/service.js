@@ -66,8 +66,42 @@ export class AcademicService {
 
   // ---------------------------------------------------------------- 状态
 
+  /**
+   * 把共享认证里「学业情况」这个站点的状态投影到本模块。
+   *
+   * 登录态的唯一真相在 auth 模块：用户在**设置页**登录时更新的是它，
+   * 本模块的 `state` 不会自己变，不投影就会出现「设置里已登录、学业页还说未登录」。
+   *
+   * 只在两个方向上动：auth 就绪 → 跟着就绪；本模块曾声称已登录而 auth 不可用 → 降级。
+   * 刻意不碰 `need_mfa` / `need_captcha` / `error`（登录进行中的状态）。
+   */
+  #syncAuthState() {
+    const site = this.sharedAuth.siteStatus('academic');
+    if (site?.ready) {
+      if (this.state.status !== 'ready') {
+        this.state.status = 'ready';
+        this.state.error = null;
+        this.state.mfa = null;
+      }
+      return;
+    }
+    if (this.state.status === 'ready') {
+      this.state.status = 'anonymous';
+      this.state.mfa = null;
+      return;
+    }
+    // 登录正在**设置页**进行中（需要两步验证 / 图形验证码）：跟着显示，
+    // 否则用户会在设置页输验证码、切到学业页却看到"未登录"。
+    const global = this.sharedAuth.status();
+    if (global.status === 'need_mfa' || global.status === 'need_captcha') {
+      this.state.status = global.status;
+      this.state.mfa = global.mfa ?? null;
+    }
+  }
+
   /** 给 `/academic/status` 与界面用。 */
   status() {
+    this.#syncAuthState();
     const grades = this.store.academicGrades.all();
     const active = grades.filter((item) => item.active !== false);
     const stats = computeStats(active, { table: this.config.gpaTable });

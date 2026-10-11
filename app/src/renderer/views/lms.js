@@ -10,6 +10,9 @@
  */
 
 (function () {
+/** 状态快照的新鲜度：超过这个时间就重新拉一次。 */
+const STATUS_TTL_MS = 1000;
+
 /**
  * 视图内的会话态。
  *
@@ -23,6 +26,8 @@
 const lmsUi = {
   mount: null,
   status: null,
+  /** 上次尝试拉 /lms/status 的时刻：用来判断快照是否过期（见 lmsMaybeLoad）。 */
+  statusAt: 0,
   statusLoading: false,
   statusError: null,
   courses: null,
@@ -209,8 +214,11 @@ async function lmsLoadStatus({ manual = false } = {}) {
   if (manual) lmsPaint();
   try {
     lmsUi.status = await PC.api('/lms/status');
+    lmsUi.statusAt = Date.now();
   } catch (error) {
     lmsUi.statusError = error.message;
+    // 失败也要记时间：否则下一次重画会立刻重试，失败时变成刷屏式请求
+    lmsUi.statusAt = Date.now();
   } finally {
     lmsUi.statusLoading = false;
     lmsPaint();
@@ -253,9 +261,19 @@ async function lmsLoadActivities(refresh) {
   }
 }
 
-/** 重画后按需补数据：只有「还没拿过」才自动拉，避免反复请求。 */
+/**
+ * 重画后按需补数据。
+ *
+ * status 是「登录态 + 缓存统计」的**快照**，它会因为别处的操作而失效：
+ * 在**设置页**登录/退出之后切回本视图、或者后端广播了 data_changed。
+ * 所以这里不能只在"从没拿过"时取一次 —— 那样会停在旧的登录态上
+ * （用户看到的现象就是：设置里明明登录了，学堂页还说未登录）。
+ *
+ * 用时间戳当闸门：快照够新就直接用，避免 paint → load → paint 打转。
+ */
 function lmsMaybeLoad() {
-  if (!lmsUi.status) {
+  const stale = Date.now() - (lmsUi.statusAt || 0) > STATUS_TTL_MS;
+  if (!lmsUi.status || stale) {
     if (!lmsUi.statusLoading) void lmsLoadStatus();
     return;
   }
