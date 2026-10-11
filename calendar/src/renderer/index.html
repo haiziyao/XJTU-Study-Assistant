@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src http://127.0.0.1:* ws://127.0.0.1:*; style-src 'self'; img-src 'self' data: http://127.0.0.1:*"
+    />
+    <title>AI 智学 · 日历与待办（测试窗口）</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- 左侧功能栏（约 10% 宽） -->
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-logo">🥔</span>
+          <span class="brand-name">智学</span>
+        </div>
+        <nav class="nav" id="nav"></nav>
+        <div class="nav-grow"></div>
+        <nav class="nav nav-bottom" id="nav-bottom"></nav>
+      </aside>
+
+      <!-- 中间对话面板 -->
+      <section class="chat">
+        <header class="chat-head">
+          <span class="dot" id="dot" title="推送通道"></span>
+          <h1 class="chat-title">对话</h1>
+          <span class="badge" id="ai-badge">AI 未接入</span>
+          <span class="status-pill" id="status">正在连接后端…</span>
+          <button class="panel-toggle" id="panel-toggle" type="button" title="收起右侧视图">⟩</button>
+        </header>
+
+        <div class="chat-log" id="chat-log"></div>
+
+        <div class="chat-compose">
+          <textarea
+            id="chat-input"
+            rows="1"
+            placeholder="用一句话添加日程 / 待办，例如：明天 15:00-16:00 项目周会"
+            autocomplete="off"
+          ></textarea>
+          <button class="primary-btn" id="chat-send" type="button">发送</button>
+        </div>
+        <div class="chat-hint">Enter 发送 · Shift + Enter 换行 · 当前由本地规则解析（AI 接口已按契约预留）</div>
+      </section>
+
+      <!-- 右侧功能视图 -->
+      <section class="panel">
+        <header class="panel-head">
+          <h2 id="panel-title">日历</h2>
+        </header>
+        <div class="panel-body" id="panel-body"></div>
+      </section>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <script src="views.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

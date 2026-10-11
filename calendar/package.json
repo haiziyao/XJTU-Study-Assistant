@@ -1,0 +1,28 @@
+{
+  "name": "potato-calendar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI 智学程序 · 日历与日程模块（Node.js 后端 + Electron 测试前端，支持指令添加）",
+  "type": "module",
+  "main": "src/main/main.cjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev:server": "node --watch bin/server.js",
+    "start:server": "node bin/server.js",
+    "dev:app": "electron .",
+    "dev:app:macos": "bash scripts/run-electron-macos.sh",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "calendar",
+    "schedule",
+    "electron",
+    "ai-tutor"
+  ],
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "electron": "^44.7.0"
+  }
+}

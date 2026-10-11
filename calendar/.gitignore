@@ -1,0 +1,18 @@
+# 依赖与构建产物
+node_modules/
+dist/
+out/
+
+# 本地 Electron 测试窗口包（由 scripts/run-electron-macos.sh 生成，含 130MB 运行时）
+.electron-bundle/
+
+# 运行时数据（本地用户数据，不入库；损坏备份一并忽略）
+data/*.json
+data/*.corrupt-*
+data/*.tmp
+
+# 系统与编辑器
+.DS_Store
+*.log
+.idea/
+.vscode/
