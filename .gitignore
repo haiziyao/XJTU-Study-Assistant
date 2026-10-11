@@ -9,6 +9,7 @@ node_modules/
 data/*.json
 data/*.corrupt-*
 data/*.tmp
+data/*.pid
 .electron-bundle/
 dist/
 out/

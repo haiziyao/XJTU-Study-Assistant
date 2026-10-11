@@ -10,6 +10,7 @@ out/
 data/*.json
 data/*.corrupt-*
 data/*.tmp
+data/*.pid
 
 # 本地凭据与侦察产物：绝不入库
 # （敏感串本身从不写进任何文件，这里是防止有人手工把凭据/会话存到仓库里）
