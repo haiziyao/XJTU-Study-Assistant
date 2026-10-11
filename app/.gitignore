@@ -11,6 +11,12 @@ data/*.json
 data/*.corrupt-*
 data/*.tmp
 
+# 本地凭据与侦察产物：绝不入库
+# （敏感串本身从不写进任何文件，这里是防止有人手工把凭据/会话存到仓库里）
+*credential*
+*probe-session*
+*.local.json
+
 # 系统与编辑器
 .DS_Store
 *.log

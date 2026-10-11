@@ -126,6 +126,13 @@ ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ node node_modules/electr
 > | 停在「测试窗口已创建」之后再无输出 | 窗口被外部关闭；`window-all-closed` 会记一条「窗口已关闭」 |
 > | `!! 未捕获异常` / `!! 渲染进程退出` | 真正的崩溃，堆栈会跟在后面 |
 >
+> 另有两点 Windows 与 macOS 的差异（都已在**测试侧**打补丁，应用代码不变，macOS 行为不受影响）：
+>
+> | 差异 | 处理 |
+> | --- | --- |
+> | **POSIX 权限位**：Windows 只认只读位，`0600` 与 `0666` 在 `stat().mode` 上无法区分（实测 0600/0644/0400 → 666/666/444） | `test/ai.test.js` 的 `0600` 断言在 `win32` 上跳过；`secret-store.js` 仍照常按 `0600` 请求，macOS/Linux 照常校验 |
+> | **GUI 子进程**：受限会话下 Electron 起不来 | 用 `npm run dev:app:safe` 或浏览器方式（见下）；`scripts/run-electron-macos.sh` 与 `dev:app:macos` 保持原样 |
+>
 > 规避 GPU 子进程失败（禁用 GPU 与渲染进程沙箱，仅适用于本机联调窗口）：
 >
 > ```powershell

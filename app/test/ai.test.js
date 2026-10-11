@@ -92,7 +92,12 @@ test('AI：配置密钥落盘 0600，接口只回显末四位', async () => {
 
     // 磁盘上是 0600，且确实存了密钥（本地单用户，靠文件权限保护）
     const file = path.join(dataDir, 'ai-config.json');
-    assert.equal((await stat(file)).mode & 0o777, 0o600);
+    // Windows 不支持 POSIX 权限位（只有只读位生效），0600 与 0666 在 stat 上无法区分，
+    // 因此这里只在 POSIX 平台断言。应用代码仍照常按 0600 请求权限，macOS / Linux 不受影响；
+    // 详见 README「Windows + 受限会话」一节。
+    if (process.platform !== 'win32') {
+      assert.equal((await stat(file)).mode & 0o777, 0o600);
+    }
     assert.equal(JSON.parse(await readFile(file, 'utf8')).apiKey, KEY);
 
     const status = await call('GET', '/ai/status');
