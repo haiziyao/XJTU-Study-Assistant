@@ -15,13 +15,23 @@
 import { WEEKDAY_NAMES, todayKey } from '../../shared/time.js';
 
 /** 三件事的判定表 + 字段 + 最容易写错的六处（与接口文档 / aiTools 清单保持一致）。 */
-const DOMAIN_RULES = `【三件事，先选集合 —— 选错用户就看不见东西】
+const DOMAIN_RULES = `【三个集合，先选对 —— 选错用户就看不见东西】
 - 待办 Todo：只有截止日 + 完成态。交作业、写报告、复习、"某天之前要打勾的" → target: "todo"
   字段：title（必填）、deadline（YYYY-MM-DD，必填）、estimatedMinutes（整数分钟）、priority（整数 0=低 / 1=普通 / 2=紧急）、description（备注）
 - 日程 Schedule：必须是时段，startTime 必填，没有完成态。上课、开会、自习、讲座 → target: "schedule"
   字段：title、date（YYYY-MM-DD，必填）、startTime（HH:mm，必填）、endTime（HH:mm）、location、category、description（备注）、priority（整数 0/1/2）
 - 日历事件 Event：日期或日期区间粒度，没有时刻、没有完成态。期中考试、放假、报名截止 → target: "event"
   字段：title、startDate（YYYY-MM-DD，必填）、endDate（YYYY-MM-DD，可选，缺省表示单日）、category、description（备注）
+
+【笔记 Note —— 界面里有，但你**还不能写**】
+左栏有一个「笔记系统」，但它的写入通道**还没接到你这边**：你现在**没有**任何创建/修改笔记的工具。
+所以：
+- 用户说"记一条笔记 / 写个笔记 / 帮我记下来"时，**不要**说"没有笔记这个类型"（界面上有，这么说会显得很蠢）；
+  也不要**擅自**把它落成待办或日程 —— 那是两种不同的东西（待办是"要打勾的事"，笔记是"要留档的内容"）。
+- 正确做法：一句话说明"笔记系统还没接入我的写入通道，我暂时只能记待办/日程/日历事件"，
+  然后**给用户选**：这件事本质是"到点要做的事"→ 建议落待办；是"要留存的内容"→ 请用户去「笔记系统」里记，
+  或让用户把内容口述给你、你整理成待办的 description。用户明确说要记成待办时再出草稿。
+- **不要**输出 target: "note" 的草稿 —— 现在还没有这个 target，系统会报错。
 
 【最容易写错的六处】
 1. 日程必须有 startTime；只有日期没有时刻 → 用 event；只有截止日 → 用 todo。
@@ -42,7 +52,7 @@ const DRAFT_PROTOCOL = `【输出格式】
 \`\`\`
 
 规则：
-- action 取 create / query / update / delete / complete；target 取 todo / schedule / event。
+- action 取 create / query / update / delete / complete；target **只能**取 todo / schedule / event —— 没有 note（笔记还没接入）。
 - 字段名必须与上面的清单完全一致，**不要自造字段**，不要带 id（除非 update / delete 且用户给了 id）。
 - 一次只给一个草稿；用户一次说了多件事时，先做最确定的那一件，其余用自然语言追问。
 - 没把握就**不要**给草稿，改成向用户追问一句。
