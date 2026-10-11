@@ -4,7 +4,9 @@
  * 布局：左侧功能栏（约 10% 宽） / 中间对话面板 / 右侧功能视图。
  *  - 左侧功能栏**由视图注册表生成**（各 views/<id>.js 自行登记，见 kit/registry.js），
  *    本文件不认识任何具体功能，新增功能不需要改这里；
- *  - 中间对话面板调用 /commands/* 的本地规则解析（AI 未接入，接口已预留）；
+ *  - 中间对话面板：**配了 AI 密钥就走 `/ai/chat`（流式气泡 + 草稿确认卡）**，
+ *    没配就退回 `/commands/run` 的本地规则解析 —— 两条路的落库都是 `/commands/execute`，
+ *    所以「模型加的」和「规则加的」在落库与审计上没有区别；
  *  - 右侧可收起：收起后中间面板变宽，周视图不可用（宽度不足）。
  *
  * 全局约定：window.PC = { state, api, refresh, toast, openEditor } 供各视图使用。
@@ -37,6 +39,10 @@
     category: '分类',
     priority: '优先级',
     estimatedMinutes: '预计时长',
+    // 待办存的是 estimatedHours（接口收 estimatedMinutes，落库前换算），两个都要有中文名
+    estimatedHours: '预计时长',
+    deadline: '截止',
+    tags: '标签',
     location: '地点',
     description: '备注',
     startDate: '开始日期',
@@ -57,6 +63,8 @@
     yearly: '每年',
     weekday: '每个工作日',
   };
+  /** 确认卡里不展示的内部字段：它们是管线用的，来源已经在置信度那行写了。 */
+  const INTERNAL_FIELD_KEYS = new Set(['source', 'externalId', 'createdAt', 'updatedAt', 'completedAt']);
 
   const state = {
     apiBase: null,
@@ -64,6 +72,10 @@
     socket: null,
     info: null,
     ai: { available: false, provider: null, contractVersion: null },
+    /** 当前 AI 会话 id；`null` = 下一条消息开新会话（设置页的「新对话」会把它清空）。 */
+    conversationId: null,
+    /** 正在流式接收的那条回复：`{ messageId, text, node, done }`，供 WebSocket 增量更新。 */
+    streaming: null,
     health: null,
     view: 'calendar',
     panelCollapsed: false,
@@ -195,13 +207,10 @@
 
   function welcome() {
     const card = mk('div', 'bubble bot');
-    card.appendChild(
-      mk(
-        'div',
-        'bubble-text',
-        '你好，这是日历与待办模块的测试界面。AI 尚未接入，中间的对话由本地规则解析器完成（接口已按 AI 契约预留，接入模型后行为不变）。可以直接这样说：',
-      ),
-    );
+    const intro = state.ai.available
+      ? `你好，我是「AI 智学」，由 ${state.ai.provider} 驱动。直接说话就行，我会把安排整理成草稿，你点确认才写进日历。也可以这样说：`
+      : '你好，这是日历与待办模块的测试界面。还没配置 AI 密钥，中间的对话由本地规则解析器完成（在「设置 → AI 接入」里填上密钥就换成模型）。可以直接这样说：';
+    card.appendChild(mk('div', 'bubble-text', intro));
     const chips = mk('div', 'chips');
     for (const example of EXAMPLES) {
       const chip = mk('button', 'chip-btn', example);
@@ -268,7 +277,10 @@
     if (draft.explain) box.appendChild(mk('div', 'cc-explain', draft.explain));
 
     const fields = draft.fields ?? preview.planned?.fields ?? {};
-    if (Object.keys(fields).length) box.appendChild(fieldRows(fields));
+    // source / externalId / 时间戳是管线里的内部字段，不是用户要确认的内容；
+    // 来源已经在下面的置信度行里写了（"来源 rules / ai"），这里再列一遍只是噪音。
+    const visible = (key) => !INTERNAL_FIELD_KEYS.has(key);
+    if (Object.keys(fields).filter(visible).length) box.appendChild(fieldRows(fields, visible));
 
     if (draft.filters && Object.keys(draft.filters).length) {
       const filters = mk('div', 'cc-filters');
@@ -378,7 +390,13 @@
     push(card);
   }
 
-  function errorCard(error) {
+  /**
+   * 失败卡片。
+   * @param {Error} error
+   * @param {{ retry?: string }} [options] 传了 `retry` 就多一个「改用本地规则」按钮 ——
+   *   AI 挂了不代表这件事做不了，但降级必须是用户按的，不能悄悄发生。
+   */
+  function errorCard(error, options = {}) {
     const card = mk('div', 'bubble bot has-card');
     const box = mk('div', 'chat-card fail');
     box.appendChild(mk('div', 'cc-title', '没能完成'));
@@ -396,6 +414,12 @@
       box.appendChild(mk('div', 'cc-meta', `错误码：${error.payload.error.code}`));
     }
     const chips = mk('div', 'chips');
+    if (options.retry) {
+      const retry = mk('button', 'chip-btn', '改用本地规则解析');
+      retry.type = 'button';
+      retry.addEventListener('click', () => runLocalRules(options.retry));
+      chips.appendChild(retry);
+    }
     for (const example of EXAMPLES.slice(0, 3)) {
       const chip = mk('button', 'chip-btn', example);
       chip.type = 'button';
@@ -407,10 +431,23 @@
     push(card);
   }
 
+  /**
+   * 发一条消息：**配了密钥走模型，没配走本地规则**。
+   *
+   * 两条路终点是同一个 `/commands/execute`（确认卡之后），所以落库、指令日志、广播完全一致；
+   * 区别只在"谁来理解这句话"。AI 调用失败时**不会偷偷退回规则解析** —— 那会让人以为用了模型，
+   * 所以失败卡片上给一个显式的「改用本地规则」按钮。
+   */
   async function send(text) {
     const content = String(text ?? '').trim();
     if (!content) return;
     bubble('user', content);
+    if (state.ai.available) return runAiChat(content);
+    return runLocalRules(content);
+  }
+
+  /** 本地规则解析（原路径，AI 不可用时的降级）。 */
+  async function runLocalRules(content) {
     const pending = systemNote('正在解析…', 'pending');
     try {
       const preview = await api('/commands/run', { method: 'POST', body: { text: content, dryRun: true } });
@@ -421,6 +458,73 @@
       pending.remove();
       errorCard(error);
     }
+  }
+
+  /**
+   * AI 对话：先落一个空气泡，增量到达时往里追加（WebSocket `ai_delta`），
+   * HTTP 返回后以最终文本定稿，再渲染草稿确认卡。
+   */
+  async function runAiChat(content) {
+    const card = bubble('bot', '');
+    const textEl = card.querySelector('.bubble-text');
+    textEl.textContent = '正在思考…';
+    const streaming = { messageId: null, text: '', node: textEl, done: false };
+    state.streaming = streaming;
+    try {
+      const result = await api('/ai/chat', {
+        method: 'POST',
+        body: {
+          text: content,
+          conversationId: state.conversationId ?? undefined,
+          stream: true,
+          context: { view: state.view },
+        },
+      });
+      state.conversationId = result.conversation?.id ?? state.conversationId;
+      streaming.done = true;
+      textEl.classList.remove('streaming');
+      textEl.textContent = result.assistant?.content || '（模型没有返回内容）';
+      const drafts = result.drafts ?? [];
+      if (!drafts.length) {
+        systemNote(`${state.ai.provider ?? 'AI'} · 只是聊天，没有产生任何写入`, 'meta');
+        return;
+      }
+      for (const entry of drafts) renderAiDraft(entry);
+    } catch (error) {
+      streaming.done = true;
+      textEl.classList.remove('streaming');
+      // 失败时后端已经把部分内容落库了：气泡里保留收到的那部分，不假装什么都没发生
+      if (!streaming.text) card.remove();
+      else textEl.textContent = streaming.text;
+      const details = error?.payload?.error?.details ?? {};
+      if (details.conversationId) state.conversationId = details.conversationId;
+      errorCard(error, { retry: content });
+    } finally {
+      if (state.streaming === streaming) state.streaming = null;
+    }
+  }
+
+  /**
+   * 把一条模型草稿渲染成确认卡。
+   * - 通过校验的：复用本地规则那张卡（`entry.draft.fields` 是模型原样给的字段）；
+   * - 没通过的：只显示问题，**不给确认按钮** —— 点了也会 400，不如直接说清楚哪里不对。
+   */
+  function renderAiDraft(entry) {
+    const draft = { ...(entry.draft ?? {}), provider: 'ai' };
+    if (!entry.error) {
+      draftCard({ ...(entry.preview ?? {}), draft });
+      return;
+    }
+    const card = mk('div', 'bubble bot has-card');
+    const box = mk('div', 'chat-card fail');
+    box.appendChild(mk('div', 'cc-title', '这条草稿没过校验，没有执行'));
+    box.appendChild(mk('div', 'cc-explain', entry.error.message ?? '未知问题'));
+    if (entry.error.details?.field) box.appendChild(mk('div', 'cc-meta', `字段：${entry.error.details.field}`));
+    const fields = draft.fields ?? {};
+    if (Object.keys(fields).length) box.appendChild(fieldRows(fields));
+    box.appendChild(mk('div', 'cc-note', '换个说法再试一次。'));
+    card.appendChild(box);
+    push(card);
   }
 
   function wireChat() {
@@ -468,6 +572,13 @@
       );
       dom.aiBadge.textContent = state.ai.available ? `AI：${state.ai.provider}` : 'AI 未接入（规则解析）';
       dom.aiBadge.classList.toggle('on', state.ai.available);
+      // 底部提示跟着 AI 状态走：否则配置好密钥后，界面还在说"当前由本地规则解析"
+      const hint = document.querySelector('.chat-hint');
+      if (hint) {
+        hint.textContent = state.ai.available
+          ? `Enter 发送 · Shift + Enter 换行 · 由 ${state.ai.provider} 驱动，回复里的安排要点确认才落库`
+          : 'Enter 发送 · Shift + Enter 换行 · 当前由本地规则解析（在「设置 → AI 接入」里填密钥即可换成模型）';
+      }
     } catch (error) {
       setStatus(`后端不可用：${error.message}`, 'error');
     }
@@ -502,6 +613,12 @@
         toast(`提醒：${title}`);
         return;
       }
+      if (message.type === 'ai_delta') {
+        appendAiDelta(message.payload);
+        return;
+      }
+      // `ai_message` 是定稿广播：当前窗口的正文由 /ai/chat 的响应负责（见 runAiChat），
+      // 这里刻意不重复渲染，否则同一段回复会被画两遍。
       if (message.type === 'data_changed') {
         clearTimeout(connectSocket._timer);
         connectSocket._timer = setTimeout(() => {
@@ -510,6 +627,18 @@
         }, 150);
       }
     };
+  }
+
+  /** 流式增量：只认当前这条回复，且定稿后到达的迟到分片直接丢掉（否则会盖掉最终文本）。 */
+  function appendAiDelta(payload = {}) {
+    const streaming = state.streaming;
+    if (!streaming || streaming.done) return;
+    if (streaming.messageId && payload.messageId && payload.messageId !== streaming.messageId) return;
+    streaming.messageId = streaming.messageId ?? payload.messageId ?? null;
+    streaming.text += payload.delta ?? '';
+    streaming.node.classList.add('streaming');
+    streaming.node.textContent = streaming.text;
+    dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
   }
 
   /* ------------------------------------------------------------ 启动 */
@@ -549,8 +678,8 @@
     };
 
     // openEditor 由日历模块通过 PCModules.service('editor', ...) 提供；其它视图经 PC.openEditor 复用，
-    // 不需要互相 import。
-    window.PC = { state, api, refresh, toast, openEditor: Modules.getService('editor') };
+    // 不需要互相 import。refreshAi 供设置页在改完 AI 配置后立刻刷新徽标与状态（WS 也会推，但别赌通道）。
+    window.PC = { state, api, refresh, refreshAi: loadMeta, toast, openEditor: Modules.getService('editor') };
 
     buildNav();
     wireChat();

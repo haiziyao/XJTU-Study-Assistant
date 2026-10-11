@@ -1220,3 +1220,104 @@ body.panel-collapsed .panel {
   opacity: 1;
   transform: translate(-50%, 0);
 }
+
+/* ------------------------------------------------------------------ 追加：设置页滚动 + AI 配置卡片 */
+
+/*
+ * 设置页必须能滚。
+ *
+ * 其它视图都在 `.view-content`（`overflow: auto`）里渲染，而设置视图是直接把 `.settings`
+ * 塞进 `.panel-body` 的 —— 后者是 `overflow: hidden` 的 flex 容器，于是卡片一多
+ * （模块登记的设置区块 + 这次新增的 AI 配置）就会被裁掉而且滚不动。
+ * 这里让 `.settings` 自己成为滚动容器：`flex: 1 + min-height: 0` 给它一个确定高度，
+ * 再 `overflow-y: auto`。只挑 `.panel-body` 的直接子元素，避免影响别的视图。
+ */
+.panel-body > .settings {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+
+/* 设置页里的键值列表：状态区用它，值可以后填 */
+.kv-list {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.kv-ok .kv-val {
+  color: var(--green);
+}
+
+.ai-form {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.ai-field {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-field-label {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.ai-input {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg-base);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 9px;
+}
+
+.ai-input:focus {
+  outline: none;
+  border-color: var(--blue);
+}
+
+.ai-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ai-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-3);
+}
+
+/* 流式回复：正在生成时给光标，定稿后由 JS 摘掉这个 class */
+.bubble-text.streaming::after {
+  content: '▍';
+  color: var(--blue);
+  animation: caret-blink 1s step-end infinite;
+}
+
+@keyframes caret-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* 对话里的元信息（例如「只是聊天，没有产生任何写入」） */
+.chat-note.meta {
+  color: var(--fg-3);
+  opacity: 0.85;
+}

@@ -54,6 +54,9 @@ export function registerAiRoutes(router, { ai, apiPrefix }) {
 
   router.delete(`${P}/conversations/:id`, ({ params }) => ai.deleteConversation(params.id));
 
+  /** 清空全部会话（设置页用）。注意与 `DELETE /ai/conversations/:id` 的先后：带 :id 的先匹配。 */
+  router.delete(`${P}/conversations`, () => ai.clearConversations());
+
   // ---------------------------------------------------------------- 对话
   router.post(`${P}/chat`, async ({ body }) => {
     const text = typeof body?.text === 'string' ? body.text : '';

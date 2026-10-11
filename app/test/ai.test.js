@@ -136,6 +136,12 @@ test('AI：一次对话自动建会话、存两条消息，并记录模型与用
     assert.match(system.content, /待办 Todo/);
     assert.match(system.content, /日程必须有 startTime/);
     assert.match(system.content, /今天/);
+    // 字段名必须是模型真正能用的那些：备注叫 description（写 notes 会被静默丢掉），
+    // priority 是整数（写 "high" 会被 400）—— 这两条都是真机/单测抓出来的
+    assert.match(system.content, /description（备注）/);
+    assert.match(system.content, /不是 notes/);
+    assert.match(system.content, /priority（整数 0=低/);
+    assert.match(system.content, /不是 "high"/);
     assert.equal(sent.model, 'mock-chat');
     assert.equal(sent.stream, false);
   } finally {
@@ -483,5 +489,34 @@ test('AI：上下文摘要真的来自业务数据（未完成待办 / 今天日
     assert.equal(context.body.recent.today.schedules, 1);
   } finally {
     await app.close();
+  }
+});
+
+test('AI：清空全部会话（设置页那一键）连消息一起删干净', async () => {
+  const mock = await startMockAi({ apiKey: KEY });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+  try {
+    await call('POST', '/ai/chat', { text: '第一件事' });
+    await call('POST', '/ai/chat', { text: '第二件事' });
+    assert.equal((await call('GET', '/ai/conversations')).body.count, 2);
+
+    const cleared = await call('DELETE', '/ai/conversations');
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.body.conversations, 2);
+    assert.equal(cleared.body.messages, 4);
+
+    assert.equal((await call('GET', '/ai/conversations')).body.count, 0);
+    const status = await call('GET', '/ai/status');
+    assert.equal(status.body.conversations, 0);
+    assert.equal(status.body.messages, 0);
+
+    // 单条删除仍然可用（别把 :id 那条路由吃掉）
+    await call('POST', '/ai/chat', { text: '第三件事' });
+    const one = (await call('GET', '/ai/conversations')).body.items[0];
+    assert.equal((await call('DELETE', `/ai/conversations/${one.id}`)).body.deleted, true);
+    assert.equal((await call('GET', '/ai/conversations')).body.count, 0);
+  } finally {
+    await app.close();
+    await mock.close();
   }
 });

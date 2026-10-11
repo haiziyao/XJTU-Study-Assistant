@@ -25,7 +25,8 @@ const ACTION_LABEL = {
   complete: '完成',
   rollover: '顺延',
 };
-const TARGET_LABEL = { schedule: '日程', event: '日历事件' };
+// todo 是独立实体，漏了它确认卡与指令日志就会显示成「新增todo」
+const TARGET_LABEL = { todo: '待办', schedule: '日程', event: '日历事件' };
 const SCHEDULE_CATEGORIES = ['class', 'study', 'meeting', 'exam', 'activity', 'other'];
 const EVENT_CATEGORIES = ['study', 'exam', 'holiday', 'anniversary', 'deadline', 'other'];
 const REPEAT_TYPES = [

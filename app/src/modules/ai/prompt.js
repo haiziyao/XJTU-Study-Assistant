@@ -14,22 +14,23 @@
 
 import { WEEKDAY_NAMES, todayKey } from '../../shared/time.js';
 
-/** 三件事的判定表 + 字段 + 最容易写错的五处（与接口文档 / aiTools 清单保持一致）。 */
+/** 三件事的判定表 + 字段 + 最容易写错的六处（与接口文档 / aiTools 清单保持一致）。 */
 const DOMAIN_RULES = `【三件事，先选集合 —— 选错用户就看不见东西】
 - 待办 Todo：只有截止日 + 完成态。交作业、写报告、复习、"某天之前要打勾的" → target: "todo"
-  字段：title（必填）、deadline（YYYY-MM-DD，必填）、estimatedMinutes（整数分钟）、priority（整数 0=低 / 1=普通 / 2=紧急）、notes
+  字段：title（必填）、deadline（YYYY-MM-DD，必填）、estimatedMinutes（整数分钟）、priority（整数 0=低 / 1=普通 / 2=紧急）、description（备注）
 - 日程 Schedule：必须是时段，startTime 必填，没有完成态。上课、开会、自习、讲座 → target: "schedule"
-  字段：title、date（YYYY-MM-DD，必填）、startTime（HH:mm，必填）、endTime（HH:mm）、location、category、notes、priority（整数 0/1/2）
+  字段：title、date（YYYY-MM-DD，必填）、startTime（HH:mm，必填）、endTime（HH:mm）、location、category、description（备注）、priority（整数 0/1/2）
 - 日历事件 Event：日期或日期区间粒度，没有时刻、没有完成态。期中考试、放假、报名截止 → target: "event"
-  字段：title、startDate（YYYY-MM-DD，必填）、endDate（YYYY-MM-DD，可选，缺省表示单日）、category、notes
+  字段：title、startDate（YYYY-MM-DD，必填）、endDate（YYYY-MM-DD，可选，缺省表示单日）、category、description（备注）
 
-【最容易写错的五处】
+【最容易写错的六处】
 1. 日程必须有 startTime；只有日期没有时刻 → 用 event；只有截止日 → 用 todo。
    日程**没有** allDay、**没有** status，这两个字段传了会被 400 拒绝。
 2. 待办的完成态字段是 completed（布尔），不是 status。
 3. priority 是**整数** 0/1/2，不是 "high"/"low" 这类英文档位（写字符串会被 400 拒绝）。
-4. 日期一律 YYYY-MM-DD，时刻一律 HH:mm（24 小时制）。相对时间（明天/下周三）自己算成绝对日期。
-5. category 传的是分类 id（不确定就留空或写 "other"），不要传中文分类名；不要自己造 id。`;
+4. 备注字段叫 **description**，不是 notes / remark / memo —— 写错名字会被静默丢掉，用户的话就没了。
+5. 日期一律 YYYY-MM-DD，时刻一律 HH:mm（24 小时制）。相对时间（明天/下周三）自己算成绝对日期。
+6. category 传的是分类 id（不确定就留空或写 "other"），不要传中文分类名；不要自己造 id。`;
 
 /** 草稿输出协议：回复里额外给一段 ```command 代码块。 */
 const DRAFT_PROTOCOL = `【输出格式】

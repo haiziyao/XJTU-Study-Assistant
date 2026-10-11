@@ -80,6 +80,8 @@ export class AiChatService {
   async resetConfig() {
     const next = await this.config.reset();
     this.onConfigChange?.();
+    // 与保存配置对称：清空也要广播，否则设置页与顶部徽标会停在旧状态
+    this.broadcast?.({ type: 'data_changed', module: 'ai', payload: { target: 'ai_config' } });
     return maskAiConfig(next);
   }
 
@@ -118,6 +120,15 @@ export class AiChatService {
     const conversation = this.getConversation(id);
     const messages = this.#messagesOf(id);
     return { ok: true, conversation, count: messages.length, messages };
+  }
+
+  /** 清空全部会话与消息（设置页的「清空全部会话」）。返回删掉了多少，便于回显。 */
+  async clearConversations() {
+    const conversations = this.store.aiConversations?.all?.() ?? [];
+    const messages = this.store.aiMessages?.all?.() ?? [];
+    if (messages.length) await this.store.aiMessages.removeMany(messages.map((item) => item.id));
+    if (conversations.length) await this.store.aiConversations.removeMany(conversations.map((item) => item.id));
+    return { ok: true, deleted: true, conversations: conversations.length, messages: messages.length };
   }
 
   // ---------------------------------------------------------------- 上下文
