@@ -1,0 +1,112 @@
+/* 学业情况视图的样式。
+   与其它视图共用 kit 里的卡片/按钮基础样式，这里只补本页特有的部分：
+   统计卡、分析卡、成绩表、批量操作条。 */
+
+.ac-head { margin-bottom: 14px; }
+.ac-title { margin: 0 0 4px; font-size: 20px; }
+.ac-sub { margin: 0; color: var(--muted, #8a8f98); font-size: 13px; line-height: 1.6; }
+.ac-muted { color: var(--muted, #8a8f98); font-size: 13px; }
+
+.ac-card {
+  background: var(--card, #1c1f26);
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+.ac-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.ac-card-title { margin: 0; font-size: 15px; }
+.ac-card-head .ac-muted { margin-left: auto; }
+
+/* ---------------------------------------------------------------- 工具条 */
+
+.ac-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.ac-spacer { flex: 1; }
+.ac-select, .ac-input {
+  background: var(--input-bg, #14171d);
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 8px;
+  color: inherit;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+.ac-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ac-form .ac-input { min-width: 160px; }
+.ghost-btn.small { padding: 4px 9px; font-size: 12px; }
+
+/* ---------------------------------------------------------------- 统计卡 */
+
+.ac-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.ac-stat {
+  background: var(--card, #1c1f26);
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.ac-stat-label { font-size: 12px; color: var(--muted, #8a8f98); }
+.ac-stat-value { font-size: 24px; font-weight: 600; margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
+.ac-stat-hint { font-size: 12px; color: var(--muted, #8a8f98); }
+
+/* ---------------------------------------------------------------- 分析卡 */
+
+.ac-analysis { border-left: 3px solid var(--accent, #4c8dff); }
+.ac-analysis-text { margin: 0 0 8px; line-height: 1.75; font-size: 14px; white-space: pre-wrap; }
+.ac-analysis-meta { margin: 0; font-size: 12px; color: var(--muted, #8a8f98); }
+
+.ac-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--line, #2a2f3a);
+}
+.ac-badge-ai { border-color: #4c8dff; color: #7fb0ff; }
+.ac-badge-local { border-color: #8a8f98; color: #a9aeb6; }
+.ac-badge-stale { border-color: #d99a2b; color: #e0ab4a; }
+
+/* ---------------------------------------------------------------- 批量条 */
+
+.ac-bulk { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.ac-bulk-label { font-size: 13px; color: var(--muted, #8a8f98); }
+
+/* ---------------------------------------------------------------- 成绩表 */
+
+.ac-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ac-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted, #8a8f98);
+  border-bottom: 1px solid var(--line, #2a2f3a);
+  padding: 6px 8px;
+}
+.ac-table td { padding: 7px 8px; border-bottom: 1px solid var(--line-faint, #23262e); }
+.ac-table tr:last-child td { border-bottom: none; }
+.ac-col-check { width: 44px; text-align: center; }
+.ac-col-num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* 未计入的行压暗，但仍然可读 —— 用户要能看见自己排除了什么 */
+.ac-row-off { opacity: 0.5; }
+.ac-row-stale { font-style: italic; }
+.ac-course { margin-right: 6px; }
+.ac-tag {
+  display: inline-block;
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line, #2a2f3a);
+  color: var(--muted, #8a8f98);
+  margin-right: 4px;
+}
+
+/* ---------------------------------------------------------------- 提示 */
+
+.ac-warn {
+  background: rgba(217, 154, 43, 0.12);
+  border: 1px solid rgba(217, 154, 43, 0.4);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+.ac-warn-inline { color: #e0ab4a; font-size: 13px; margin: 0 0 8px; }
+.ac-attention { margin: 6px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.8; }

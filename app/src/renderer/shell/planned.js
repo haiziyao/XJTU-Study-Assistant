@@ -3,7 +3,9 @@
  *
  * 这些功能尚未实现，但左栏先保留入口，让整体导航从第一天起就是完整形态。
  *
- * 目前占位：学情 / 随手拍。
+ * 目前占位：随手拍。
+ * 已经落地、不再占位的：「学业」由 `views/academic.js` 实现（id `academic`，order 40）、
+ * 「笔记系统」由 `views/notes/notes.js` 实现（id `notes`，order 50）。
  * 「网课」不再是独立入口 —— 直播与回放本来就来自思源学堂，已并入 `views/lms.js` 的「网课」页签。
  *
  * **实现某个功能时**：
@@ -16,18 +18,6 @@
 
 (function () {
   const PLANNED = [
-    {
-      id: 'study',
-      label: '学情',
-      icon: '📈',
-      order: 40,
-      desc: '学情分析由 AI 智学主程序汇总，本模块只提供日历与日程的原始数据。',
-      bullets: [
-        '统计口径：/api/v1/schedules/stats（完成率、计划时长）',
-        '已就绪：日程与事件的区间聚合 /api/v1/calendar',
-        '待主程序接入：错题、笔记、听课记录等学习行为数据',
-      ],
-    },
     {
       id: 'snapshot',
       label: '随手拍',
