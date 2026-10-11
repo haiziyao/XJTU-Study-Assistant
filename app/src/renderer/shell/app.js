@@ -112,11 +112,23 @@
   /* ------------------------------------------------------------ 左侧功能栏 */
   // 功能栏完全由视图注册表生成：各 views/<id>.js 自行登记，外壳不认识任何具体功能。
 
+  /**
+   * 左栏图标：外壳侧统一把视图登记的「名字 / emoji」映射成内联 SVG（见 shell/icons.js）。
+   * 未登记的图标原样回退成文本，保证不认识图标表的视图行为不变。
+   */
+  function navIcon(icon) {
+    const node = mk('span', 'nav-icon');
+    const svg = window.PCIcons?.svg?.(icon, 20);
+    if (svg) node.innerHTML = svg;
+    else node.textContent = String(icon ?? '');
+    return node;
+  }
+
   function navButton(item) {
     const button = mk('button', `nav-item${state.view === item.id ? ' active' : ''}`);
     button.type = 'button';
     button.dataset.view = item.id;
-    button.append(mk('span', 'nav-icon', item.icon), mk('span', 'nav-label', item.label));
+    button.append(navIcon(item.icon), mk('span', 'nav-label', item.label));
     button.addEventListener('click', () => selectView(item.id));
     return button;
   }
