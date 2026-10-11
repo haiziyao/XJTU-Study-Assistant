@@ -1,9 +1,10 @@
 /* 学业情况视图的样式。
-   与其它视图共用 kit 里的卡片/按钮基础样式，这里只补本页特有的部分：
-   统计卡、分析卡、成绩表、批量操作条。 */
+   布局约定见 academic.js 的注释：内容一律放在 `.view-content` 里（它提供内边距与滚动），
+   按钮放 `.toolbar`。因此这里**不再自己写外边距** —— `.view-content` 已经是
+   `display:flex; gap:10px`，再加 margin 会变成两倍间距。 */
 
-.ac-head { margin-bottom: 14px; }
-.ac-title { margin: 0 0 4px; font-size: 20px; }
+.ac-head { margin-bottom: 2px; }
+.ac-title { margin: 0 0 4px; font-size: 18px; }
 .ac-sub { margin: 0; color: var(--muted, #8a8f98); font-size: 13px; line-height: 1.6; }
 .ac-muted { color: var(--muted, #8a8f98); font-size: 13px; }
 
@@ -12,7 +13,6 @@
   border: 1px solid var(--line, #2a2f3a);
   border-radius: 10px;
   padding: 14px 16px;
-  margin-bottom: 12px;
 }
 .ac-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
 .ac-card-title { margin: 0; font-size: 15px; }
@@ -20,23 +20,21 @@
 
 /* ---------------------------------------------------------------- 工具条 */
 
-.ac-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
-.ac-spacer { flex: 1; }
 .ac-select, .ac-input {
   background: var(--input-bg, #14171d);
   border: 1px solid var(--line, #2a2f3a);
   border-radius: 8px;
   color: inherit;
-  padding: 7px 10px;
+  padding: 6px 10px;
   font-size: 13px;
 }
 .ac-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.ac-form .ac-input { min-width: 160px; }
-.ghost-btn.small { padding: 4px 9px; font-size: 12px; }
+.ac-form .ac-input { min-width: 180px; }
+.ac-toolbar-note { font-size: 12px; color: var(--muted, #8a8f98); }
 
 /* ---------------------------------------------------------------- 统计卡 */
 
-.ac-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.ac-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
 .ac-stat {
   background: var(--card, #1c1f26);
   border: 1px solid var(--line, #2a2f3a);
@@ -66,8 +64,9 @@
 
 /* ---------------------------------------------------------------- 批量条 */
 
-.ac-bulk { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.ac-bulk { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .ac-bulk-label { font-size: 13px; color: var(--muted, #8a8f98); }
+.ac-bulk button { padding: 4px 10px; font-size: 12px; }
 
 /* ---------------------------------------------------------------- 成绩表 */
 
@@ -77,12 +76,31 @@
   font-weight: 500;
   color: var(--muted, #8a8f98);
   border-bottom: 1px solid var(--line, #2a2f3a);
-  padding: 6px 8px;
+  padding: 6px 10px;
 }
-.ac-table td { padding: 7px 8px; border-bottom: 1px solid var(--line-faint, #23262e); }
-.ac-table tr:last-child td { border-bottom: none; }
-.ac-col-check { width: 44px; text-align: center; }
+.ac-table td { padding: 7px 10px; border-bottom: 1px solid var(--line-faint, #23262e); }
+.ac-col-check { width: 46px; text-align: center; }
 .ac-col-num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* 学期分隔行：不用斑马纹，而是明确的一条带底色的标题行 —— 一眼能看出分了几段 */
+.ac-term-row td {
+  padding: 0;
+  border-bottom: 1px solid var(--line, #2a2f3a);
+  background: var(--bg-elevated, #232733);
+}
+.ac-term-row:not(:first-child) td { border-top: 1px solid var(--line, #2a2f3a); }
+.ac-term-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  position: sticky;
+  top: 0;
+  background: inherit;
+}
+.ac-term-name { font-weight: 600; font-size: 13px; }
+.ac-term-meta { font-size: 12px; color: var(--muted, #8a8f98); font-variant-numeric: tabular-nums; }
 
 /* 未计入的行压暗，但仍然可读 —— 用户要能看见自己排除了什么 */
 .ac-row-off { opacity: 0.5; }
@@ -106,7 +124,6 @@
   border-radius: 8px;
   padding: 9px 12px;
   font-size: 13px;
-  margin-bottom: 12px;
 }
 .ac-warn-inline { color: #e0ab4a; font-size: 13px; margin: 0 0 8px; }
 .ac-attention { margin: 6px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.8; }

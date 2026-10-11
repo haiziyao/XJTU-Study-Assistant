@@ -51,12 +51,35 @@
       ui.status = await PC.api('/academic/status');
       if (ui.status?.loggedIn) {
         await Promise.all([loadGrades(), loadTerms(), loadAnalysis()]);
+        await ensureAnalysis();
       }
     } catch (error) {
       ui.error = error;
     } finally {
       ui.loading = false;
       paint();
+    }
+  }
+
+  /**
+   * 有成绩却没有分析时，自动补一段。
+   *
+   * 为什么需要这一步：**登录本身也会同步**（`/academic/login` 顺手拉一次成绩），
+   * 但那条路径不会生成分析，于是"第一次进来什么都没有、必须手动点一次同步"
+   * —— 而用户刚登录完，最想看到的恰恰就是那段点评。
+   * 这里以"有没有成绩"为准而不是"刚才有没有点同步"，所以无论数据是被谁、
+   * 通过哪条路径同步进来的，进来都能看到分析。
+   */
+  async function ensureAnalysis() {
+    if (ui.analysis?.available) return;
+    if (!(ui.stats?.includedCount > 0)) return;
+    try {
+      // 不带 force：数据没变时后端会命中缓存，不会重复烧 token
+      ui.analysis = await PC.api('/academic/analysis', { method: 'POST', body: { force: false } });
+    } catch (error) {
+      // 补分析失败不该挡住成绩展示
+      ui.analysis = null;
+      if (!ui.error) ui.error = error;
     }
   }
 
@@ -172,45 +195,65 @@
       await loadAnalysis();
     });
 
-  /* ------------------------------------------------------------ 渲染 */
+  /* ------------------------------------------------------------ 渲染
+
+     结构必须与其它视图一致，否则会同时踩两个坑：
+       mount 是 `.panel-body`，它的样式是 `display:flex; flex-direction:column; overflow:hidden`，
+       **没有内边距、也不滚动**。所以内容要放进 `.view-content`
+       （`flex:1; overflow:auto; padding:12px 14px 16px`）里 —— 滚动与留白都由它提供；
+       按钮放 `.toolbar`（固定在顶部，不随内容滚走）。
+     直接把内容 append 到 mount 上，就会表现为「贴边 + 不能滚」。 */
 
   function paint() {
     const mount = ui.mount;
     if (!mount) return;
     mount.innerHTML = '';
 
-    const head = mk('div', 'ac-head');
-    head.appendChild(mk('h2', 'ac-title', '学业情况'));
-    head.appendChild(
-      mk('p', 'ac-sub', '成绩来自本科教务系统。学分绩只统计你勾选的课程，每一门都可以单独选择算不算。'),
-    );
-    mount.appendChild(head);
-
-    if (ui.error) mount.appendChild(errorBox(ui.error));
-
     if (ui.loading && !ui.status) {
-      mount.appendChild(mk('p', 'ac-muted', '正在读取…'));
+      const content = mk('div', 'view-content');
+      content.appendChild(viewHeader());
+      content.appendChild(mk('p', 'ac-muted', '正在读取…'));
+      mount.appendChild(content);
       return;
     }
 
+    // 未登录：没有可操作的东西，不给工具条
     if (!ui.status?.loggedIn) {
-      mount.appendChild(loginCard());
+      const content = mk('div', 'view-content');
+      content.appendChild(viewHeader());
+      if (ui.error) content.appendChild(errorBox(ui.error));
+      content.appendChild(loginCard());
+      mount.appendChild(content);
       return;
     }
 
     mount.appendChild(toolbar());
-    mount.appendChild(statCards());
-    mount.appendChild(analysisCard());
-    mount.appendChild(bulkBar());
-    mount.appendChild(gradeTable());
-    mount.appendChild(attentionCard());
+
+    const content = mk('div', 'view-content');
+    content.appendChild(viewHeader());
+    if (ui.error) content.appendChild(errorBox(ui.error));
+    content.appendChild(statCards());
+    content.appendChild(analysisCard());
+    content.appendChild(bulkBar());
+    content.appendChild(gradeTable());
+    content.appendChild(attentionCard());
 
     if (ui.status?.lastError) {
       const box = mk('div', 'ac-warn');
       box.appendChild(mk('strong', null, '上次同步失败：'));
       box.appendChild(mk('span', null, ui.status.lastError.message ?? ''));
-      mount.appendChild(box);
+      content.appendChild(box);
     }
+    mount.appendChild(content);
+  }
+
+  function viewHeader() {
+    const head = mk('div', 'ac-head');
+    head.appendChild(mk('h2', 'ac-title', '学业情况'));
+    head.appendChild(
+      mk('p', 'ac-sub', '成绩来自本科教务系统。学分绩只统计你勾选的课程，每一门都可以单独选择算不算。'),
+    );
+    return head;
   }
 
   function loginCard() {
@@ -259,7 +302,10 @@
   }
 
   function toolbar() {
-    const bar = mk('div', 'ac-toolbar');
+    // 用共享的 `.toolbar`：它自带左右内边距与下边框，并固定在内容区上方不随滚动
+    const bar = mk('div', 'toolbar wrap');
+    const title = mk('div', 'toolbar-title', '学业');
+    bar.appendChild(title);
 
     const sync = mk('button', 'primary-btn', ui.busy === 'sync' ? '同步中…' : '同步成绩');
     sync.type = 'button';
@@ -285,8 +331,7 @@
     });
     bar.appendChild(select);
 
-    const spacer = mk('span', 'ac-spacer');
-    bar.appendChild(spacer);
+    bar.appendChild(mk('span', 'spacer'));
 
     if (ui.status?.lastSyncAt) {
       bar.appendChild(mk('span', 'ac-muted', `上次同步 ${formatStamp(ui.status.lastSyncAt)}`));
@@ -384,6 +429,13 @@
     return bar;
   }
 
+  /**
+   * 成绩明细，**按学期分组**。
+   *
+   * 为什么分组：一屏几十门课平铺下来，用户很难看出"这学期几门、多少学分、学期绩点多少"，
+   * 也分不清哪些课属于同一学期。每个学期插一行小标题（学期名 + 门数 + 学分 + 学期绩点），
+   * 既是视觉分隔，也顺带把该学期的口径摊开 —— 数据直接取自 `stats.terms`，不另算一套。
+   */
   function gradeTable() {
     const card = mk('section', 'ac-card');
     const head = mk('div', 'ac-card-head');
@@ -396,6 +448,21 @@
       return card;
     }
 
+    // 学期口径索引（stats.terms 与列表用的是同一套计算）
+    const termStats = new Map((ui.stats?.terms ?? []).map((item) => [item.term, item]));
+
+    // 按学期分组，保持 listGrades 已有的排序（学期倒序、学期内按课程名）
+    const groups = [];
+    for (const grade of ui.grades) {
+      const key = grade.term ?? '';
+      let group = groups.find((item) => item.term === key);
+      if (!group) {
+        group = { term: key, label: grade.termLabel ?? key ?? '未标注学期', grades: [] };
+        groups.push(group);
+      }
+      group.grades.push(grade);
+    }
+
     const table = mk('table', 'ac-table');
     const thead = mk('thead');
     const headRow = mk('tr');
@@ -405,48 +472,80 @@
       ['学分', 'ac-col-num'],
       ['成绩', 'ac-col-num'],
       ['绩点', 'ac-col-num'],
-      ['学期', ''],
       ['性质', ''],
     ]) {
-      const th = mk('th', className, label);
-      headRow.appendChild(th);
+      headRow.appendChild(mk('th', className, label));
     }
     thead.appendChild(headRow);
     table.appendChild(thead);
 
     const tbody = mk('tbody');
-    for (const grade of ui.grades) {
-      const row = mk('tr', grade.included === false ? 'ac-row-off' : '');
-      if (grade.stale) row.classList.add('ac-row-stale');
+    for (const group of groups) {
+      // --- 学期分隔行 ---
+      const termRow = mk('tr', 'ac-term-row');
+      const termCell = mk('td', null);
+      termCell.colSpan = 6;
 
-      const checkCell = mk('td', 'ac-col-check');
-      const check = mk('input');
-      check.type = 'checkbox';
-      check.checked = grade.included !== false;
-      check.disabled = ui.busy === `row:${grade.id}`;
-      check.addEventListener('change', () => void toggleOne(grade.id, check.checked));
-      checkCell.appendChild(check);
-      row.appendChild(checkCell);
+      const termHead = mk('div', 'ac-term-head');
+      termHead.appendChild(mk('span', 'ac-term-name', group.label));
 
-      const nameCell = mk('td');
-      nameCell.appendChild(mk('span', 'ac-course', grade.courseName || grade.courseCode || '(未命名)'));
-      if (grade.stale) nameCell.appendChild(mk('span', 'ac-tag', '本次未返回'));
-      if ((grade.gradePointResolved ?? grade.gradePoint) === null && grade.included === false) {
-        nameCell.appendChild(mk('span', 'ac-tag', '等级制'));
+      const stat = termStats.get(group.term);
+      const chips = [`${group.grades.length} 门`];
+      const credits = termCellCredits(group.grades);
+      if (credits > 0) chips.push(`${credits} 学分`);
+      if (stat && typeof stat.gpa === 'number') chips.push(`学期学分绩 ${stat.gpa.toFixed(3)}`);
+      // 只统计被纳入的：与上方总分口径保持一致，避免用户以为"这门没算进去"
+      const includedCount = group.grades.filter((item) => item.included !== false).length;
+      if (includedCount !== group.grades.length) chips.push(`已计入 ${includedCount} 门`);
+      termHead.appendChild(mk('span', 'ac-term-meta', chips.join(' · ')));
+
+      termCell.appendChild(termHead);
+      termRow.appendChild(termCell);
+      tbody.appendChild(termRow);
+
+      // --- 该学期的课程行 ---
+      for (const grade of group.grades) {
+        tbody.appendChild(gradeRow(grade));
       }
-      row.appendChild(nameCell);
-
-      row.appendChild(mk('td', 'ac-col-num', formatNumber(grade.credit, 1)));
-      row.appendChild(mk('td', 'ac-col-num', formatScore(grade)));
-      row.appendChild(mk('td', 'ac-col-num', formatGpa(grade.gradePointResolved ?? grade.gradePoint)));
-      row.appendChild(mk('td', 'ac-muted', grade.termLabel ?? grade.term ?? ''));
-      row.appendChild(mk('td', 'ac-muted', grade.natureLabel ?? ''));
-
-      tbody.appendChild(row);
     }
     table.appendChild(tbody);
     card.appendChild(table);
     return card;
+  }
+
+  /** 一组课程的学分合计（只看有数值的）。 */
+  function termCellCredits(list) {
+    return list.reduce((sum, item) => sum + (typeof item.credit === 'number' ? item.credit : 0), 0);
+  }
+
+  /** 单门课的一行。 */
+  function gradeRow(grade) {
+    const row = mk('tr', grade.included === false ? 'ac-row-off' : '');
+    if (grade.stale) row.classList.add('ac-row-stale');
+
+    const checkCell = mk('td', 'ac-col-check');
+    const check = mk('input');
+    check.type = 'checkbox';
+    check.checked = grade.included !== false;
+    check.disabled = ui.busy === `row:${grade.id}`;
+    check.addEventListener('change', () => void toggleOne(grade.id, check.checked));
+    checkCell.appendChild(check);
+    row.appendChild(checkCell);
+
+    const nameCell = mk('td');
+    nameCell.appendChild(mk('span', 'ac-course', grade.courseName || grade.courseCode || '(未命名)'));
+    if (grade.stale) nameCell.appendChild(mk('span', 'ac-tag', '本次未返回'));
+    if ((grade.gradePointResolved ?? grade.gradePoint) === null && grade.included === false) {
+      nameCell.appendChild(mk('span', 'ac-tag', '等级制'));
+    }
+    row.appendChild(nameCell);
+
+    row.appendChild(mk('td', 'ac-col-num', formatNumber(grade.credit, 1)));
+    row.appendChild(mk('td', 'ac-col-num', formatScore(grade)));
+    row.appendChild(mk('td', 'ac-col-num', formatGpa(grade.gradePointResolved ?? grade.gradePoint)));
+    row.appendChild(mk('td', 'ac-muted', grade.natureLabel ?? ''));
+
+    return row;
   }
 
   function attentionCard() {
