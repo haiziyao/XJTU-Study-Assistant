@@ -115,12 +115,21 @@ export class ScheduleService {
     return this.store.schedules;
   }
 
-  /** 原始记录查询。支持 date（单日）、from/to（闭区间）、status、category、keyword、priority。 */
-  list({ date, from, to, status, category, keyword, priority, limit, includeRolled = true } = {}) {
+  /**
+   * 原始记录查询。支持 date（单日）、from/to（闭区间）、status、category、keyword、priority、allDay。
+   *
+   * `allDay` 是「待办 / 日程」的分界线：`allDay === true` 是**待办**（只有日期，有完成态），
+   * `allDay === false` 是**时段日程**（有起止时刻，没有完成态）。待办列表只该查前者。
+   */
+  list({ date, from, to, status, category, keyword, priority, allDay, limit, includeRolled = true } = {}) {
     let items = this.collection.all();
     if (date) items = items.filter((item) => item.date === date);
     if (from) items = items.filter((item) => item.date >= from);
     if (to) items = items.filter((item) => item.date <= to);
+    if (allDay !== undefined && allDay !== null && allDay !== '') {
+      const wantAllDay = allDay === true || allDay === 'true' || allDay === '1' || allDay === 1;
+      items = items.filter((item) => Boolean(item.allDay) === wantAllDay);
+    }
     if (status) {
       const wanted = String(status).split(',').map((s) => s.trim());
       items = items.filter((item) => wanted.includes(item.status));

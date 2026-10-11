@@ -274,6 +274,9 @@ export class CommandParser {
         rangeLabel: range.label,
         status: /未完成|待办|还没/.test(text) ? 'pending' : /已完成|做完了/.test(text) ? 'done' : undefined,
       };
+      // 说了「待办 / 作业 / 任务 / 截止」，或者动作是「完成」时，条件限定为待办（只有日期的条目）：
+      // 否则「完成今天的作业」会把同一天的时段日程（开会、上课）也算成候选。
+      if (TODO_HINT_RE.test(text) || action === 'complete') filters.allDay = true;
       if (keyword) filters.keyword = keyword;
 
       const fields = {};

@@ -522,7 +522,10 @@
   gap: 1px;
   padding: 3px 6px 3px 9px;
   border-radius: 8px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04));
+  /* 日程块用分类色做底（苹果日历那种「整块着色」），左侧强调条再用饱和色压一道；
+     上行是 color-mix 不可用时的兜底 */
+  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--cat, var(--fg-3)) 26%, transparent);
   box-shadow: var(--shadow-1);
   overflow: hidden;
   min-width: 0;

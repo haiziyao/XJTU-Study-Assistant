@@ -35,6 +35,8 @@ export function createCalendarCommands({ events, schedules, store }) {
         to: filters.to,
         // 只有「完成」才默认限定未完成项；删除/修改应能命中任意状态
         status: filters.status ?? (draft.action === 'complete' ? 'pending' : undefined),
+        // 「完成」是待办的语义：时段日程（有起止时刻）没有完成态，别让它被完成
+        allDay: draft.action === 'complete' ? true : filters.allDay,
         keyword: filters.keyword,
         includeRolled: false,
       });
@@ -121,9 +123,40 @@ export function createCalendarCommands({ events, schedules, store }) {
     },
 
     async complete(draft, options) {
-      if (draft.target === 'event') throw HttpError.badRequest('日历事件不支持「完成」操作，请对日程使用');
+      if (draft.target === 'event') {
+        throw HttpError.badRequest('日历事件没有完成态，不能标记完成；请对「待办」使用');
+      }
       const matches = locate(draft);
-      if (!matches.length) throw HttpError.notFound('没有找到符合条件的日程');
+      if (!matches.length) {
+        // 没找到「待办」时再回查一次（不限定 allDay）：如果命中的是时段日程，
+        // 那用户/AI 想要的其实是完成一场会议 —— 得给出能看懂的原因，而不是干巴巴的 404。
+        const filters = draft.filters ?? {};
+        const fallback = filters.id
+          ? [schedules.get(filters.id)]
+          : schedules.list({
+              from: filters.from,
+              to: filters.to,
+              status: filters.status,
+              keyword: filters.keyword,
+              includeRolled: false,
+            });
+        const timed = (fallback ?? []).find((item) => item && !item.allDay);
+        if (timed) {
+          const span = `${timed.startTime ?? '?'}${timed.endTime ? `-${timed.endTime}` : ''}`;
+          throw HttpError.badRequest(
+            `「${timed.title ?? '这条记录'}」是时段日程（${span}），日程没有完成态；只有待办（只有日期的条目）可以标记完成`,
+          );
+        }
+        throw HttpError.notFound('没有找到符合条件的待办');
+      }
+      // 点名了 id 时也可能指到时段日程，这里再拦一道
+      const timed = matches.find((item) => !item.allDay);
+      if (timed) {
+        const span = `${timed.startTime ?? '?'}${timed.endTime ? `-${timed.endTime}` : ''}`;
+        throw HttpError.badRequest(
+          `「${timed.title ?? '这条记录'}」是时段日程（${span}），日程没有完成态；只有待办可以标记完成`,
+        );
+      }
       if (options.dryRun) {
         return { dryRun: true, planned: { action: 'complete', ids: matches.map((m) => m.id) } };
       }
@@ -132,7 +165,7 @@ export function createCalendarCommands({ events, schedules, store }) {
       return {
         items: updated,
         affected: updated.map((item) => ({ id: item.id, title: item.title })),
-        explain: `已完成 ${updated.length} 条日程`,
+        explain: `已完成 ${updated.length} 条待办`,
       };
     },
 

@@ -5,7 +5,7 @@
  *   1. 「待办」类措辞必须落在 schedules 集合 —— 待办视图只读 /schedules，
  *      判成 events 会让用户说了「加待办」却在待办列表里看不到；
  *   2. 单日无时刻 = 待办，跨天区间 = 日历事件；
- *   3. 「完成」只对日程有意义（事件没有完成态），默认必须走 schedules；
+ *   3. 「完成」只对待办有意义（时段日程与日历事件都没有完成态），且待办列表只含 allDay 条目；
  *   4. 日历模块要声明 aiTools，且接口文档与工具清单保持一致 ——
  *      AI 是照着文档调接口的，文档漂了它就会写错集合。
  */
@@ -57,12 +57,15 @@ test('「待办」类措辞解析为全天日程，而不是日历事件', () =>
   }
 });
 
-test('「完成」默认针对日程（事件没有完成态，打过去会报错）', () => {
+test('「完成」是待办的动作：只定位待办，不碰时段日程', () => {
   const draft = parser.parse('完成今天的英语听力');
   assert.equal(draft.action, 'complete');
   assert.equal(draft.target, 'schedule');
   assert.equal(draft.filters.from, '2025-10-15');
   assert.equal(draft.filters.keyword, '英语听力');
+  // 待办 = allDay，条件里必须带上，否则同一天的「开会」也会被算成候选
+  assert.equal(draft.filters.allDay, true);
+  assert.equal(parser.parse('查询今天的待办').filters.allDay, true);
 });
 
 test('单日且没有时刻的表达一律算待办：「明天 交实验报告」也是待办', () => {
@@ -135,10 +138,45 @@ test('一句话完成待办：状态流转为 done', async () => {
     assert.equal(done.body.items.length, 1);
     assert.equal(done.body.items[0].status, 'done');
 
-    const remaining = await call('GET', '/schedules?status=pending');
+    const remaining = await call('GET', '/schedules?allDay=1&status=pending');
     assert.equal(remaining.body.items.length, 0);
-    const finished = await call('GET', '/schedules?status=done');
+    const finished = await call('GET', '/schedules?allDay=1&status=done');
     assert.equal(finished.body.items.length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+test('待办与日程是两件事：待办列表不含带时刻的日程，日程也不能被完成', async () => {
+  const { app, call } = await startApp();
+  try {
+    // 同一天：一条待办 + 一条带时刻的日程
+    await call('POST', '/commands/run', { text: '添加待办 今天 交实验报告' });
+    const meeting = await call('POST', '/commands/run', { text: '添加日程 今天 15:00-16:00 项目周会' });
+    assert.equal(meeting.body.item.allDay, false);
+    const meetingId = meeting.body.item.id;
+
+    // ① 待办列表（allDay=1）里只有待办，会议不会混进来
+    const todos = await call('GET', '/schedules?allDay=1&status=pending&limit=300');
+    assert.equal(todos.body.items.length, 1);
+    assert.equal(todos.body.items[0].title, '交实验报告');
+
+    // ② 只取时段日程时，那条会议在
+    const timed = await call('GET', '/schedules?allDay=0');
+    assert.equal(timed.body.items.length, 1);
+    assert.equal(timed.body.items[0].title, '项目周会');
+
+    // ③ 直接点名一条时段日程去「完成」→ 400，且状态没被改
+    const rejected = await call('POST', `/schedules/${meetingId}/status`, { status: 'done' });
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.body.error.message, /没有完成态/);
+    const after = await call('GET', `/schedules/${meetingId}`);
+    assert.equal(after.body.item.status, 'pending');
+
+    // ④ 但「取消」对日程是成立的（取消一场会议是合理操作）
+    const cancelled = await call('POST', `/schedules/${meetingId}/status`, { status: 'cancelled' });
+    assert.equal(cancelled.status, 200);
+    assert.equal(cancelled.body.item.status, 'cancelled');
   } finally {
     await app.close();
   }
@@ -152,7 +190,7 @@ test('「完成」打在日历事件上是明确的报错，而不是静默改�
       draft: { ok: true, action: 'complete', target: 'event', filters: { from: todayKey(), to: todayKey() } },
     });
     assert.equal(result.status, 400);
-    assert.match(result.body.error.message, /日历事件不支持/);
+    assert.match(result.body.error.message, /没有完成态/);
     // 事件本身没被改动
     const events = await call('GET', '/events');
     assert.equal(events.body.items.length, 1);

@@ -671,10 +671,13 @@ async function renderTodoList(host) {
   const weekStart = PCUtil.startOfWeek(today);
   const weekEnd = PCUtil.addDays(weekStart, 6);
 
-  let query = '/schedules?status=pending&limit=300';
-  if (state.todo.filter === 'today') query = `/schedules?date=${today}`;
-  else if (state.todo.filter === 'week') query = `/schedules?from=${weekStart}&to=${weekEnd}`;
-  else if (state.todo.filter === 'done') query = '/schedules?status=done&limit=100';
+  // 待办 = 只有日期的条目（allDay=1）。带起止时刻的日程（开会、上课）属于日历，不属于待办列表，
+  // 所以这里恒定带上 allDay=1 —— 待办与日程是两件事，别混在一张表里。
+  const TODO_SCOPE = 'allDay=1';
+  let query = `/schedules?${TODO_SCOPE}&status=pending&limit=300`;
+  if (state.todo.filter === 'today') query = `/schedules?${TODO_SCOPE}&date=${today}`;
+  else if (state.todo.filter === 'week') query = `/schedules?${TODO_SCOPE}&from=${weekStart}&to=${weekEnd}`;
+  else if (state.todo.filter === 'done') query = `/schedules?${TODO_SCOPE}&status=done&limit=100`;
 
   host.innerHTML = '';
   host.appendChild(mk('div', 'loading', '加载中…'));

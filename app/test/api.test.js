@@ -60,9 +60,19 @@ test('指令 run：创建 -> 查询 -> 完成 -> 删除 全链路', async () => 
     });
     assert.equal(queried.body.count, 1);
 
-    const completed = await call('POST', '/commands/run', { text: '完成 2030-01-02 项目周会' });
+    // 「完成」是待办的动作，不是时段日程的：先建一条待办再完成它
+    const todo = await call('POST', '/commands/run', { text: '添加待办 2030-01-02 交材料' });
+    assert.equal(todo.body.item.allDay, true);
+    const completed = await call('POST', '/commands/run', { text: '完成 2030-01-02 交材料' });
     assert.equal(completed.body.items[0].status, 'done');
     assert.ok(completed.body.items[0].completedAt);
+
+    // 时段日程（有起止时刻）没有完成态：直接点名它也会被拒
+    const rejected = await call('POST', '/commands/run', { text: '完成 2030-01-02 项目周会' });
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.body.error.message, /没有完成态/);
+    const untouched = await call('GET', `/schedules/${id}`);
+    assert.equal(untouched.body.item.status, 'pending');
 
     const removed = await call('POST', '/commands/run', { text: '删除 2030-01-02 项目周会' });
     assert.equal(removed.body.deleted, 1);

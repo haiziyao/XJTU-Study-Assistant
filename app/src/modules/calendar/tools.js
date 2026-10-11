@@ -29,7 +29,8 @@ export const CALENDAR_TOOL_SPECS = [
   },
   {
     name: 'calendar_schedule_list',
-    description: '按日期/区间/状态/关键词查日程与待办（待办 = status pending 的全天日程）',
+    description:
+      '按日期/区间/状态/关键词查日程与待办。**待办与日程是两件事**：allDay=1 是待办（只有日期，有完成态），allDay=0 是时段日程（有起止时刻，没有完成态）',
     method: 'GET',
     path: '/schedules',
     requiresAuth: false,
@@ -38,7 +39,8 @@ export const CALENDAR_TOOL_SPECS = [
       date: 'YYYY-MM-DD?',
       from: 'YYYY-MM-DD?',
       to: 'YYYY-MM-DD?',
-      status: 'pending|done|cancelled|rolled?（可逗号分隔）',
+      allDay: 'boolean?（true 只取待办，false 只取时段日程；不传则两者都返回）',
+      status: 'pending|done|cancelled|rolled?（可逗号分隔；只有待办有完成态）',
       category: 'class|study|meeting|exam|activity|other?',
       priority: '0|1|2?',
       keyword: 'string?',
@@ -73,7 +75,8 @@ export const CALENDAR_TOOL_SPECS = [
   // ---------------------------------------------------------------- 写：日程 / 待办
   {
     name: 'calendar_schedule_create',
-    description: '新建日程；不传起止时刻则为全天（即待办）。响应附带同时间段冲突提示',
+    description:
+      '新建日程。传 allDay=true（且不给起止时刻）就是**待办**（只有日期、有完成态）；传 startTime 则是时段日程（上课、开会）。两者都写 /schedules，但语义不同，别混',
     method: 'POST',
     path: '/schedules',
     requiresAuth: false,
@@ -105,12 +108,13 @@ export const CALENDAR_TOOL_SPECS = [
   },
   {
     name: 'calendar_schedule_complete',
-    description: '把日程/待办标记为完成（或其它状态），「完成今天的作业」走这里',
+    description:
+      '把**待办**标记为完成（或改状态），「完成今天的作业」走这里。⚠️ 只对 allDay=1 的待办有效：时段日程与日历事件都没有完成态，传它们的 id 会返回 400',
     method: 'POST',
     path: '/schedules/{id}/status',
     requiresAuth: false,
     mutates: true,
-    params: { id: 'string（路径参数）', status: 'pending|done|cancelled（必填，通常 done）' },
+    params: { id: 'string（路径参数，必须是待办：allDay=true）', status: 'pending|done|cancelled（必填，通常 done）' },
   },
   {
     name: 'calendar_schedule_rollover',

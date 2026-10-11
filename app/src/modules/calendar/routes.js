@@ -70,6 +70,8 @@ export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1'
       status: query.status,
       category: query.category,
       priority: query.priority,
+      // allDay=1 只取待办、allDay=0 只取时段日程（两件事的语义分界，见 schedule-service.list 注释）
+      allDay: query.allDay,
       keyword: query.keyword,
       limit: query.limit,
     });
@@ -111,6 +113,16 @@ export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1'
 
   router.post(`${P}/schedules/:id/status`, async ({ params, body }) => {
     if (!body?.status) throw HttpError.badRequest('status 为必填');
+    // 「完成」是待办的语义：时段日程（有起止时刻）没有完成态。取消/恢复对两者都成立，所以只拦 done。
+    if (body.status === 'done') {
+      const target = schedules.get(params.id);
+      if (target && !target.allDay) {
+        const span = `${target.startTime ?? '?'}${target.endTime ? `-${target.endTime}` : ''}`;
+        throw HttpError.badRequest(
+          `「${target.title ?? '这条记录'}」是时段日程（${span}），日程没有完成态；只有待办（allDay=true）可以标记完成`,
+        );
+      }
+    }
     return { item: await schedules.setStatus(params.id, body.status) };
   });
 
