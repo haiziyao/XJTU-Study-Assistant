@@ -67,6 +67,8 @@ export class LmsService {
     const activities = this.store.lmsActivities.all();
     const schedules = this.store.schedules.all().filter((item) => String(item.externalId ?? '').startsWith('lms:'));
     const events = this.store.events.all().filter((item) => String(item.externalId ?? '').startsWith('lms:'));
+    // 作业现在落在待办集合里，统计「已同步」时必须一起数，否则页面上数字会少
+    const todos = this.store.todos.all().filter((item) => String(item.externalId ?? '').startsWith('lms:'));
     return {
       status: this.state.status,
       user: this.state.user,
@@ -80,7 +82,7 @@ export class LmsService {
         lastCoursesAt: this.state.lastCoursesAt,
         lastActivitiesAt: this.state.lastActivitiesAt,
       },
-      synced: { schedules: schedules.length, events: events.length },
+      synced: { schedules: schedules.length, events: events.length, todos: todos.length },
       lastSyncAt: this.state.lastSyncAt,
       autoSync: {
         enabled: this.state.autoSync,
@@ -273,6 +275,7 @@ export class LmsService {
       courses: data.courses,
       activities: data.activities,
       existingSchedules: this.store.schedules.all(),
+      existingTodos: this.store.todos.all(),
       existingEvents: this.store.events.all(),
       options: resolved,
     });
@@ -294,6 +297,7 @@ export class LmsService {
       courses: data.courses,
       activities: data.activities,
       existingSchedules: this.store.schedules.all(),
+      existingTodos: this.store.todos.all(),
       existingEvents: this.store.events.all(),
       options: resolved,
     });

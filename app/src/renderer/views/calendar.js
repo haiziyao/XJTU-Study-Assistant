@@ -16,11 +16,28 @@ async function fetchCalendar(from, to) {
   return new Map((data.days ?? []).map((day) => [day.date, day]));
 }
 
-/** 统一的写操作包装：toast + 刷新右侧视图。 */
-async function setScheduleStatus(id, status, label) {
+/**
+ * 勾选 / 取消勾选待办。
+ *
+ * 「完成」是**待办独有**的语义：日程（时段）与日历事件都没有完成态，
+ * 所以这里只可能是 /todos/:id/completed 一个入口。
+ */
+async function setTodoCompleted(id, completed) {
   try {
-    await PC.api(`/schedules/${id}/status`, { method: 'POST', body: { status } });
-    PC.toast(label);
+    await PC.api(`/todos/${id}/completed`, { method: 'POST', body: { completed } });
+    PC.toast(completed ? '已完成' : '已恢复待办');
+    PC.refresh();
+  } catch (error) {
+    PC.toast(error.message);
+  }
+}
+
+/** 删除一条待办。 */
+async function removeTodo(id, title) {
+  if (!window.confirm(`确定删除待办「${title}」？`)) return;
+  try {
+    await PC.api(`/todos/${id}`, { method: 'DELETE' });
+    PC.toast(`已删除「${title}」`);
     PC.refresh();
   } catch (error) {
     PC.toast(error.message);
@@ -146,10 +163,11 @@ function renderMonth(host, anchor) {
         if (date.slice(0, 7) !== String(anchor).slice(0, 7)) cell.classList.add('outside');
         if (date === PC.state.calendar.anchor) cell.classList.add('selected');
 
+        const dayTodos = day.todos ?? [];
         const headEl = mk('div', 'cell-head');
         headEl.appendChild(mk('span', 'dnum', PCUtil.toDate(date).getDate()));
-        const total = day.events.length + day.schedules.length;
-        if (total) headEl.appendChild(mk('span', 'dstat', `${day.stats?.done ?? 0}/${total}`));
+        const total = day.events.length + day.schedules.length + dayTodos.length;
+        if (total) headEl.appendChild(mk('span', 'dstat', `${day.stats?.todosCompleted ?? 0}/${total}`));
 
         const list = mk('div', 'cell-list');
         const chips = [
@@ -159,12 +177,21 @@ function renderMonth(host, anchor) {
         for (const chip of chips.slice(0, 3)) list.appendChild(chipEl(chip));
         if (chips.length > 3) list.appendChild(mk('div', 'more', `+${chips.length - 3}`));
 
+        // 待办用「小圆点」表达（参考实现的月视图做法）：今天截止=红、其它=蓝，最多 3 个
+        const dots = mk('div', 'cell-dots');
+        for (const todo of dayTodos.slice(0, 3)) {
+          const dot = mk('span', `cell-dot${todo.isToday ? ' today' : ''}${todo.completed ? ' done' : ''}`);
+          dot.title = `${todo.title}（截止 ${todo.deadline}）`;
+          dots.appendChild(dot);
+        }
+        if (dayTodos.length > 3) dots.appendChild(mk('span', 'cell-dot-more', `+${dayTodos.length - 3}`));
+
         const add = mk('button', 'cell-add', '+');
         add.type = 'button';
         add.title = '在这天新建';
         add.dataset.add = date;
 
-        cell.append(headEl, list, add);
+        cell.append(headEl, list, dots, add);
         grid.appendChild(cell);
       }
 
@@ -193,9 +220,7 @@ function renderMonth(host, anchor) {
 function chipEl(chip) {
   const node = mk('div', `chip cat-${chip.category ?? 'other'}`);
   if (chip.kind === 'event') node.classList.add('is-event');
-  if (chip.status === 'done') node.classList.add('done');
-  if (chip.status === 'cancelled') node.classList.add('cancelled');
-  if (!chip.allDay && chip.startTime) node.appendChild(mk('span', 'c-time', chip.startTime));
+  if (chip.startTime) node.appendChild(mk('span', 'c-time', chip.startTime));
   node.appendChild(mk('span', 'c-title', chip.title));
   node.title = `${PCUtil.timeRange(chip)} ${chip.title}`;
   return node;
@@ -237,21 +262,35 @@ function renderWeek(host, anchor) {
       const allDayRow = mk('div', 'week-allday');
       allDayRow.appendChild(mk('div', 'gutter', '全天'));
       for (const date of days) {
-        const day = byDate.get(date) ?? { events: [], schedules: [] };
+        const day = byDate.get(date) ?? { events: [], schedules: [], todos: [], imported: [] };
         const col = mk('div', 'allday-col');
-        const allDayItems = [
-          ...day.events.map((item) => ({ kind: 'event', ...item })),
-          ...day.schedules.filter((item) => item.allDay).map((item) => ({ kind: 'schedule', ...item })),
-        ];
-        for (const item of allDayItems.slice(0, 4)) {
-          const chip = mk('div', `ad-chip cat-${item.category ?? 'other'}`, item.title);
-          chip.title = item.title;
-          if (item.kind === 'schedule') {
-            chip.addEventListener('click', () => openEditor({ target: 'schedule', id: item.scheduleId }));
-          }
+
+        // 日期粒度的事件
+        for (const event of day.events) {
+          const chip = mk('div', `ad-chip cat-${event.category ?? 'other'}`, event.title);
+          chip.title = event.title;
           col.appendChild(chip);
         }
-        if (allDayItems.length > 4) col.appendChild(mk('div', 'more', `+${allDayItems.length - 4}`));
+        // 当天截止的待办
+        for (const todo of day.todos ?? []) {
+          const chip = mk('div', `week-todo${todo.completed ? ' done' : ''}${todo.isToday ? ' today' : ''}`, todo.title);
+          chip.title = `${todo.completed ? '已完成' : '待办'} · 预估 ${todo.estimatedHours ?? 1} 小时`;
+          chip.addEventListener('click', () => openEditor({ target: 'todo', id: todo.id }));
+          col.appendChild(chip);
+        }
+        // 历史遗留的导入日期锚点：只读
+        for (const item of day.imported ?? []) {
+          const chip = mk('div', 'week-todo imported', item.title);
+          chip.title = '外部导入的日期锚点（只读）';
+          chip.addEventListener('click', () => PC.toast('导入项，暂不支持编辑'));
+          col.appendChild(chip);
+        }
+
+        const total = col.children.length;
+        if (total > 4) {
+          while (col.children.length > 4) col.children[col.children.length - 1].remove();
+          col.appendChild(mk('div', 'more', `+${total - 4}`));
+        }
         allDayRow.appendChild(col);
       }
 
@@ -269,7 +308,7 @@ function renderWeek(host, anchor) {
         const col = mk('div', 'day-col');
         col.dataset.date = date;
         const day = byDate.get(date) ?? { schedules: [] };
-        const timed = day.schedules.filter((item) => !item.allDay && item.startTime);
+        const timed = day.schedules.filter((item) => item.startTime);
         for (const block of layoutBlocks(timed)) col.appendChild(blockEl(block));
         col.addEventListener('click', (event) => {
           if (event.target.closest('.block')) return;
@@ -334,8 +373,6 @@ function layoutBlocks(items) {
 
 function blockEl(block) {
   const node = mk('div', `block cat-${block.category ?? 'other'}`);
-  if (block.status === 'done') node.classList.add('done');
-  if (block.status === 'cancelled') node.classList.add('cancelled');
   node.style.top = `${(block.start / 60) * HOUR_HEIGHT}px`;
   node.style.height = `${Math.max(20, ((block.end - block.start) / 60) * HOUR_HEIGHT - 2)}px`;
   if (block.cols > 1) {
@@ -383,15 +420,11 @@ function renderDay(host, anchor) {
     .then((byDate) => {
       loading.remove();
       const day = byDate.get(anchor) ?? { events: [], schedules: [], stats: {} };
-      const timed = day.schedules.filter((item) => !item.allDay && item.startTime);
-      const allDayItems = [
-        ...day.events.map((item) => ({ kind: 'event', ...item })),
-        ...day.schedules.filter((item) => item.allDay).map((item) => ({ kind: 'schedule', ...item })),
-      ];
+      const timed = day.schedules.filter((item) => item.startTime);
 
       const wrap = mk('div', 'day-view');
       const hero = dayHero(anchor);
-      const allDay = dayAllDay(allDayItems);
+      const allDay = dayAllDay({ todos: day.todos ?? [], imported: day.imported ?? [] });
       const timeline = mk('div', 'day-timeline');
       wrap.append(hero, allDay, timeline);
 
@@ -500,21 +533,40 @@ function lunarLabel(payload) {
 
 /* ---------------------------------------------------------------- 日视图：全天 */
 
-function dayAllDay(items) {
+/**
+ * 日视图的「全天」行 = **当天截止的待办**（可勾选） + 历史遗留的导入项（只读）。
+ *
+ * 参考实现里这不是「全天事件」，而是右侧 TodoPanel：待办是今天要做完的事，
+ * 挂在时间轴上方最自然。导入项没有复选框、灰显，因为它既不是待办也不是日程。
+ */
+function dayAllDay(day) {
   const row = mk('div', 'day-allday');
   row.appendChild(mk('div', 'day-allday-label', '全天'));
   const list = mk('div', 'day-allday-items');
-  for (const item of items) {
-    const chip = mk('div', `day-allday-item cat-${item.category ?? 'other'}`, item.title);
-    if (item.status === 'done') chip.classList.add('done');
-    if (item.status === 'cancelled') chip.classList.add('cancelled');
-    chip.title = item.title;
-    chip.addEventListener('click', () => {
-      if (item.kind === 'event') openEditor({ target: 'event', id: item.eventId });
-      else openEditor({ target: 'schedule', id: item.scheduleId });
+
+  for (const todo of day.todos ?? []) {
+    const chip = mk('div', `day-allday-item day-allday-todo${todo.completed ? ' done' : ''}`);
+    const check = mk('button', 'day-todo-check', todo.completed ? '✓' : '');
+    check.type = 'button';
+    check.title = todo.completed ? '恢复待办' : '标记完成';
+    check.addEventListener('click', (event) => {
+      event.stopPropagation();
+      setTodoCompleted(todo.id, !todo.completed);
     });
+    chip.append(check, mk('span', null, todo.title), mk('span', 'day-allday-hours', `${todo.estimatedHours ?? 1}h`));
+    chip.title = `${todo.title} · 截止今天 · ${todo.complexityLabel ?? ''}`;
+    chip.addEventListener('click', () => openEditor({ target: 'todo', id: todo.id }));
     list.appendChild(chip);
   }
+
+  for (const item of day.imported ?? []) {
+    const chip = mk('div', 'day-allday-item day-allday-imported', item.title);
+    chip.appendChild(mk('span', 'tag', '导入'));
+    chip.title = '外部导入的日期锚点，只读';
+    chip.addEventListener('click', () => PC.toast('导入项，暂不支持编辑'));
+    list.appendChild(chip);
+  }
+
   // 即使一条都没有也保留这一行，和苹果日历一样固定有「全天」
   row.appendChild(list);
   return row;
@@ -635,9 +687,13 @@ function todoToolbar() {
   const date = mk('input', 'qa-date');
   date.type = 'date';
   date.value = PCUtil.todayKey();
-  const time = mk('input', 'qa-time');
-  time.type = 'time';
-  const add = mk('button', 'primary-btn', '添加');
+  const hours = mk('input', 'qa-hours');
+  hours.type = 'number';
+  hours.min = '0';
+  hours.step = '0.5';
+  hours.placeholder = '工时';
+  hours.title = '预估工时（小时，默认 1）';
+  const add = mk('button', 'primary-btn', '快速添加');
   add.type = 'button';
 
   const submit = async () => {
@@ -646,12 +702,13 @@ function todoToolbar() {
       title.focus();
       return;
     }
-    const body = { title: text, date: date.value || PCUtil.todayKey(), allDay: !time.value, category: 'study' };
-    if (time.value) body.startTime = time.value;
+    const body = { title: text, deadline: date.value || PCUtil.todayKey() };
+    const parsed = Number(hours.value);
+    if (Number.isFinite(parsed) && parsed > 0) body.estimatedHours = parsed;
     try {
-      await PC.api('/schedules', { method: 'POST', body });
+      await PC.api('/todos', { method: 'POST', body });
       title.value = '';
-      time.value = '';
+      hours.value = '';
       PC.toast('已添加待办');
       PC.refresh();
     } catch (error) {
@@ -662,13 +719,18 @@ function todoToolbar() {
   title.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') submit();
   });
-  quick.append(title, date, time, add);
+  quick.append(title, date, hours, add);
+
+  // 「+ 添加」打开完整编辑器（优先级 / 标签 / 备注）
+  const create = mk('button', 'primary-btn', '+ 新建待办');
+  create.type = 'button';
+  create.addEventListener('click', () => openEditor({ target: 'todo', defaults: { deadline: PCUtil.todayKey() } }));
 
   const rollover = mk('button', 'ghost-btn', '顺延未完成到本周');
   rollover.type = 'button';
   rollover.addEventListener('click', async () => {
     try {
-      const result = await PC.api('/schedules/rollover', { method: 'POST', body: {} });
+      const result = await PC.api('/todos/rollover', { method: 'POST', body: {} });
       PC.toast(result.moved ? `已顺延 ${result.moved} 条` : '没有需要顺延的待办');
       PC.refresh();
     } catch (error) {
@@ -677,24 +739,27 @@ function todoToolbar() {
   });
 
   const row2 = mk('div', 'toolbar-row');
-  row2.append(quick, rollover);
+  row2.append(quick, create, rollover);
   bar.append(seg, row2);
   return bar;
 }
 
+/**
+ * 待办列表：数据全部来自 `/todos`（待办是独立集合，不再从 schedules 里挑 allDay 行）。
+ *
+ * 分组：今天 / 本周 / 未完成（更远的）/ 已完成 —— 与参考实现的 TodoPanel 一致。
+ */
 async function renderTodoList(host) {
   const state = PC.state;
   const today = PCUtil.todayKey();
   const weekStart = PCUtil.startOfWeek(today);
   const weekEnd = PCUtil.addDays(weekStart, 6);
 
-  // 待办 = 只有日期的条目（allDay=1）。带起止时刻的日程（开会、上课）属于日历，不属于待办列表，
-  // 所以这里恒定带上 allDay=1 —— 待办与日程是两件事，别混在一张表里。
-  const TODO_SCOPE = 'allDay=1';
-  let query = `/schedules?${TODO_SCOPE}&status=pending&limit=300`;
-  if (state.todo.filter === 'today') query = `/schedules?${TODO_SCOPE}&date=${today}`;
-  else if (state.todo.filter === 'week') query = `/schedules?${TODO_SCOPE}&from=${weekStart}&to=${weekEnd}`;
-  else if (state.todo.filter === 'done') query = `/schedules?${TODO_SCOPE}&status=done&limit=100`;
+  let query = '/todos?limit=300';
+  if (state.todo.filter === 'today') query = `/todos?date=${today}`;
+  else if (state.todo.filter === 'week') query = `/todos?from=${weekStart}&to=${weekEnd}`;
+  else if (state.todo.filter === 'overdue') query = '/todos?overdue=1';
+  else if (state.todo.filter === 'done') query = '/todos?completed=true&limit=100';
 
   host.innerHTML = '';
   host.appendChild(mk('div', 'loading', '加载中…'));
@@ -708,58 +773,57 @@ async function renderTodoList(host) {
     return;
   }
 
-  let items = (payload.items ?? []).filter((item) => item.status !== 'rolled');
-  if (state.todo.filter === 'overdue') items = items.filter((item) => item.date < today);
-  if (state.todo.filter === 'done') items = items.filter((item) => item.status === 'done');
+  const items = payload.items ?? [];
+  const stats = payload.stats ?? {};
 
   host.innerHTML = '';
   if (!items.length) {
     host.appendChild(emptyBox(todoEmptyText(state.todo.filter)));
+    renderTodoFooter(host, stats);
     return;
   }
 
-  const groups = new Map();
-  for (const item of items) {
-    if (!groups.has(item.date)) groups.set(item.date, []);
-    groups.get(item.date).push(item);
-  }
-  const dates = [...groups.keys()].sort((a, b) => (state.todo.filter === 'done' ? b.localeCompare(a) : a.localeCompare(b)));
-
-  for (const date of dates) {
+  // 分组顺序：已逾期 -> 今天到期 -> 本周到期 -> 未完成 -> 已完成。
+  // 逾期条目必须单独一组：混在「今天到期」里等于在标题上说假话（截图里就踩到了）。
+  const pending = items.filter((item) => !item.completed);
+  const buckets = [
+    ['overdue', '已逾期', pending.filter((item) => item.isOverdue)],
+    ['today', '今天到期', pending.filter((item) => !item.isOverdue && item.deadline <= today)],
+    ['week', '本周到期', pending.filter((item) => item.deadline > today && item.deadline <= weekEnd)],
+    ['later', '未完成', pending.filter((item) => item.deadline > weekEnd)],
+    ['done', '已完成', items.filter((item) => item.completed)],
+  ];
+  for (const [key, label, list] of buckets) {
+    if (!list.length) continue;
     const header = mk('div', 'group-head');
-    header.append(
-      mk('span', 'gh-date', PCUtil.fmtCN(date)),
-      mk('span', `gh-rel${date < today ? ' overdue' : ''}`, PCUtil.relativeDay(date, today)),
-      mk('span', 'gh-count', `${groups.get(date).length} 条`),
-    );
+    header.append(mk('span', 'gh-date', label), mk('span', 'gh-count', `${list.length} 条`));
     host.appendChild(header);
 
     const rows = mk('div', 'rows');
-    const list = groups.get(date).sort((a, b) => {
-      if (a.allDay !== b.allDay) return a.allDay ? -1 : 1;
-      return String(a.startTime ?? '').localeCompare(String(b.startTime ?? ''));
-    });
-    for (const item of list) rows.appendChild(todoRow(item));
+    const sorted = [...list].sort((a, b) =>
+      key === 'done' ? b.deadline.localeCompare(a.deadline) : a.deadline.localeCompare(b.deadline),
+    );
+    for (const item of sorted) rows.appendChild(todoRow(item));
     host.appendChild(rows);
   }
 
-  // 底部进度：当前周完成率（进度条数据来自 /schedules/stats）
-  try {
-    const stats = await PC.api(`/schedules/stats?from=${weekStart}&to=${weekEnd}`);
-    const footer = mk('div', 'todo-stats');
-    const rate = Math.max(0, Math.min(100, stats.completionRate ?? 0));
-    footer.append(
-      mk('span', 'ts-text', `本周 ${stats.done}/${stats.total} 项完成 · 计划 ${stats.plannedHours ?? 0} 小时`),
-    );
-    const bar = mk('div', 'progress');
-    const fill = mk('div', 'progress-fill');
-    fill.style.width = `${rate}%`;
-    bar.appendChild(fill);
-    footer.appendChild(bar);
-    host.appendChild(footer);
-  } catch {
-    /* 统计失败不影响列表 */
-  }
+  renderTodoFooter(host, stats);
+}
+
+/** 页脚：完成率与计划工时（口径来自 `/todos` 的 stats）。 */
+function renderTodoFooter(host, stats) {
+  if (!stats.total) return;
+  const footer = mk('div', 'todo-stats');
+  const rate = Math.max(0, Math.min(100, stats.completionRate ?? 0));
+  footer.append(
+    mk('span', 'ts-text', `${stats.completed}/${stats.total} 项完成 · 计划 ${stats.plannedHours ?? 0} 小时${stats.overdue ? ` · 逾期 ${stats.overdue}` : ''}`),
+  );
+  const bar = mk('div', 'progress');
+  const fill = mk('div', 'progress-fill');
+  fill.style.width = `${rate}%`;
+  bar.appendChild(fill);
+  footer.appendChild(bar);
+  host.appendChild(footer);
 }
 
 function todoEmptyText(filter) {
@@ -770,43 +834,50 @@ function todoEmptyText(filter) {
   return '还没有待办，用上面的输入框添加一条。';
 }
 
+/** 复杂度色点：simple/normal/complex/heavy -> 绿/蓝/橙/红（沿用设计令牌）。 */
+const COMPLEXITY_COLOR = {
+  simple: 'var(--green)',
+  normal: 'var(--blue)',
+  complex: 'var(--orange)',
+  heavy: 'var(--red)',
+};
+
 function todoRow(item) {
   const today = PCUtil.todayKey();
-  const row = mk('div', `todo-row priority-${item.priority ?? 1}`);
-  if (item.status === 'done') row.classList.add('done');
-  if (item.status === 'cancelled') row.classList.add('cancelled');
+  const row = mk('div', `todo-row priority-${item.priority ?? 0}`);
+  if (item.completed) row.classList.add('done');
+  if (item.isOverdue) row.classList.add('overdue');
+  if (item.isToday) row.classList.add('today');
 
-  const check = mk('button', 'check', item.status === 'done' ? '✓' : '');
+  const check = mk('button', 'check', item.completed ? '✓' : '');
   check.type = 'button';
-  check.title = item.status === 'done' ? '恢复待办' : '标记完成';
-  check.addEventListener('click', () =>
-    setScheduleStatus(item.id, item.status === 'done' ? 'pending' : 'done', item.status === 'done' ? '已恢复' : '已完成'),
-  );
+  check.title = item.completed ? '恢复待办' : '标记完成';
+  check.addEventListener('click', () => setTodoCompleted(item.id, !item.completed));
 
   const main = mk('div', 'tr-main');
   const titleLine = mk('div', 'tr-title');
   titleLine.appendChild(mk('span', null, item.title));
   if (item.priority === 2) titleLine.appendChild(mk('span', 'tag urgent', '紧急'));
-  else if (item.priority === 1 && item.date < today && item.status === 'pending') {
-    titleLine.appendChild(mk('span', 'tag late', '逾期'));
-  }
+  else if (item.isOverdue) titleLine.appendChild(mk('span', 'tag late', '逾期'));
   main.appendChild(titleLine);
 
-  const meta = [
-    item.allDay ? '全天' : item.startTime,
-    item.endTime && !item.allDay ? `– ${item.endTime}` : null,
-    CATEGORY_LABEL[item.category] ?? item.category,
-    item.location,
-    item.complexity ? `复杂度 ${item.complexity}` : null,
-    item.estimatedMinutes ? `${item.estimatedMinutes} 分钟` : null,
-  ]
-    .filter(Boolean)
-    .join(' · ');
-  main.appendChild(mk('div', 'tr-meta', meta));
+  const meta = mk('div', 'tr-meta');
+  const dot = mk('span', 'complexity-dot');
+  dot.style.background = COMPLEXITY_COLOR[item.complexity] ?? 'var(--fg-3)';
+  meta.append(
+    mk('span', null, `截止 ${PCUtil.fmtCN(item.deadline)}`),
+    mk('span', null, ` · ${PCUtil.relativeDay(item.deadline, today)}`),
+    mk('span', null, ` · ${item.completed ? '已完成' : '优先级'} `),
+    mk('span', 'todo-priority', '★'.repeat(Math.max(1, (item.priority ?? 0) + 1))),
+    mk('span', null, ' · '),
+    dot,
+    mk('span', null, `${item.complexityLabel ?? ''}（${item.estimatedHours ?? 1}h）`),
+  );
+  main.appendChild(meta);
 
   const actions = mk('div', 'ri-actions');
-  actions.appendChild(iconBtn('编辑', '✎', () => openEditor({ target: 'schedule', id: item.id })));
-  actions.appendChild(iconBtn('删除', '🗑', () => removeRecord('schedule', item.id, item.title), 'danger'));
+  actions.appendChild(iconBtn('编辑', '✎', () => openEditor({ target: 'todo', id: item.id })));
+  actions.appendChild(iconBtn('删除', '🗑', () => removeTodo(item.id, item.title), 'danger'));
 
   row.append(check, main, actions);
   return row;
@@ -958,10 +1029,12 @@ function placeholderView(title, desc, bullets) {
 
 /* ================================================================ 新建 / 编辑弹层 */
 
+const EDITOR_PATH = { schedule: '/schedules', event: '/events', todo: '/todos' };
+
 function openEditor(options = {}) {
   const state = { target: options.target ?? 'schedule', id: options.id ?? null, defaults: options.defaults ?? {} };
   if (state.id) {
-    const path = state.target === 'schedule' ? `/schedules/${state.id}` : `/events/${state.id}`;
+    const path = `${EDITOR_PATH[state.target] ?? '/schedules'}/${state.id}`;
     PC.api(path)
       .then(({ item }) => mountEditor(state, item))
       .catch((error) => PC.toast(error.message));
@@ -978,6 +1051,7 @@ function mountEditor(state, item) {
   const head = mk('div', 'modal-head');
   const tabs = mk('div', 'tabs');
   for (const [key, label] of [
+    ['todo', '待办'],
     ['schedule', '日程'],
     ['event', '日历事件'],
   ]) {
@@ -997,7 +1071,8 @@ function mountEditor(state, item) {
   head.appendChild(closeBtn);
 
   const body = mk('div', 'modal-body');
-  body.appendChild(state.target === 'schedule' ? scheduleForm(item, state.defaults) : eventForm(item, state.defaults));
+  const formOf = { todo: todoForm, schedule: scheduleForm, event: eventForm };
+  body.appendChild((formOf[state.target] ?? scheduleForm)(item, state.defaults));
   const error = mk('div', 'modal-error');
 
   const foot = mk('div', 'modal-foot');
@@ -1006,7 +1081,8 @@ function mountEditor(state, item) {
     del.type = 'button';
     del.addEventListener('click', async () => {
       close();
-      await removeRecord(state.target, state.id, item.title);
+      if (state.target === 'todo') await removeTodo(state.id, item.title);
+      else await removeRecord(state.target, state.id, item.title);
     });
     foot.appendChild(del);
   }
@@ -1039,8 +1115,8 @@ function mountEditor(state, item) {
   }
 
   save.addEventListener('click', async () => {
-    const collect = state.target === 'schedule' ? collectSchedule : collectEvent;
-    const payload = collect(body);
+    const collectors = { todo: collectTodo, schedule: collectSchedule, event: collectEvent };
+    const payload = (collectors[state.target] ?? collectSchedule)(body);
     if (!payload.title || !payload.title.trim()) {
       error.textContent = '请填写标题';
       return;
@@ -1048,17 +1124,18 @@ function mountEditor(state, item) {
     error.textContent = '';
     try {
       let conflicts = 0;
+      const base = EDITOR_PATH[state.target] ?? '/schedules';
       if (state.target === 'schedule') {
         if (state.id) {
-          await PC.api(`/schedules/${state.id}`, { method: 'PATCH', body: payload });
+          await PC.api(`${base}/${state.id}`, { method: 'PATCH', body: payload });
         } else {
-          const result = await PC.api('/schedules', { method: 'POST', body: payload });
+          const result = await PC.api(base, { method: 'POST', body: payload });
           conflicts = result.conflicts?.length ?? 0;
         }
       } else if (state.id) {
-        await PC.api(`/events/${state.id}`, { method: 'PATCH', body: payload });
+        await PC.api(`${base}/${state.id}`, { method: 'PATCH', body: payload });
       } else {
-        await PC.api('/events', { method: 'POST', body: payload });
+        await PC.api(base, { method: 'POST', body: payload });
       }
       close();
       PC.toast(state.id ? '已保存' : '已创建');
@@ -1075,7 +1152,6 @@ function scheduleForm(item, defaults) {
   const data = item ?? {
     date: defaults.date ?? PCUtil.todayKey(),
     startTime: defaults.startTime,
-    allDay: !defaults.startTime,
     category: 'study',
     priority: 1,
     repeat: { type: 'none', interval: 1, weekdays: [], until: { mode: 'never' } },
@@ -1092,13 +1168,6 @@ function scheduleForm(item, defaults) {
   date.type = 'date';
   date.value = data.date ?? PCUtil.todayKey();
   wrap.appendChild(field('日期', date));
-
-  const allDay = mk('input', 'f-allday');
-  allDay.type = 'checkbox';
-  allDay.checked = Boolean(data.allDay);
-  const allDayWrap = mk('label', 'check-field');
-  allDayWrap.append(allDay, mk('span', null, '全天（退化为待办锚点，不占用具体时段）'));
-  wrap.appendChild(allDayWrap);
 
   const start = mk('input', 'f-start');
   start.type = 'time';
@@ -1142,14 +1211,57 @@ function scheduleForm(item, defaults) {
   description.placeholder = '备注（可选）';
   wrap.appendChild(field('备注', description));
 
-  const sync = () => {
-    const disabled = allDay.checked;
-    start.disabled = disabled;
-    end.disabled = disabled;
-    timeRow.classList.toggle('muted', disabled);
+  // 日程必须是时段：起止时刻是必填信息，没有「全天」这种形态（只有日期请用待办）
+  start.required = true;
+  return wrap;
+}
+
+/**
+ * 待办编辑器：标题 / 截止日 / 优先级 / 预估小时 / 备注 / 标签。
+ * 标签用逗号或空格分隔的普通文本框，不引入额外依赖。
+ */
+function todoForm(item, defaults) {
+  const data = item ?? {
+    deadline: defaults.deadline ?? PCUtil.todayKey(),
+    priority: 0,
+    estimatedHours: 1,
+    tags: [],
   };
-  allDay.addEventListener('change', sync);
-  sync();
+  const wrap = mk('div', 'form-grid');
+
+  const title = mk('input', 'in-title');
+  title.type = 'text';
+  title.value = data.title ?? '';
+  title.placeholder = '例如：交实验报告';
+  wrap.appendChild(field('标题', title));
+
+  const deadline = mk('input', 'f-deadline');
+  deadline.type = 'date';
+  deadline.value = data.deadline ?? PCUtil.todayKey();
+  const priority = mk('select', 'f-priority');
+  for (const key of [0, 1, 2]) priority.appendChild(option(key, PRIORITY_LABEL[key], Number(data.priority ?? 0) === key));
+  const inline1 = mk('div', 'inline-2');
+  inline1.append(field('截止日', deadline), field('优先级', priority));
+  wrap.appendChild(inline1);
+
+  const hours = mk('input', 'f-hours');
+  hours.type = 'number';
+  hours.min = '0';
+  hours.step = '0.5';
+  hours.value = data.estimatedHours ?? 1;
+  const tags = mk('input', 'f-tags');
+  tags.type = 'text';
+  tags.value = (data.tags ?? []).join('、');
+  tags.placeholder = '标签，用「、」或逗号分隔';
+  const inline2 = mk('div', 'inline-2');
+  inline2.append(field('预估工时（小时）', hours), field('标签', tags));
+  wrap.appendChild(inline2);
+
+  const description = mk('textarea', 'f-desc');
+  description.rows = 2;
+  description.value = data.description ?? '';
+  description.placeholder = '备注（可选）';
+  wrap.appendChild(field('备注', description));
 
   return wrap;
 }
@@ -1272,11 +1384,10 @@ function repeatBlock(repeat) {
 }
 
 function collectSchedule(body) {
-  const allDay = body.querySelector('.f-allday').checked;
+  // 日程没有 allDay / status：起止时刻就是它的全部时间信息
   const payload = {
     title: body.querySelector('.in-title').value.trim(),
     date: body.querySelector('.f-date').value,
-    allDay,
     category: body.querySelector('.f-category').value,
     priority: Number(body.querySelector('.f-priority').value),
     estimatedMinutes: body.querySelector('.f-estimated').value
@@ -1286,13 +1397,27 @@ function collectSchedule(body) {
     description: body.querySelector('.f-desc').value,
     repeat: body.querySelector('.repeat-block')._read(),
   };
-  if (!allDay) {
-    payload.startTime = body.querySelector('.f-start').value || undefined;
-    payload.endTime = body.querySelector('.f-end').value || undefined;
-  }
+  payload.startTime = body.querySelector('.f-start').value || undefined;
+  payload.endTime = body.querySelector('.f-end').value || undefined;
   const reminder = body.querySelector('.f-reminder').value;
   payload.reminders = reminder === '' ? [] : [{ offsetMinutes: Number(reminder) }];
   return payload;
+}
+
+function collectTodo(body) {
+  const hours = Number(body.querySelector('.f-hours').value);
+  return {
+    title: body.querySelector('.in-title').value.trim(),
+    deadline: body.querySelector('.f-deadline').value,
+    priority: Number(body.querySelector('.f-priority').value),
+    estimatedHours: Number.isFinite(hours) && hours > 0 ? hours : 1,
+    tags: body
+      .querySelector('.f-tags')
+      .value.split(/[、,，\s]+/)
+      .map((tag) => tag.trim())
+      .filter(Boolean),
+    description: body.querySelector('.f-desc').value,
+  };
 }
 
 function collectEvent(body) {

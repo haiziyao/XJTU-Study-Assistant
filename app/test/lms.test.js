@@ -241,25 +241,29 @@ test('思源学堂：同步预览的映射规则', async () => {
     const items = preview.body.items;
     const byKey = new Map(items.map((item) => [item.key, item]));
 
-    // 未提交的作业 -> 新建日程，截止日为准，标题带课程名
+    // 未提交的作业 -> 新建**待办**（作业没有具体时刻，它不是日程）
     const first = byKey.get('lms:activity:5001');
     assert.equal(first.action, 'create');
-    assert.equal(first.kind, 'schedule');
-    assert.equal(first.payload.date, '2026-10-14');
-    assert.equal(first.payload.allDay, true, '跨天的作业按全天待办处理');
-    assert.equal(first.payload.category, 'study');
+    assert.equal(first.kind, 'todo', '没有时刻的作业落到待办集合');
+    assert.equal(first.payload.deadline, '2026-10-14');
+    assert.equal(first.payload.allDay, undefined, '待办没有 allDay');
+    assert.equal(first.payload.status, undefined, '待办用 completed，没有 status');
+    assert.equal(first.payload.category, undefined, '待办没有分类');
+    assert.equal(first.payload.reminders, undefined, '待办没有提醒');
+    assert.equal(first.payload.completed, undefined, '未提交的作业不该被标成完成');
     assert.equal(first.payload.externalId, 'lms:activity:5001');
     assert.equal(first.payload.title, '[数据结构] 第一次作业：链表');
     assert.deepEqual(first.payload.tags.slice(0, 2), ['思源学堂', '作业']);
     assert.match(first.payload.description, /课程：数据结构/);
 
-    // 直播 -> 带起止时刻的时段日程
+    // 直播 -> 有起止时刻，仍然是时段日程
     const live = byKey.get('lms:activity:5004');
     assert.equal(live.action, 'create');
+    assert.equal(live.kind, 'schedule');
     assert.equal(live.payload.date, '2026-10-13');
     assert.equal(live.payload.startTime, '10:00');
     assert.equal(live.payload.endTime, '11:40');
-    assert.equal(live.payload.allDay, false);
+    assert.equal(live.payload.allDay, undefined, '日程没有 allDay');
     assert.equal(live.payload.category, 'class');
 
     // 已提交的作业默认不导入
@@ -272,7 +276,8 @@ test('思源学堂：同步预览的映射规则', async () => {
     assert.equal(expired.action, 'skip');
     assert.match(expired.reason, /已过期/);
     // 跳过/失效条目也要带 kind 和 payload（前端不必靠猜字段是否存在）
-    assert.equal(expired.kind, 'schedule');
+    // 过期作业仍然是「没有时刻的作业」= 待办
+    assert.equal(expired.kind, 'todo');
     assert.equal(expired.payload, null);
 
     // 勾选「包含过期」+「已提交也导入」后，两条都能进来
@@ -286,11 +291,13 @@ test('思源学堂：同步预览的映射规则', async () => {
     assert.ok(wideKeys.includes('lms:activity:5003'));
     assert.ok(wideKeys.includes('lms:activity:5002'));
     const wideSubmitted = wide.body.items.find((item) => item.key === 'lms:activity:5002');
-    assert.equal(wideSubmitted.payload.status, 'done', '已提交的作业同步成已完成');
+    assert.equal(wideSubmitted.kind, 'todo');
+    assert.equal(wideSubmitted.payload.completed, true, '已提交的作业同步成「待办已完成」');
 
     // 回放默认不导入，开启后作为时段日程进入计划
     assert.equal(byKey.has('lms:activity:5007'), false, '回放默认被跳过');
     const lesson = wide.body.items.find((item) => item.key === 'lms:activity:5007');
+    assert.equal(lesson.kind, 'schedule', '回放有时刻 -> 时段日程');
     assert.equal(lesson.payload.date, '2026-10-06');
     assert.equal(lesson.payload.startTime, '10:00');
     assert.equal(lesson.payload.category, 'class');
@@ -314,21 +321,41 @@ test('思源学堂：应用同步是幂等的，可重复执行', async () => {
     await login(call);
     const first = await call('POST', '/lms/sync/apply', { today: TODAY });
     assert.equal(first.status, 200);
-    assert.equal(first.body.created, 3, '三条未提交的未来作业/直播');
+    assert.equal(first.body.created, 3, '两条未提交的未来作业 + 一条直播');
+    // 逐条核对归属：5001/5006 是待办，5004 是时段日程
+    const byKey = new Map(first.body.results.map((item) => [item.key, item]));
+    assert.equal(byKey.get('lms:activity:5001').kind, 'todo');
+    assert.equal(byKey.get('lms:activity:5006').kind, 'todo');
+    assert.equal(byKey.get('lms:activity:5004').kind, 'schedule');
 
+    // 时段日程：只有那条直播
     const schedules = await call('GET', '/schedules');
-    const created = schedules.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:'));
-    assert.equal(created.length, 3);
-    assert.ok(created.every((item) => item.source === 'import'));
-    assert.equal(created[0].reminders.length, 1);
+    const createdSchedules = schedules.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:'));
+    assert.equal(createdSchedules.length, 1);
+    assert.equal(createdSchedules[0].externalId, 'lms:activity:5004');
+    assert.ok(createdSchedules.every((item) => item.source === 'import'));
+    assert.equal(createdSchedules[0].reminders.length, 1);
+
+    // 待办：两条作业，截止日就是作业的截止日
+    const todos = await call('GET', '/todos');
+    const createdTodos = todos.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:'));
+    assert.equal(createdTodos.length, 2);
+    assert.deepEqual(createdTodos.map((item) => item.externalId).sort(), ['lms:activity:5001', 'lms:activity:5006']);
+    assert.equal(createdTodos.find((item) => item.externalId === 'lms:activity:5001').deadline, '2026-10-14');
+    assert.ok(createdTodos.every((item) => item.source === 'import' && item.completed === false));
 
     // 再同步一次：全部跳过，不产生重复记录
     const second = await call('POST', '/lms/sync/apply', { today: TODAY });
     assert.equal(second.body.created, 0);
     assert.equal(second.body.updated, 0);
     assert.equal(second.body.skipped, 5);
-    const after = await call('GET', '/schedules');
-    assert.equal(after.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 3);
+    const afterSchedules = await call('GET', '/schedules');
+    assert.equal(afterSchedules.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 1);
+    const afterTodos = await call('GET', '/todos');
+    assert.equal(afterTodos.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 2);
+    // 幂等：重跑不会把作业重复建进待办
+    assert.equal(second.body.created, 0);
+    assert.equal(second.body.updated, 0);
   } finally {
     await app.close();
     await mock.close();
@@ -352,14 +379,15 @@ test('思源学堂：作业改期 -> 更新；作业消失 -> stale', async () =
     const preview = await call('POST', '/lms/sync/preview', { today: TODAY, refresh: true });
     const changed = preview.body.items.find((item) => item.key === 'lms:activity:5001');
     assert.equal(changed.action, 'update');
+    assert.equal(changed.kind, 'todo', '作业改期改的是待办的截止日');
     assert.ok(changed.changes.includes('title'));
-    assert.ok(changed.changes.includes('date'));
+    assert.ok(changed.changes.includes('deadline'));
 
     const applied = await call('POST', '/lms/sync/apply', { today: TODAY, refresh: true });
     assert.equal(applied.body.updated, 1);
-    const schedules = await call('GET', '/schedules');
-    const updated = schedules.body.items.find((item) => item.externalId === 'lms:activity:5001');
-    assert.equal(updated.date, '2026-10-16');
+    const todos = await call('GET', '/todos');
+    const updated = todos.body.items.find((item) => item.externalId === 'lms:activity:5001');
+    assert.equal(updated.deadline, '2026-10-16');
     assert.equal(updated.title, '[数据结构] 第一次作业：链表（改）');
 
     // 学校删掉了直播活动 -> 已同步的记录变成 stale，可选清理
@@ -373,8 +401,11 @@ test('思源学堂：作业改期 -> 更新；作业消失 -> stale', async () =
 
     const pruned = await call('POST', '/lms/sync/apply', { today: TODAY, refresh: true, pruneStale: true });
     assert.equal(pruned.body.removed, 1);
+    // 直播被清理后，日程里已经没有 lms 记录了（作业都在 todos 里）
     const finalSchedules = await call('GET', '/schedules');
-    assert.equal(finalSchedules.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 2);
+    assert.equal(finalSchedules.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 0);
+    const finalTodos = await call('GET', '/todos');
+    assert.equal(finalTodos.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 2);
   } finally {
     await app.close();
     await mock.close();
@@ -388,8 +419,11 @@ test('思源学堂：只同步选中的 keys', async () => {
     await login(call);
     const applied = await call('POST', '/lms/sync/apply', { today: TODAY, keys: ['lms:activity:5001'] });
     assert.equal(applied.body.created, 1);
-    const schedules = await call('GET', '/schedules');
-    const items = schedules.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:'));
+    assert.equal(applied.body.results[0].kind, 'todo', '只勾选的这条作业是待办');
+    // 没被勾选的直播不该被建出来
+    assert.equal((await call('GET', '/schedules')).body.items.length, 0);
+    const todos = await call('GET', '/todos');
+    const items = todos.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:'));
     assert.equal(items.length, 1);
     assert.equal(items[0].externalId, 'lms:activity:5001');
   } finally {

@@ -64,14 +64,17 @@ test('dschat 2 单日事件转换为本项目字段', () => {
   assert.equal(target, 'schedule');
   assert.equal(fields.date, '2026-09-20');
   assert.equal(fields.startTime, '10:00');
-  assert.equal(fields.allDay, false);
+  assert.equal(fields.allDay, undefined, '日程模型里已经没有 allDay');
+  assert.equal(fields.status, undefined, '日程没有完成态');
   assert.equal(fields.repeat.interval, 2);
   assert.equal(fields.source, 'import');
 
-  // 全天事件（无时刻）
-  const allDay = fromDschatEvent({ title: '放假', date: '2026-10-01', all_day: 1 });
-  assert.equal(allDay.fields.allDay, true);
+  // 没有时刻的单日项 = 待办（dschat 2 的日期锚点就是待办；日程必须是时段）
+  const allDay = fromDschatEvent({ title: '交实验报告', date: '2026-10-01', all_day: 1 });
+  assert.equal(allDay.target, 'todo');
+  assert.equal(allDay.fields.deadline, '2026-10-01');
   assert.equal(allDay.fields.startTime, undefined);
+  assert.equal(allDay.fields.allDay, undefined);
 });
 
 test('反向转换输出 dschat 2 的 snake_case 形状', () => {
@@ -112,13 +115,13 @@ test('标记行解析：新增日程 / 删除日程 / 新增待办 / 新增学�
 
   assert.equal(drafts[0].fields.repeat.interval, 2);
   assert.equal(drafts[0].fields.repeat.until.date, '2026-12-31');
-  assert.equal(drafts[1].fields.allDay, false);
+  assert.equal(drafts[1].fields.allDay, undefined, '日程模型里已经没有 allDay 了');
   assert.equal(drafts[1].fields.repeat, undefined);
   assert.equal(drafts[2].action, 'delete');
   assert.equal(drafts[2].filters.keyword, '每周例会');
-  assert.equal(drafts[3].fields.allDay, true);
+  assert.equal(drafts[3].target, 'todo');
   assert.equal(drafts[3].fields.priority, 2);
-  assert.equal(drafts[3].fields.date, '2026-09-25');
+  assert.equal(drafts[3].fields.deadline, '2026-09-25');
   assert.deepEqual(drafts[3].fields.tags, ['数学']);
   assert.equal(drafts[4].target, 'event');
   assert.equal(drafts[4].fields.startDate, '2026-02-23');
@@ -189,6 +192,51 @@ test('dschat 2 兼容接口：写入、查询、按标题删除', async () => {
   }
 });
 
+test('dschat 兼容：completed 布尔写进去能读回来（待办的完成态）', async () => {
+  const { app, call } = await startApp();
+  try {
+    // ① completed: true -> 待办已完成 + completedAt
+    const created = await call('POST', '/compat/dschat/events', {
+      title: '已交的英语作业',
+      date: '2026-10-14',
+      all_day: true,
+      completed: true,
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.target, 'todo');
+    assert.equal(created.body.item.completed, true, 'completed 布尔不能被别名层吞掉');
+    assert.ok(created.body.item.completedAt, '完成要写 completedAt');
+
+    const listed = await call('GET', '/compat/dschat/events?start=2026-10-14&end=2026-10-14');
+    const found = listed.body.events.find((item) => item.title === '已交的英语作业');
+    assert.equal(found.completed, true, '读回来也要是 true');
+    assert.equal(found.all_day, true);
+    assert.equal(found.date, '2026-10-14');
+
+    // ② completed: false -> 未完成（false 不能被 ?? 当成「没给」）
+    const undone = await call('POST', '/compat/dschat/events', {
+      title: '还没交的英语作业',
+      date: '2026-10-15',
+      all_day: true,
+      completed: false,
+    });
+    assert.equal(undone.body.item.completed, false);
+    const listed2 = await call('GET', '/compat/dschat/events?start=2026-10-15&end=2026-10-15');
+    assert.equal(listed2.body.events.find((item) => item.title === '还没交的英语作业').completed, false);
+
+    // ③ 旧形状的 status 作为兜底也会被折回布尔
+    const legacyShape = await call('POST', '/compat/dschat/events', {
+      title: '旧形状作业',
+      date: '2026-10-16',
+      all_day: true,
+      status: 'done',
+    });
+    assert.equal(legacyShape.body.item.completed, true);
+  } finally {
+    await app.close();
+  }
+});
+
 test('标记行接口端到端：一次提交多条并返回逐条结果', async () => {
   const { app, call } = await startApp();
   try {
@@ -204,9 +252,12 @@ test('标记行接口端到端：一次提交多条并返回逐条结果', async
     assert.equal(result.body.failed, 1);
     assert.equal(result.body.failed >= 1, true);
 
+    // 待办现在落在 todos 集合，日程 agenda 里以 todos 桶呈现（不是旧的 allDay 桶）
     const agenda = await call('GET', '/schedules/agenda?date=2026-09-25');
-    assert.equal(agenda.body.allDay.length, 1);
-    assert.equal(agenda.body.allDay[0].title, '高数作业');
+    assert.equal(agenda.body.schedules.length, 0);
+    assert.equal(agenda.body.todos.length, 1);
+    assert.equal(agenda.body.todos[0].title, '高数作业');
+    assert.equal(agenda.body.todos[0].deadline, '2026-09-25');
   } finally {
     await app.close();
   }

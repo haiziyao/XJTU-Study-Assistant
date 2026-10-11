@@ -89,25 +89,22 @@ function describe({ course, activity, deadlineText, type }) {
   return lines.join('\n');
 }
 
+/** 各 kind 需要比较的字段（待办比 deadline/completed，事件比 startDate/endDate，日程比时段）。 */
+const COMPARE_FIELDS = {
+  schedule: ['title', 'description', 'category', 'date', 'startTime', 'endTime', 'priority'],
+  event: ['title', 'description', 'category', 'startDate', 'endDate'],
+  todo: ['title', 'description', 'deadline', 'priority', 'completed'],
+};
+
 /** 比较新旧记录，找出真正发生变化的字段。 */
-function diff(existing, payload) {
+function diff(existing, payload, kind = 'schedule') {
   const changed = [];
-  for (const field of [
-    'title',
-    'description',
-    'category',
-    'date',
-    'startTime',
-    'endTime',
-    'allDay',
-    'priority',
-    'status',
-    'startDate',
-    'endDate',
-  ]) {
+  for (const field of COMPARE_FIELDS[kind] ?? COMPARE_FIELDS.schedule) {
     if (payload[field] === undefined) continue;
-    const before = existing[field] ?? (field === 'allDay' ? false : null);
-    const after = payload[field] ?? (field === 'allDay' ? false : null);
+    // 待办的 completed 是布尔，缺省要按 false 比，否则「已勾选」会被误判成变化
+    const fallback = field === 'completed' ? false : null;
+    const before = existing[field] ?? fallback;
+    const after = payload[field] ?? fallback;
     if (String(before) !== String(after)) changed.push(field);
   }
   const beforeTags = (existing.tags ?? []).join('|');
@@ -118,6 +115,9 @@ function diff(existing, payload) {
 
 /**
  * 把一条活动转成同步条目；返回 null 表示这条数据不该进日历。
+ *
+ * kind 归属（2026-10 重做后）：作业有时刻 -> `schedule`，否则 -> `todo`；
+ * 直播/回放有时刻 -> `schedule`，没有时刻 -> 全天 `event`（日程必须是时段）。
  * @returns {object|null}
  */
 export function activityToItem(activity, { course, today, options }) {
@@ -138,37 +138,49 @@ export function activityToItem(activity, { course, today, options }) {
   };
 
   if (type === 'homework') {
-    if (!deadline) return { ...base, action: 'skip', reason: '作业没有时间信息，无法安排' };
-    if (!options.includePast && deadline.date < today) {
-      return { ...base, action: 'skip', reason: '已过期（可勾选「包含过期」再同步）' };
-    }
-    // 同一天、两端都有具体时刻 -> 时段块；否则按「截止日的待办」处理
+    // 同一天、两端都有具体时刻 -> 时段日程；否则这条作业就是**待办**（只有截止日）。
+    // kind 在这里就定下来：被跳过的条目，前端也要知道它本来会进哪个集合。
     const timed = Boolean(start?.time && deadline.time && start.date === deadline.date);
-    const allDay = !timed;
+    const kind = timed ? 'schedule' : 'todo';
+    if (!deadline) return { ...base, kind, action: 'skip', reason: '作业没有时间信息，无法安排' };
+    if (!options.includePast && deadline.date < today) {
+      return { ...base, kind, action: 'skip', reason: '已过期（可勾选「包含过期」再同步）' };
+    }
     const existing = options.existingByExternalId.get(base.key);
-    const status = base.submitted && options.markSubmittedDone ? 'done' : existing?.status ?? 'pending';
     if (base.submitted && options.skipSubmitted && !existing) {
-      return { ...base, action: 'skip', reason: '已提交，未导入' };
+      return { ...base, kind, action: 'skip', reason: '已提交，未导入' };
     }
     const refinedHomework = refineActivityTitle(activity.title, course?.name ?? null);
-    const payload = {
+    const common = {
       title: clip(composeTitle(refinedHomework.title, course?.name ?? null)),
       description: describe({ course, activity, deadlineText: formatDeadline(activity.endTime ?? activity.startTime), type }),
-      category: 'study',
-      date: deadline.date,
-      allDay,
-      status,
-      priority: priorityForDeadline(today, deadline.date),
       tags: [SYNC_TAG, '作业', ...(course?.name ? [course.name] : [])],
-      reminders: existing?.reminders?.length ? existing.reminders : [{ offsetMinutes: timed ? 60 : 0, channel: 'app' }],
       source: 'import',
       externalId: base.key,
     };
-    if (timed) {
-      payload.startTime = start.time;
-      payload.endTime = deadline.time;
+
+    if (!timed) {
+      // 待办契约：只有 deadline / priority / completed，没有 category、地点、提醒
+      const todoPayload = {
+        ...common,
+        deadline: deadline.date,
+        priority: priorityForDeadline(today, deadline.date),
+      };
+      if (base.submitted && options.markSubmittedDone) todoPayload.completed = true;
+      else if (existing?.completed) todoPayload.completed = existing.completed; // 保留学生自己勾过的状态
+      return finalizeItem({ ...base, kind, isTimed: false }, todoPayload, existing);
     }
-    return finalizeItem({ ...base, kind: 'schedule', isTimed: timed }, payload, existing);
+
+    const payload = {
+      ...common,
+      category: 'study',
+      date: deadline.date,
+      startTime: start.time,
+      endTime: deadline.time,
+      priority: priorityForDeadline(today, deadline.date),
+      reminders: existing?.reminders?.length ? existing.reminders : [{ offsetMinutes: 60, channel: 'app' }],
+    };
+    return finalizeItem({ ...base, kind, isTimed: true }, payload, existing);
   }
 
   if (type === 'lecture_live') {
@@ -178,25 +190,34 @@ export function activityToItem(activity, { course, today, options }) {
     const timed = Boolean(start?.time);
     const existing = options.existingByExternalId.get(base.key);
     const refined = refineActivityTitle(activity.title, course?.name ?? null);
-    const payload = {
+    const common = {
       title: clip(composeTitle(refined.title, course?.name ?? null)),
       description: describe({ course, activity, deadlineText: formatDeadline(activity.startTime), type }),
-      category: 'class',
-      location: refined.location ?? undefined,
-      date,
-      allDay: !timed,
-      status: existing?.status ?? 'pending',
-      priority: timed ? 1 : 0,
       tags: [SYNC_TAG, '直播', ...(course?.name ? [course.name] : [])],
-      reminders: existing?.reminders?.length ? existing.reminders : [{ offsetMinutes: 15, channel: 'app' }],
       source: 'import',
       externalId: base.key,
     };
-    if (timed) {
-      payload.startTime = start.time;
-      if (deadline?.time && deadline.date === start.date) payload.endTime = deadline.time;
+
+    if (!timed) {
+      // 没有具体时刻的直播 -> 全天日历事件（日程必须是时段，不能塞进 /schedules）
+      return finalizeItem(
+        { ...base, kind: 'event', isTimed: false },
+        { ...common, category: 'study', startDate: date, endDate: date, allDay: true },
+        existing,
+      );
     }
-    return finalizeItem({ ...base, kind: 'schedule', isTimed: timed }, payload, existing);
+
+    const payload = {
+      ...common,
+      category: 'class',
+      location: refined.location ?? undefined,
+      date,
+      startTime: start.time,
+      priority: 1,
+      reminders: existing?.reminders?.length ? existing.reminders : [{ offsetMinutes: 15, channel: 'app' }],
+    };
+    if (deadline?.time && deadline.date === start.date) payload.endTime = deadline.time;
+    return finalizeItem({ ...base, kind: 'schedule', isTimed: true }, payload, existing);
   }
 
   if (type === 'lesson') {
@@ -205,26 +226,34 @@ export function activityToItem(activity, { course, today, options }) {
     if (!options.includePast && start.date < today) return { ...base, action: 'skip', reason: '已过期' };
     const existing = options.existingByExternalId.get(base.key);
     const refinedReplay = refineActivityTitle(activity.title, course?.name ?? null);
-    const payload = {
+    const common = {
       title: clip(composeTitle(refinedReplay.title, course?.name ?? null)),
       description: describe({ course, activity, deadlineText: formatDeadline(activity.startTime), type }),
-      category: 'class',
-      location: refinedReplay.location ?? undefined,
-      date: start.date,
-      allDay: !start.time,
-      status: existing?.status ?? 'pending',
-      priority: 0,
       tags: [SYNC_TAG, '回放', ...(course?.name ? [course.name] : [])],
-      reminders: existing?.reminders?.length ? existing.reminders : [],
       source: 'import',
       externalId: base.key,
     };
-    if (start.time) {
-      payload.startTime = start.time;
-      const end = parseLmsTime(activity.lessonEnd ?? activity.endTime);
-      if (end?.time && end.date === start.date) payload.endTime = end.time;
+
+    if (!start.time) {
+      return finalizeItem(
+        { ...base, kind: 'event', isTimed: false },
+        { ...common, category: 'study', startDate: start.date, endDate: start.date, allDay: true },
+        existing,
+      );
     }
-    return finalizeItem({ ...base, kind: 'schedule', isTimed: Boolean(start.time) }, payload, existing);
+
+    const payload = {
+      ...common,
+      category: 'class',
+      location: refinedReplay.location ?? undefined,
+      date: start.date,
+      startTime: start.time,
+      priority: 0,
+      reminders: existing?.reminders?.length ? existing.reminders : [],
+    };
+    const end = parseLmsTime(activity.lessonEnd ?? activity.endTime);
+    if (end?.time && end.date === start.date) payload.endTime = end.time;
+    return finalizeItem({ ...base, kind: 'schedule', isTimed: true }, payload, existing);
   }
 
   return { ...base, action: 'skip', reason: `${ACTIVITY_TYPE_LABEL[type] ?? type}不参与同步` };
@@ -240,7 +269,7 @@ function finalizeItem(base, payload, existing) {
   if (!existing) {
     return { ...base, action: 'create', payload };
   }
-  const changed = diff(existing, payload);
+  const changed = diff(existing, payload, base.kind);
   if (!changed.length) {
     return { ...base, action: 'skip', reason: '已是最新', existingId: existing.id, payload };
   }
@@ -258,7 +287,7 @@ function finalizeItem(base, payload, existing) {
  * @param {object}   [input.options]
  * @returns {{items:object[], summary:object}}
  */
-export function buildSyncPlan({ courses = [], activities = [], existingSchedules = [], existingEvents = [], options = {} }) {
+export function buildSyncPlan({ courses = [], activities = [], existingSchedules = [], existingEvents = [], existingTodos = [], options = {} }) {
   const today = options.today;
   if (!today) throw new Error('buildSyncPlan 需要 options.today（YYYY-MM-DD）');
   const resolved = {
@@ -273,10 +302,11 @@ export function buildSyncPlan({ courses = [], activities = [], existingSchedules
     ...options,
   };
 
+  // 三个集合都要纳入幂等查找，否则作业（现在落在待办里）每次同步都会重复创建
   const existingByExternalId = new Map();
-  for (const item of [...existingSchedules, ...existingEvents]) {
-    if (item.externalId) existingByExternalId.set(item.externalId, item);
-  }
+  for (const item of existingSchedules) if (item.externalId) existingByExternalId.set(item.externalId, { ...item, __kind: 'schedule' });
+  for (const item of existingEvents) if (item.externalId) existingByExternalId.set(item.externalId, { ...item, __kind: 'event' });
+  for (const item of existingTodos) if (item.externalId) existingByExternalId.set(item.externalId, { ...item, __kind: 'todo' });
 
   const courseById = courseMapOf(courses);
   const items = [];
@@ -344,7 +374,7 @@ export function buildSyncPlan({ courses = [], activities = [], existingSchedules
     if (externalId.startsWith(COURSE_EVENT_EXTERNAL_ID) && !resolved.includeCourseRange) continue;
     items.push({
       key: externalId,
-      kind: existing.startDate !== undefined ? 'event' : 'schedule',
+      kind: existing.__kind ?? (existing.startDate !== undefined ? 'event' : 'schedule'),
       action: 'stale',
       existingId: existing.id,
       title: existing.title,
@@ -366,25 +396,28 @@ export async function applySyncPlan({ services, plan, keys = null, pruneStale = 
   const wanted = keys ? new Set(keys) : null;
   const results = { created: 0, updated: 0, removed: 0, skipped: 0, results: [], errors: [] };
 
+  // kind -> 集合：待办进 todos，事件进 events，时段日程进 schedules
+  const collectionOf = (kind) => {
+    if (kind === 'todo') return services.todos;
+    if (kind === 'event') return services.events;
+    return services.schedules;
+  };
+
   for (const item of plan.items) {
     if (wanted && !wanted.has(item.key)) continue;
     try {
       if (item.action === 'create') {
-        const created = item.kind === 'event' ? await services.events.create(item.payload) : await services.schedules.create(item.payload);
+        const created = await collectionOf(item.kind).create(item.payload);
         results.created += 1;
-        results.results.push({ key: item.key, action: 'create', id: created.id, title: created.title });
+        results.results.push({ key: item.key, action: 'create', kind: item.kind, id: created.id, title: created.title });
       } else if (item.action === 'update') {
-        const updated =
-          item.kind === 'event'
-            ? await services.events.update(item.existingId, item.payload)
-            : await services.schedules.update(item.existingId, item.payload);
+        const updated = await collectionOf(item.kind).update(item.existingId, item.payload);
         results.updated += 1;
-        results.results.push({ key: item.key, action: 'update', id: updated?.id ?? item.existingId, changes: item.changes });
+        results.results.push({ key: item.key, action: 'update', kind: item.kind, id: updated?.id ?? item.existingId, changes: item.changes });
       } else if (item.action === 'stale' && pruneStale) {
-        if (item.kind === 'event') await services.events.remove(item.existingId);
-        else await services.schedules.remove(item.existingId);
+        await collectionOf(item.kind).remove(item.existingId);
         results.removed += 1;
-        results.results.push({ key: item.key, action: 'remove', id: item.existingId });
+        results.results.push({ key: item.key, action: 'remove', kind: item.kind, id: item.existingId });
       } else {
         results.skipped += 1;
       }

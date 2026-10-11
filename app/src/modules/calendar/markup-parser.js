@@ -25,15 +25,14 @@ const PRIORITY_TABLE = {
   low: 0, 低: 0, 不急: 0, 次要: 0, 0: 0,
 };
 
-const SUBJECT_CATEGORY = [
-  { re: /(上课|课程|课|讲座)/, category: 'class' },
-  { re: /(自习|复习|预习|刷题|作业|论文|学习|读书|背单词)/, category: 'study' },
-  { re: /(考试|测验|期中|期末)/, category: 'exam' },
-  { re: /(会议|开会|例会)/, category: 'meeting' },
-  { re: /(活动|运动|比赛|社团)/, category: 'activity' },
-];
-
 const UNKNOWN = new Set(['', '无', 'none', 'null', '-']);
+
+/** `HH:MM` 加一小时（用于标记行只给了开始时间的情况）。 */
+function addHour(clock) {
+  const [h, m] = String(clock).split(':').map(Number);
+  const total = ((h || 0) * 60 + (m || 0) + 60) % (24 * 60);
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
 
 function splitFields(rest) {
   return rest.split(/[|｜]/).map((part) => part.trim());
@@ -104,17 +103,16 @@ function scheduleDraft(raw, action, parts) {
   if (!title) warnings.push('标记行缺少日程标题');
   if (!date) warnings.push('标记行缺少日期，默认今天');
 
-  const allDay = !startTime && !endTime;
+  // 日程必须是时段：标记行没给时刻时补一个默认时段（不再退化成全天/待办）
+  const timed = Boolean(startTime || endTime);
+  if (!timed) warnings.push('标记行缺少开始时间，默认 09:00-10:00');
   const fields = {
     title: title ?? '未命名日程',
     date: date ?? new Date().toISOString().slice(0, 10),
-    allDay,
+    startTime: startTime ?? '09:00',
+    endTime: endTime ?? (startTime ? addHour(startTime) : '10:00'),
     source: 'command',
   };
-  if (!allDay) {
-    fields.startTime = startTime;
-    fields.endTime = endTime;
-  }
   if (location) fields.location = location;
   const repeat = repeatFromDschat({ repeat: repeatText, repeat_end: repeatEnd });
   if (repeat.type !== 'none') fields.repeat = repeat;
@@ -127,7 +125,7 @@ function scheduleDraft(raw, action, parts) {
     fields,
     confidence: warnings.length ? 0.6 : 0.9,
     warnings,
-    explain: `${allDay ? '全天' : `${fields.startTime ?? ''}${fields.endTime ? `-${fields.endTime}` : ''}`} ${fields.date} 添加日程「${fields.title}」`,
+    explain: `${fields.startTime}-${fields.endTime} ${fields.date} 添加日程「${fields.title}」`,
     markup: { type: 'schedule', fields: 7 },
   };
 }
@@ -139,8 +137,8 @@ function todoDraft(raw, action, parts) {
       ok: Boolean(title),
       raw,
       action,
-      target: 'schedule',
-      filters: title ? { keyword: title, status: action === 'complete' ? 'pending' : undefined } : {},
+      target: 'todo',
+      filters: title ? { keyword: title, completed: action === 'complete' ? false : undefined } : {},
       confidence: title ? 0.85 : 0.3,
       warnings: title ? [] : ['标记行缺少待办标题'],
       explain: `${action === 'delete' ? '删除' : '完成'}待办「${title ?? '未命名'}」`,
@@ -158,27 +156,22 @@ function todoDraft(raw, action, parts) {
 
   const fields = {
     title: title ?? '未命名待办',
-    date: date ?? new Date().toISOString().slice(0, 10),
-    allDay: true,
+    deadline: date ?? new Date().toISOString().slice(0, 10),
     priority,
     source: 'command',
   };
-  if (subject) {
-    const mapped = SUBJECT_CATEGORY.find((entry) => entry.re.test(subject));
-    fields.category = mapped?.category ?? 'study';
-    fields.tags = mapped ? [subject] : [subject];
-    // dschat 2 的「科目」是自由文本，本项目分类是固定枚举，因此原文存入 tags 保留信息
-  }
+  // dschat 2 的「科目」是自由文本，待办没有分类枚举，因此原文存入 tags 保留信息
+  if (subject) fields.tags = [subject];
 
   return {
     ok: true,
     raw,
     action: 'create',
-    target: 'schedule',
+    target: 'todo',
     fields,
     confidence: warnings.length ? 0.6 : 0.88,
     warnings,
-    explain: `添加待办「${fields.title}」（${fields.date}，优先级 ${priority}）`,
+    explain: `添加待办「${fields.title}」（截止 ${fields.deadline}，优先级 ${priority}）`,
     markup: { type: 'todo' },
   };
 }

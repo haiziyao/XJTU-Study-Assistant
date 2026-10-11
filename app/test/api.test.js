@@ -11,6 +11,12 @@ import path from 'node:path';
 
 import { createServer } from '../src/server/index.js';
 
+/** 服务端用的是服务器本地日期，测试里同样算本地日期。 */
+function todayKey() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
 async function startApp() {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'potato-calendar-'));
   const app = await createServer({ dataDir, version: '0.1.0-test' });
@@ -51,7 +57,8 @@ test('指令 run：创建 -> 查询 -> 完成 -> 删除 全链路', async () => 
     });
     assert.equal(created.status, 200);
     assert.equal(created.body.item.date, '2030-01-02');
-    assert.equal(created.body.item.status, 'pending');
+    assert.equal(created.body.item.startTime, '15:00');
+    assert.equal(created.body.item.status, undefined, '日程没有完成态');
     assert.equal(created.body.item.source, 'command');
     const id = created.body.item.id;
 
@@ -62,9 +69,10 @@ test('指令 run：创建 -> 查询 -> 完成 -> 删除 全链路', async () => 
 
     // 「完成」是待办的动作，不是时段日程的：先建一条待办再完成它
     const todo = await call('POST', '/commands/run', { text: '添加待办 2030-01-02 交材料' });
-    assert.equal(todo.body.item.allDay, true);
+    assert.equal(todo.body.target, 'todo');
+    assert.equal(todo.body.item.deadline, '2030-01-02');
     const completed = await call('POST', '/commands/run', { text: '完成 2030-01-02 交材料' });
-    assert.equal(completed.body.items[0].status, 'done');
+    assert.equal(completed.body.items[0].completed, true);
     assert.ok(completed.body.items[0].completedAt);
 
     // 时段日程（有起止时刻）没有完成态：直接点名它也会被拒
@@ -72,7 +80,8 @@ test('指令 run：创建 -> 查询 -> 完成 -> 删除 全链路', async () => 
     assert.equal(rejected.status, 400);
     assert.match(rejected.body.error.message, /没有完成态/);
     const untouched = await call('GET', `/schedules/${id}`);
-    assert.equal(untouched.body.item.status, 'pending');
+    assert.equal(untouched.body.item.startTime, '15:00', '被拒之后日程本身没有被动过');
+    assert.equal(untouched.body.item.title, '项目周会');
 
     const removed = await call('POST', '/commands/run', { text: '删除 2030-01-02 项目周会' });
     assert.equal(removed.body.deleted, 1);
@@ -131,26 +140,25 @@ test('重复日程在区间查询中展开，并记录冲突提示', async () =>
   }
 });
 
-test('顺延未完成日程：原记录标记 rolled 并保留双向引用', async () => {
+test('顺延未完成待办：截止日平移 + rolledFrom 记来源（不克隆、不改完成态）', async () => {
   const { app, call } = await startApp();
   try {
-    const created = await call('POST', '/schedules', {
-      title: '上周没写完的作业',
-      date: '2020-01-06',
-      startTime: '10:00',
-      endTime: '11:00',
-    });
-    const rolled = await call('POST', '/schedules/rollover', { weekStart: '2020-01-13' });
+    const created = await call('POST', '/todos', { title: '上周没写完的作业', deadline: '2020-01-06' });
+    const rolled = await call('POST', '/todos/rollover', { weekStart: '2020-01-13' });
     assert.equal(rolled.body.moved, 1);
-    assert.equal(rolled.body.items[0].toDate, '2020-01-13');
+    assert.equal(rolled.body.items[0].from, '2020-01-06');
+    // 显式给了一个**过去**的周一时，落点被夹到今天（顺延不能把人挪回过去）
+    assert.equal(rolled.body.items[0].to, todayKey());
 
-    const original = await call('GET', `/schedules/${created.body.item.id}`);
-    assert.equal(original.body.item.status, 'rolled');
-    assert.equal(original.body.item.rolledTo.date, '2020-01-13');
+    // 同一条记录（id 不变）被平移，来源记在 rolledFrom
+    const after = await call('GET', `/todos/${created.body.item.id}`);
+    assert.equal(after.body.item.id, created.body.item.id);
+    assert.equal(after.body.item.deadline, todayKey());
+    assert.deepEqual(after.body.item.rolledFrom, { deadline: '2020-01-06' });
+    assert.equal(after.body.item.completed, false);
 
-    const clone = await call('GET', `/schedules/${original.body.item.rolledTo.id}`);
-    assert.equal(clone.body.item.status, 'pending');
-    assert.equal(clone.body.item.rolledFrom.id, created.body.item.id);
+    // 日程没有顺延这回事：接口已删除
+    assert.equal((await call('POST', '/schedules/rollover', { weekStart: '2020-01-13' })).status, 404);
   } finally {
     await app.close();
   }

@@ -73,7 +73,6 @@ export class ReminderService {
           title: schedule.title,
           date: schedule.date,
           startTime: schedule.startTime ?? null,
-          allDay: Boolean(schedule.allDay),
           offsetMinutes: reminder.offsetMinutes,
           channel: reminder.channel,
           triggerAt: triggerAt.toISOString(),

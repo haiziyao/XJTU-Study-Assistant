@@ -94,3 +94,28 @@ export function complexityOf(estimatedMinutes) {
   if (estimatedMinutes <= 600) return 'complex';
   return 'heavy';
 }
+
+/**
+ * 由预估**工时**推导复杂度（待办用的是小时，阈值与 PotatoCalendar 的
+ * `get_complexity_info` 完全一致：≤1h 简单 / ≤3h 一般 / ≤10h 复杂 / 其余繁琐）。
+ */
+export function complexityOfHours(estimatedHours) {
+  const hours = Number(estimatedHours);
+  if (!Number.isFinite(hours) || hours <= 0) return 'simple';
+  if (hours <= 1) return 'simple';
+  if (hours <= 3) return 'normal';
+  if (hours <= 10) return 'complex';
+  return 'heavy';
+}
+
+/** 非整数数值校验（工时可以是 1.5 小时，因此不能用 intValue）。 */
+export function numberValue(value, field, { min = 0, max = 100000, optional = true, fallback } = {}) {
+  if (value === undefined || value === null || value === '') {
+    if (optional) return fallback;
+    throw HttpError.badRequest(`字段 ${field} 必填`, { field });
+  }
+  const num = Number(value);
+  if (!Number.isFinite(num)) fail(field, '必须是数字');
+  if (num < min || num > max) fail(field, `取值范围 ${min}~${max}`);
+  return num;
+}

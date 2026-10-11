@@ -76,7 +76,11 @@ export function parseDateExpr(text, now = new Date()) {
 
   if (/周末/.test(text)) {
     const { start } = weekRange(today, 1);
-    return { dateKey: addDays(start, 5), matched: '周末' };
+    // 今天就是周日：今天仍在周末里，直接用今天
+    if (weekdayOf(today) === 0) return { dateKey: today, matched: '周末' };
+    const saturday = addDays(start, 5);
+    // 本周六已经过去 -> 下周六（否则「周末写作业」会落到昨天）
+    return { dateKey: saturday < today ? addDays(saturday, 7) : saturday, matched: '周末' };
   }
 
   const week = text.match(/(这|本|下下|下个|下|上)?\s*(?:周|星期|礼拜)\s*([一二三四五六日天1-7])/);
@@ -91,7 +95,12 @@ export function parseDateExpr(text, now = new Date()) {
     else if (prefix === '上') base = addDays(start, -7);
     // 周一为一周起点：start 是周一
     const offset = target === 0 ? 6 : target - 1;
-    return { dateKey: addDays(base, offset), matched: week[0].trim() };
+    let dateKey = addDays(base, offset);
+    // 裸「周X / 星期X / 礼拜X」（没有 本/这/下/上 前缀）指的是**下一个**该星期几：
+    // 本周那一天已经过去时直接落到过去，会让 AI 把待办/日程建到昨天以前。
+    // 今天正好是那一天则保留今天；显式写了「本周/这周」的不动（用户明确要那一周）。
+    if (!prefix && dateKey < today) dateKey = addDays(dateKey, 7);
+    return { dateKey, matched: week[0].trim() };
   }
 
   return undefined;

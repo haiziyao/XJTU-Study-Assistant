@@ -137,13 +137,14 @@ export function normalizeAliases(input = {}) {
 
 /**
  * dschat 2 单日事件 -> 本模块入参。
- * 有具体时刻 => Schedule（时段粒度）；全天或没有时刻 => Schedule(allDay)（等价于 dschat 2 的日期锚点事件）。
- * 需要跨天区间时请显式传 `target: "event"`，此时会转成 Event（startDate/endDate）。
+ *
+ * 归属（2026-10 重做后）：有具体时刻 => `Schedule`（时段）；没有时刻 => `Todo`（待办，
+ * dschat 2 的日期锚点就是待办）；需要跨天区间时显式传 `target: "event"`。
  */
 export function fromDschatEvent(payload = {}, { target } = {}) {
   const mapped = normalizeAliases(payload);
   const allDay = mapped.allDay === true || mapped.allDay === 1 || (!mapped.startTime && !mapped.endTime);
-  const resolvedTarget = target ?? (allDay ? 'schedule' : 'schedule');
+  const resolvedTarget = target ?? (allDay ? 'todo' : 'schedule');
   if (resolvedTarget === 'event') {
     return {
       target: 'event',
@@ -160,6 +161,23 @@ export function fromDschatEvent(payload = {}, { target } = {}) {
       },
     };
   }
+  if (allDay) {
+    // 没有时刻 = 待办：只有截止日 + 优先级（dschat 的 completed -> completed）
+    return {
+      target: 'todo',
+      fields: {
+        title: mapped.title,
+        description: mapped.description ?? '',
+        deadline: mapped.date,
+        priority: typeof mapped.priority === 'number' ? mapped.priority : undefined,
+        // dschat 2 的 `completed` 布尔在别名层被折成 `status: 'done'|'pending'`（见 ALIASES），
+        // 这里再折回待办的布尔：显式布尔优先，status 兜底，两者都没有就不动完成态。
+        completed: mapped.completed ?? (mapped.status === 'done' ? true : mapped.status === 'pending' ? false : undefined),
+        source: 'import',
+        externalId: payload.id,
+      },
+    };
+  }
   return {
     target: 'schedule',
     fields: {
@@ -168,9 +186,8 @@ export function fromDschatEvent(payload = {}, { target } = {}) {
       category: mapped.category,
       location: mapped.location,
       date: mapped.date,
-      startTime: allDay ? undefined : mapped.startTime,
-      endTime: allDay ? undefined : mapped.endTime,
-      allDay,
+      startTime: mapped.startTime,
+      endTime: mapped.endTime,
       priority: typeof mapped.priority === 'number' ? mapped.priority : undefined,
       repeat: mapped.repeat,
       source: 'import',
@@ -178,17 +195,19 @@ export function fromDschatEvent(payload = {}, { target } = {}) {
   };
 }
 
-/** 本模块记录 -> dschat 2 API 形状（snake_case，单日锚点）。 */
+/** 本模块记录 -> dschat 2 API 形状（snake_case，单日锚点）。待办记录按「全天 + completed」输出。 */
 export function toDschatEvent(record) {
+  const isTodo = record.deadline !== undefined;
   return {
     id: record.id,
     title: record.title,
     notes: record.description ?? '',
     location: record.location ?? '',
-    date: record.date ?? record.startDate,
-    start_time: record.allDay ? null : record.startTime ?? null,
-    end_time: record.allDay ? null : record.endTime ?? null,
-    all_day: Boolean(record.allDay),
+    date: record.date ?? record.deadline ?? record.startDate,
+    start_time: isTodo || record.allDay ? null : record.startTime ?? null,
+    end_time: isTodo || record.allDay ? null : record.endTime ?? null,
+    all_day: isTodo ? true : Boolean(record.allDay),
+    ...(isTodo ? { completed: Boolean(record.completed) } : {}),
     ...repeatToDschat(record.repeat),
     created_at: record.createdAt ? Date.parse(record.createdAt) / 1000 : null,
     updated_at: record.updatedAt ? Date.parse(record.updatedAt) / 1000 : null,
