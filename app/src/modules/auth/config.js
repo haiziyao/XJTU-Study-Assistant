@@ -1,8 +1,15 @@
 /**
  * 全局统一身份认证的配置。
  *
- * 这里成了**共享 HTTP 客户端的唯一来源**：`userAgent` / `timeoutMs` 只在此处定义一次，
- * 各业务模块不再各自维护（它们以前各自写了一份，值一样但散在三处）。
+ * 这里的 `userAgent` / `timeoutMs` 是**共享 HTTP 客户端**实际使用的值 ——
+ * 登录收敛到本模块之后，各业务模块不再自建客户端，因此这两个值在这里生效。
+ *
+ * （`lms/config.js` 与 `academic/config.js` 里仍留着同名的默认值，
+ * 那是历史遗留的管道：`resolveLmsConfig` / `resolveAcademicConfig` 会照常产出它们，
+ * 但已经没有消费者。留着是为了不动队友的配置接口，将来可以一并删掉。）
+ *
+ * `casOrigin` 不同：它**仍然必须逐站点可覆盖** —— 两个站点只有在同一个 CAS 源下
+ * 才谈得上单点登录，而测试里两个 mock 站点是各自独立的服务。
  *
  * 已实测的事实（见 `scripts/sso-probe.js` 与 docs/接口文档.md §13）：
  * 学校的统一认证底层是 **Keycloak**（`identity1.xjtu.edu.cn` 上的 KEYCLOAK_* 票据），

@@ -254,6 +254,52 @@ test('auth 设置卡：缺账号或密码时原地提示，不发请求', async 
   assert.match(textsOf(mount), /请填写学号与密码/);
 });
 
+/* ------------------------------------------------------------------ 学堂视图的引导 */
+
+test('★ 学堂视图：未登录时不再有密码表单，改为指向设置的引导', async () => {
+  const { api, calls } = makeApi({
+    '/lms/status': { status: 'anonymous', loggedIn: false, user: null, courses: {}, activities: {} },
+  });
+  const boot = bootRenderer({ api });
+  const mount = await boot.render('lms');
+
+  const text = textsOf(mount);
+  const inputs = inputsOf(mount);
+
+  // 一个密码输入框都不该有 —— 这是本次重构最直接的用户可见变化
+  assert.equal(
+    inputs.filter((node) => node.type === 'password').length,
+    0,
+    '★ 学堂视图不该再出现密码输入框（登录只在设置里做一次）',
+  );
+
+  // 应当明确把用户送去设置，并说清为什么只登一次就够
+  assert.match(text, /设置/, '要指向设置页');
+  assert.match(text, /同一个学校账号|统一身份认证/, '要说明两个模块共用一个账号');
+  assert.ok(findButton(mount, '去设置里登录'), '应给一个去设置的按钮');
+
+  // 不该再去打学堂自己的登录/MFA/验证码接口
+  assert.equal(
+    calls.some((entry) => /\/lms\/(login|mfa|captcha)/.test(entry)),
+    false,
+    `学堂视图不该再调用登录类接口，实际：${calls.join(' | ')}`,
+  );
+});
+
+test('学堂视图：引导按钮会切到设置页（走外壳的 openView）', async () => {
+  const opened = [];
+  const { api } = makeApi({
+    '/lms/status': { status: 'anonymous', loggedIn: false, user: null, courses: {}, activities: {} },
+  });
+  const boot = bootRenderer({ api });
+  // 外壳把 selectView 暴露成 PC.openView；这里用替身记录被切到哪个视图
+  boot.PC.openView = (id) => opened.push(id);
+  const mount = await boot.render('lms');
+
+  findButton(mount, '去设置里登录').listeners.click[0]();
+  assert.deepEqual(opened, ['settings'], '点按钮应当切到设置页');
+});
+
 /* ------------------------------------------------------------------ 图形验证码 */
 
 test('auth 设置卡：被要求图形验证码时显示图片与输入框', async () => {

@@ -1236,7 +1236,11 @@
 
     // openEditor 由日历模块通过 PCModules.service('editor', ...) 提供；其它视图经 PC.openEditor 复用，
     // 不需要互相 import。refreshAi 供设置页在改完 AI 配置后立刻刷新徽标与状态（WS 也会推，但别赌通道）。
-    window.PC = { state, api, refresh, refreshAi: loadMeta, toast, openEditor: Modules.getService('editor') };
+    //
+    // openView 让模块能**引导用户去另一个视图**，而不必自己实现跳转或去点 DOM。
+    // 目前只有一个用处：学堂/学业这些需要登录的页面，在未登录时给一个「去设置里登录」的按钮。
+    // 它是 selectView 的直接暴露，没有额外语义 —— 纯函数引用，不引入模块间耦合。
+    window.PC = { state, api, refresh, refreshAi: loadMeta, toast, openEditor: Modules.getService('editor'), openView: selectView };
 
     buildNav();
     wireChat();

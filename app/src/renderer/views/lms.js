@@ -1,5 +1,9 @@
 /**
- * 思源学堂视图：登录 / 验证码 / 短信与二次认证 / 课程与活动 / 同步预览与应用 / 自动同步设置。
+ * 思源学堂视图：课程与活动 / 同步预览与应用 / 自动同步设置。
+ *
+ * **这里不再有登录表单**：登录已收敛到「设置 → 统一身份认证」。
+ * 学堂与教务用的是同一个学校账号，共享 Cookie 罐里的 CAS 票据让一次登录对两边都生效，
+ * 所以未登录时本视图只给一张引导卡（见 lmsLoginCard），把用户送到设置里。
  *
  * 视图内的会话状态只保存在本文件的闭包里（后端才是唯一数据源），
  * 所有类名以 `lms-` 为前缀，样式见同目录 lms.css。
@@ -13,8 +17,8 @@
  * 前端只需要记住「最近一次拿到的 status / 课程 / 活动 / 同步预览」这些渲染素材。
  * 所有交互都只改这一份数据，再 lmsPaint() 整体重画，避免 DOM 与数据不一致。
  *
- * 注意：这里不保存密码。登录表单的失败分支全部原地更新（见 lmsLoginCard），
- * 只有登录态真正前进（已登录 / 需要两步验证）时才重画。
+ * 注意：这里**不保存密码**，也没有密码输入框 —— 密码只在设置页那一次登录里出现，
+ * 且提交后立刻从内存里清掉。
  */
 const lmsUi = {
   mount: null,
@@ -44,12 +48,8 @@ const lmsUi = {
   groupsAll: null,
   courseSemesterToggle: new Map(),
   courseSemestersAll: null,
-  /** 只记住学号（方便切走再切回来），明文密码不留在内存里。 */
-  username: '',
-  loginError: null,
-  mfaSent: false,
+  /** 两步验证的手机号（脱敏），只用于状态卡展示。 */
   mfaPhoneMasked: null,
-  mfaError: null,
   /** 同步选项：默认值保持后端默认语义（见 lmsSyncBody 的注释）。 */
   options: {
     includePast: false,
@@ -175,41 +175,6 @@ function lmsStatusPill(status) {
   return mk('span', `lms-pill ${kind}`.trim(), LMS_STATUS_LABEL[status] ?? status ?? '未知');
 }
 
-/**
- * 载入图形验证码。
- *
- * Electron 用 file:// 载入页面时 CSP 的 `img-src 'self' data:` 不放行 http://127.0.0.1，
- * 所以 <img> 一旦加载失败就退回「fetch → data URL」（connect-src 与 img 的 data: 都是放行的）。
- */
-function lmsLoadCaptcha(img, note) {
-  const url = `${PC.state.apiBase}/lms/captcha?t=${Date.now()}`;
-  if (note) note.textContent = '';
-  img.onerror = () => {
-    img.onerror = null;
-    fetch(url)
-      .then((response) => {
-        if (!response.ok) throw new Error(`验证码接口返回 ${response.status}`);
-        return response.blob();
-      })
-      .then(
-        (blob) =>
-          new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.onerror = () => reject(new Error('验证码图片解码失败'));
-            reader.readAsDataURL(blob);
-          }),
-      )
-      .then((dataUrl) => {
-        img.src = String(dataUrl);
-      })
-      .catch((error) => {
-        if (note) note.textContent = `验证码加载失败：${error.message}`;
-      });
-  };
-  img.src = url;
-}
-
 /** 同步请求体：界面勾选项 ↔ 后端选项的唯一映射点。 */
 function lmsSyncBody(extra) {
   const options = lmsUi.options;
@@ -301,24 +266,6 @@ function lmsMaybeLoad() {
 
 /* --------------------------------------------------------------- 登录 / 验证 */
 
-function lmsOnLoggedIn() {
-  lmsUi.loginError = null;
-  lmsUi.mfaSent = false;
-  lmsUi.mfaPhoneMasked = null;
-  lmsUi.mfaError = null;
-  lmsUi.courses = null;
-  lmsUi.coursesError = null;
-  lmsUi.activities = null;
-  lmsUi.activitiesError = null;
-  lmsUi.preview = null;
-  lmsUi.selected = new Set();
-  lmsUi.applyResult = null;
-  lmsUi.applyError = null;
-  lmsUi.autoSyncError = null;
-  PC.toast('已登录思源学堂');
-  lmsPaint();
-}
-
 async function lmsLogout() {
   try {
     const status = await PC.api('/lms/logout', { method: 'POST', body: {} });
@@ -328,12 +275,11 @@ async function lmsLogout() {
     lmsUi.preview = null;
     lmsUi.selected = new Set();
     lmsUi.applyResult = null;
-    lmsUi.loginError = null;
-    lmsUi.mfaSent = false;
     lmsUi.mfaPhoneMasked = null;
-    lmsUi.mfaError = null;
     lmsUi.autoSyncError = null;
-    PC.toast('已退出思源学堂');
+    // 单点登录下"只退学堂"没有意义（CAS 票据还在共享罐里），后端执行的是全局退出，
+    // 提示也要如实这么说，否则用户会以为教务还登着。
+    PC.toast('已退出登录（学堂与教务一并退出）');
   } catch (error) {
     lmsUi.statusError = error.message;
   }
@@ -368,276 +314,61 @@ async function lmsSaveAutoSync(enabled, intervalHours) {
   }
 }
 
-async function lmsSendMfa(button) {
-  const label = button.textContent;
-  button.disabled = true;
-  button.textContent = '发送中…';
-  lmsUi.mfaError = null;
-  try {
-    const result = await PC.api('/lms/mfa/send', { method: 'POST', body: {} });
-    if (result.status) lmsUi.status = result.status;
-    lmsUi.mfaSent = true;
-    lmsUi.mfaPhoneMasked = result.phoneMasked ?? lmsUi.mfaPhoneMasked;
-    PC.toast('验证码已发送');
-  } catch (error) {
-    lmsUi.mfaError = error.message;
-  }
-  if (button.isConnected) {
-    button.disabled = false;
-    button.textContent = label;
-  }
-  lmsPaint();
-}
-
-/** 登录卡片：失败分支全部原地更新，保住用户已经输入的密码。 */
+/**
+ * 未登录时的引导卡。
+ *
+ * 登录已收敛到「设置 → 统一身份认证」：学堂与教务用的是同一个学校账号，
+ * 在那里登录一次，两边都会自动完成各自的认证（共享 Cookie 罐里的 CAS 票据做单点登录）。
+ *
+ * 所以这里**刻意不再提供密码表单** —— 两个地方各输一次密码既多余，
+ * 也容易让人以为"要登录两次"。两步验证与图形验证码同样在设置里完成。
+ */
 function lmsLoginCard() {
-  const status = lmsUi.status;
   const card = mk('div', 'card');
 
   const head = mk('div', 'lms-head');
-  head.appendChild(mk('div', 'card-title', status?.status === 'need_captcha' ? '登录（需要图形验证码）' : '登录思源学堂'));
+  head.appendChild(mk('div', 'card-title', '需要登录'));
   head.appendChild(mk('div', 'spacer'));
-  head.appendChild(mk('span', 'lms-hint', '统一身份认证的学号 / 工号'));
+  head.appendChild(lmsStatusPill(lmsUi.status?.status));
   card.appendChild(head);
 
-  const form = mk('div', 'lms-form');
-
-  const username = mk('input');
-  username.type = 'text';
-  username.placeholder = '学号 / 用户名';
-  username.autocomplete = 'username';
-  username.value = lmsUi.username;
-  username.addEventListener('input', () => {
-    lmsUi.username = username.value;
-  });
-  form.appendChild(field('学号 / 用户名', username));
-
-  const password = mk('input');
-  password.type = 'password';
-  password.placeholder = '密码';
-  password.autocomplete = 'current-password';
-  form.appendChild(field('密码', password));
-
-  const captchaField = mk('div', 'field hidden');
-  captchaField.appendChild(mk('span', 'field-label', '图形验证码'));
-  const captchaRow = mk('div', 'lms-captcha');
-  const captchaInput = mk('input');
-  captchaInput.type = 'text';
-  captchaInput.placeholder = '验证码';
-  captchaInput.autocomplete = 'off';
-  const captchaImg = mk('img');
-  captchaImg.alt = '图形验证码';
-  captchaImg.title = '点击刷新验证码';
-  const captchaReload = mk('button', 'ghost-btn', '换一张');
-  captchaReload.type = 'button';
-  const captchaNote = mk('span', 'lms-hint', '');
-  captchaRow.append(captchaInput, captchaImg, captchaReload);
-  captchaField.append(captchaRow, captchaNote);
-  form.appendChild(captchaField);
-
-  const error = mk('div', 'lms-error');
-  const setError = (text) => {
-    lmsUi.loginError = text || null;
-    error.textContent = text || '';
-    error.classList.toggle('hidden', !text);
-  };
-  form.appendChild(error);
-
-  const actions = mk('div', 'lms-actions');
-  const submit = mk('button', 'primary-btn', '登录');
-  submit.type = 'button';
-  actions.append(submit, mk('span', 'lms-hint', '回车即可提交'));
-  form.appendChild(actions);
-  card.appendChild(form);
-
-  let captchaOn = Boolean(status?.captchaRequired) || status?.status === 'need_captcha';
-  const reloadCaptcha = () => lmsLoadCaptcha(captchaImg, captchaNote);
-  const showCaptcha = () => {
-    captchaOn = true;
-    captchaField.classList.remove('hidden');
-    reloadCaptcha();
-  };
-  captchaReload.addEventListener('click', reloadCaptcha);
-  captchaImg.addEventListener('click', reloadCaptcha);
-  if (captchaOn) showCaptcha();
-
-  setError(
-    status?.status === 'need_captcha'
-      ? status.error ?? '请输入图形验证码'
-      : status?.status === 'error'
-        ? status.error ?? '登录失败'
-        : lmsUi.loginError,
+  const body = mk('div', 'lms-form');
+  body.appendChild(
+    mk(
+      'div',
+      'lms-hint',
+      '思源学堂与学业情况用的是同一个学校账号，登录入口已统一到「设置 → 统一身份认证」：在那里登录一次，两个模块都会自动完成认证。',
+    ),
   );
 
-  const doSubmit = async () => {
-    if (submit.disabled) return;
-    const name = username.value.trim();
-    const secret = password.value;
-    const code = captchaInput.value.trim();
-    if (!name) {
-      setError('请填写学号 / 用户名');
-      username.focus();
-      return;
-    }
-    if (!secret) {
-      setError('请填写密码');
-      password.focus();
-      return;
-    }
-    if (captchaOn && !code) {
-      setError('请填写图形验证码');
-      captchaInput.focus();
-      return;
-    }
-    setError(null);
-    submit.disabled = true;
-    submit.textContent = '登录中…';
-    try {
-      const next = await PC.api('/lms/login', {
-        method: 'POST',
-        body: { username: name, password: secret, captcha: captchaOn ? code : undefined },
-      });
-      lmsUi.status = next;
-      if (next.status === 'ready') {
-        lmsOnLoggedIn(); // 重画后本卡片会被替换，finally 里不再动 DOM
-        return;
-      }
-      if (next.status === 'need_mfa') {
-        lmsUi.mfaSent = Boolean(next.mfa?.sent);
-        lmsUi.mfaPhoneMasked = next.mfa?.phoneMasked ?? null;
-        lmsUi.mfaError = null;
-        lmsPaint();
-        return;
-      }
-      // 连续失败会要求图形验证码：原地把验证码行加出来，密码不用重输
-      if (next.captchaRequired && !captchaOn) showCaptcha();
-      if (next.status === 'need_captcha') {
-        reloadCaptcha();
-        captchaInput.value = '';
-      }
-      setError(next.error ?? '登录失败');
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      if (submit.isConnected) {
-        submit.disabled = false;
-        submit.textContent = '登录';
-      }
-    }
-  };
-
-  submit.addEventListener('click', () => void doSubmit());
-  for (const input of [username, password, captchaInput]) {
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        void doSubmit();
-      }
-    });
+  // 把"现在卡在哪一步"如实说出来，用户才知道去设置里要做什么
+  const step = lmsUi.status?.status;
+  if (step === 'need_mfa') {
+    body.appendChild(mk('div', 'lms-hint', '当前需要两步验证，请在设置里完成短信验证码校验。'));
+  } else if (step === 'need_captcha') {
+    body.appendChild(mk('div', 'lms-hint', '当前需要图形验证码，请在设置里输入。'));
+  } else if (step === 'error') {
+    body.appendChild(mk('div', 'lms-error', lmsUi.status?.error ?? '登录异常'));
   }
-  return card;
-}
-
-/** 两步验证卡片（短信验证码 / Safety Verify 二次认证共用）。 */
-function lmsMfaCard() {
-  const status = lmsUi.status;
-  const flow = status?.mfa?.flow === 'sec' ? 'sec' : 'mfa';
-  const sendLabel = flow === 'sec' ? '发送验证码' : '发送短信验证码';
-  const sent = lmsUi.mfaSent || Boolean(status?.mfa?.sent);
-  const phone = lmsUi.mfaPhoneMasked ?? status?.mfa?.phoneMasked ?? null;
-
-  const card = mk('div', 'card');
-  const head = mk('div', 'lms-head');
-  head.append(
-    mk('div', 'card-title', '两步验证'),
-    mk('div', 'spacer'),
-    mk('span', 'lms-pill warn', flow === 'sec' ? '二次认证' : '短信验证'),
-  );
-  card.appendChild(head);
-
-  const error = mk('div', 'lms-error');
-  const setError = (text) => {
-    lmsUi.mfaError = text || null;
-    error.textContent = text || '';
-    error.classList.toggle('hidden', !text);
-  };
-
-  if (!sent) {
-    card.appendChild(
-      mk(
-        'div',
-        'lms-hint',
-        flow === 'sec' ? '学校要求二次认证：先获取验证码，再输入收到的 6 位数字。' : '学校要求短信验证：先获取验证码，再输入收到的 6 位数字。',
-      ),
-    );
-    const actions = mk('div', 'lms-actions');
-    const send = mk('button', 'primary-btn', sendLabel);
-    send.type = 'button';
-    send.addEventListener('click', () => void lmsSendMfa(send));
-    actions.appendChild(send);
-    card.appendChild(actions);
-    setError(lmsUi.mfaError);
-    card.appendChild(error);
-    return card;
-  }
-
-  card.appendChild(mk('div', 'lms-hint', phone ? `验证码已发送至 ${phone}` : '验证码已发送，请查看手机'));
-  const form = mk('div', 'lms-form');
-  const code = mk('input');
-  code.type = 'text';
-  code.inputMode = 'numeric';
-  code.maxLength = 6;
-  code.placeholder = '6 位验证码';
-  code.autocomplete = 'one-time-code';
-  form.appendChild(field('验证码', code));
 
   const actions = mk('div', 'lms-actions');
-  const verify = mk('button', 'primary-btn', '提交验证码');
-  verify.type = 'button';
-  const resend = mk('button', 'ghost-btn', '重新发送');
-  resend.type = 'button';
-  actions.append(verify, resend);
-  form.appendChild(actions);
-  form.appendChild(error);
-  setError(lmsUi.mfaError);
-  card.appendChild(form);
-
-  const doVerify = async () => {
-    const value = code.value.trim();
-    if (!/^\d{6}$/.test(value)) {
-      setError('请输入 6 位数字验证码');
-      code.focus();
-      return;
-    }
-    setError(null);
-    verify.disabled = true;
-    verify.textContent = '校验中…';
-    try {
-      const next = await PC.api('/lms/mfa/verify', { method: 'POST', body: { code: value } });
-      lmsUi.status = next;
-      if (next.status === 'ready') {
-        lmsOnLoggedIn();
-        return;
-      }
-      setError(next.error ?? '验证码校验失败');
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      if (verify.isConnected) {
-        verify.disabled = false;
-        verify.textContent = '提交验证码';
-      }
-    }
-  };
-  verify.addEventListener('click', () => void doVerify());
-  code.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      void doVerify();
-    }
+  const go = mk('button', 'primary-btn', '去设置里登录');
+  go.type = 'button';
+  go.addEventListener('click', () => {
+    // openView 由外壳提供（shell/app.js 把 selectView 暴露到 PC 上）。
+    // 万一外壳版本较旧没有它，退化成文字指引，不要让按钮点了没反应。
+    if (typeof PC.openView === 'function') PC.openView('settings');
+    else PC.toast?.('请打开左侧的「设置」，在「统一身份认证」里登录');
   });
-  resend.addEventListener('click', () => void lmsSendMfa(resend));
-  requestAnimationFrame(() => code.focus());
+  actions.appendChild(go);
+
+  const retry = mk('button', 'ghost-btn', '刷新状态');
+  retry.type = 'button';
+  retry.addEventListener('click', () => void lmsLoadStatus({ manual: true }));
+  actions.appendChild(retry);
+
+  body.appendChild(actions);
+  card.appendChild(body);
   return card;
 }
 
@@ -1561,7 +1292,8 @@ function lmsPaint() {
 
   const ready = lmsUi.status?.status === 'ready';
   content.appendChild(lmsStatusCard());
-  if (lmsUi.status && !ready) content.appendChild(lmsUi.status.status === 'need_mfa' ? lmsMfaCard() : lmsLoginCard());
+  // 未登录（含需要两步验证 / 图形验证码）一律给同一张引导卡：登录只在设置里做一次
+  if (lmsUi.status && !ready) content.appendChild(lmsLoginCard());
   if (ready) {
     content.appendChild(lmsCoursesCard());
     content.appendChild(lmsActivitiesCard());
