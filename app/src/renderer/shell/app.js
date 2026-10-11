@@ -76,6 +76,14 @@
     conversationId: null,
     /** 正在流式接收的那条回复：`{ messageId, text, node, done }`，供 WebSocket 增量更新。 */
     streaming: null,
+    /** 思考强度：none / low / medium / high（映射到上游的 reasoning_effort）。 */
+    thinking: 'none',
+    /** 写入权限：auto 自动审批 / manual 手动审批 / strict 全部确认。 */
+    permission: 'manual',
+    /** 待发送的附件（只活在内存里；发送后只在消息上留元信息）。 */
+    attachments: [],
+    /** 模型选择器缓存的列表。 */
+    models: null,
     health: null,
     view: 'calendar',
     panelCollapsed: false,
@@ -200,13 +208,34 @@
    * - 用户消息按纯文本渲染（自己敲的字不该被 Markdown 规则改样）；
    * - 机器人消息走富文本（Markdown 子集 + LaTeX 子集 + ```svg 图形）。
    */
-  function bubble(role, text) {
+  function bubble(role, text, files = []) {
     const node = mk('div', `bubble ${role}`);
     const body = mk('div', 'bubble-text');
     node.appendChild(body);
     if (role === 'user') body.textContent = String(text ?? '');
     else if (text) window.PCRichText?.render(body, text);
+    if (files.length) {
+      const box = mk('div', 'bubble-files');
+      for (const file of files) {
+        if (file.type?.startsWith('image/') && file.dataUrl) {
+          const img = mk('img');
+          img.src = file.dataUrl;
+          img.alt = file.name;
+          box.appendChild(img);
+        } else {
+          box.appendChild(mk('span', 'attach-chip', `${file.name}（${formatSize(file.size)}）`));
+        }
+      }
+      node.appendChild(box);
+    }
     return push(node);
+  }
+
+  function formatSize(bytes) {
+    const value = Number(bytes) || 0;
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${(value / 1024 / 1024).toFixed(1)} MB`;
   }
 
   /** 流式更新：每次增量都重渲染（公式/图形会随内容长出来），半截输入由 richtext 兜住不崩。 */
@@ -508,9 +537,17 @@
    */
   async function send(text) {
     const content = String(text ?? '').trim();
-    if (!content) return;
-    bubble('user', content);
-    if (state.ai.available) return runAiChat(content);
+    const files = state.attachments;
+    if (!content && !files.length) return;
+    if (files.length && !state.ai.available) {
+      toast('附件要配了 AI 才能解析，先去掉或去「设置 → AI 接入」填密钥');
+      return;
+    }
+    bubble('user', content, files);
+    // 附件所有权已经交给这条消息，清空待发区（避免下一条又带一遍）
+    state.attachments = [];
+    renderAttachments();
+    if (state.ai.available) return runAiChat(content, files);
     return runLocalRules(content);
   }
 
@@ -532,7 +569,7 @@
    * AI 对话：先落一个空气泡，增量到达时往里追加（WebSocket `ai_delta`），
    * HTTP 返回后以最终文本定稿，再渲染草稿确认卡。
    */
-  async function runAiChat(content) {
+  async function runAiChat(content, files = []) {
     const card = bubble('bot', '');
     const textEl = card.querySelector('.bubble-text');
     textEl.textContent = '正在思考…';   // 尚未有内容时先给占位，第一块增量到达就被覆盖
@@ -546,6 +583,15 @@
           conversationId: state.conversationId ?? undefined,
           stream: true,
           context: { view: state.view },
+          attachments: files.map((file) => ({
+            name: file.name,
+            type: file.type,
+            size: file.size,
+            dataUrl: file.dataUrl,
+            text: file.text,
+          })),
+          thinking: state.thinking,
+          permission: state.permission,
         },
       });
       state.conversationId = result.conversation?.id ?? state.conversationId;
@@ -558,9 +604,14 @@
         if (entry.result) queryCard(entry.result);
         else if (entry.error) systemNote(`查询没成功：${entry.error.message}`, 'fail');
       }
+      // 「自动审批」：写操作已经在服务端执行掉了，这里给回执（用户仍然看得见做了什么）
+      for (const item of result.executed ?? []) {
+        if (item.error) systemNote(`自动执行失败：${item.error.message}`, 'fail');
+        else resultCard({ ...item.result, explain: `${item.result.explain ?? '已自动执行'}（自动审批）` });
+      }
       const drafts = result.drafts ?? [];
       for (const entry of drafts) renderAiDraft(entry);
-      if (!drafts.length && !queried.length) {
+      if (!drafts.length && !queried.length && !(result.executed ?? []).length) {
         systemNote(`${state.ai.provider ?? 'AI'} · 只是聊天，没有产生任何写入`, 'meta');
       }
       keepBodyLast(card);
@@ -615,6 +666,228 @@
     push(card);
   }
 
+  /* ------------------------------------------------------------ 输入区扩展 */
+
+  /** 待发送附件：小卡片列表（图片给缩略图，其它给文件名与大小）。 */
+  function renderAttachments() {
+    const host = dom.chatAttachments;
+    if (!host) return;
+    host.replaceChildren();
+    host.hidden = state.attachments.length === 0;
+    state.attachments.forEach((file, index) => {
+      const chip = mk('span', 'attach-chip');
+      if (file.type?.startsWith('image/') && file.dataUrl) {
+        const img = mk('img');
+        img.src = file.dataUrl;
+        img.alt = file.name;
+        chip.appendChild(img);
+      } else {
+        chip.appendChild(mk('span', 'attach-kind', file.type?.startsWith('image/') ? '🖼' : '📄'));
+      }
+      chip.append(
+        mk('span', 'attach-name', file.name),
+        mk('span', 'attach-size', formatSize(file.size)),
+      );
+      const remove = mk('button', 'attach-del', '×');
+      remove.type = 'button';
+      remove.title = '移除';
+      remove.addEventListener('click', () => {
+        state.attachments.splice(index, 1);
+        renderAttachments();
+      });
+      chip.appendChild(remove);
+      host.appendChild(chip);
+    });
+  }
+
+  /** 读一个文件：图片/文本读成 dataURL/文本，其它只留元信息（给模型知道有这么个文件）。 */
+  function readFile(file) {
+    return new Promise((resolve) => {
+      const base = { name: file.name, type: file.type, size: file.size, dataUrl: '', text: '' };
+      const isImage = file.type.startsWith('image/');
+      const isText = /^text\//.test(file.type) || /\.(txt|md|markdown|csv|json|ya?ml|log|ini|tex)$/i.test(file.name);
+      if (!isImage && !isText) return resolve(base);
+      if (isImage && file.size > 4 * 1024 * 1024) {
+        toast(`${file.name} 超过 4MB，图片先不放了`);
+        return resolve({ ...base, type: file.type });
+      }
+      const reader = new FileReader();
+      reader.onerror = () => resolve(base);
+      reader.onload = () =>
+        resolve(isImage ? { ...base, dataUrl: String(reader.result ?? '') } : { ...base, text: String(reader.result ?? '') });
+      if (isImage) reader.readAsDataURL(file);
+      else reader.readAsText(file);
+      return undefined;
+    });
+  }
+
+  async function addFiles(list) {
+    const picked = [...(list ?? [])].slice(0, 8);
+    for (const file of picked) {
+      if (state.attachments.length >= 8) {
+        toast('最多 8 个附件');
+        break;
+      }
+      state.attachments.push(await readFile(file));
+    }
+    renderAttachments();
+  }
+
+  /**
+   * 通用「向上展开」选择器。
+   *
+   * 菜单用绝对定位挂在按钮上方（CSS 的 `bottom: 100%`），**不参与布局** ——
+   * 所以展开时输入框那一行不会跟着往上跳（这是明确要求）。
+   */
+  function composeSelect({ prefix, value, options, hint, onChange }) {
+    const wrap = mk('div', 'compose-select');
+    const button = mk('button');
+    button.type = 'button';
+    const label = mk('span', 'cs-label', prefix);
+    const current = mk('span', 'cs-value');
+    const caret = mk('span', 'cs-caret', '▴');
+    button.append(label, current, caret);
+
+    const menu = mk('div', 'compose-menu');
+    const paint = () => {
+      const found = options.find((item) => item.value === value) ?? options[0];
+      current.textContent = found.label;
+      for (const node of menu.querySelectorAll('button')) node.classList.toggle('active', node.dataset.value === value);
+    };
+
+    for (const option of options) {
+      const item = mk('button');
+      item.type = 'button';
+      item.dataset.value = option.value;
+      item.append(mk('span', 'cm-check', option.value === value ? '✓' : ''), mk('span', null, option.label));
+      if (option.hint) item.title = option.hint;
+      item.addEventListener('click', () => {
+        value = option.value;
+        paint();
+        close();
+        onChange?.(option.value);
+      });
+      menu.appendChild(item);
+    }
+    if (hint) menu.appendChild(mk('div', 'cm-hint', hint));
+
+    const close = () => wrap.classList.remove('open');
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const open = wrap.classList.contains('open');
+      for (const other of document.querySelectorAll('.compose-select.open')) other.classList.remove('open');
+      wrap.classList.toggle('open', !open);
+    });
+    wrap.append(button, menu);
+    menu.addEventListener('click', (event) => event.stopPropagation());
+    paint();
+    return wrap;
+  }
+
+  const THINKING_OPTIONS = [
+    { value: 'none', label: '无', hint: '不带 reasoning_effort，用上游默认' },
+    { value: 'low', label: '低' },
+    { value: 'medium', label: '中' },
+    { value: 'high', label: '高', hint: '想得久一点，也贵一点' },
+  ];
+  const PERMISSION_OPTIONS = [
+    { value: 'auto', label: '自动审批', hint: '写操作直接执行 —— 风险自负' },
+    { value: 'manual', label: '手动审批', hint: '只读查询自动跑，写操作点确认' },
+    { value: 'strict', label: '全部确认', hint: '连查询也要点确认' },
+  ];
+
+  function renderControls() {
+    const host = dom.chatControls;
+    if (!host) return;
+    host.replaceChildren(
+      composeSelect({
+        prefix: '思考模式',
+        value: state.thinking,
+        options: THINKING_OPTIONS,
+        hint: '映射到上游的 reasoning_effort；不认这个字段的端点会忽略它',
+        onChange: (value) => {
+          state.thinking = value;
+        },
+      }),
+      composeSelect({
+        prefix: '权限',
+        value: state.permission,
+        options: PERMISSION_OPTIONS,
+        hint: '「自动审批」会替你点确认，只建议在能撤得回来的场合用',
+        onChange: (value) => {
+          state.permission = value;
+        },
+      }),
+    );
+  }
+
+  /** 顶栏徽标：显示具体模型名，点开选模型（列表来自 GET /ai/models）。 */
+  function wireModelPicker() {
+    const badge = dom.aiBadge;
+    if (!badge) return;
+    const wrap = mk('div', 'compose-select');
+    const menu = mk('div', 'compose-menu');
+    wrap.appendChild(menu);
+    // 菜单挂在 chat-head 上，定位仍由 .compose-select 负责（右对齐）
+    badge.parentNode.insertBefore(wrap, badge.nextSibling);
+    wrap.insertBefore(badge, menu);
+
+    const paint = () => {
+      const models = state.models?.models ?? [];
+      menu.replaceChildren();
+      if (!models.length) {
+        menu.appendChild(mk('div', 'cm-hint', state.models?.reason ? `拿不到模型列表：${state.models.reason}` : '还没有模型列表'));
+      }
+      for (const model of models) {
+        const item = mk('button');
+        item.type = 'button';
+        item.dataset.value = model.id;
+        const active = model.id === state.models?.current;
+        item.append(
+          mk('span', 'cm-check', active ? '✓' : ''),
+          mk('span', 'cm-model', model.id),
+          model.source === 'builtin' ? mk('span', 'cm-tag', '候选') : null,
+        );
+        if (active) item.classList.add('active');
+        item.addEventListener('click', async () => {
+          wrap.classList.remove('open');
+          try {
+            await api('/ai/config', { method: 'POST', body: { model: model.id } });
+            toast(`已切换到 ${model.id}`);
+            await loadMeta();
+            state.models = await api('/ai/models');
+            paint();
+          } catch (error) {
+            toast(`切换失败：${error.message}`);
+          }
+        });
+        menu.appendChild(item);
+      }
+      menu.appendChild(mk('div', 'cm-hint', '列表来自上游 GET /models；拿不到时给内置候选'));
+    };
+
+    badge.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      if (!state.ai.available) {
+        toast('先到「设置 → AI 接入」填 API Key');
+        return;
+      }
+      const open = wrap.classList.contains('open');
+      for (const other of document.querySelectorAll('.compose-select.open')) other.classList.remove('open');
+      if (open) return;
+      wrap.classList.add('open');
+      if (!state.models) {
+        menu.replaceChildren(mk('div', 'cm-hint', '正在取模型列表…'));
+        try {
+          state.models = await api('/ai/models');
+        } catch (error) {
+          state.models = { models: [], reason: error.message };
+        }
+      }
+      paint();
+    });
+  }
+
   function wireChat() {
     const input = dom.chatInput;
     const submit = () => {
@@ -623,6 +896,16 @@
       autoGrow();
       send(text);
     };
+    // 「+」→ 系统文件选择器；选完读进内存（图片给 dataURL，文本读正文）
+    dom.chatAttach.addEventListener('click', () => dom.chatFiles.click());
+    dom.chatFiles.addEventListener('change', async () => {
+      await addFiles(dom.chatFiles.files);
+      dom.chatFiles.value = ''; // 允许再次选同一个文件
+    });
+    // 点空白处收起所有向上展开的菜单
+    document.addEventListener('click', () => {
+      for (const node of document.querySelectorAll('.compose-select.open')) node.classList.remove('open');
+    });
     dom.chatSend.addEventListener('click', submit);
     input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey) {
@@ -647,18 +930,29 @@
 
   async function loadMeta() {
     try {
-      const [health, caps] = await Promise.all([api('/health'), api('/ai/capabilities')]);
+      const [health, caps, aiStatus] = await Promise.all([
+        api('/health'),
+        api('/ai/capabilities'),
+        // 顶栏要显示**具体模型名**，这个只有 /ai/status 有；失败也不该拖垮整个 loadMeta
+        api('/ai/status').catch(() => null),
+      ]);
       state.health = health;
       state.ai = {
         available: Boolean(caps.available),
         provider: caps.provider ?? null,
         contractVersion: caps.contractVersion ?? null,
+        model: aiStatus?.config?.model ?? null,
       };
       setStatus(
         `已连接 · 事件 ${health.counts?.events ?? 0} · 日程 ${health.counts?.schedules ?? 0}`,
         'ok',
       );
-      dom.aiBadge.textContent = state.ai.available ? `AI：${state.ai.provider}` : 'AI 未接入（规则解析）';
+      // 模型可能刚被改过（设置页或选择器），列表缓存要跟着失效
+      if (state.models && state.models.current !== state.ai.model) state.models = null;
+      // 显示**具体模型名**而不是 provider 名（provider 只是"哪家服务"）
+      const model = state.models?.current ?? state.ai.model ?? null;
+      dom.aiBadge.textContent = state.ai.available ? `AI：${model ?? state.ai.provider}` : 'AI 未接入（规则解析）';
+      dom.aiBadge.classList.toggle('badge-btn', true);
       dom.aiBadge.classList.toggle('on', state.ai.available);
       // 底部提示跟着 AI 状态走：否则配置好密钥后，界面还在说"当前由本地规则解析"
       const hint = document.querySelector('.chat-hint');
@@ -761,6 +1055,10 @@
       chatSend: document.getElementById('chat-send'),
       status: document.getElementById('status'),
       aiBadge: document.getElementById('ai-badge'),
+      chatAttach: document.getElementById('chat-attach'),
+      chatFiles: document.getElementById('chat-files'),
+      chatAttachments: document.getElementById('chat-attachments'),
+      chatControls: document.getElementById('chat-controls'),
       dot: document.getElementById('dot'),
       toast: document.getElementById('toast'),
     };
@@ -771,6 +1069,9 @@
 
     buildNav();
     wireChat();
+    renderControls();
+    renderAttachments();
+    wireModelPicker();
 
     const info = await resolveInfo();
     state.info = info;

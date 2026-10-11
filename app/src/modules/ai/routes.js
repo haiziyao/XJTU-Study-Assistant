@@ -34,6 +34,9 @@ export function registerAiRoutes(router, { ai, apiPrefix }) {
   /** 清掉磁盘上的配置（密钥失效，回落到环境变量或未配置）。 */
   router.delete(`${P}/config`, async () => ({ ok: true, config: await ai.resetConfig() }));
 
+  /** 可选模型列表（顶栏「AI：<模型名>」点开后的选择器）。 */
+  router.get(`${P}/models`, () => ai.listModels());
+
   // ---------------------------------------------------------------- 上下文
   router.get(`${P}/context`, async ({ query }) =>
     ai.buildContext({
@@ -60,12 +63,18 @@ export function registerAiRoutes(router, { ai, apiPrefix }) {
   // ---------------------------------------------------------------- 对话
   router.post(`${P}/chat`, async ({ body }) => {
     const text = typeof body?.text === 'string' ? body.text : '';
-    if (!text.trim()) throw HttpError.badRequest('text 不能为空', { field: 'text' });
+    const hasFiles = Array.isArray(body?.attachments) && body.attachments.length > 0;
+    if (!text.trim() && !hasFiles) throw HttpError.badRequest('text 与 attachments 至少要有一个', { field: 'text' });
     return ai.send({
       text,
       conversationId: body?.conversationId,
       context: body?.context && typeof body.context === 'object' ? body.context : {},
       stream: asBool(body?.stream),
+      // 附件只在本轮使用：图片走多模态，文本内联进提示词（见 chat-service 的 normalizeAttachments）
+      attachments: Array.isArray(body?.attachments) ? body.attachments : [],
+      // 思考强度与写入权限：都是"这一轮"的选择，跟着消息一起落库
+      thinking: typeof body?.thinking === 'string' ? body.thinking : 'none',
+      permission: typeof body?.permission === 'string' ? body.permission : 'manual',
     });
   });
 }

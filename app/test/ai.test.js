@@ -678,3 +678,137 @@ test('AI：公式规范常驻提示词；绘图说明按开关注入，指令词
     await mock.close();
   }
 });
+
+test('AI：思考强度按档位透传（无 = 不带 reasoning_effort）', async () => {
+  const mock = await startMockAi({ apiKey: KEY, replies: ['好', '好'] });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+  try {
+    await call('POST', '/ai/chat', { text: '随便聊聊' });
+    assert.equal('reasoning_effort' in mock.state.bodies[0], false, '「无」不该带这个字段');
+
+    await call('POST', '/ai/chat', { text: '认真想想', thinking: 'high' });
+    assert.equal(mock.state.bodies[1].reasoning_effort, 'high');
+
+    await call('POST', '/ai/chat', { text: '再来一次', thinking: '不存在的档位' });
+    assert.equal('reasoning_effort' in mock.state.bodies[2], false, '非法档位回落到「无」');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('AI：写入权限三档 —— 全部确认连查询都要确认，自动审批直接执行写操作', async () => {
+  const query = { ok: true, action: 'query', target: 'todo', filters: { completed: false } };
+  const create = { ok: true, action: 'create', target: 'todo', fields: { title: '写实验报告', deadline: '2026-10-20' } };
+  // 逐次调用脚本（mock 按调用次序取）：
+  //   strict 轮 → 查询草稿（不自动执行，所以只有 1 次调用）
+  //   manual 轮 → 查询草稿 + 回灌后的作答
+  //   auto  轮 → 写操作草稿（自动执行）
+  const mock = await startMockAi({
+    apiKey: KEY,
+    replies: [
+      `\`\`\`command\n${JSON.stringify(query)}\n\`\`\``,
+      `\`\`\`command\n${JSON.stringify(query)}\n\`\`\``,
+      '你有 1 条待办。',
+      `\`\`\`command\n${JSON.stringify(create)}\n\`\`\``,
+    ],
+  });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+  try {
+    // strict：查询也不自动执行 → 只返回草稿，等用户确认；上游只被调了一次
+    const strict = await call('POST', '/ai/chat', { text: '我有哪些待办', permission: 'strict' });
+    assert.equal(strict.body.queried.length, 0);
+    assert.equal(strict.body.drafts.length, 1);
+    assert.equal(strict.body.drafts[0].draft.action, 'query');
+    assert.equal(mock.state.bodies.length, 1, 'strict 下不该有第二次回灌调用');
+    assert.equal((await call('GET', '/todos')).body.items.length, 0, '待办还没被创建');
+
+    // manual（默认）：查询自动执行，写操作等确认
+    const manual = await call('POST', '/ai/chat', { text: '我有哪些待办' });
+    assert.equal(manual.body.queried.length, 1);
+    assert.equal(manual.body.permission, 'manual');
+
+    // auto：写操作直接执行，drafts 被清空、executed 带结果
+    const auto = await call('POST', '/ai/chat', { text: '帮我加一条待办', permission: 'auto' });
+    assert.equal(auto.status, 200);
+    assert.equal(auto.body.executed.length, 1);
+    assert.equal(auto.body.executed[0].result.target, 'todo');
+    assert.deepEqual(auto.body.drafts, [], '自动执行的草稿不再留确认卡');
+    const todos = await call('GET', '/todos');
+    assert.equal(todos.body.items.length, 1);
+    assert.equal(todos.body.items[0].title, '写实验报告');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('AI：附件 —— 文本内联进提示词、图片转多模态、读不了的文件如实说明', async () => {
+  const mock = await startMockAi({ apiKey: KEY, reply: '看过了。' });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+  try {
+    const chat = await call('POST', '/ai/chat', {
+      text: '看看这份笔记',
+      attachments: [
+        { name: '笔记.md', type: 'text/markdown', size: 12, text: '# 第三章\n牛顿定律' },
+        { name: '照片.png', type: 'image/png', size: 1024, dataUrl: 'data:image/png;base64,AAAA' },
+        { name: '讲义.pdf', type: 'application/pdf', size: 20480 },
+      ],
+    });
+    assert.equal(chat.status, 200);
+
+    const sent = mock.state.bodies[0].messages.at(-1);
+    assert.equal(sent.role, 'user');
+    assert.ok(Array.isArray(sent.content), '有图片时应使用多模态数组');
+    const text = sent.content.find((part) => part.type === 'text').text;
+    assert.match(text, /看看这份笔记/);
+    assert.match(text, /牛顿定律/, '文本附件内容应内联');
+    assert.match(text, /讲义\.pdf/);
+    assert.match(text, /读不了/, '读不了的文件要如实说明，别让模型假装看过');
+    const image = sent.content.find((part) => part.type === 'image_url');
+    assert.equal(image.image_url.url, 'data:image/png;base64,AAAA');
+
+    // 只落元信息：base64 不进 JSON 集合
+    const [message] = chat.body.conversation ? [chat.body.user] : [];
+    assert.equal(message.attachments.length, 3);
+    assert.equal(JSON.stringify(message).includes('base64,AAAA'), false);
+    assert.equal(message.attachments[0].name, '笔记.md');
+
+    // 只发附件不写字也可以
+    const onlyFile = await call('POST', '/ai/chat', { attachments: [{ name: 'a.txt', type: 'text/plain', size: 3, text: 'abc' }] });
+    assert.equal(onlyFile.status, 200);
+    // 两者都空则 400
+    assert.equal((await call('POST', '/ai/chat', { text: '   ' })).status, 400);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('AI：模型列表 —— 上游给就用上游的，给不了回落内置候选', async () => {
+  const mock = await startMockAi({ apiKey: KEY, reply: '好' });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl, model: 'mock-chat' } });
+  try {
+    const listed = await call('GET', '/ai/models');
+    assert.equal(listed.status, 200);
+    assert.equal(listed.body.source, 'upstream');
+    // 当前模型必须在列表里，否则选择器显示不出选中项
+    assert.ok(listed.body.models.some((item) => item.id === 'mock-chat'));
+    assert.ok(listed.body.models.some((item) => item.id === 'mock-model'));
+    assert.equal(listed.body.current, 'mock-chat');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+
+  // 未配置密钥 → 内置候选
+  const bare = await startApp();
+  try {
+    const fallback = await bare.call('GET', '/ai/models');
+    assert.equal(fallback.body.source, 'builtin');
+    assert.ok(fallback.body.models.some((item) => item.id === 'deepseek-chat'));
+    assert.ok(fallback.body.models.some((item) => item.id === 'deepseek-reasoner'));
+  } finally {
+    await bare.app.close();
+  }
+});

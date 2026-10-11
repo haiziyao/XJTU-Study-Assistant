@@ -30,7 +30,7 @@
         <header class="chat-head">
           <span class="dot" id="dot" title="推送通道"></span>
           <h1 class="chat-title">对话</h1>
-          <span class="badge" id="ai-badge">AI 未接入</span>
+          <span class="badge badge-btn" id="ai-badge" role="button" tabindex="0" title="点击选择模型">AI 未接入</span>
           <span class="status-pill" id="status">正在连接后端…</span>
           <button class="panel-toggle" id="panel-toggle" type="button" title="收起右侧视图">⟩</button>
         </header>
@@ -38,6 +38,7 @@
         <div class="chat-log" id="chat-log"></div>
 
         <div class="chat-compose">
+          <button class="compose-plus" id="chat-attach" type="button" title="添加图片或文件">+</button>
           <textarea
             id="chat-input"
             rows="1"
@@ -46,6 +47,10 @@
           ></textarea>
           <button class="primary-btn" id="chat-send" type="button">发送</button>
         </div>
+        <div class="chat-attachments" id="chat-attachments" hidden></div>
+        <!-- 思考模式 / 权限：气泡向上展开（绝对定位，展开时输入框那一行不动） -->
+        <div class="chat-controls" id="chat-controls"></div>
+        <input type="file" id="chat-files" multiple hidden />
         <div class="chat-hint">Enter 发送 · Shift + Enter 换行 · 当前由本地规则解析（AI 接口已按契约预留）</div>
       </section>
 

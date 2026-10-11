@@ -16,6 +16,9 @@ import { HttpError } from '../../core/http/router.js';
 
 import { redactSecret } from './config.js';
 
+/** 上游列不出模型时的候选（DeepSeek 官方常用两个；换端点也能手动填模型名）。 */
+const BUILTIN_MODELS = ['deepseek-chat', 'deepseek-reasoner'];
+
 /** 上游报错体截断长度：够定位问题，又不至于把整页 HTML 塞进响应。 */
 const MAX_ERROR_BODY = 400;
 
@@ -90,7 +93,7 @@ export function createOpenAiCompatProvider({ getConfig, fetchImpl = globalThis.f
   if (typeof fetchImpl !== 'function') throw new Error('createOpenAiCompatProvider 需要可用的 fetch');
 
   /** 真正的上游调用，流式/非流式共用入口与错误映射。 */
-  async function chat({ messages, temperature, stream = false, onDelta, signal } = {}) {
+  async function chat({ messages, temperature, stream = false, onDelta, signal, reasoningEffort } = {}) {
     const config = getConfig();
     if (!config.apiKey) throw unavailableError(config);
     if (!Array.isArray(messages) || !messages.length) throw HttpError.badRequest('messages 不能为空');
@@ -118,6 +121,9 @@ export function createOpenAiCompatProvider({ getConfig, fetchImpl = globalThis.f
           messages,
           temperature: temperature ?? config.temperature,
           stream: Boolean(stream),
+          // 思考强度：OpenAI 兼容端点认 `reasoning_effort`（low/medium/high）。
+          // 「无」就不带这个字段；上游不认识它时会忽略（DeepSeek 官方 API 忽略未知字段）。
+          ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         }),
         signal: controller.signal,
       });
@@ -178,6 +184,56 @@ export function createOpenAiCompatProvider({ getConfig, fetchImpl = globalThis.f
     }
   }
 
+  /**
+   * 列上游可用模型（OpenAI 兼容的 `GET /models`）。
+   * 上游不提供或调用失败时返回**内置候选**，并标明来源 —— 设置页的模型选择器据此渲染。
+   */
+  async function listModels() {
+    const config = getConfig();
+    const builtin = BUILTIN_MODELS.map((id) => ({ id, source: 'builtin' }));
+    if (!config.apiKey) return { models: builtin, source: 'builtin', reason: '未配置密钥' };
+    try {
+      const response = await withTimeout((signal) =>
+        fetchImpl(`${config.baseUrl}/models`, {
+          headers: { Authorization: `Bearer ${config.apiKey}` },
+          signal,
+        }),
+      );
+      if (!response.ok) throw new Error(`上游返回 ${response.status}`);
+      const data = await response.json();
+      const models = (data?.data ?? data?.models ?? [])
+        .map((item) => (typeof item === 'string' ? item : item?.id))
+        .filter((id) => typeof id === 'string' && id)
+        .map((id) => ({ id, source: 'upstream' }));
+      if (!models.length) throw new Error('上游没有返回模型列表');
+      // 当前模型必须出现在列表里，否则选择器会显示不出选中项
+      if (!models.some((item) => item.id === config.model)) {
+        models.unshift({ id: config.model, source: 'current' });
+      }
+      return { models, source: 'upstream' };
+    } catch (error) {
+      return {
+        models: builtin.some((item) => item.id === config.model)
+          ? builtin
+          : [{ id: config.model, source: 'current' }, ...builtin],
+        source: 'builtin',
+        reason: redactSecret(error?.message ?? String(error), config.apiKey),
+      };
+    }
+  }
+
+  /** 带超时的轻量请求（列模型不需要流式与重试）。 */
+  async function withTimeout(run) {
+    const config = getConfig();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.min(config.timeoutMs, 15_000));
+    try {
+      return await run(controller.signal);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   return {
     /** provider 名字会出现在 `/ai/capabilities` 里；配置改了也实时生效。 */
     get name() {
@@ -187,5 +243,6 @@ export function createOpenAiCompatProvider({ getConfig, fetchImpl = globalThis.f
       return Boolean(getConfig().apiKey);
     },
     chat,
+    listModels,
   };
 }

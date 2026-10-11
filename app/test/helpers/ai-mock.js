@@ -41,6 +41,15 @@ export async function startMockAi(options = {}) {
     req.on('end', async () => {
       const raw = Buffer.concat(chunks).toString('utf8');
       state.requests.push(`${req.method} ${req.url}`);
+      if (req.url?.endsWith('/models')) {
+        const auth = String(req.headers.authorization ?? '');
+        if (auth !== `Bearer ${options.apiKey ?? 'test-key'}`) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: { message: 'bad key' } }));
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ object: 'list', data: [{ id: 'mock-model' }, { id: 'mock-chat' }] }));
+      }
       if (req.url?.endsWith('/chat/completions') === false) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: { message: 'not found' } }));

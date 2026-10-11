@@ -1617,3 +1617,207 @@ body.panel-collapsed .panel {
 .op-write .op-chip {
   color: var(--green);
 }
+
+/* ------------------------------------------------------------------ 追加：输入区（+ 附件 / 思考模式 / 权限 / 模型选择） */
+
+/* 「+」按钮：与发送按钮同高，位于输入框左侧 */
+.compose-plus {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--bg-base);
+  color: var(--fg-2);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color var(--t), color var(--t), background var(--t);
+}
+.compose-plus:hover {
+  color: var(--fg);
+  border-color: var(--blue);
+  background: var(--bg-hover);
+}
+
+/* 待发送附件：小卡片 + 缩略图 + 移除按钮 */
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 14px 6px;
+  background: var(--bg-surface);
+}
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 3px 6px 3px 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-base);
+  font-size: 11px;
+  color: var(--fg-2);
+}
+.attach-chip img {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+.attach-chip .attach-kind {
+  flex: none;
+  width: 22px;
+  text-align: center;
+  color: var(--fg-3);
+}
+.attach-chip .attach-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attach-chip .attach-size {
+  flex: none;
+  color: var(--fg-3);
+}
+.attach-chip .attach-del {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.attach-chip .attach-del:hover {
+  color: var(--red);
+}
+/* 消息气泡里的附件（已发送） */
+.bubble .bubble-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.bubble .bubble-files img {
+  max-width: 160px;
+  max-height: 110px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+}
+
+/*
+ * 控制行：思考模式 / 权限。
+ * 选择器本体是普通按钮，菜单**绝对定位在按钮上方**（bottom: 100%）——
+ * 关键点：展开时只覆盖在上方，不参与布局，所以输入框那一行纹丝不动。
+ */
+.chat-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px 6px;
+  background: var(--bg-surface);
+}
+.compose-select {
+  position: relative;
+}
+.compose-select > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  font-size: 11px;
+  color: var(--fg-2);
+  background: var(--bg-base);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.compose-select > button:hover {
+  color: var(--fg);
+  border-color: var(--blue);
+}
+.compose-select > button .cs-label {
+  color: var(--fg-3);
+}
+.compose-select.open > button {
+  color: var(--fg);
+  border-color: var(--blue);
+}
+.compose-select .cs-caret {
+  color: var(--fg-3);
+}
+.compose-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  min-width: 168px;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-2);
+  display: none;
+}
+.compose-select.open .compose-menu {
+  display: block;
+}
+.compose-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.compose-menu button:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.compose-menu button.active {
+  color: var(--blue);
+}
+.compose-menu .cm-check {
+  width: 12px;
+  color: var(--blue);
+}
+.compose-menu .cm-hint {
+  padding: 4px 8px 6px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+/* 顶栏模型选择：徽标可点 */
+.badge-btn {
+  cursor: pointer;
+  transition: color var(--t), border-color var(--t);
+}
+.badge-btn:hover {
+  color: var(--fg);
+  border-color: var(--blue);
+}
+.chat-head .compose-select .compose-menu {
+  left: auto;
+  right: 0;
+  min-width: 220px;
+}
+.compose-menu button .cm-model {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compose-menu button .cm-tag {
+  flex: none;
+  font-size: 10px;
+  color: var(--fg-3);
+}

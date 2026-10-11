@@ -38,6 +38,26 @@ const MAX_AUTO_QUERIES = 3;
 /** 回灌给模型的单次查询条数上限（只读；多了只会让提示词变贵、让它跑偏）。 */
 const MAX_QUERY_ITEMS = 20;
 
+/**
+ * 思考强度：映射到 OpenAI 兼容的 `reasoning_effort`。
+ * `none` 表示不带这个字段（也就是上游默认行为）。
+ */
+const THINKING_LEVELS = Object.freeze({ none: null, low: 'low', medium: 'medium', high: 'high' });
+
+/**
+ * 写入权限三档（UI 上叫「自动审批 / 手动审批 / 全部确认」）：
+ * - `auto`   自动审批：**写操作也自动执行**，结果以卡片回执（默认不选它，风险自负）；
+ * - `manual` 手动审批（默认）：只读查询自动跑，写操作必须点确认；
+ * - `strict` 全部确认：连只读查询也要用户点确认。
+ */
+const PERMISSIONS = Object.freeze(['auto', 'manual', 'strict']);
+
+/** 附件上限：图片走多模态直传，文本文件内联进提示词，其余只登记名字。 */
+const MAX_ATTACHMENTS = 8;
+const MAX_IMAGES = 4;
+const MAX_TEXT_CHARS = 20_000;
+const MAX_TEXT_TOTAL = 60_000;
+
 /** 会话标题最长多少字（取用户第一句话的开头）。 */
 const TITLE_MAX = 24;
 
@@ -76,6 +96,12 @@ export class AiChatService {
 
   maskConfig() {
     return maskAiConfig(this.config.get());
+  }
+
+  /** 上游可用的模型列表（给顶栏的模型选择器用）。 */
+  async listModels() {
+    const result = await this.provider.listModels();
+    return { ok: true, current: this.config.get().model, ...result };
   }
 
   /** 改配置：白名单字段才能进来；`apiKey: ""` 表示清空。 */
@@ -250,9 +276,13 @@ export class AiChatService {
    * @param {object} [input.context] `{ view, module, courseId }`
    * @param {boolean} [input.stream] 是否边生成边通过 WebSocket 广播
    */
-  async send({ text, conversationId, context = {}, stream = false } = {}) {
+  async send({ text, conversationId, context = {}, stream = false, attachments = [], thinking = 'none', permission = 'manual' } = {}) {
     const trimmed = String(text ?? '').trim();
-    if (!trimmed) throw HttpError.badRequest('text 不能为空');
+    const files = normalizeAttachments(attachments);
+    // 允许"只发附件不写字"，但两者都空就没意义
+    if (!trimmed && !files.length) throw HttpError.badRequest('text 不能为空');
+    const effort = THINKING_LEVELS[thinking] ?? null;
+    const mode = PERMISSIONS.includes(permission) ? permission : 'manual';
     if (!this.provider.configured()) {
       throw new HttpError(501, ERROR_CODES.AI_UNAVAILABLE, 'AI 尚未配置密钥，无法对话', {
         hint: '在设置里填 API Key，或 POST /api/v1/ai/config {"apiKey":"sk-…"}。',
@@ -260,15 +290,28 @@ export class AiChatService {
       });
     }
 
-    const conversation = conversationId ? this.getConversation(conversationId) : await this.createConversation(trimmed);
-    const userMessage = await this.#appendMessage({ conversationId: conversation.id, role: 'user', content: trimmed });
+    const conversation = conversationId
+      ? this.getConversation(conversationId)
+      : await this.createConversation(trimmed || files[0]?.name || '新对话');
+    const userMessage = await this.#appendMessage({
+      conversationId: conversation.id,
+      role: 'user',
+      content: trimmed,
+      // 只落**元信息**：base64 动辄几 MB，塞进 JSON 集合会把业务数据文件撑爆
+      attachments: files.map((file) => ({ name: file.name, type: file.type, size: file.size })),
+      thinking,
+      permission: mode,
+    });
 
     const enriched = await this.buildContext(context);
     // 作图：设置里开着就给（默认开），关着但用户用了「画…」这类指令词也临时给
     const draw = this.config.get().drawMode !== false || DRAW_KEYWORDS.test(trimmed);
+    const history = this.#history(conversation.id);
+    // #history 里最后一条就是刚存的用户正文，这里换成"正文 + 附件"的多模态版本
     const messages = [
       { role: 'system', content: buildChatSystemPrompt({ ...enriched, ...context, draw }) },
-      ...this.#history(conversation.id),
+      ...history.slice(0, -1),
+      { role: 'user', content: buildUserContent(trimmed, files) },
     ];
 
     // 先落一条占位消息：流式 delta 需要一个稳定的 messageId
@@ -279,6 +322,8 @@ export class AiChatService {
       status: stream ? 'streaming' : 'pending',
       model: this.config.get().model,
       provider: this.config.get().provider,
+      thinking,
+      permission: mode,
     });
 
     let partial = '';
@@ -286,6 +331,7 @@ export class AiChatService {
       const result = await this.provider.chat({
         messages,
         stream: Boolean(stream),
+        reasoningEffort: effort,
         onDelta: stream
           ? (delta) => {
               partial += delta;
@@ -304,9 +350,16 @@ export class AiChatService {
       // 只读查询**自动执行**：查询不改数据，让用户为"我明天有什么课"点一次确认毫无意义，
       // 更关键的是模型看不到结果就只能说"我拿不到数据"（实测它真的会这么说）。
       // 执行结果回灌给模型，它再用自然语言回答 —— 这是"只读工具先放开"的最小实现。
-      const queried = await this.#runReadOnlyQueries(previewed);
+      // 「全部确认」：连只读查询也要用户点确认，所以不自动执行
+      const autoQuery = mode !== 'strict';
+      const queried = autoQuery ? await this.#runReadOnlyQueries(previewed) : [];
       let content = extracted.text;
-      let drafts = previewed.filter((entry) => entry.draft?.action !== 'query' || entry.error);
+      let drafts = autoQuery
+        ? previewed.filter((entry) => entry.draft?.action !== 'query' || entry.error)
+        : previewed;
+      // 「自动审批」：写操作也直接执行（先过 dryRun 校验，再真执行）
+      const executed = mode === 'auto' ? await this.#autoExecuteWrites(drafts) : [];
+      if (executed.length) drafts = drafts.filter((entry) => !executed.some((item) => item.entry === entry));
       let followupUsage = null;
       let queryError = null;
 
@@ -314,6 +367,7 @@ export class AiChatService {
         try {
           const followup = await this.provider.chat({
             messages: this.#withQueryResults(messages, extracted.text, queried),
+            reasoningEffort: effort,
           });
           const answer = extractDrafts(followup.text);
           content = answer.text || followup.text;
@@ -330,6 +384,9 @@ export class AiChatService {
       const saved = await this.store.aiMessages.update(assistant.id, {
         content: content || (queried.length ? '已经查到数据。' : ''),
         drafts,
+        executed,
+        thinking,
+        permission: mode,
         // 只读查询的原始结果：前端据此画数据卡片，也方便排查"模型到底看到了什么"
         queried,
         status: 'done',
@@ -354,6 +411,10 @@ export class AiChatService {
         assistant: saved,
         drafts,
         queried,
+        executed,
+        // 把这一轮的选择回显给调用方：前端据此在气泡上标注"自动执行/思考强度"
+        thinking,
+        permission: mode,
       };
     } catch (error) {
       const failure = {
@@ -433,6 +494,28 @@ export class AiChatService {
     return out;
   }
 
+  /**
+   * 「自动审批」：把通过 dryRun 校验的写操作直接执行掉。
+   *
+   * 风险自负的一档 —— 它等于替用户点了确认。所以：
+   *   - 只执行 **dryRun 已通过** 的草稿（校验不过的一律留着走人工确认卡）；
+   *   - 逐条 try/catch，一条失败不影响其它条；
+   *   - 结果原样回给前端（渲染成"已自动执行"的回执卡），用户仍然看得见发生了什么。
+   */
+  async #autoExecuteWrites(drafts) {
+    const out = [];
+    for (const entry of drafts) {
+      if (entry.error || entry.draft?.action === 'query' || entry.draft?.ok === false) continue;
+      try {
+        const result = await this.commands.execute(entry.draft);
+        out.push({ entry, draft: entry.draft, result });
+      } catch (error) {
+        out.push({ entry, draft: entry.draft, error: { code: error.code ?? 'INTERNAL', message: error.message } });
+      }
+    }
+    return out;
+  }
+
   /** 只留模型回答需要的字段：整库塞进下一轮提示词既贵又容易跑偏。 */
   #compactQueryResult(target, result) {
     const FIELDS = {
@@ -487,4 +570,62 @@ export class AiChatService {
     }
     await this.store.aiConversations.update(id, patch);
   }
+}
+
+/* -------------------------------------------------------------- 附件处理 */
+
+/**
+ * 附件归一化。
+ *
+ * 三类分开处理（**不落 base64**，只在这一次请求里用）：
+ *   - 图片：转成多模态 `image_url`（需要模型本身支持看图，否则上游会报错）；
+ *   - 文本类（text/* 与常见后缀）：读成字符串内联进提示词，单文件 20k 字符、合计 60k 上限；
+ *   - 其它：只把文件名告诉模型，明确说"内容无法读取"，免得它假装看过。
+ */
+export function normalizeAttachments(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .slice(0, MAX_ATTACHMENTS)
+    .map((item) => ({
+      name: String(item?.name ?? '未命名').slice(0, 120),
+      type: String(item?.type ?? ''),
+      size: Number(item?.size) || 0,
+      dataUrl: typeof item?.dataUrl === 'string' ? item.dataUrl : '',
+      text: typeof item?.text === 'string' ? item.text.slice(0, MAX_TEXT_CHARS) : '',
+    }))
+    .filter((item) => item.dataUrl || item.text || item.name);
+}
+
+const TEXT_LIKE = /^(text\/|\.(txt|md|markdown|csv|json|ya?ml|log|ini|tex)$)/i;
+
+/** 组装送进模型的 user 内容：纯文本、或"文本 + 图片"的多模态数组。 */
+export function buildUserContent(text, files) {
+  const images = files.filter((file) => file.type.startsWith('image/') && file.dataUrl).slice(0, MAX_IMAGES);
+  const parts = [text || '（见附件）'];
+
+  const texts = files.filter((file) => file.text || TEXT_LIKE.test(file.type) || TEXT_LIKE.test(file.name));
+  let budget = MAX_TEXT_TOTAL;
+  if (texts.length) {
+    const blocks = [];
+    for (const file of texts) {
+      const body = file.text || '（没能读到内容）';
+      const clipped = body.slice(0, budget);
+      budget -= clipped.length;
+      blocks.push(`----- 附件：${file.name}（${file.size} 字节）-----\n${clipped}${clipped.length < body.length ? '\n…（已截断）' : ''}`);
+      if (budget <= 0) break;
+    }
+    parts.push(`\n\n【用户附上了文本文件，内容如下】\n${blocks.join('\n\n')}`);
+  }
+
+  const opaque = files.filter((file) => !images.includes(file) && !texts.includes(file));
+  if (opaque.length) {
+    parts.push(`\n\n【用户附了这些文件，但本程序读不了它们的内容，别假装看过】${opaque.map((file) => `${file.name}（${file.type || '未知类型'}，${file.size} 字节）`).join('、')}`);
+  }
+  const prompt = parts.join('');
+
+  if (!images.length) return prompt;
+  return [
+    { type: 'text', text: prompt },
+    ...images.map((file) => ({ type: 'image_url', image_url: { url: file.dataUrl } })),
+  ];
 }
