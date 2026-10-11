@@ -13,7 +13,7 @@ import path from 'node:path';
 import { HttpError } from '../../core/http/router.js';
 import { todayKey } from '../../shared/time.js';
 import { AUTH_STATUS, CasAuth, generateVisitorId } from './cas-auth.js';
-import { DEFAULT_SYNC_TYPES, resolveLmsConfig } from './config.js';
+import { DEFAULT_SYNC_TYPES, activityTypesOf, resolveLmsConfig } from './config.js';
 import { CookieJar, HttpClient } from './http-client.js';
 import { JsonFile } from './secret-store.js';
 import { LmsApi } from './api.js';
@@ -211,11 +211,13 @@ export class LmsService {
   }
 
   listActivities({ courseIds, type } = {}) {
+    // type 支持分组名（online = 直播 + 回放 + 在线视频），先归一成类型数组再匹配，见 config.js 的 activityTypesOf
+    const types = activityTypesOf(type);
     let items = this.store.lmsActivities
       .all()
       .map((record) => activityView(record))
       .filter((item) => (courseIds?.length ? courseIds.map(Number).includes(Number(item.courseId)) : true))
-      .filter((item) => (type ? item.type === type : true));
+      .filter((item) => (types ? types.includes(item.type) : true));
     items.sort((a, b) => String(a.endTime ?? a.startTime ?? '').localeCompare(String(b.endTime ?? b.startTime ?? '')));
     return { items, count: items.length, fetchedAt: this.state.lastActivitiesAt, loggedIn: this.state.status === 'ready' };
   }

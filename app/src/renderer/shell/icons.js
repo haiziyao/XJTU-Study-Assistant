@@ -19,6 +19,8 @@ window.PCIcons = (function () {
     checkSquare: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12.2l2.6 2.6L16 9.4"/>',
     cap: '<path d="M2.5 9.2L12 5l9.5 4.2L12 13.4z"/><path d="M6.5 11.6v4.2c0 1.1 2.5 2.2 5.5 2.2s5.5-1.1 5.5-2.2v-4.2"/>',
     chart: '<path d="M3.5 20.5h17"/><path d="M4 16.5l4.8-5.2 3.6 3.2L20 6.5"/><path d="M20 11V6.5h-4.5"/>',
+    note:
+      '<rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M9 3.5v17"/><path d="M12.4 8.2h4M12.4 12h4"/>',
     camera:
       '<path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h1.6l1.2-2h7.4l1.2 2h1.6A2.5 2.5 0 0 1 21 8.5v8A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/><circle cx="12" cy="12.4" r="3.4"/>',
     play: '<circle cx="12" cy="12" r="9"/><path d="M10 8.6l5.4 3.4-5.4 3.4z"/>',
@@ -40,6 +42,7 @@ window.PCIcons = (function () {
     '☑': 'checkSquare',
     '🎓': 'cap',
     '📈': 'chart',
+    '📝': 'note',
     '📷': 'camera',
     '▶': 'play',
     '✉': 'mail',

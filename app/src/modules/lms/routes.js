@@ -9,6 +9,7 @@
  */
 
 import { HttpError } from '../../core/http/router.js';
+import { activityTypesOf } from './config.js';
 
 const MAX_BODY_KEYS = 2000;
 
@@ -97,7 +98,9 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
 
   router.get(`${P}/activities`, async ({ query }) => {
     const courseIds = normalizeCourseIds(query.courseId ?? query.courseIds);
-    const typeFilter = (items) => (query.type ? items.filter((item) => item.type === query.type) : items);
+    // 与 lms.listActivities 用同一套归一：type 可以是 lesson/homework 这类底层类型，也可以是 online（网课 = 直播 + 回放 + 在线视频）分组
+    const types = activityTypesOf(query.type);
+    const typeFilter = (items) => (types ? items.filter((item) => types.includes(item.type)) : items);
     if (asBool(query.refresh)) {
       const refreshed = await lms.refreshActivities({ courseIds, force: true });
       return { ...refreshed, items: typeFilter(refreshed.items), count: typeFilter(refreshed.items).length };

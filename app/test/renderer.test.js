@@ -11,11 +11,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { createServer } from '../src/server/index.js';
+import { ACTIVITY_TYPE_LABEL } from '../src/modules/lms/config.js';
 
 /** 起服务，并取回 index.html 与它引用的全部资源。 */
 async function loadRenderer() {
@@ -116,8 +117,9 @@ test('视图注册表：顺序、插槽与跨模块服务符合外壳约定', as
     const main = ids('main');
     const bottom = ids('bottom');
 
-    // 左栏上部：日历 / 待办 / 思源学堂 / 学情 / 拍题 / 网课 / 消息（后三个暂为占位页）
-    assert.deepEqual(main, ['calendar', 'todo', 'lms', 'study', 'photo', 'course', 'message']);
+    // 左栏上部：日历 / 待办 / 思源学堂 / 学情 / 笔记系统 / 随手拍 / 消息（学情以后暂为占位页）
+    // 注意「网课」没有独立入口：直播 + 回放归到思源学堂视图里，左栏再出现 course 就是回归
+    assert.deepEqual(main, ['calendar', 'todo', 'lms', 'study', 'notes', 'snapshot', 'message']);
     // 左栏底部固定为设置
     assert.deepEqual(bottom, ['settings']);
 
@@ -125,6 +127,12 @@ test('视图注册表：顺序、插槽与跨模块服务符合外壳约定', as
       assert.equal(typeof view.render, 'function', `视图 ${view.id} 必须有 render`);
       assert.ok(view.label, `视图 ${view.id} 必须有 label`);
       assert.ok(view.title, `视图 ${view.id} 必须有 title`);
+    }
+
+    // 左栏图标：登记的 emoji 必须能在外壳图标表里命中，否则会退化成「一个裸 emoji」
+    for (const view of modules.list()) {
+      const svg = context.window.PCIcons?.svg?.(view.icon, 20);
+      assert.match(String(svg), /^<svg /, `视图 ${view.id} 的图标 ${view.icon} 应命中图标表`);
     }
 
     // 跨模块能力：日历模块提供的编辑弹层，其它视图通过服务取用而不是互相引用
@@ -144,5 +152,18 @@ test('静态资源不暴露 renderer 目录之外的文件', async () => {
     }
   } finally {
     await app.close();
+  }
+});
+
+test('思源学堂：活动类型的中文标签，前端与后端两份表必须同步', async () => {
+  // 前端是 classic script（模块内的 const 取不到），所以这里直接读源码比对：
+  // 后端 config.js 有、前端漏掉的话，真实账号里那些类型会在列表里显示成裸英文
+  // —— online_video（在线视频）就这么漏过一次，真机自检抓到的。
+  const source = await readFile(new URL('../src/renderer/views/lms.js', import.meta.url), 'utf8');
+  const block = source.match(/const LMS_ACTIVITY_LABEL = \{([\s\S]*?)\n\};/);
+  assert.ok(block, 'views/lms.js 里应有 LMS_ACTIVITY_LABEL');
+  const frontend = new Map([...block[1].matchAll(/^\s*([A-Za-z_]\w*):\s*'([^']*)'/gm)].map((m) => [m[1], m[2]]));
+  for (const [type, label] of Object.entries(ACTIVITY_TYPE_LABEL)) {
+    assert.equal(frontend.get(type), label, `前端缺 ${type} 的中文标签，会显示成裸英文`);
   }
 });

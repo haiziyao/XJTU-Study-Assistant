@@ -47,6 +47,28 @@ export const ACTIVITY_TYPES = ['homework', 'material', 'lesson', 'lecture_live']
 /** 同步时默认关心的活动类型：作业 + 直播（都带明确时间点，才值得进日历）。 */
 export const DEFAULT_SYNC_TYPES = ['homework', 'lecture_live'];
 
+/**
+ * 活动类型分组：一个分组名 = 多个底层 type。
+ *
+ * `online`（网课）= 直播 + 回放 + 在线视频 —— 学堂里同一门课的不同形态（真实账号里 952 条直播、
+ * 767 条回放、35 条在线视频），前端「网课」页签用同一套划分，所以 `/lms/activities?type=online`
+ * 也必须返回这三类，别让接口和界面各说各话。
+ * 注意：只有直播/回放带时刻，在线视频没有时间，因此它们不参与同步（见 sync.js）。
+ */
+export const ACTIVITY_TYPE_GROUPS = Object.freeze({
+  online: Object.freeze(['lecture_live', 'lesson', 'online_video']),
+});
+
+/**
+ * 把查询里的 `type` 归一成「要匹配的类型数组」。
+ * 未传返回 null（不过滤）；分组名返回组内类型；其余按精确匹配处理（未知类型也能查，结果为空数组而已）。
+ */
+export function activityTypesOf(type) {
+  const key = String(type ?? '').trim();
+  if (!key) return null;
+  return ACTIVITY_TYPE_GROUPS[key] ?? [key];
+}
+
 export const ACTIVITY_TYPE_LABEL = Object.freeze({
   homework: '作业',
   material: '资料',

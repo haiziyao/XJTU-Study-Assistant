@@ -3,6 +3,9 @@
  *
  * 这些功能尚未实现，但左栏先保留入口，让整体导航从第一天起就是完整形态。
  *
+ * 目前占位：学情 / 笔记系统 / 随手拍。
+ * 「网课」不再是独立入口 —— 直播与回放本来就来自思源学堂，已并入 `views/lms.js` 的「网课」页签。
+ *
  * **实现某个功能时**：
  *   1. 新建 `src/renderer/views/<id>.js`，用 PCModules.register 登记同名 id；
  *   2. 在 index.html 里加一行 `<script src="views/<id>.js"></script>`（放在本文件之后）；
@@ -26,27 +29,27 @@
       ],
     },
     {
-      id: 'photo',
-      label: '拍题',
-      icon: '📷',
+      id: 'notes',
+      label: '笔记系统',
+      icon: '📝',
       order: 50,
-      desc: '拍题与题目识别属于主程序能力，本模块预留入口与数据挂载点。',
+      desc: '笔记的正文与图片归主程序（AI 智学）持有，本模块只预留入口与数据挂载点。',
       bullets: [
-        '建议由主程序做 OCR，识别后通过 /api/v1/commands/parse 生成日程草稿',
-        '或直接 POST /api/v1/events 写入「做题计划」类日历事件',
-        '本模块不处理图片，避免引入额外依赖',
+        '与日历联动：一条笔记可以挂到某一天或某条日程，区间数据见 /api/v1/calendar?from=&to=',
+        '「随手拍」拍下的内容先落到笔记，再由主程序做识别与整理',
+        '待主程序接入：全文检索、Markdown 渲染、导出（本模块不落库笔记正文）',
       ],
     },
     {
-      id: 'course',
-      label: '网课',
-      icon: '▶',
+      id: 'snapshot',
+      label: '随手拍',
+      icon: '📷',
       order: 60,
-      desc: '网课播放与进度记录属于主程序能力，本模块提供时间轴对齐。',
+      desc: '随手拍只负责「拍下来先存着」，识别与整理交给笔记系统与主程序。',
       bullets: [
-        '课程表：以「日程」形式写入，分类选 class',
-        '直播/回放时间可复用提醒能力（reminders.offsetMinutes）',
-        '学习时长统计见 /api/v1/schedules/stats',
+        '拍摄 / 选图由主程序或系统能力完成，本模块不处理图片二进制',
+        '一条随手拍确认后：进「笔记系统」，或用 POST /api/v1/todos、POST /api/v1/events 生成待办 / 日程',
+        '落库时间沿用日历统一的日期与时刻语义（YYYY-MM-DD、HH:MM）',
       ],
     },
   ];

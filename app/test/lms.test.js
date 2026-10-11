@@ -14,7 +14,7 @@ import path from 'node:path';
 
 import { createServer } from '../src/server/index.js';
 import { normalizeCourse } from '../src/modules/lms/api.js';
-import { ACTIVITY_TYPE_LABEL } from '../src/modules/lms/config.js';
+import { ACTIVITY_TYPE_LABEL, activityTypesOf } from '../src/modules/lms/config.js';
 import { buildSyncPlan, refineActivityTitle } from '../src/modules/lms/sync.js';
 import { parseLmsTime } from '../src/modules/lms/time.js';
 import { startMockLms } from './helpers/lms-mock.js';
@@ -214,6 +214,19 @@ test('思源学堂：课程与活动拉取并落地缓存', async () => {
     const homeworkFresh = await call('GET', '/lms/activities?type=homework&refresh=1');
     assert.equal(homeworkFresh.body.count, 4);
     assert.ok(homeworkFresh.body.items.every((item) => item.type === 'homework'));
+
+    // 「网课」= 直播 + 回放：界面上的网课页签与这里的 type=online 必须是同一套划分
+    const online = await call('GET', '/lms/activities?type=online');
+    assert.equal(online.body.count, 2);
+    assert.deepEqual(online.body.items.map((item) => item.type).sort(), ['lecture_live', 'lesson']);
+    const onlineFresh = await call('GET', '/lms/activities?type=online&refresh=1');
+    assert.equal(onlineFresh.body.count, 2, 'refresh 分支也要认分组名');
+    // 单个底层类型仍然可以精确查
+    assert.equal((await call('GET', '/lms/activities?type=lesson')).body.count, 1);
+    // 分组划分本身：在线视频（真实账号里有 35 条）也算网课，但它没有时刻，不参与同步
+    assert.deepEqual(activityTypesOf('online'), ['lecture_live', 'lesson', 'online_video']);
+    assert.deepEqual(activityTypesOf('homework'), ['homework']);
+    assert.equal(activityTypesOf(''), null, '不传 type 表示不过滤');
 
     const one = await call('GET', '/lms/activities/5001');
     assert.equal(one.body.item.type, 'homework');

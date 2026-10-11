@@ -65,13 +65,24 @@ const LMS_STATUS_LABEL = {
   error: '登录异常',
 };
 
+/**
+ * 活动类型页签。
+ *
+ * 「网课」= 直播 + 回放 + 在线视频（见 LMS_TYPE_MATCH），都是学堂里同一门课的形态，
+ * 所以左栏不再单开一个「网课」入口 —— 网课就长在思源学堂里，每一行仍标注具体是哪种。
+ * 后端 `/lms/activities?type=online` 用的是同一套划分（modules/lms/config.js）。
+ */
 const LMS_TYPE_TABS = [
   ['', '全部'],
   ['homework', '作业'],
-  ['lecture_live', '直播'],
-  ['lesson', '回放'],
+  ['online', '网课'],
   ['material', '资料'],
 ];
+
+/** 页签值 -> 命中的底层类型；不在表里就按 type 精确匹配。 */
+const LMS_TYPE_MATCH = {
+  online: ['lecture_live', 'lesson', 'online_video'],
+};
 
 const LMS_ACTIVITY_LABEL = {
   homework: '作业',
@@ -79,6 +90,15 @@ const LMS_ACTIVITY_LABEL = {
   lesson: '课程回放',
   material: '资料',
   course: '课程',
+  // 下面这些是实测真实账号里出现、不参与同步的类型。**必须和后端 config.js 的
+  // ACTIVITY_TYPE_LABEL 保持一致**，否则列表里会冒出裸英文（online_video 就漏过一次）。
+  page: '课程页面',
+  forum: '讨论',
+  web_link: '外部链接',
+  online_video: '在线视频',
+  questionnaire: '问卷',
+  exam: '考试',
+  unknown: '其它',
 };
 
 const LMS_ACTION_LABEL = { create: '新建', update: '更新', skip: '跳过', stale: '失效' };
@@ -921,7 +941,11 @@ function lmsCourseRow(course) {
 /** 活动列表：类型与课程都在前端过滤（后端 refresh 时不做类型过滤）。 */
 function lmsVisibleActivities() {
   let items = lmsUi.activities?.items ?? [];
-  if (lmsUi.activityType) items = items.filter((item) => item.type === lmsUi.activityType);
+  if (lmsUi.activityType) {
+    // 「网课」页签命中直播 + 回放两种类型，其余页签精确匹配
+    const types = LMS_TYPE_MATCH[lmsUi.activityType] ?? [lmsUi.activityType];
+    items = items.filter((item) => types.includes(item.type));
+  }
   if (lmsUi.activityCourseId) {
     items = items.filter((item) => String(item.courseId) === String(lmsUi.activityCourseId));
   }
@@ -1047,7 +1071,7 @@ function lmsSyncCard(ready) {
   };
   optionRow('includePast', '包含过期内容');
   optionRow('includeSubmitted', '包含已提交作业', '默认不导入');
-  optionRow('includeLesson', '导入课程回放');
+  optionRow('includeLesson', '导入网课回放');
   optionRow('includeCourseRange', '整学期课程做成日历事件', '整段日期内都会显示');
   optionRow('pruneStale', '同步时清理失效记录', '删除学堂已下架的条目');
   card.appendChild(checks);
