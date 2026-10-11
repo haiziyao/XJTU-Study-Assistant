@@ -13,7 +13,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { createServer } from '../src/server/index.js';
-import { buildSyncPlan } from '../src/server/lms/sync.js';
+import { normalizeCourse } from '../src/server/lms/api.js';
+import { buildSyncPlan, refineActivityTitle } from '../src/server/lms/sync.js';
 import { parseLmsTime } from '../src/server/lms/time.js';
 import { startMockLms } from './helpers/lms-mock.js';
 
@@ -511,6 +512,31 @@ test('思源学堂：自动同步设置与执行', async () => {
   }
 });
 
+test('思源学堂：清洗真实活动标题并提取教室', () => {
+  // 实测学校返回：直播标题带日期前缀，回放标题里夹着教室与时段
+  assert.deepEqual(refineActivityTitle('材料力学 教2楼-西203 2026-09-14 08:00:00-08:50:00', '材料力学'), { title: '材料力学', location: '教2楼-西203' });
+  assert.deepEqual(refineActivityTitle('2026-09-14-材料力学', '材料力学'), { title: '材料力学', location: null });
+  assert.deepEqual(refineActivityTitle('第一次作业：链表', '数据结构'), { title: '第一次作业：链表', location: null });
+  assert.deepEqual(refineActivityTitle('', '数据结构'), { title: '数据结构', location: null });
+
+  const plan = buildSyncPlan({
+    courses: [{ id: 1, name: '材料力学' }],
+    activities: [
+      { id: 900, courseId: 1, type: 'lesson', title: '材料力学 教2楼-西203 2026-10-14 08:00:00-08:50:00', startTime: '2026-10-14T08:00:00+08:00', endTime: '2026-10-14T08:50:00+08:00' },
+      { id: 901, courseId: 1, type: 'lecture_live', title: '2026-10-15-材料力学', startTime: '2026-10-15T10:00:00+08:00', endTime: '2026-10-15T10:50:00+08:00' },
+    ],
+    options: { today: '2026-10-11', types: ['lesson', 'lecture_live'] },
+  });
+  const lesson = plan.items.find((item) => item.key === 'lms:activity:900');
+  assert.equal(lesson.payload.title, '材料力学', '标题里已有课程名就不再重复加前缀');
+  assert.equal(lesson.payload.location, '教2楼-西203', '回放标题里的教室要变成日程地点');
+  assert.equal(lesson.payload.startTime, '08:00');
+  const live = plan.items.find((item) => item.key === 'lms:activity:901');
+  assert.equal(live.payload.title, '材料力学', '直播标题的日期前缀要去掉');
+  assert.equal(live.payload.location, null ?? live.payload.location, '没有教室信息时不写 location');
+  assert.equal(live.payload.location, undefined);
+});
+
 test('思源学堂：时间解析按北京时间处理两种格式', () => {
   assert.deepEqual(parseLmsTime('2026-10-13T10:00:00+08:00'), { date: '2026-10-13', time: '10:00', iso: '2026-10-13T02:00:00.000Z' });
   assert.deepEqual(parseLmsTime('2026-10-13T10:00:00'), { date: '2026-10-13', time: '10:00', iso: null });
@@ -520,6 +546,17 @@ test('思源学堂：时间解析按北京时间处理两种格式', () => {
   assert.equal(parseLmsTime(null), null);
   // 同一时刻的 UTC 写法（Z）也必须落到北京时间同一天
   assert.equal(parseLmsTime('2026-10-12T17:30:00Z').date, '2026-10-13');
+});
+
+test('思源学堂：真实数据里学期只有 code 时也能给出可读标签', () => {
+  // 实测学校返回：semester.name / real_name 都是 null，只有 code = "2026-1"
+  const onlyCode = normalizeCourse({ id: 1, name: '材料力学', academic_year: { code: '2026', name: '2026-2027' }, semester: { id: 23, code: '2026-1', name: null, real_name: null } });
+  assert.equal(onlyCode.semester.label, '2026-2027 学年 · 第 1 学期');
+  const withName = normalizeCourse({ id: 2, name: 'X', semester: { id: 1, code: '2026-1', name: '秋季学期' } });
+  assert.equal(withName.semester.label, '秋季学期');
+  const noSemester = normalizeCourse({ id: 3, name: 'Y' });
+  assert.equal(noSemester.semester, null);
+  assert.equal(normalizeCourse({ name: '没有 id' }), null, '缺 id 的脏数据直接丢弃');
 });
 
 test('思源学堂：同步计划在缺少 today 时直接报错', () => {

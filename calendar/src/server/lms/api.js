@@ -78,9 +78,27 @@ const toIntOrNull = (value) => {
 const str = (value) => (value === undefined || value === null ? null : String(value));
 const bool = (value) => value === true || value === 'true' || value === 1 || value === '1';
 
+/**
+ * 学期信息。
+ *
+ * 实测学校里 `semester.name` / `semester.real_name` 都可能是 null（只给 `code: "2026-1"`），
+ * 所以这里额外算一个可读的 `label`（优先 real_name > name > 「<学年> 学年 · 第 N 学期」），
+ * 前端直接用 label 就不会出现「学期：」后面空白。
+ */
 function normalizeSemester(raw) {
   if (!raw || typeof raw !== 'object') return null;
-  return { id: toIntOrNull(raw.id), code: str(raw.code), name: str(raw.name), realName: str(raw.real_name ?? raw.realName) };
+  const name = str(raw.name);
+  const realName = str(raw.real_name ?? raw.realName);
+  return { id: toIntOrNull(raw.id), code: str(raw.code), name, realName, label: realName ?? name };
+}
+
+/** 用「学年 + 学期 code」拼一个兜底 label（学年信息在课程上，所以单独处理）。 */
+function withSemesterLabel(course, raw) {
+  if (!course.semester || course.semester.label) return course;
+  const year = str(raw?.academic_year?.name ?? raw?.academicYear?.name);
+  const index = String(course.semester.code ?? '').split('-')[1];
+  const parts = [year ? `${year} 学年` : null, index ? `第 ${index} 学期` : course.semester.code].filter(Boolean);
+  return { ...course, semester: { ...course.semester, label: parts.length ? parts.join(' · ') : null } };
 }
 
 function normalizeInstructors(raw) {
@@ -98,7 +116,7 @@ export function normalizeCourse(raw) {
   const id = toIntOrNull(raw.id);
   if (id === null) return null;
   const attributes = raw.course_attributes ?? raw.courseAttributes ?? {};
-  return {
+  const course = {
     id,
     name: str(raw.name) ?? `课程 ${id}`,
     courseCode: str(raw.course_code ?? raw.courseCode),
@@ -122,6 +140,7 @@ export function normalizeCourse(raw) {
       : null,
     instructors: normalizeInstructors(raw.instructors),
   };
+  return withSemesterLabel(course, raw);
 }
 
 export function normalizeActivity(raw) {

@@ -27,6 +27,11 @@
   通过 `GET /ai/capabilities` 的 `lmsTools` 暴露，未来接入模型时直接注册成 function-calling 工具。
 - **自动同步（可选）**：`POST /lms/settings { autoSync, autoSyncIntervalHours }` 打开后，服务每 30 分钟检查一次，
   到间隔就按默认规则执行同步（只新建/更新，**不删除**任何记录），结果写入 `data/lms-meta.json`；默认关闭。
+- **真机数据适配**（用真实账号拉 54 门课 / 单课 24 条活动后修正）：
+  学期字段只有 `code`（如 `2026-1`），`name` / `real_name` 都是 null，现在补一个可读 `label`
+  （`2026-2027 学年 · 第 1 学期`），界面不会再显示空的「学期：」；
+  直播标题形如 `2026-09-14-材料力学`（去掉日期前缀、课程名不重复加前缀），
+  回放标题形如 `材料力学 教2楼-西203 2026-09-14 08:00:00-08:50:00`（把教室提取为日程 `location`）。
 - **自检脚本** `scripts/lms-probe.js`：不需要账号密码，打印真实跳转链（lms → identity1 → CAS）、
   `execution` / `mfaEnabled` 解析结果、RSA 公钥与加密结果、验证码接口可用性，用于区分「环境问题」与「账号问题」。
 - **测试**：`test/helpers/lms-mock.js` 复刻 CAS + 思源学堂（含 RSA 加密校验、Cookie、两步验证、失败提示、验证码图片），

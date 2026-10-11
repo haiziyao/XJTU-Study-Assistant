@@ -40,6 +40,39 @@ function priorityForDeadline(today, deadlineDate) {
   return 0;
 }
 
+/**
+ * 清洗活动标题。
+ *
+ * 实测学校返回的活动标题长这样：
+ *   直播：`2026-09-14-材料力学`
+ *   回放：`材料力学 教2楼-西203 2026-09-14 08:00:00-08:50:00`
+ * 直接拿去当日程标题会又长又重复，所以这里去掉日期前缀，
+ * 并把回放标题里的教室抠出来放进 `location`（日历里上课地点很有用）。
+ */
+export function refineActivityTitle(rawTitle, courseName) {
+  let text = String(rawTitle ?? '').trim();
+  text = text.replace(/^\d{4}[-/]\d{1,2}[-/]\d{1,2}[-_\s]*/, '').trim();
+  let location = null;
+  if (courseName && text.startsWith(courseName)) {
+    const rest = text.slice(courseName.length).trim();
+    const match = rest.match(/^(.+?)\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}/);
+    if (match) {
+      location = match[1].trim() || null;
+      text = courseName;
+    } else if (!rest) {
+      text = courseName;
+    }
+  }
+  return { title: text || courseName || '', location };
+}
+
+/** 标题里已经有课程名就不再重复加前缀。 */
+function composeTitle(title, courseName) {
+  if (!courseName) return title;
+  if (!title) return courseName;
+  return title.includes(courseName) ? title : `[${courseName}] ${title}`;
+}
+
 function courseMapOf(courses) {
   const map = new Map();
   for (const course of courses ?? []) map.set(Number(course.id), course);
@@ -117,8 +150,9 @@ export function activityToItem(activity, { course, today, options }) {
     if (base.submitted && options.skipSubmitted && !existing) {
       return { ...base, action: 'skip', reason: '已提交，未导入' };
     }
+    const refinedHomework = refineActivityTitle(activity.title, course?.name ?? null);
     const payload = {
-      title: clip(course?.name ? `[${course.name}] ${activity.title}` : activity.title),
+      title: clip(composeTitle(refinedHomework.title, course?.name ?? null)),
       description: describe({ course, activity, deadlineText: formatDeadline(activity.endTime ?? activity.startTime), type }),
       category: 'study',
       date: deadline.date,
@@ -143,10 +177,12 @@ export function activityToItem(activity, { course, today, options }) {
     if (!options.includePast && date < today) return { ...base, action: 'skip', reason: '已结束（可勾选「包含过期」再同步）' };
     const timed = Boolean(start?.time);
     const existing = options.existingByExternalId.get(base.key);
+    const refined = refineActivityTitle(activity.title, course?.name ?? null);
     const payload = {
-      title: clip(course?.name ? `[${course.name}] ${activity.title}` : activity.title),
+      title: clip(composeTitle(refined.title, course?.name ?? null)),
       description: describe({ course, activity, deadlineText: formatDeadline(activity.startTime), type }),
       category: 'class',
+      location: refined.location ?? undefined,
       date,
       allDay: !timed,
       status: existing?.status ?? 'pending',
@@ -168,10 +204,12 @@ export function activityToItem(activity, { course, today, options }) {
     if (!start) return { ...base, action: 'skip', reason: '回放没有时间信息' };
     if (!options.includePast && start.date < today) return { ...base, action: 'skip', reason: '已过期' };
     const existing = options.existingByExternalId.get(base.key);
+    const refinedReplay = refineActivityTitle(activity.title, course?.name ?? null);
     const payload = {
-      title: clip(course?.name ? `[${course.name}] 回放 ${activity.title}` : `回放 ${activity.title}`),
+      title: clip(composeTitle(refinedReplay.title, course?.name ?? null)),
       description: describe({ course, activity, deadlineText: formatDeadline(activity.startTime), type }),
       category: 'class',
+      location: refinedReplay.location ?? undefined,
       date: start.date,
       allDay: !start.time,
       status: existing?.status ?? 'pending',

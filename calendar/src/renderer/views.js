@@ -2277,7 +2277,7 @@ function lmsCourseRow(course) {
   row.appendChild(title);
 
   const teachers = (course.instructors ?? []).map((item) => item?.name).filter(Boolean).join('、');
-  const semester = course.semester?.realName || course.semester?.name;
+  const semester = course.semester?.realName || course.semester?.name || course.semester?.label;
   const meta1 = [
     teachers ? `教师：${teachers}` : null,
     course.credit ? `学分：${course.credit}` : null,
