@@ -1821,3 +1821,20 @@ body.panel-collapsed .panel {
   font-size: 10px;
   color: var(--fg-3);
 }
+
+/* 思考过程卡（思考模式才有）：与操作卡同款折叠，配色走中性灰 */
+.op-think {
+  border-color: color-mix(in srgb, var(--fg-3) 45%, var(--line));
+  background: color-mix(in srgb, var(--fg-3) 8%, var(--bg-surface));
+}
+.op-think .op-chip {
+  color: var(--fg-3);
+}
+.think-text {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg-3);
+  white-space: pre-wrap;
+  max-height: 320px;
+  overflow-y: auto;
+}

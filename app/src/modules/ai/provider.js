@@ -16,8 +16,11 @@ import { HttpError } from '../../core/http/router.js';
 
 import { redactSecret } from './config.js';
 
-/** 上游列不出模型时的候选（DeepSeek 官方常用两个；换端点也能手动填模型名）。 */
-const BUILTIN_MODELS = ['deepseek-chat', 'deepseek-reasoner'];
+/**
+ * 上游列不出模型时的候选。取值来自官方文档的 Chat Completions 「Possible values」：
+ * `deepseek-flash`（快、便宜、**支持看图**）与 `deepseek-v4-pro`（更强、不看图）。
+ */
+const BUILTIN_MODELS = ['deepseek-flash', 'deepseek-v4-pro'];
 
 /** 上游报错体截断长度：够定位问题，又不至于把整页 HTML 塞进响应。 */
 const MAX_ERROR_BODY = 400;
@@ -40,12 +43,13 @@ function unavailableError(config) {
  * 解析 SSE 流：只认 `data:` 行，忽略注释与心跳。
  * 返回累计文本、usage 与结束原因；过程中每块都回调 `onDelta(delta, { text })`。
  */
-async function readStream(response, { onDelta, model }) {
+async function readStream(response, { onDelta, onReasoning, model }) {
   const reader = response.body?.getReader?.();
   if (!reader) throw HttpError.upstream('上游没有返回可读的流');
   const decoder = new TextDecoder();
   let buffer = '';
   let text = '';
+  let reasoning = '';
   let usage = null;
   let finishReason = null;
 
@@ -71,6 +75,12 @@ async function readStream(response, { onDelta, model }) {
         throw HttpError.upstream(`上游在流中报错：${chunk.error.message ?? '未知错误'}`, { upstreamError: chunk.error });
       }
       const choice = chunk.choices?.[0];
+      // 思考模式的增量：`reasoning_content` 先来，`content` 后到（两者可能交错）
+      const thinking = choice?.delta?.reasoning_content ?? '';
+      if (thinking) {
+        reasoning += thinking;
+        onReasoning?.(thinking, { reasoning });
+      }
       const delta = choice?.delta?.content ?? choice?.message?.content ?? '';
       if (delta) {
         text += delta;
@@ -81,7 +91,7 @@ async function readStream(response, { onDelta, model }) {
     }
   }
 
-  return { text, usage, finishReason, model, streamed: true };
+  return { text, reasoning, usage, finishReason, model, streamed: true };
 }
 
 /**
@@ -93,7 +103,7 @@ export function createOpenAiCompatProvider({ getConfig, fetchImpl = globalThis.f
   if (typeof fetchImpl !== 'function') throw new Error('createOpenAiCompatProvider 需要可用的 fetch');
 
   /** 真正的上游调用，流式/非流式共用入口与错误映射。 */
-  async function chat({ messages, temperature, stream = false, onDelta, signal, reasoningEffort } = {}) {
+  async function chat({ messages, temperature, stream = false, onDelta, onReasoning, signal, reasoningEffort } = {}) {
     const config = getConfig();
     if (!config.apiKey) throw unavailableError(config);
     if (!Array.isArray(messages) || !messages.length) throw HttpError.badRequest('messages 不能为空');
@@ -121,8 +131,9 @@ export function createOpenAiCompatProvider({ getConfig, fetchImpl = globalThis.f
           messages,
           temperature: temperature ?? config.temperature,
           stream: Boolean(stream),
-          // 思考强度：OpenAI 兼容端点认 `reasoning_effort`（low/medium/high）。
-          // 「无」就不带这个字段；上游不认识它时会忽略（DeepSeek 官方 API 忽略未知字段）。
+          // 思考强度：官方取值 none / low / high / max（medium 只是兼容别名，会映射成 high）。
+          // 注意**必须显式传**：DeepSeek 的思考模式默认是打开的（effort 默认 high），
+          // 省略字段 ≠ 关闭思考。
           ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         }),
         signal: controller.signal,
@@ -166,6 +177,8 @@ export function createOpenAiCompatProvider({ getConfig, fetchImpl = globalThis.f
       const choice = data.choices?.[0] ?? {};
       return {
         text: choice.message?.content ?? '',
+        // 思考模式下思维链与 content 同级返回；不给 UI 看就等于白花钱算了
+        reasoning: choice.message?.reasoning_content ?? '',
         model: data.model ?? config.model,
         usage: data.usage ?? null,
         finishReason: choice.finish_reason ?? null,
@@ -174,7 +187,7 @@ export function createOpenAiCompatProvider({ getConfig, fetchImpl = globalThis.f
     }
 
     try {
-      return await readStream(response, { onDelta, model: config.model });
+      return await readStream(response, { onDelta, onReasoning, model: config.model });
     } catch (error) {
       if (error instanceof HttpError) throw error;
       if (timedOut) {

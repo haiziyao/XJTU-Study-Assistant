@@ -88,7 +88,7 @@ function aiCard(ai) {
 
   const form = mk('div', 'ai-form');
   const keyInput = input({ type: 'password', placeholder: 'API Key（例如 sk-…）', autocomplete: 'off' });
-  const modelInput = input({ type: 'text', placeholder: '模型，留空不改（默认 deepseek-chat）' });
+  const modelInput = input({ type: 'text', placeholder: '模型，留空不改（默认 deepseek-flash）' });
   const baseInput = input({ type: 'text', placeholder: '接口地址，留空不改（OpenAI 兼容端点）' });
   const drawBox = mk('input');
   drawBox.type = 'checkbox';

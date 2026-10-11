@@ -39,10 +39,27 @@ const MAX_AUTO_QUERIES = 3;
 const MAX_QUERY_ITEMS = 20;
 
 /**
- * 思考强度：映射到 OpenAI 兼容的 `reasoning_effort`。
- * `none` 表示不带这个字段（也就是上游默认行为）。
+ * 思考强度 → 官方 `reasoning_effort`。
+ *
+ * 官方合法取值只有 `none / low / high / max`（**没有 medium**：它只是兼容别名，会映射成 high，
+ * 所以这里不再对外暴露"中"，免得界面说"中"、上游当"高"）。
+ * 另外：DeepSeek 的思考模式**默认就是开的**（effort 默认 high），所以关闭时必须显式传 `none`。
  */
-const THINKING_LEVELS = Object.freeze({ none: null, low: 'low', medium: 'medium', high: 'high' });
+const THINKING_LEVELS = Object.freeze({
+  none: 'none',
+  low: 'low',
+  high: 'high',
+  max: 'max',
+  // 兼容旧前端/别名
+  medium: 'high',
+  minimal: 'low',
+  xhigh: 'high',
+});
+
+/** 支持看图的官方模型（见「图像理解」文档：目前只有 flash）。 */
+const VISION_MODELS = /flash/i;
+/** 官方支持的图片格式；**按内容判断**，所以只认 data URL 里的 MIME。 */
+const IMAGE_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
 
 /**
  * 写入权限三档（UI 上叫「自动审批 / 手动审批 / 全部确认」）：
@@ -260,6 +277,8 @@ export class AiChatService {
         { role: 'user', content: trimmed },
       ],
       temperature: 0,
+      // 把一句话解析成 JSON 是结构化抽取，开思考纯属烧 token（而且思考模式下 temperature 不生效）
+      reasoningEffort: THINKING_LEVELS.none,
     });
     const { drafts } = extractDrafts(result.text);
     if (!drafts.length) {
@@ -276,12 +295,20 @@ export class AiChatService {
    * @param {object} [input.context] `{ view, module, courseId }`
    * @param {boolean} [input.stream] 是否边生成边通过 WebSocket 广播
    */
-  async send({ text, conversationId, context = {}, stream = false, attachments = [], thinking = 'none', permission = 'manual' } = {}) {
+  async send({ text, conversationId, context = {}, stream = false, attachments = [], thinking = 'high', permission = 'manual' } = {}) {
     const trimmed = String(text ?? '').trim();
     const files = normalizeAttachments(attachments);
+    const model = this.config.get().model;
+    const images = files.filter((file) => IMAGE_TYPES.includes(file.type) && file.dataUrl);
+    if (images.length && isKnownNonVisionModel(model)) {
+      throw HttpError.badRequest(`${model} 不支持图片输入；换成 deepseek-flash 再发，或去掉图片`, {
+        field: 'attachments',
+        hint: '官方「图像理解」文档：目前只有 deepseek-flash 支持看图',
+      });
+    }
     // 允许"只发附件不写字"，但两者都空就没意义
     if (!trimmed && !files.length) throw HttpError.badRequest('text 不能为空');
-    const effort = THINKING_LEVELS[thinking] ?? null;
+    const effort = THINKING_LEVELS[thinking] ?? 'high';
     const mode = PERMISSIONS.includes(permission) ? permission : 'manual';
     if (!this.provider.configured()) {
       throw new HttpError(501, ERROR_CODES.AI_UNAVAILABLE, 'AI 尚未配置密钥，无法对话', {
@@ -327,6 +354,7 @@ export class AiChatService {
     });
 
     let partial = '';
+    let partialReasoning = '';
     try {
       const result = await this.provider.chat({
         messages,
@@ -339,6 +367,23 @@ export class AiChatService {
                 type: 'ai_delta',
                 module: 'ai',
                 payload: { conversationId: conversation.id, messageId: assistant.id, delta, text: partial },
+              });
+            }
+          : undefined,
+        // 思维链单独一条通道：前端把它放进默认折叠的「思考过程」卡里，不和正文混在一起
+        onReasoning: stream
+          ? (delta) => {
+              partialReasoning += delta;
+              this.broadcast?.({
+                type: 'ai_delta',
+                module: 'ai',
+                payload: {
+                  conversationId: conversation.id,
+                  messageId: assistant.id,
+                  channel: 'reasoning',
+                  delta,
+                  text: partialReasoning,
+                },
               });
             }
           : undefined,
@@ -387,6 +432,8 @@ export class AiChatService {
         executed,
         thinking,
         permission: mode,
+        // 思维链最多留 2 万字：它是给人看/排查的，不是数据
+        reasoning: String(result.reasoning ?? partialReasoning ?? '').slice(0, 20_000) || null,
         // 只读查询的原始结果：前端据此画数据卡片，也方便排查"模型到底看到了什么"
         queried,
         status: 'done',
@@ -598,9 +645,16 @@ export function normalizeAttachments(list) {
 
 const TEXT_LIKE = /^(text\/|\.(txt|md|markdown|csv|json|ya?ml|log|ini|tex)$)/i;
 
+/** 已知不支持看图的官方模型（`deepseek-v4-pro`）；其它端点/模型不拦，交给上游判断。 */
+function isKnownNonVisionModel(model) {
+  return /^deepseek-v4-pro$/i.test(String(model ?? '').trim());
+}
+
 /** 组装送进模型的 user 内容：纯文本、或"文本 + 图片"的多模态数组。 */
 export function buildUserContent(text, files) {
-  const images = files.filter((file) => file.type.startsWith('image/') && file.dataUrl).slice(0, MAX_IMAGES);
+  // 只送官方支持的四种格式：格式不对上游会 400（官方按**文件内容**判断格式），
+  // 所以不认识的一律降级成"读不了的文件"，而不是硬塞进去赌一把
+  const images = files.filter((file) => IMAGE_TYPES.includes(file.type) && file.dataUrl).slice(0, MAX_IMAGES);
   const parts = [text || '（见附件）'];
 
   const texts = files.filter((file) => file.text || TEXT_LIKE.test(file.type) || TEXT_LIKE.test(file.name));

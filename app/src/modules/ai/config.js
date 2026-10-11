@@ -20,7 +20,9 @@ import { JsonFile } from './secret-store.js';
 export const AI_DEFAULTS = Object.freeze({
   provider: 'deepseek',
   baseUrl: 'https://api.deepseek.com/v1',
-  model: 'deepseek-chat',
+  // 官方 Chat Completions 的合法取值是 deepseek-flash / deepseek-v4-pro；
+  // 默认用 flash（快、便宜，而且是**唯一支持看图**的那个）
+  model: 'deepseek-flash',
   timeoutMs: 60_000,
   temperature: 0.3,
   /** 送进模型的历史轮数（一轮 = 一问一答）；0 表示不带历史。 */

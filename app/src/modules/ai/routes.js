@@ -72,8 +72,10 @@ export function registerAiRoutes(router, { ai, apiPrefix }) {
       stream: asBool(body?.stream),
       // 附件只在本轮使用：图片走多模态，文本内联进提示词（见 chat-service 的 normalizeAttachments）
       attachments: Array.isArray(body?.attachments) ? body.attachments : [],
-      // 思考强度与写入权限：都是"这一轮"的选择，跟着消息一起落库
-      thinking: typeof body?.thinking === 'string' ? body.thinking : 'none',
+      // 思考强度与写入权限：都是"这一轮"的选择，跟着消息一起落库。
+      // thinking 不传就交给服务层用默认值（官方默认是**开思考**、effort=high）——
+      // 这里**不能**兜成 'none'，否则"没传"会变成"关掉思考"，和官方语义相反。
+      thinking: typeof body?.thinking === 'string' ? body.thinking : undefined,
       permission: typeof body?.permission === 'string' ? body.permission : 'manual',
     });
   });

@@ -91,13 +91,29 @@ export async function startMockAi(options = {}) {
           JSON.stringify({
             id: 'chatcmpl-mock',
             model: body?.model ?? 'mock-model',
-            choices: [{ index: 0, message: { role: 'assistant', content: reply }, finish_reason: 'stop' }],
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: 'assistant',
+                  content: reply,
+                  // 思考模式下思维链与 content 同级返回
+                  ...(options.reasoning ? { reasoning_content: options.reasoning } : {}),
+                },
+                finish_reason: 'stop',
+              },
+            ],
             usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 },
           }),
         );
       }
 
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+      // 思维链先流，再流正文（与真实上游一致）
+      for (const piece of chunkText(options.reasoning ?? '')) {
+        if (!piece) continue;
+        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { reasoning_content: piece } }] })}\n\n`);
+      }
       for (const piece of chunkText(reply)) {
         res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: piece } }] })}\n\n`);
       }

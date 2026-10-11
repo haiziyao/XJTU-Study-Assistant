@@ -63,7 +63,7 @@ test('AI：未配置密钥时状态明确，对话返回 501 而不是 500', asy
     assert.equal(status.body.config.hasKey, false);
     assert.equal(status.body.config.keyHint, null);
     // 就算没配密钥，也要说清楚模型和地址是什么，便于用户判断
-    assert.equal(status.body.config.model, 'deepseek-chat');
+    assert.equal(status.body.config.model, 'deepseek-flash');
     assert.match(status.body.config.baseUrl, /^https:\/\//);
 
     const chat = await call('POST', '/ai/chat', { text: '你好' });
@@ -78,11 +78,11 @@ test('AI：未配置密钥时状态明确，对话返回 501 而不是 500', asy
 test('AI：配置密钥落盘 0600，接口只回显末四位', async () => {
   const { app, call, dataDir } = await startApp();
   try {
-    const saved = await call('POST', '/ai/config', { apiKey: KEY, model: 'deepseek-reasoner', temperature: 0.1 });
+    const saved = await call('POST', '/ai/config', { apiKey: KEY, model: 'deepseek-v4-pro', temperature: 0.1 });
     assert.equal(saved.status, 200);
     assert.equal(saved.body.config.hasKey, true);
     assert.equal(saved.body.config.keyHint, '…abcd');
-    assert.equal(saved.body.config.model, 'deepseek-reasoner');
+    assert.equal(saved.body.config.model, 'deepseek-v4-pro');
     // 接口响应里绝不能出现原值
     assert.equal(JSON.stringify(saved.body).includes(KEY), false);
 
@@ -679,21 +679,90 @@ test('AI：公式规范常驻提示词；绘图说明按开关注入，指令词
   }
 });
 
-test('AI：思考强度按档位透传（无 = 不带 reasoning_effort）', async () => {
-  const mock = await startMockAi({ apiKey: KEY, replies: ['好', '好'] });
+test('AI：思考强度对齐官方取值（none/low/high/max），默认 high，且必须显式传', async () => {
+  // 官方文档：思考模式**默认打开**、effort 默认 high；合法取值 none/low/high/max（medium 只是别名→high）
+  const mock = await startMockAi({ apiKey: KEY, replies: ['好', '好', '好', '好', '好'] });
   const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
   try {
-    await call('POST', '/ai/chat', { text: '随便聊聊' });
-    assert.equal('reasoning_effort' in mock.state.bodies[0], false, '「无」不该带这个字段');
+    await call('POST', '/ai/chat', { text: '默认档' });
+    assert.equal(mock.state.bodies[0].reasoning_effort, 'high', '不传时应与官方默认一致（high）');
 
-    await call('POST', '/ai/chat', { text: '认真想想', thinking: 'high' });
-    assert.equal(mock.state.bodies[1].reasoning_effort, 'high');
+    await call('POST', '/ai/chat', { text: '不想思考', thinking: 'none' });
+    assert.equal(mock.state.bodies[1].reasoning_effort, 'none', '关闭思考必须显式传 none，省略 ≠ 关闭');
 
-    await call('POST', '/ai/chat', { text: '再来一次', thinking: '不存在的档位' });
-    assert.equal('reasoning_effort' in mock.state.bodies[2], false, '非法档位回落到「无」');
+    await call('POST', '/ai/chat', { text: '想久一点', thinking: 'max' });
+    assert.equal(mock.state.bodies[2].reasoning_effort, 'max');
+
+    await call('POST', '/ai/chat', { text: '旧前端的 medium', thinking: 'medium' });
+    assert.equal(mock.state.bodies[3].reasoning_effort, 'high', 'medium 是兼容别名，映射成 high');
+
+    await call('POST', '/ai/chat', { text: '乱传一个', thinking: '不存在的档位' });
+    assert.equal(mock.state.bodies[4].reasoning_effort, 'high', '非法档位回落到官方默认');
   } finally {
     await app.close();
     await mock.close();
+  }
+});
+
+test('AI：思维链（reasoning_content）被单独收好，且**不回传**给下一轮', async () => {
+  const mock = await startMockAi({ apiKey: KEY, replies: ['4 条', '好'], reasoning: '先数一数……4 个 R' });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+  try {
+    const first = await call('POST', '/ai/chat', { text: 'strawberry 里有几个 r' });
+    assert.equal(first.body.assistant.reasoning, '先数一数……4 个 R');
+    // 正文里不该混进思维链
+    assert.equal(first.body.assistant.content, '4 条');
+
+    // 第二轮：官方文档说未携带 tools 时 reasoning_content 不该回传（传了也会被忽略）
+    await call('POST', '/ai/chat', { conversationId: first.body.conversation.id, text: '再来' });
+    const history = mock.state.bodies[1].messages;
+    assert.equal(JSON.stringify(history).includes('先数一数'), false, '思维链不进上下文');
+    for (const message of history.slice(1)) {
+      assert.deepEqual(Object.keys(message).sort(), ['content', 'role'], '历史消息只带 role/content');
+    }
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('AI：看图能力按官方文档把关（只有 flash 支持，格式只认四种）', async () => {
+  const mock = await startMockAi({ apiKey: KEY, replies: ['看到了'] });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl, model: 'deepseek-v4-pro' } });
+  try {
+    const rejected = await call('POST', '/ai/chat', {
+      text: '看看这张图',
+      attachments: [{ name: 'a.png', type: 'image/png', size: 100, dataUrl: 'data:image/png;base64,AAAA' }],
+    });
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.body.error.details.field, 'attachments');
+    assert.match(rejected.body.error.message, /deepseek-flash/);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+
+  // 换成 flash：图片正常；不支持的类型（bmp）降级成"读不了的文件"，不硬塞给上游
+  const flash = await startMockAi({ apiKey: KEY, replies: ['看到了'] });
+  const ok = await startApp({ mock: flash, ai: { apiKey: KEY, baseUrl: flash.baseUrl, model: 'deepseek-flash' } });
+  try {
+    const chat = await ok.call('POST', '/ai/chat', {
+      text: '这两张',
+      attachments: [
+        { name: 'a.png', type: 'image/png', size: 100, dataUrl: 'data:image/png;base64,AAAA' },
+        { name: 'b.bmp', type: 'image/bmp', size: 100, dataUrl: 'data:image/bmp;base64,BBBB' },
+      ],
+    });
+    assert.equal(chat.status, 200);
+    const content = flash.state.bodies[0].messages.at(-1).content;
+    const urls = content.filter((part) => part.type === 'image_url');
+    assert.equal(urls.length, 1, '只把官方支持的格式当图片送');
+    assert.match(urls[0].image_url.url, /^data:image\/png/);
+    assert.match(content.find((part) => part.type === 'text').text, /b\.bmp/);
+    assert.match(content.find((part) => part.type === 'text').text, /读不了/);
+  } finally {
+    await ok.app.close();
+    await flash.close();
   }
 });
 
@@ -806,8 +875,9 @@ test('AI：模型列表 —— 上游给就用上游的，给不了回落内置�
   try {
     const fallback = await bare.call('GET', '/ai/models');
     assert.equal(fallback.body.source, 'builtin');
-    assert.ok(fallback.body.models.some((item) => item.id === 'deepseek-chat'));
-    assert.ok(fallback.body.models.some((item) => item.id === 'deepseek-reasoner'));
+    // 官方 Chat Completions 的合法取值只有这两个
+    assert.ok(fallback.body.models.some((item) => item.id === 'deepseek-flash'));
+    assert.ok(fallback.body.models.some((item) => item.id === 'deepseek-v4-pro'));
   } finally {
     await bare.app.close();
   }

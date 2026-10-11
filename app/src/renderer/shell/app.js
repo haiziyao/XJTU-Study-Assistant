@@ -30,6 +30,9 @@
     '添加待办 明天 交实验报告 预计2小时',
   ];
 
+  /** 官方支持的图片格式（其余一律当普通文件，别硬塞给上游）。 */
+  const VISION_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'];
+
   const FIELD_LABEL = {
     title: '标题',
     date: '日期',
@@ -76,8 +79,10 @@
     conversationId: null,
     /** 正在流式接收的那条回复：`{ messageId, text, node, done }`，供 WebSocket 增量更新。 */
     streaming: null,
-    /** 思考强度：none / low / medium / high（映射到上游的 reasoning_effort）。 */
-    thinking: 'none',
+    /** 思考强度：none / low / high / max（官方 reasoning_effort 的合法取值）。默认 high（官方默认）。 */
+    thinking: 'high',
+    /** 正在流式接收的思维链节点（思考模式才有）。 */
+    reasoningNode: null,
     /** 写入权限：auto 自动审批 / manual 手动审批 / strict 全部确认。 */
     permission: 'manual',
     /** 待发送的附件（只活在内存里；发送后只在消息上留元信息）。 */
@@ -598,6 +603,17 @@
       streaming.done = true;
       textEl.classList.remove('streaming');
       setBubbleText(textEl, result.assistant?.content || '（模型没有返回内容）');
+      // 思维链兜底：流式没收到（或只收到一半）就用落库的那份
+      const reasoning = String(result.assistant?.reasoning ?? '').trim();
+      if (reasoning && (!state.reasoningNode || state.reasoningNode.text.length < reasoning.length)) {
+        if (!state.reasoningNode) state.reasoningNode = ensureReasoningCard();
+        state.reasoningNode.text = reasoning;
+        state.reasoningNode.body.textContent = reasoning;
+      }
+      if (state.reasoningNode) {
+        if (card.parentNode) dom.chatLog.insertBefore(state.reasoningNode.card, card);
+        state.reasoningNode = null;
+      }
       // 只读查询由后端自动执行了：把数据原样列出来（模型的话可能概括得太粗，用户要看的是具体条目）
       const queried = result.queried ?? [];
       for (const entry of queried) {
@@ -621,6 +637,10 @@
       // 失败时后端已经把部分内容落库了：气泡里保留收到的那部分，不假装什么都没发生
       if (!streaming.text) card.remove();
       else setBubbleText(textEl, streaming.text);
+      if (state.reasoningNode) {
+        state.reasoningNode.card.querySelector('.op-title').textContent = '（这次没成功）';
+        state.reasoningNode = null;
+      }
       const details = error?.payload?.error?.details ?? {};
       if (details.conversationId) state.conversationId = details.conversationId;
       errorCard(error, { retry: content });
@@ -728,7 +748,12 @@
         toast('最多 8 个附件');
         break;
       }
-      state.attachments.push(await readFile(file));
+      const record = await readFile(file);
+      // 官方只认 JPEG/PNG/GIF/WebP（按内容判断），其它格式上游会 400 —— 提前说清楚
+      if (record.type.startsWith('image/') && !VISION_IMAGE_TYPES.includes(record.type)) {
+        toast(`${record.name} 的图片格式不支持（只认 PNG/JPEG/GIF/WebP），已作为普通文件附上`);
+      }
+      state.attachments.push(record);
     }
     renderAttachments();
   }
@@ -784,11 +809,13 @@
     return wrap;
   }
 
+  // 官方 reasoning_effort 只有 none / low / high / max（medium 只是别名，会映射成 high，
+  // 所以这里不摆"中"—— 界面写"中"、上游按"高"算，那种对不上号的档位不如不给）
   const THINKING_OPTIONS = [
-    { value: 'none', label: '无', hint: '不带 reasoning_effort，用上游默认' },
+    { value: 'none', label: '无', hint: '关闭思考模式：最快最省（必须显式传 none，官方默认是开的）' },
     { value: 'low', label: '低' },
-    { value: 'medium', label: '中' },
-    { value: 'high', label: '高', hint: '想得久一点，也贵一点' },
+    { value: 'high', label: '高', hint: '官方默认档' },
+    { value: 'max', label: '最高', hint: '想得最久，也最贵' },
   ];
   const PERMISSION_OPTIONS = [
     { value: 'auto', label: '自动审批', hint: '写操作直接执行 —— 风险自负' },
@@ -897,7 +924,15 @@
       send(text);
     };
     // 「+」→ 系统文件选择器；选完读进内存（图片给 dataURL，文本读正文）
-    dom.chatAttach.addEventListener('click', () => dom.chatFiles.click());
+    dom.chatAttach.addEventListener('click', () => {
+      // 看图只有 deepseek-flash 支持（官方「图像理解」文档），提前提醒而不是等上游 400
+      const model = state.ai.model ?? '';
+      dom.chatFiles.accept = 'image/png,image/jpeg,image/gif,image/webp,.txt,.md,.csv,.json,.yaml,.yml,.log,.tex,.pdf';
+      dom.chatFiles.click();
+      if (model && !/flash/i.test(model)) {
+        toast(`${model} 不支持图片输入，要发图请先在顶栏切到 deepseek-flash`);
+      }
+    });
     dom.chatFiles.addEventListener('change', async () => {
       await addFiles(dom.chatFiles.files);
       dom.chatFiles.value = ''; // 允许再次选同一个文件
@@ -1017,10 +1052,55 @@
     if (!streaming || streaming.done) return;
     if (streaming.messageId && payload.messageId && payload.messageId !== streaming.messageId) return;
     streaming.messageId = streaming.messageId ?? payload.messageId ?? null;
+
+    // 思维链走单独一条通道：进「思考过程」卡，不跟正文混在一起
+    if (payload.channel === 'reasoning') {
+      if (!state.reasoningNode) state.reasoningNode = ensureReasoningCard();
+      state.reasoningNode.text += payload.delta ?? '';
+      state.reasoningNode.body.textContent = state.reasoningNode.text;
+      // 思考卡始终排在正文气泡之前（"正文永远在最底下"那条规则）
+      if (streaming.node.parentNode?.parentNode === dom.chatLog) {
+        dom.chatLog.insertBefore(state.reasoningNode.card, streaming.node.parentNode);
+      }
+      dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
+      return;
+    }
+
     streaming.text += payload.delta ?? '';
     streaming.node.classList.add('streaming');
     setBubbleText(streaming.node, streaming.text);
     dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
+  }
+
+  /**
+   * 「思考过程」卡：默认折叠，内容随流式增量长出来。
+   * 官方把思维链放在 `reasoning_content`（与 content 同级）——不给用户看就等于白花钱算了，
+   * 但直接铺在正文里又会喧宾夺主，所以折叠起来。
+   */
+  function ensureReasoningCard() {
+    const card = mk('div', 'bubble bot has-card');
+    const box = mk('div', 'chat-card op-card op-think');
+    const head = mk('button', 'op-head');
+    head.type = 'button';
+    head.setAttribute('aria-expanded', 'false');
+    head.append(mk('span', 'op-chip', '思考过程'), mk('span', 'op-title', '点一下展开'), mk('span', 'op-caret', '›'));
+    const body = mk('div', 'op-body');
+    const text = mk('div', 'think-text');
+    body.appendChild(text);
+    box.append(head, body);
+    card.appendChild(box);
+
+    const pinned = dom.chatLog.scrollHeight - dom.chatLog.scrollTop - dom.chatLog.clientHeight < 24;
+    dom.chatLog.appendChild(card);
+    head.addEventListener('click', () => {
+      const next = !box.classList.contains('open');
+      box.classList.toggle('open', next);
+      head.setAttribute('aria-expanded', next ? 'true' : 'false');
+      // 展开/收起改变高度：原本贴底就继续贴底，免得把正文顶出屏幕
+      if (pinned) dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
+    });
+    if (pinned) dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
+    return { card, body: text, text: '' };
   }
 
   /* ------------------------------------------------------------ 启动 */
