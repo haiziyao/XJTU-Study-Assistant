@@ -27,6 +27,11 @@ import { buildChatSystemPrompt, buildCommandSystemPrompt } from './prompt.js';
 /** 给上下文注入留的默认预算（与接口文档 §10.7 一致）。 */
 const DEFAULT_MEMORY_BUDGET = Object.freeze({ maxItems: 8, maxChars: 600 });
 
+/** 一轮对话最多自动执行几个只读查询（防止模型把"查一下"拆成八条）。 */
+const MAX_AUTO_QUERIES = 3;
+/** 回灌给模型的单次查询条数上限（只读；多了只会让提示词变贵、让它跑偏）。 */
+const MAX_QUERY_ITEMS = 20;
+
 /** 会话标题最长多少字（取用户第一句话的开头）。 */
 const TITLE_MAX = 24;
 
@@ -285,24 +290,54 @@ export class AiChatService {
           : undefined,
       });
 
-      const { text: visible, drafts: rawDrafts } = extractDrafts(result.text ?? partial);
-      const drafts = await previewDrafts(this.commands, rawDrafts);
+      const extracted = extractDrafts(result.text ?? partial);
+      const previewed = await previewDrafts(this.commands, extracted.drafts);
+
+      // 只读查询**自动执行**：查询不改数据，让用户为"我明天有什么课"点一次确认毫无意义，
+      // 更关键的是模型看不到结果就只能说"我拿不到数据"（实测它真的会这么说）。
+      // 执行结果回灌给模型，它再用自然语言回答 —— 这是"只读工具先放开"的最小实现。
+      const queried = await this.#runReadOnlyQueries(previewed);
+      let content = extracted.text;
+      let drafts = previewed.filter((entry) => entry.draft?.action !== 'query' || entry.error);
+      let followupUsage = null;
+      let queryError = null;
+
+      if (queried.length) {
+        try {
+          const followup = await this.provider.chat({
+            messages: this.#withQueryResults(messages, extracted.text, queried),
+          });
+          const answer = extractDrafts(followup.text);
+          content = answer.text || followup.text;
+          followupUsage = followup.usage ?? null;
+          // 第二次回复里的写操作草稿照样要渲染出来（"顺手把那条推迟到明天"）
+          const extra = await previewDrafts(this.commands, answer.drafts.filter((item) => item.action !== 'query'));
+          drafts = [...drafts, ...extra];
+        } catch (error) {
+          // 总结这一步失败不影响"已经查到了"：正文仍然给用户，数据靠下面的 queried 卡片呈现
+          queryError = error?.message ?? '查询结果总结失败';
+        }
+      }
+
       const saved = await this.store.aiMessages.update(assistant.id, {
-        content: visible,
+        content: content || (queried.length ? '已经查到数据。' : ''),
         drafts,
+        // 只读查询的原始结果：前端据此画数据卡片，也方便排查"模型到底看到了什么"
+        queried,
         status: 'done',
         model: result.model ?? this.config.get().model,
         usage: result.usage ?? null,
+        usageFollowup: followupUsage,
         finishReason: result.finishReason ?? null,
         // 抽掉草稿前的原文留着：排查"模型到底说了啥"时只有这里有
-        raw: rawDrafts.length ? result.text : null,
-        error: null,
+        raw: extracted.drafts.length ? result.text : null,
+        error: queryError ? { code: 'PARTIAL', message: queryError } : null,
       });
       await this.#touchConversation(conversation.id, trimmed);
       this.broadcast?.({
         type: 'ai_message',
         module: 'ai',
-        payload: { conversationId: conversation.id, message: saved, drafts },
+        payload: { conversationId: conversation.id, message: saved, drafts, queried },
       });
       return {
         ok: true,
@@ -310,6 +345,7 @@ export class AiChatService {
         user: userMessage,
         assistant: saved,
         drafts,
+        queried,
       };
     } catch (error) {
       const failure = {
@@ -357,6 +393,7 @@ export class AiChatService {
     return this.store.aiMessages.insert({
       status: 'done',
       drafts: [],
+      queried: [],
       usage: null,
       model: null,
       provider: null,
@@ -364,6 +401,72 @@ export class AiChatService {
       raw: null,
       ...data,
     });
+  }
+
+  /**
+   * 自动执行只读查询草稿（`action: "query"`）。
+   *
+   * 为什么可以不经确认：它**不改任何数据**（用 `dryRun` 走一遍，连指令日志都不写）。
+   * 为什么必须自动执行：模型看不见数据，就会一直说"我拿不到/需要你确认"，
+   * 而用户问的是"我明天有什么日程"——这种问题应该直接给答案。
+   */
+  async #runReadOnlyQueries(previewed) {
+    const out = [];
+    for (const entry of previewed) {
+      if (entry.error || entry.draft?.action !== 'query') continue;
+      if (out.length >= MAX_AUTO_QUERIES) break;
+      try {
+        const result = await this.commands.execute(entry.draft, { dryRun: true });
+        out.push({ draft: entry.draft, result: this.#compactQueryResult(entry.draft.target, result) });
+      } catch (error) {
+        out.push({ draft: entry.draft, error: { code: error.code ?? 'INTERNAL', message: error.message } });
+      }
+    }
+    return out;
+  }
+
+  /** 只留模型回答需要的字段：整库塞进下一轮提示词既贵又容易跑偏。 */
+  #compactQueryResult(target, result) {
+    const FIELDS = {
+      todo: ['id', 'title', 'deadline', 'completed', 'priority', 'estimatedHours'],
+      schedule: ['id', 'title', 'date', 'startTime', 'endTime', 'location', 'category'],
+      event: ['id', 'title', 'startDate', 'endDate', 'category'],
+    };
+    const fields = FIELDS[target] ?? ['id', 'title'];
+    const items = (result.items ?? []).slice(0, MAX_QUERY_ITEMS).map((item) => {
+      const picked = {};
+      for (const key of fields) if (item[key] !== undefined && item[key] !== null) picked[key] = item[key];
+      return picked;
+    });
+    return {
+      target,
+      filters: result.filters ?? {},
+      count: result.count ?? items.length,
+      truncated: (result.items?.length ?? 0) > items.length,
+      explain: result.explain ?? null,
+      items,
+    };
+  }
+
+  /**
+   * 把查询结果回灌进对话（第二次模型调用）。
+   *
+   * 用一条 `role: "user"` 的显式标注消息而不是 `role: "tool"`：我们没走函数调用协议，
+   * 各家 OpenAI 兼容端点对 `tool` 消息的校验不一致，而带标注的 user 消息到处都能跑。
+   */
+  #withQueryResults(messages, replyText, queried) {
+    const usable = queried.filter((entry) => entry.result);
+    return [
+      ...messages,
+      { role: 'assistant', content: replyText || '（我发起了一次只读查询）' },
+      {
+        role: 'user',
+        content:
+          '[系统注入] 上面的只读查询已由系统执行完毕，结果如下（JSON）。请**据此直接用自然语言回答用户的问题**：' +
+          '不要再说"需要你确认""我拿不到数据"，也不要再输出查询草稿。\n' +
+          JSON.stringify(usable.map((entry) => entry.result)),
+      },
+    ];
   }
 
   async #touchConversation(id, firstText) {

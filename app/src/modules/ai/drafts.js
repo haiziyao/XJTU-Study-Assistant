@@ -78,13 +78,34 @@ function normalizeDraft(draft) {
 }
 
 /**
+ * 查询类草稿的兜底：把误写在 `fields` 里的条件搬到 `filters`。
+ *
+ * 实测模型会把日期写成 `fields: { date }`，而查询处理器只读 `draft.filters` ——
+ * 结果不是"查不到"，而是**没加条件地查了整个库**（更危险：答案看着像真的）。
+ * 这里做一次最小归一，不改变调用方看到的内容。
+ */
+function normalizeQueryFilters(draft) {
+  if (draft.action !== 'query') return draft;
+  const filters = { ...(draft.filters ?? {}) };
+  const fields = draft.fields ?? {};
+  if (!filters.from && !filters.to && fields.date) {
+    filters.from = fields.date;
+    filters.to = filters.date ?? fields.date;
+  }
+  if (!filters.from && fields.from) filters.from = fields.from;
+  if (!filters.to && fields.to) filters.to = fields.to;
+  if (!filters.keyword && fields.keyword) filters.keyword = fields.keyword;
+  return { ...draft, filters };
+}
+
+/**
  * 逐条预校验：成功给 `preview`（dryRun 的返回），失败给 `error`。
  * 单条失败不影响其它草稿，也不影响这次聊天本身。
  */
 export async function previewDrafts(commands, drafts = []) {
   const results = [];
   for (const draft of drafts) {
-    const normalized = normalizeDraft(draft);
+    const normalized = normalizeQueryFilters(normalizeDraft(draft));
     try {
       if (normalized.ok === false) {
         results.push({ draft: normalized, preview: null, error: { code: 'PARSE_FAILED', message: normalized.warnings?.[0] ?? '模型表示无法确定' } });

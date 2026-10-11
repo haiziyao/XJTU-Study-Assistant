@@ -326,7 +326,10 @@
         const result = await api('/commands/execute', { method: 'POST', body: { draft } });
         actions.replaceChildren(mk('span', 'cc-note ok', '已执行'));
         box.classList.add('done');
-        resultCard(result);
+        // 查询类草稿的结果是**数据行**，不是"执行了哪些写操作" —— 以前一律走 resultCard，
+        // 而它只画 affected / conflicts，于是"查到了但界面一片空白"。
+        if (result.action === 'query') queryCard(result);
+        else resultCard(result);
         refresh();
       } catch (error) {
         actions.replaceChildren(mk('span', 'cc-note fail', '执行失败'));
@@ -484,9 +487,15 @@
       streaming.done = true;
       textEl.classList.remove('streaming');
       textEl.textContent = result.assistant?.content || '（模型没有返回内容）';
+      // 只读查询由后端自动执行了：把数据原样列出来（模型的话可能概括得太粗，用户要看的是具体条目）
+      const queried = result.queried ?? [];
+      for (const entry of queried) {
+        if (entry.result) queryCard(entry.result);
+        else if (entry.error) systemNote(`查询没成功：${entry.error.message}`, 'fail');
+      }
       const drafts = result.drafts ?? [];
       if (!drafts.length) {
-        systemNote(`${state.ai.provider ?? 'AI'} · 只是聊天，没有产生任何写入`, 'meta');
+        if (!queried.length) systemNote(`${state.ai.provider ?? 'AI'} · 只是聊天，没有产生任何写入`, 'meta');
         return;
       }
       for (const entry of drafts) renderAiDraft(entry);

@@ -8,6 +8,8 @@
  * 重点覆盖几处「一旦写错就会静默出事」的地方：
  *   - 密钥只进不出（接口不回显、错误信息里也不许出现）；
  *   - 模型**不能**直接写库：草稿只做 dryRun 预览，落库必须经 /commands/execute；
+ *   - **只读查询要自动执行并把结果回灌给模型**（否则模型只能说"我拿不到数据"，
+ *     用户问"我明天有什么日程"却什么也看不到 —— 这是实测反馈的 bug）；
  *   - 流式增量走 WebSocket，且 HTTP 仍然一次拿到最终结果（重连不会丢）；
  *   - 多轮历史真的进了上游请求体；
  *   - 上游 401 / 超时翻译成 502，而不是 500 或一直挂着。
@@ -515,6 +517,118 @@ test('AI：清空全部会话（设置页那一键）连消息一起删干净', 
     const one = (await call('GET', '/ai/conversations')).body.items[0];
     assert.equal((await call('DELETE', `/ai/conversations/${one.id}`)).body.deleted, true);
     assert.equal((await call('GET', '/ai/conversations')).body.count, 0);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('AI：只读查询自动执行 + 结果回灌，模型能说出具体安排（不再"我拿不到数据"）', async () => {
+  const DAY = '2026-10-13';
+  const queryDraft = {
+    ok: true,
+    action: 'query',
+    target: 'schedule',
+    filters: { from: DAY, to: DAY },
+    explain: `查询 ${DAY} 的日程`,
+  };
+  // 第一次回查询草稿，第二次（拿到结果后）才给自然语言答案
+  const mock = await startMockAi({
+    apiKey: KEY,
+    replies: [
+      `我查一下你明天（${DAY}）的日程。\n\`\`\`command\n${JSON.stringify(queryDraft)}\n\`\`\``,
+      '你明天只有一件事：10:00–11:00 在 教2楼-西203 上材料力学。',
+    ],
+  });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+  try {
+    await call('POST', '/schedules', { title: '材料力学', date: DAY, startTime: '10:00', endTime: '11:00', location: '教2楼-西203' });
+
+    const chat = await call('POST', '/ai/chat', { text: '我明天有什么日程' });
+    assert.equal(chat.status, 200);
+
+    // 1) 上游被调了两次：先出草稿，再据结果作答
+    assert.equal(mock.state.bodies.length, 2, '应该有一次回灌后的第二次调用');
+
+    // 2) 第二次请求里带着**真实数据**，并且明确告诉模型别再推诿
+    const injected = mock.state.bodies[1].messages.at(-1);
+    assert.equal(injected.role, 'user');
+    assert.match(injected.content, /\[系统注入\]/);
+    assert.match(injected.content, /材料力学/);
+    assert.match(injected.content, /教2楼-西203/);
+    assert.match(injected.content, /不要再输出查询草稿/);
+    assert.match(injected.content, /不要再说"需要你确认"/);
+
+    // 3) 给用户看的是答案，而不是"准备执行：查询日程"的确认卡
+    assert.match(chat.body.assistant.content, /材料力学/);
+    assert.deepEqual(chat.body.drafts, [], '查询不该再产出确认卡');
+
+    // 4) 数据原样返回给前端画数据卡片
+    assert.equal(chat.body.queried.length, 1);
+    assert.equal(chat.body.queried[0].result.count, 1);
+    assert.equal(chat.body.queried[0].result.items[0].title, '材料力学');
+    assert.equal(chat.body.queried[0].result.items[0].startTime, '10:00');
+    assert.equal(chat.body.queried[0].draft.filters.from, DAY);
+
+    // 5) 只读就是只读：日程没被改动
+    const schedules = await call('GET', '/schedules');
+    assert.equal(schedules.body.items.length, 1);
+    assert.equal(schedules.body.items[0].title, '材料力学');
+    assert.equal(schedules.body.items[0].updatedAt, schedules.body.items[0].createdAt, '查询不该写任何东西');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('AI：模型把查询条件写进 fields.date 时会被兜住（否则等于查了整个库）', async () => {
+  const today = '2026-10-11';
+  const badShape = {
+    ok: true,
+    action: 'query',
+    target: 'schedule',
+    // 实测模型就是这么写的：条件在 fields 里，而查询处理器只读 filters
+    fields: { date: '2026-10-13' },
+    explain: '查询 2026-10-13 的日程',
+  };
+  const mock = await startMockAi({
+    apiKey: KEY,
+    replies: [`\`\`\`command\n${JSON.stringify(badShape)}\n\`\`\``, '那天没有安排。'],
+  });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+  try {
+    // 两条日程：一条在查询日，一条在别的日子 —— 没兜住的话会把两条都查出来
+    await call('POST', '/schedules', { title: '目标那天', date: '2026-10-13', startTime: '10:00' });
+    await call('POST', '/schedules', { title: '别的日子', date: today, startTime: '08:00' });
+
+    const chat = await call('POST', '/ai/chat', { text: '10 月 13 号有什么日程' });
+    const [entry] = chat.body.queried;
+    assert.deepEqual(entry.draft.filters, { from: '2026-10-13', to: '2026-10-13' }, 'fields.date 应被搬进 filters');
+    assert.equal(entry.result.count, 1, '只该命中目标那天');
+    assert.equal(entry.result.items[0].title, '目标那天');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('AI：总结那一步失败也不丢数据（查询结果照样返回给前端）', async () => {
+  const mock = await startMockAi({
+    apiKey: KEY,
+    replies: [
+      `\`\`\`command\n${JSON.stringify({ ok: true, action: 'query', target: 'todo', filters: {} })}\n\`\`\``,
+      '这次总结不该成功',
+    ],
+    failWith: [2],
+  });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+  try {
+    await call('POST', '/todos', { title: '写实验报告', deadline: '2026-10-20' });
+    const chat = await call('POST', '/ai/chat', { text: '我有哪些待办' });
+    assert.equal(chat.status, 200, '总结失败不该让整次对话失败');
+    assert.equal(chat.body.queried[0].result.items[0].title, '写实验报告');
+    assert.equal(chat.body.assistant.error?.code, 'PARTIAL');
+    assert.match(chat.body.assistant.error.message, /500/);
   } finally {
     await app.close();
     await mock.close();

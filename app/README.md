@@ -356,6 +356,7 @@ app/
 | 能力清单 | `GET /ai/capabilities` 聚合各模块 `aiTools` | ✅ 日历 **19** 个 + 思源学堂 **8** 个 + AI **2** 个（共 29），每项带 `module` |
 | **前端接线** | `src/renderer/shell/app.js`（中栏）+ `shell/settings.js`（配置区） | ✅ 配了密钥就走 `/ai/chat`：**边生成边渲染**（WS `ai_delta`，实测 35 块增量）、回复里的草稿渲染成确认卡、失败卡片给「改用本地规则」按钮；设置页能填密钥/模型/接口地址，并管理会话 |
 | 降级与文案 | `send()` 按 `state.ai.available` 分流 | ✅ 没配密钥时中栏走本地规则，徽标/欢迎语/底部提示都说明"当前是规则解析"并指路设置页 |
+| **只读查询自动执行** | `modules/ai/chat-service.js` 的 `#runReadOnlyQueries` / `#withQueryResults` | ✅ 「我明天有什么日程」不再变成一张确认卡：查询（`dryRun`，只读）自动跑 → 结果回灌 → 模型用自然语言答，界面同时列出数据行；**写操作仍然必须点确认** |
 | provider 注册位 | `src/server/index.js` 的 `services = { store, commands, aiBridge, hub, broadcast }` | ✅ 模块在自己的 `createServices({ services })` 里就能注册 provider |
 
 ### 还差的（按重要性）
@@ -365,9 +366,11 @@ app/
    可以给草稿打 `fields.source = "ai"` —— 注意这与"用户确认后才落库"并不冲突：
    人确认的是**内容**，不是**来源**。`Event` / `Schedule` 的 `source` 枚举已含 `manual / command / ai / import`。
 
-2. **没有工具调用循环**：`aiTools` 只是一份清单，框架不会替模型执行 tool call。
-   走 Agent 路线（模型自己查数据、自己决定调哪个工具）需要实现「模型 → 调工具 → 回灌结果」的循环，
-   工具落点就是清单里那些已实现的 HTTP 接口。建议只读工具先放开，写操作仍走草稿确认。
+2. **工具调用循环只做了一半**：只读查询已经能自动执行并回灌（见上表），
+   但那是"抽草稿 → 执行 → 再问一次模型"的**固定一轮**流程，不是模型自己决定调哪个工具。
+   真正的 Agent 循环（模型按 `aiTools` 清单自行选择、多轮调用、失败重试）还没做，
+   工具落点就是清单里那些已实现的 HTTP 接口。
+   工具落点就是清单里那些已实现的 HTTP 接口（只读那批已经能自动跑了）。
 
 3. **记忆（Agent 记忆）只有契约**：[接口文档 §10](docs/接口文档.md) 把数据模型、6 个接口、
    注入预算与排序、「AI 推断的记忆一律不能直接写」都定死了，`/ai/context` 的钩子也留好了
