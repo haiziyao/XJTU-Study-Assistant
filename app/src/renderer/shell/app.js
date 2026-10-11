@@ -90,7 +90,7 @@
     /** 模型选择器缓存的列表。 */
     models: null,
     health: null,
-    view: 'calendar',
+    view: new URLSearchParams(location.search).get('view') ?? 'calendar',
     panelCollapsed: false,
     calendar: { mode: 'month', anchor: U.todayKey() },
     todo: { filter: 'all' },
