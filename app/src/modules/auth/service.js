@@ -163,12 +163,16 @@ export class AuthService {
   status() {
     const sites = [...this.sites.values()].map((site) => this.siteStatus(site.id));
     const readyCount = sites.filter((site) => site.ready).length;
+    // `captchaRequired` 要**逐站点聚合**：阈值判定（连续失败 3 次）在各自的 CasAuth 里，
+    // 只看全局标志会漏掉"某个站点已经被要求图形验证码"这种情况。
+    const captchaRequired =
+      this.state.captchaRequired || [...this.sites.values()].some((site) => site.casAuth.captchaRequired);
     return {
       status: this.state.status,
       loggedIn: readyCount > 0,
       username: this.state.username,
       mfa: this.state.mfa,
-      captchaRequired: this.state.captchaRequired,
+      captchaRequired,
       error: this.state.error,
       siteCount: sites.length,
       readyCount,
@@ -357,13 +361,25 @@ export class AuthService {
       case AUTH_STATUS.NEED_MFA:
         this.state.status = 'need_mfa';
         this.state.pendingSite = site.id;
-        this.state.mfa = { phone: result.phone ?? null, sent: false };
-        return { status: this.state.status, mfa: this.state.mfa, site: this.siteStatus(site.id) };
+        // ★ 原样保留 CasAuth 给的 mfa 对象：里面有 `flow`（'mfa' 短信 / 'sec' 二次认证），
+        //   业务模块靠它区分两条流程；只挑 phone 字段会把 flow 丢掉，界面就走错分支。
+        this.state.mfa = { ...(result.mfa ?? {}) };
+        return {
+          status: this.state.status,
+          mfa: this.state.mfa,
+          error: result.message ?? null,
+          site: this.siteStatus(site.id),
+        };
       case AUTH_STATUS.NEED_CAPTCHA:
         this.state.status = 'need_captcha';
         this.state.pendingSite = site.id;
         this.state.captchaRequired = true;
-        return { status: this.state.status, captchaRequired: true, site: this.siteStatus(site.id) };
+        return {
+          status: this.state.status,
+          captchaRequired: true,
+          error: result.message ?? null,
+          site: this.siteStatus(site.id),
+        };
       default:
         this.state.status = 'error';
         this.state.error = result?.message ?? '登录失败';

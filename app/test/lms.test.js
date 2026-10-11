@@ -482,13 +482,15 @@ test('思源学堂：登录态失效时给出明确提示', async () => {
   await login(first.call);
   await first.app.close();
 
-  // 把会话文件换成一张学校已经不认的票（模拟服务端让会话过期）
+  // 把**共享会话文件**换成一张学校已经不认的票（模拟服务端让会话过期）。
+  // 注意文件变了：票据现在由全局认证模块统一持有（auth-session.json），
+  // 不再有 lms-session.json —— 那正是"登录收敛到一处"的直接体现。
   await writeFile(
-    path.join(first.dataDir, 'lms-session.json'),
+    path.join(first.dataDir, 'auth-session.json'),
     JSON.stringify({
       savedAt: new Date().toISOString(),
-      user: { name: '张三', userNo: '2021001' },
       cookies: [{ name: 'LMS_SESSION', value: 'expired', domain: '127.0.0.1', hostOnly: true, path: '/', expiresAt: null, secure: false }],
+      sites: { lms: { lastOkAt: new Date().toISOString() } },
     }),
   );
 
@@ -497,7 +499,7 @@ test('思源学堂：登录态失效时给出明确提示', async () => {
     const failed = await second.call('POST', '/lms/sync/preview', { today: TODAY });
     assert.equal(failed.status, 401);
     assert.match(failed.body.error.message, /失效/);
-    // 失效后本地票据被清掉，状态回到未登录
+    // 失效后本模块的登录态回到未登录（共享票据由 auth 决定去留，本模块不擅自清）
     const status = await second.call('GET', '/lms/status');
     assert.equal(status.body.status, 'anonymous');
     // 重新登录依然可用

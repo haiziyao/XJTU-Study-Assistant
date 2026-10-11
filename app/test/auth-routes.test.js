@@ -15,21 +15,29 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { createServer } from '../src/server/index.js';
+import { loadModules } from '../src/core/module/registry.js';
 import { startMockSso } from './helpers/sso-mock.js';
 
 const USER = '2024001';
 const PASS = 'secret-pass';
 
 /**
- * 起一套服务，并在装配后注册两个指向 SSO mock 的站点。
+ * 起一套**只装配 auth 模块**的服务，再注册两个指向 SSO mock 的站点。
  *
- * 之所以能在装配后注册：`registerSite` 就是普通方法，站点表是运行时可变的。
- * （S4/S5 之后 lms/academic 会在各自的 createServices 里注册，这里不需要它们。）
+ * 为什么只装 auth：这是 auth 的 HTTP 契约测试，不该被别的模块干扰。
+ * 装配全部模块时，`lms` 也会注册一个站点（它已经接入共享认证），
+ * 站点数、readyCount 这些断言就会跟着变 —— 那种耦合会让用例变脆。
+ * 真实的全量装配另有一条冒烟用例覆盖（见文件末尾）。
  */
-async function startApp({ mock } = {}) {
+async function startApp({ mock, onlyAuth = true } = {}) {
   const server = mock ?? (await startMockSso());
   const dataDir = await mkdtemp(path.join(tmpdir(), 'potato-auth-http-'));
-  const app = await createServer({ dataDir, auth: { casOrigin: server.origin } });
+  const modules = onlyAuth ? await loadModules({ only: ['auth'] }) : undefined;
+  const app = await createServer({
+    dataDir,
+    ...(modules ? { modules } : {}),
+    auth: { casOrigin: server.origin },
+  });
   const info = await app.listen({ port: 0 });
 
   app.services.auth.registerSite({ id: 'a', label: '站点A', loginUrl: server.siteAUrl });
@@ -231,12 +239,33 @@ test('auth HTTP：验证码端点回二进制图片，而不是被 JSON 包一�
 test('auth HTTP：没有注册任何站点时，验证码端点给出明确失败', async () => {
   const mock = await startMockSso();
   const dataDir = await mkdtemp(path.join(tmpdir(), 'potato-auth-nosite-'));
+  // 只装 auth：否则 lms 会注册一个站点，这条用例就测不到"无站点"的分支了
+  const modules = await loadModules({ only: ['auth'] });
+  const app = await createServer({ dataDir, modules, auth: { casOrigin: mock.origin } });
+  const info = await app.listen({ port: 0 });
+  try {
+    const response = await fetch(`${info.baseUrl}/auth/captcha`);
+    assert.equal(response.status, 500, '没有站点时应当是明确的装配期错误，而不是静默 200');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+/* ------------------------------------------------------------------ 与真实装配的集成 */
+
+test('auth HTTP：★ 全量装配时 lms 会把自己的站点注册进来，且 auth 排在最前', async () => {
+  const mock = await startMockSso();
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'potato-auth-full-'));
   const app = await createServer({ dataDir, auth: { casOrigin: mock.origin } });
   const info = await app.listen({ port: 0 });
   try {
-    // 刻意不注册任何站点
-    const response = await fetch(`${info.baseUrl}/auth/captcha`);
-    assert.equal(response.status, 500, '没有站点时应当是明确的装配期错误，而不是静默 200');
+    const listed = await (await fetch(`${info.baseUrl}/modules`)).json();
+    assert.equal(listed.items[0].id, 'auth', 'auth 必须排在所有业务模块之前');
+    assert.equal(listed.items[0].order, 5);
+
+    const sites = app.services.auth.status().sites.map((site) => site.id);
+    assert.ok(sites.includes('lms'), `lms 应当注册了自己的站点，实际：${sites.join(', ')}`);
   } finally {
     await app.close();
     await mock.close();
