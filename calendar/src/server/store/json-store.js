@@ -135,6 +135,10 @@ export class JsonStore {
     this.schedules = new Collection({ filePath: path.join(dataDir, 'schedules.json') });
     /** 指令历史，供前端「最近指令」与后续 AI 训练/回放使用。 */
     this.commandLogs = new Collection({ filePath: path.join(dataDir, 'command-logs.json') });
+    /** 思源学堂课程缓存（离线也能看课程/作业，避免每次打开都打学校服务器）。 */
+    this.lmsCourses = new Collection({ filePath: path.join(dataDir, 'lms-courses.json') });
+    /** 思源学堂活动缓存（作业 / 直播 / 回放）。 */
+    this.lmsActivities = new Collection({ filePath: path.join(dataDir, 'lms-activities.json') });
   }
 
   async init() {
@@ -142,12 +146,20 @@ export class JsonStore {
       this.events.load(),
       this.schedules.load(),
       this.commandLogs.load(),
+      this.lmsCourses.load(),
+      this.lmsActivities.load(),
     ]);
     return this;
   }
 
   collection(name) {
-    const map = { events: this.events, schedules: this.schedules, commandLogs: this.commandLogs };
+    const map = {
+      events: this.events,
+      schedules: this.schedules,
+      commandLogs: this.commandLogs,
+      lmsCourses: this.lmsCourses,
+      lmsActivities: this.lmsActivities,
+    };
     const target = map[name];
     if (!target) throw new Error(`未知集合: ${name}`);
     return target;

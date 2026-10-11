@@ -59,6 +59,34 @@ function resolveDataDir() {
   return undefined;
 }
 
+/**
+ * 思源学堂接入配置（可选）。
+ *
+ * 默认连学校线上站点；如果需要指向 webvpn 或本地假站点（离线演示），
+ * 只要在数据目录（或应用根目录）放一个 lms-config.json：
+ *   { "baseUrl": "http://127.0.0.1:4599", "casOrigin": "http://127.0.0.1:4599" }
+ * 注意：GUI 启动（open / 双击）不会继承终端里的环境变量，所以用文件而不是环境变量。
+ */
+function resolveLmsOptions(dataDir) {
+  const candidates = [
+    process.env.POTATO_LMS_CONFIG,
+    dataDir ? path.join(dataDir, 'lms-config.json') : null,
+    path.join(CURRENT_DIR, '..', '..', 'lms-config.json'),
+  ].filter(Boolean);
+  for (const file of candidates) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (parsed && typeof parsed === 'object') {
+        log();
+        return { config: parsed };
+      }
+    } catch {
+      /* 不存在或格式错误就忽略，继续用线上配置 */
+    }
+  }
+  return undefined;
+}
+
 /** 加载 ESM 业务模块（只加载一次）。 */
 async function loadEsm() {
   if (!esm) {
@@ -75,7 +103,8 @@ async function loadEsm() {
 /** 端口被占用时依次递增重试，最多 10 个端口。 */
 async function startBackend() {
   const { createServer, constants } = await loadEsm();
-  backend = await createServer({ dataDir: resolveDataDir() });
+  const dataDir = resolveDataDir();
+  backend = await createServer({ dataDir, lms: resolveLmsOptions(dataDir) });
   const candidates = Array.from({ length: 10 }, (_, index) => constants.DEFAULT_PORT + index);
   let lastError;
   for (const port of candidates) {

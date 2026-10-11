@@ -71,6 +71,10 @@ export const ERROR_CODES = {
   AI_UNAVAILABLE: 'AI_UNAVAILABLE',
   NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
   INTERNAL: 'INTERNAL',
+  /** 需要先登录外部系统（思源学堂）。 */
+  UNAUTHORIZED: 'UNAUTHORIZED',
+  /** 外部系统（学校服务器）返回了错误或无法解析的内容。 */
+  UPSTREAM_ERROR: 'UPSTREAM_ERROR',
 };
 
 /** AI 能力开关：本阶段统一关闭，仅保留接口契约。 */

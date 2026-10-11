@@ -10,6 +10,8 @@ import { COMMAND_GRAMMAR } from '../parser/command-parser.js';
 import { MARKUP_GRAMMAR } from '../parser/markup-parser.js';
 import { buildIcs } from '../services/ics-service.js';
 import { fromDschatEvent, toDschatEvent } from '../services/compat.js';
+import { LMS_TOOL_SPECS } from '../lms/tools.js';
+import { registerLmsRoutes } from './lms.js';
 import { API_PREFIX, WS_PATH } from '../../shared/constants.js';
 import { THEME } from '../../shared/theme.js';
 import { addDays } from '../../shared/time.js';
@@ -290,7 +292,12 @@ export function registerRoutes(router, context) {
   router.get(`${API_PREFIX}/ai/capabilities`, () => ({
     contractVersion: AI_CONTRACT_VERSION,
     ...aiBridge.capabilities(),
+    // 思源学堂工具清单：AI Agent 只需按 name + params 调用，不必了解登录细节
+    lmsTools: LMS_TOOL_SPECS,
   }));
+
+  // ---------------------------------------------------------------- 思源学堂接入
+  registerLmsRoutes(router, { lms: services.lms, apiPrefix: API_PREFIX });
 
   router.post(`${API_PREFIX}/ai/nl2command`, async ({ body }) => {
     if (!body?.text) throw HttpError.badRequest('text 为必填');

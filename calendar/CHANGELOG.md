@@ -5,6 +5,35 @@
 
 ## [Unreleased]
 
+### 新增（思源学堂接入：课程 / 作业 / 直播 → 日历）
+
+- **统一身份认证登录**（`src/server/lms/cas-auth.js`）：零依赖实现 `login.xjtu.edu.cn` 的登录状态机 ——
+  拉取登录页 `execution`、用 `/cas/jwt/publicKey` 的 RSA 公钥加密密码（`__RSA__` + PKCS1v1.5）、
+  `mfa/detect` 探测两步验证、安全手机验证码（`initByType` → `send` → `valid`）、
+  二次认证（Safety Verify）、连续失败 3 次后的图形验证码；登录失败页（`el-alert`）与「还停在登录页」都能识别。
+- **HTTP 客户端**（`src/server/lms/http-client.js`）：自带 Cookie 罐 + 手动跟踪重定向。
+  Node 的 `fetch` 没有 Cookie 罐，自动重定向会丢掉 CAS 每次跳转种下的会话票（表现为「密码对了但回到登录页」）。
+- **思源学堂接口封装**（`src/server/lms/api.js`）：用户信息（从 `/user/index` 的 `globalData` 里解析）、
+  我的课程、课程活动、活动详情、作业提交记录；字段统一归一化为 camelCase，学校改字段只需改这一个文件。
+- **同步映射**（`src/server/lms/sync.js`，纯函数）：作业 → 待办/时段日程（截止日为准、分类 study、按剩余天数给优先级）、
+  直播 → 时段日程（分类 class）、回放/资料默认不导入、课程可选整学期做成日历事件；
+  每条记录带 `externalId = lms:activity:<活动 ID>`，重复同步只更新不新增，**不会覆盖用户手改的状态与提醒**；
+  思源学堂查不到的活动会以 `stale` 报出，可选择清理。
+- **REST 接口** `/api/v1/lms/*`（`src/server/routes/lms.js`）：status / login / mfa / captcha / logout /
+  courses / activities / activities/:id / sync/preview / sync/apply。写操作一律「先预览后应用」，未登录返回 `401 UNAUTHORIZED`。
+- **本地缓存**：新增 `data/lms-courses.json`、`data/lms-activities.json` 两个集合；未登录时仍可读缓存（响应带 `loggedIn: false`）。
+- **会话持久化**：`data/lms-session.json`（权限 `0600`，7 天失效），**不保存密码**；进程重启免登录。
+- **AI 工具契约**：`src/server/lms/tools.js` 定义 7 个工具（name / method / path / params / requiresAuth / mutates），
+  通过 `GET /ai/capabilities` 的 `lmsTools` 暴露，未来接入模型时直接注册成 function-calling 工具。
+- **自动同步（可选）**：`POST /lms/settings { autoSync, autoSyncIntervalHours }` 打开后，服务每 30 分钟检查一次，
+  到间隔就按默认规则执行同步（只新建/更新，**不删除**任何记录），结果写入 `data/lms-meta.json`；默认关闭。
+- **自检脚本** `scripts/lms-probe.js`：不需要账号密码，打印真实跳转链（lms → identity1 → CAS）、
+  `execution` / `mfaEnabled` 解析结果、RSA 公钥与加密结果、验证码接口可用性，用于区分「环境问题」与「账号问题」。
+- **测试**：`test/helpers/lms-mock.js` 复刻 CAS + 思源学堂（含 RSA 加密校验、Cookie、两步验证、失败提示、验证码图片），
+  `test/lms.test.js` 覆盖登录、验证码、MFA、二次认证、课程/活动缓存、映射规则、幂等、改期更新、失效清理、只同步选中项、会话持久化与失效 —— 共 14 项，用例总数 30 → 44。
+- 日程新增 `externalId` 字段（幂等同步用）；`ERROR_CODES` 新增 `UNAUTHORIZED` / `UPSTREAM_ERROR`；`HttpError` 新增 `unauthorized()` / `upstream()`。
+- 文档：[接口文档.md](接口文档.md) 新增第 9 节「思源学堂接入（LMS）」（含登录流程、接口清单、映射表、同步动作表、安全说明）；README 新增「思源学堂接入（LMS）」一节。
+
 ### 新增（测试窗口重做为三栏界面）
 
 - **三栏布局**：左栏功能栏（约 10% 宽，日历 / 待办 / 学情 / 拍题 / 网课 / 消息 + 底部设置）、中间对话面板、右侧功能视图；
@@ -22,6 +51,15 @@
 
 ### 修复
 
+- **真实账号登录卡在两步验证**（已用真机抓包定位并实测修复）：`POST /cas/mfa/detect` 只接受
+  `application/x-www-form-urlencoded`，之前按 JSON 发送，学校返回
+  `400 Required String parameter 'username' is not present`，界面表现为
+  「两步验证探测返回了无法解析的内容」。同一轮实测还确认了 `/attest/api/guard/securephone/{send,valid}`
+  **只能**用 JSON（传表单会 415），两种编码现在都按真机行为固定下来，并由 mock 强制校验（防回归）。
+- 学校 `/cas/login` 成功后的跳转链会经过 `identity1.xjtu.edu.cn` 代理，跳转上限从 8 提到 20，
+  避免长链路被误判为失败。
+- `scripts/run-electron-macos.sh` 在并发/目录被清理时写 `data-dir.txt` 会因父目录不存在中断，已先 `mkdir -p`。
+
 - **界面只渲染骨架、无导航 / 无对话 / 无视图**：`app.js` 中 `dom` 声明为 `const` 却在 `boot()` 内重新赋值，
   抛出 `TypeError: Assignment to constant variable` 且被启动期 `catch` 吞掉。改为 `let`，并让启动异常强制写入控制台。
 - **浏览器访问 `/app`（无尾斜杠）整页无样式无脚本**：页面内资源为相对路径，会被解析到根目录而 404；
@@ -33,6 +71,7 @@
 - 接入 AI provider（自然语言 → 指令对象），落地 `/ai/nl2command`。
 - 农历能力（`GET /meta/lunar` 目前返回 501 与契约）。
 - 导入 PotatoTimer 学习记录（`source: "import"` + `externalId`）。
+- 移动教务（jwapp）课表导入：思源学堂没有上课时间/地点，「自动生成课表」需要接这一路接口。
 - 重复日程的单次例外（`exceptions`）。
 - ICS 导入（当前只支持导出）。
 - 存储层替换为 SQLite（服务层接口保持不变）。

@@ -19,6 +19,7 @@ import { ReminderService } from './services/reminder-service.js';
 import { CommandService } from './services/command-service.js';
 import { CommandParser } from './parser/command-parser.js';
 import { AiBridge } from './ai/ai-bridge.js';
+import { LmsService } from './lms/service.js';
 import { registerRoutes } from './routes/index.js';
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -36,9 +37,12 @@ export async function createServer(options = {}) {
   const aiBridge = new AiBridge({ parser });
   const commands = new CommandService({ parser, eventService: events, scheduleService: schedules, store, aiBridge });
   const reminders = new ReminderService({ store, scheduleService: schedules, broadcast });
+  // 思源学堂接入：登录态 + 课程/活动缓存 + 同步。可用 options.lms 覆盖配置（测试时指向 mock 服务器）。
+  const lms = new LmsService({ store, services: { events, schedules }, broadcast, dataDir, ...(options.lms ?? {}) });
+  await lms.restore();
 
   const router = createRouter();
-  const services = { store, events, schedules, commands, reminders };
+  const services = { store, events, schedules, commands, reminders, lms };
   registerRoutes(router, { services, aiBridge, hub, version: options.version });
 
   const server = http.createServer((req, res) => {
@@ -68,6 +72,7 @@ export async function createServer(options = {}) {
         server.once('error', reject);
         server.listen(port, host, () => {
           reminders.start();
+          lms.startAutoSync();
           const actual = server.address();
           resolve({
             host,
@@ -81,6 +86,7 @@ export async function createServer(options = {}) {
 
     async close() {
       reminders.stop();
+      lms.stopAutoSync();
       for (const socket of [...hub.clients]) hub.close(socket);
       // 测试与退出场景下必须主动断开 keep-alive 连接，否则 server.close() 会一直等待
       server.closeAllConnections?.();

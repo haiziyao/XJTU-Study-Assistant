@@ -43,6 +43,7 @@ const EDITABLE = [
   'repeat',
   'eventId',
   'source',
+  'externalId',
   'rolledFrom',
   'rolledTo',
   'completedAt',
@@ -103,6 +104,8 @@ function normalize(rawInput, { partial = false } = {}) {
   if (input.source !== undefined) {
     data.source = enumValue(input.source, ['manual', 'command', 'ai', 'import'], 'source', { optional: true, fallback: 'manual' });
   } else if (!partial) data.source = 'manual';
+  // 外部系统（思源学堂等）的记录标识，用于重复同步时的幂等更新
+  if (input.externalId !== undefined) data.externalId = input.externalId === null ? null : String(input.externalId);
   if (input.rolledFrom !== undefined) data.rolledFrom = input.rolledFrom;
   if (input.rolledTo !== undefined) data.rolledTo = input.rolledTo;
   if (input.completedAt !== undefined) data.completedAt = input.completedAt;

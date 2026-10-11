@@ -18,6 +18,7 @@
   const NAV = [
     { view: 'calendar', label: '日历', icon: '🗓' },
     { view: 'todo', label: '待办', icon: '☑' },
+    { view: 'lms', label: '思源学堂', icon: '🎓' },
     { view: 'study', label: '学情', icon: '📈' },
     { view: 'photo', label: '拍题', icon: '📷' },
     { view: 'course', label: '网课', icon: '▶' },
@@ -80,6 +81,7 @@
   const views = {
     calendar: V.calendar,
     todo: V.todo,
+    lms: V.lms,
     message: V.message,
     settings: V.settings,
     study: V.placeholder('学情', '学情分析由 AI 智学主程序汇总，本模块只提供日历与日程的原始数据。', [

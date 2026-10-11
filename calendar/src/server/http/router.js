@@ -34,6 +34,16 @@ export class HttpError extends Error {
   static notImplemented(message, details) {
     return new HttpError(501, ERROR_CODES.NOT_IMPLEMENTED, message, details);
   }
+
+  /** 需要先登录外部系统（如思源学堂）。 */
+  static unauthorized(message, details) {
+    return new HttpError(401, ERROR_CODES.UNAUTHORIZED, message, details);
+  }
+
+  /** 学校服务器/上游服务出错。 */
+  static upstream(message, details) {
+    return new HttpError(502, ERROR_CODES.UPSTREAM_ERROR, message, details);
+  }
 }
 
 /**

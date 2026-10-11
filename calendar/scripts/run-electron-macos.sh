@@ -46,8 +46,10 @@ mkdir -p "$APP_DIR/data"
 ) | (cd "$APP_DIR" && tar -xf -)
 
 # 让打包进 .app 的测试窗口与项目共用同一份数据（主进程读取 data-dir.txt）
-mkdir -p "$ROOT/data"
-printf '%s' "$ROOT/data" > "$APP_DIR/data-dir.txt"
+# POTATO_DATA_DIR 可以指定别处的数据目录，方便用假数据做演示而不污染真实数据
+DATA_DIR="${POTATO_DATA_DIR:-$ROOT/data}"
+mkdir -p "$DATA_DIR" "$APP_DIR"
+printf '%s' "$DATA_DIR" > "$APP_DIR/data-dir.txt"
 
 # 关掉上一次由本脚本启动的实例，避免端口逐次递增
 pkill -f "$BUNDLE/Contents/MacOS/Electron" 2>/dev/null || true
@@ -59,6 +61,6 @@ sleep 3
 echo
 echo "Electron 测试窗口已启动。"
 echo "  运行日志：$APP_DIR/data/electron-main.log"
-echo "  数据目录：$APP_DIR/data"
+echo "  数据目录：$DATA_DIR"
 echo "  若窗口被其它应用挡在后面，可执行：open \"$BUNDLE\""
 echo "  停止：pkill -f \"$BUNDLE/Contents/MacOS/Electron\""

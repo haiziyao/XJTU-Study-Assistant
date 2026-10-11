@@ -19,6 +19,7 @@
 | 聚合视图接口（日/周/月/年通用） | ✅ 已实现 |
 | ICS 导出（可订阅到系统日历） | ✅ 已实现 |
 | dschat 2 兼容（字段别名 / 标记行 / 兼容接口） | ✅ 已实现 |
+| 思源学堂接入（CAS 登录 / 课程 / 作业 / 直播 → 同步到日历） | ✅ 已实现（见下文，第 9 节接口见 [接口文档.md](接口文档.md)） |
 | 测试窗口（浏览器 `/app` 或 Electron） | ✅ 已实现（三栏界面：功能栏 / 对话 / 功能视图） |
 | AI 接入（NL → 指令对象） | 🚧 仅契约与占位（`/ai/*`） |
 | 农历 / 学习记录导入 | 🚧 仅契约 |
@@ -36,7 +37,7 @@ npm run dev:server            # 带 --watch 自动重启
 npm install                   # electron 为 devDependency
 npm run dev:app
 
-# 3) 测试（零依赖，30 个用例）
+# 3) 测试（零依赖，44 个用例；含思源学堂的本地 mock 端到端测试）
 npm test
 ```
 
@@ -114,6 +115,52 @@ node scripts/seed-demo.js          # 写入 16 条演示记录（日期相对今
 node scripts/seed-demo.js --clear  # 只删除演示记录，不影响手动添加的数据
 ```
 
+### 思源学堂接入（LMS）
+
+把「思源学堂里有哪些课程、作业什么时候截止、什么时候直播」变成日历里的待办与日程。
+参考实现是 [yan-xiaoo/XJTUToolBox](https://github.com/yan-xiaoo/XJTUToolBox) 的 `lms/` + `auth/`（Python），
+这里用**零依赖 Node** 重写，并且**只读**学校数据（不代交作业、不改任何学校侧内容）。
+
+在测试窗口左栏点「思源学堂」即可使用：
+
+1. **登录**：学号 + 密码。密码用 `/cas/jwt/publicKey` 的 RSA 公钥加密后才发出，**明文密码不出本机**；若学校要求两步验证，界面会让你发短信验证码并输入；连续失败 3 次会出现图形验证码。
+2. **课程 / 活动**：登录后自动拉取「我的课程」与每门课的作业、直播、回放、资料，并缓存到本地（断网也能看上次结果）。
+3. **同步到日历**：点「预览同步」先看清单（新建 / 更新 / 跳过 / 失效），勾选后再点「同步选中」。
+   - 作业 → **日程**（截止日；同一天有明确起止时刻则做成时段块）；
+   - 直播 → **日程**（真实起止时刻，分类「上课」）；
+   - 回放 / 资料默认不导入，可在选项里打开；
+   - 每条记录带 `externalId = lms:activity:<活动 ID>`，**重复同步只更新不新增**，而且不会覆盖你手动改过的状态与提醒。
+
+同步也可以交给后台自动做：打开「自动同步」后，服务每 30 分钟检查一次，间隔到了就按同一套规则执行
+（**只新建与更新，绝不删除**），适合「作业一发布就自动出现在待办里」。默认关闭。
+
+登录票据单独存在 `data/lms-session.json`（权限 `0600`，7 天后失效），**不保存密码**；
+不登录时仍然可以查看缓存的课程与活动（响应里 `loggedIn: false`），但同步等写操作会返回 401。
+
+想先看效果但不想用真账号？可以起一个**本地假思源学堂**（内置 2 门课 / 4 个作业 / 1 场直播 / 1 个回放）：
+
+```bash
+node scripts/mock-lms-server.js --port 4599            # 终端 A：假站点（加 --mfa 可演示两步验证）
+PC_LMS_BASE_URL=http://127.0.0.1:4599 \
+PC_LMS_CAS_ORIGIN=http://127.0.0.1:4599 \
+PORT=3210 node bin/server.js                          # 终端 B：后端指向假站点
+# 再打开 http://127.0.0.1:3210/app/  ，用 2021001 / pw-123456 登录
+```
+
+（Electron 测试窗口也可以用同一份假站点：把上面的两个地址写进数据目录的 `lms-config.json`
+—— `{"baseUrl":"http://127.0.0.1:4599","casOrigin":"http://127.0.0.1:4599"}` —— 再 `npm run dev:app:macos`。
+GUI 由 LaunchServices 启动，**不会继承终端环境变量**，所以用配置文件而不是环境变量。）
+
+登录出问题时先跑自检脚本（不需要账号，只检查跳转链、公钥、验证码接口）：
+
+```bash
+node scripts/lms-probe.js
+```
+
+> 思源学堂**不提供上课时间/地点**，所以「自动生成课表」还需要另接移动教务（jwapp）的课表接口，本阶段没做。
+> 全部 14 项相关用例都用本地 mock 服务器跑（`test/helpers/lms-mock.js` 复刻了 CAS 登录、RSA 加密、Cookie、两步验证与失败提示），
+> 因此**不需要真实账号**也能验证整条链路。
+
 ### 冒烟示例
 
 ```bash
@@ -134,6 +181,10 @@ curl -s "localhost:3210/api/v1/ics" -o potato.ics
 
 # 指令语法速查
 curl -s localhost:3210/api/v1/commands/grammar | jq
+
+# 思源学堂：状态 / 课程 / 同步预览（未登录时前两个返回 401）
+curl -s localhost:3210/api/v1/lms/status | jq
+curl -s -X POST localhost:3210/api/v1/lms/sync/preview -H 'Content-Type: application/json' -d '{}' | jq
 ```
 
 ## 目录结构
@@ -151,11 +202,12 @@ calendar/
 │       ├── store/              # JSON 集合存储（原子写 + 逐条容错）
 │       ├── services/           # 事件 / 日程 / 提醒 / 指令 / 重复规则 / 校验 / ICS / dschat2 兼容
 │       ├── parser/             # 中文指令解析 + dschat2 标记行解析
-│       ├── routes/             # 全部 REST 路由
+│       ├── routes/             # 全部 REST 路由（含 lms.js 思源学堂路由）
+│       ├── lms/                # 思源学堂接入（CAS 登录 / API 归一化 / 同步映射 / 工具清单）
 │       └── ai/ai-bridge.js     # AI provider 注册与契约（占位）
-├── data/                       # 运行时数据（events / schedules / command-logs）
+├── data/                       # 运行时数据（events / schedules / command-logs / lms-*）
 ├── scripts/                    # run-electron-macos.sh（沙箱启动）+ seed-demo.js（演示数据）
-└── test/                       # node:test 用例（解析器 + 接口 + 兼容层，30 个）
+└── test/                       # node:test 用例（解析器 + 接口 + 兼容层 + 思源学堂，44 个）
 ```
 
 ## 架构
@@ -165,7 +217,8 @@ Electron 渲染层（测试窗口：左功能栏 + 中对话 + 右功能视图�
         │  HTTP + WebSocket（仅 127.0.0.1）
         ▼
 Node.js 后端 ── 路由层 ── 服务层 ── JSON 存储（原子写）
-                    │         └── 提醒扫描（30s，到点 WS 推送 + 系统通知）
+                    │         ├── 提醒扫描（30s，到点 WS 推送 + 系统通知）
+                    │         └── 思源学堂客户端（CAS 登录 + 课程/活动缓存 + 同步计划）
                     └── 指令解析器（规则版）／AI Bridge（待接入模型）
 ```
 
@@ -181,7 +234,8 @@ Node.js 后端 ── 路由层 ── 服务层 ── JSON 存储（原子写�
 5. **顺延可追溯**：顺延引入 `rolled` 状态与 `rolledFrom / rolledTo` 双向引用，不再把「被顺延」当作「已完成」。
 6. **结构化重复**：支持间隔、星期集合、结束条件（日期/次数），并修正「31 号在 2 月消失」等问题。
 7. **零依赖后端**：只用 Node 内置模块，测试与联调不依赖网络安装；Electron 仅作为可选的前端壳。
-8. **与 dschat 2 平滑对接**：`/compat/dschat/*` 兼容其 snake_case 字段与按标题删除；`/commands/markup` 直接吃它那套中文标记行；反向可导出 ICS。映射与差异见 [接口文档.md](接口文档.md) 第 8 节。
+8. **外部系统只读接入**：思源学堂走「登录 → 拉取 → 预览 → 应用」四步，写库前一定先给用户看清单；每条记录带 `externalId`，重复同步只更新不新增，且不会回滚用户手改的状态。
+9. **与 dschat 2 平滑对接**：`/compat/dschat/*` 兼容其 snake_case 字段与按标题删除；`/commands/markup` 直接吃它那套中文标记行；反向可导出 ICS。映射与差异见 [接口文档.md](接口文档.md) 第 8 节。
 
 ## 与 dschat 2 的关系（一句话版）
 
@@ -193,6 +247,7 @@ Node.js 后端 ── 路由层 ── 服务层 ── JSON 存储（原子写�
 - 接入 AI provider（`aiBridge.registerProvider`）实现自然语言理解；
 - 农历能力（建议接 `lunar-javascript`，不要移植旧查表实现）；
 - 导入 PotatoTimer 学习记录（`source: "import"` + `externalId` 去重）；
+- 移动教务（jwapp）课表导入：思源学堂没有上课时间/地点，真正的「自动生成课表」需要接这一路的接口；
 - 重复日程的单次例外（`exceptions` 字段）；
 - ICS 导入（当前只支持导出）；
 - 数据规模变大后把 JSON 存储替换为 SQLite（服务层接口不变）。

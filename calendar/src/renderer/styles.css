@@ -1495,6 +1495,281 @@ body.panel-collapsed .panel {
   gap: 4px;
 }
 
+/* ----------------------------------------------------------- 思源学堂视图 */
+
+.lms-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.lms-head .card-title {
+  margin-bottom: 0;
+}
+
+.lms-head .spacer {
+  flex: 1;
+}
+
+.lms-hint {
+  font-size: 11px;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+.lms-error {
+  margin-top: 8px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 107, 122, 0.45);
+  background: rgba(255, 107, 122, 0.08);
+  color: var(--red);
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.lms-form {
+  display: grid;
+  gap: 8px;
+  max-width: 420px;
+}
+
+.lms-captcha {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.lms-captcha img {
+  height: 34px;
+  min-width: 96px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #fff;
+  object-fit: contain;
+  cursor: pointer;
+}
+
+.lms-captcha input {
+  width: 108px;
+  flex: none;
+}
+
+.lms-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.lms-actions .spacer {
+  flex: 1;
+}
+
+.lms-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.lms-filters select {
+  max-width: 220px;
+}
+
+.lms-list {
+  display: grid;
+  gap: 6px;
+}
+
+.lms-row,
+.lms-result {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-base);
+  border: 1px solid var(--line);
+}
+
+.lms-result {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.lms-row-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.lms-row-title > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lms-row-meta {
+  font-size: 11px;
+  color: var(--fg-3);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.lms-pill {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--fg-3);
+  flex: none;
+}
+
+.lms-pill.ready {
+  color: var(--green);
+  border-color: rgba(92, 219, 139, 0.5);
+}
+
+.lms-pill.warn {
+  color: var(--orange);
+  border-color: rgba(255, 184, 108, 0.5);
+}
+
+.lms-pill.error {
+  color: var(--red);
+  border-color: rgba(255, 107, 122, 0.5);
+}
+
+.lms-badge {
+  font-size: 10px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  flex: none;
+}
+
+.lms-badge.create {
+  color: var(--green);
+  border-color: rgba(92, 219, 139, 0.5);
+}
+
+.lms-badge.update {
+  color: var(--blue);
+  border-color: rgba(108, 140, 255, 0.5);
+}
+
+.lms-badge.skip {
+  color: var(--fg-3);
+}
+
+.lms-badge.stale {
+  color: var(--orange);
+  border-color: rgba(255, 184, 108, 0.5);
+}
+
+.tag.submitted {
+  color: var(--green);
+  border-color: rgba(92, 219, 139, 0.5);
+}
+
+.lms-checks {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.lms-checks .check-field {
+  align-items: flex-start;
+}
+
+.lms-checks .check-field input {
+  flex: none;
+  margin: 4px 0 0;
+}
+
+.lms-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+
+.lms-sync-list {
+  display: grid;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+  /* 窄栏下 reason 再长也只换行，不产生横向滚动 */
+  overflow-x: hidden;
+  padding-right: 2px;
+}
+
+.lms-sync-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-base);
+  border: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.lms-sync-row input {
+  flex: none;
+  margin: 3px 0 0;
+}
+
+.lms-sync-main {
+  min-width: 0;
+}
+
+/* 自动同步设置行（状态卡片内） */
+
+.lms-autosync-block {
+  margin-top: 10px;
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.lms-autosync {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.lms-autosync .check-field {
+  flex: none;
+  cursor: pointer;
+}
+
+.lms-hours {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+
+.lms-hours input {
+  width: 74px;
+  flex: none;
+}
+
+.lms-autosync-toggle:disabled {
+  cursor: not-allowed;
+}
+
 /* --------------------------------------------------------------- 弹层 */
 
 .modal-mask {
