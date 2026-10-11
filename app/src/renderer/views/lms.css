@@ -345,3 +345,31 @@
     display: none;
   }
 }
+
+/* 两级分组：学期（第 1 层）→ 课程（第 2 层）。
+   第 2 层缩进更深、竖线更淡，才不会看着像两层一样重 */
+.lms-group-l2 .lms-group-head {
+  background: var(--bg-base);
+  font-weight: 500;
+}
+
+.lms-group-body-l1 {
+  padding-left: 8px;
+  border-left: 2px solid var(--line);
+  margin-left: 6px;
+}
+
+.lms-group-body-l2 {
+  padding-left: 8px;
+  border-left: 2px dotted color-mix(in srgb, var(--line) 80%, transparent);
+  margin-left: 4px;
+}
+
+/* 学期层的表头稍微显眼一点（它是第一眼看的那一层） */
+.lms-group-l1 > .lms-group-head {
+  background: var(--bg-elevated);
+}
+
+.lms-group-l2 > .lms-group-head {
+  background: color-mix(in srgb, var(--bg-elevated) 55%, var(--bg-base));
+}

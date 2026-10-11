@@ -29,13 +29,21 @@ const lmsUi = {
   activitiesError: null,
   activityType: '',
   activityCourseId: '',
+  /** 学期筛选（空 = 全部学期） */
+  semesterFilter: '',
   /**
-   * 按课程分组时，用户显式点开/点收过哪些课程（key → true/false）。
-   * 没记录过的走"自适应默认"（见 lmsGroupsDefaultExpanded）。
+   * 分组折叠状态。三处各记一份，互不干扰：
+   *   semesterToggle       活动卡：学期层（key = 学期键）
+   *   groupToggle          活动卡：学期里的课程层（key = 课程键）
+   *   courseSemesterToggle 课程卡：学期层
+   * 没记录过的走"自适应默认"（见 lmsGroupExpandedIn）；`*All` 是「全部展开/收起」的覆盖。
    */
+  semesterToggle: new Map(),
+  semestersAll: null,
   groupToggle: new Map(),
-  /** 「展开全部 / 收起全部」的整体覆盖：null 表示没点过 */
   groupsAll: null,
+  courseSemesterToggle: new Map(),
+  courseSemestersAll: null,
   /** 只记住学号（方便切走再切回来），明文密码不留在内存里。 */
   username: '',
   loginError: null,
@@ -890,16 +898,35 @@ function lmsAutoSyncRow(status) {
 
 function lmsCoursesCard() {
   const card = mk('div', 'card');
+  const items = lmsUi.courses?.items ?? [];
+  const semesters = lmsSemesterOptions();
+
   const head = mk('div', 'lms-head');
   head.appendChild(mk('div', 'card-title', '课程'));
-  if (lmsUi.courses?.count) head.appendChild(mk('span', 'lms-hint', `${lmsUi.courses.count} 门`));
+  if (lmsUi.courses?.count) {
+    // 学期数一起报出来 —— 课程多的时候它就是"按学期分"的那一层
+    head.appendChild(
+      mk('span', 'lms-hint', `${lmsUi.courses.count} 门 · ${semesters.length} 个学期`),
+    );
+  }
   head.appendChild(mk('div', 'spacer'));
+  if (semesters.length > 1) {
+    head.appendChild(
+      lmsAllToggleButton({
+        expanded: lmsEverythingExpanded(lmsUi.courseSemestersAll, items.length),
+        onClick: () => {
+          lmsUi.courseSemestersAll = !lmsEverythingExpanded(lmsUi.courseSemestersAll, items.length);
+          lmsResetGroupState({ keep: 'courseSemestersAll' });
+          lmsPaint();
+        },
+      }),
+    );
+  }
   head.appendChild(lmsActionButton('刷新课程', '刷新中…', lmsUi.coursesBusy, () => void lmsLoadCourses(true)));
   card.appendChild(head);
 
   if (lmsUi.coursesError) card.appendChild(mk('div', 'lms-error', `课程加载失败：${lmsUi.coursesError}`));
 
-  const items = lmsUi.courses?.items ?? [];
   if (lmsUi.courses === null || (lmsUi.coursesBusy && !items.length)) {
     card.appendChild(mk('div', 'loading', '加载中…'));
     return card;
@@ -909,13 +936,34 @@ function lmsCoursesCard() {
     return card;
   }
 
-  const list = mk('div', 'lms-list');
-  for (const course of items) list.appendChild(lmsCourseRow(course));
-  card.appendChild(list);
+  // 课程也按学期分（新学期在前，最新那个默认展开）
+  semesters.forEach((semester, index) =>
+    card.appendChild(lmsCourseSemesterSection(semester, index === 0, items.length)),
+  );
   if (lmsUi.courses?.fetchedAt) {
     card.appendChild(mk('div', 'lms-hint', `更新于 ${lmsFormatStamp(lmsUi.courses.fetchedAt)}`));
   }
   return card;
+}
+
+/** 课程卡里的一个学期分组。 */
+function lmsCourseSemesterSection(semester, isNewest, totalCourses) {
+  const expanded = lmsGroupExpandedIn(lmsUi.courseSemesterToggle, lmsUi.courseSemestersAll, semester.key, {
+    isNewest,
+    smallEnough: totalCourses <= LMS_GROUP_AUTO_EXPAND,
+  });
+  return lmsCollapsibleGroup({
+    label: semester.label,
+    level: 1,
+    tags: [mk('span', 'lms-hint', `${semester.courses.length} 门`)],
+    expanded,
+    onToggle: (next) => {
+      lmsUi.courseSemesterToggle.set(semester.key, next);
+      lmsUi.courseSemestersAll = null;
+      lmsPaint();
+    },
+    render: () => semester.courses.map((course) => lmsCourseRow(course)),
+  });
 }
 
 function lmsCourseRow(course) {
@@ -980,6 +1028,11 @@ function lmsVisibleActivities() {
   if (lmsUi.activityCourseId) {
     items = items.filter((item) => String(item.courseId) === String(lmsUi.activityCourseId));
   }
+  if (lmsUi.semesterFilter) {
+    // 活动本身不带学期，得从课程表查（查不到算「未知学期」，与分组口径一致）
+    const index = lmsCourseSemesterIndex();
+    items = items.filter((item) => (index.get(String(item.courseId))?.key ?? '__none__') === lmsUi.semesterFilter);
+  }
   return items;
 }
 
@@ -1008,96 +1061,278 @@ function lmsSubmitPending(item) {
   return lmsSubmitKnown(item) && Number(item.userSubmitCount) === 0;
 }
 
+/* ------------------------------------------------------------------ 学期 */
+
+/** 学期的身份：优先 id，其次 code，最后 label（同一学期必须落到同一个键上）。 */
+function lmsSemesterKey(semester) {
+  if (!semester) return '__none__';
+  if (semester.id !== null && semester.id !== undefined) return `id:${semester.id}`;
+  if (semester.code) return `code:${semester.code}`;
+  const label = lmsSemesterLabel(semester);
+  return label === '未知学期' ? '__none__' : `label:${label}`;
+}
+
+/** 学期怎么显示：接口已经把 real_name / name / code 归一成 label 了。 */
+function lmsSemesterLabel(semester) {
+  return semester?.label || semester?.realName || semester?.name || semester?.code || '未知学期';
+}
+
+/** 课程 id → 所属学期。活动只带 courseId，学期信息得从课程表查。 */
+function lmsCourseSemesterIndex() {
+  const index = new Map();
+  for (const course of lmsUi.courses?.items ?? []) {
+    index.set(String(course.id), {
+      key: lmsSemesterKey(course.semester),
+      label: course.semester ? lmsSemesterLabel(course.semester) : '未知学期',
+    });
+  }
+  return index;
+}
+
 /**
- * 把当前筛选结果**按课程分组**。
+ * 学期之间怎么排：**新学期在前**。
  *
- * 分组顺序按"最近有活动"排前面 —— 正在上的课自然浮上来，而不是按课程名的字母序。
- * 顺带算出每门课的作业状态：明确未提交数 + 还没查过的条数（两者都不藏）。
+ * 依据优先用学期内最晚的活动时间，其次课程起止日期，最后退化到学期 code
+ * （`2026-1` 这种字符串直接比大小也够用）。都没有的（「未知学期」）永远排最后。
  */
-function lmsActivityGroups() {
-  const groups = new Map();
-  for (const item of lmsVisibleActivities()) {
-    const key = item.courseId != null && item.courseId !== '' ? String(item.courseId) : `name:${item.courseName ?? ''}`;
-    if (!groups.has(key)) {
-      groups.set(key, {
+function lmsSemesterRank(latestActivity, courses) {
+  if (latestActivity) return latestActivity;
+  let latest = '';
+  for (const course of courses ?? []) {
+    const stamp = String(course.endDate || course.startDate || '');
+    if (stamp > latest) latest = stamp;
+  }
+  if (latest) return latest;
+  for (const course of courses ?? []) {
+    const code = String(course.semester?.code ?? '');
+    if (code > latest) latest = code;
+  }
+  return latest;
+}
+
+function lmsSemesterSort(a, b) {
+  if (a.key === '__none__') return 1;
+  if (b.key === '__none__') return -1;
+  return b.rank.localeCompare(a.rank) || a.label.localeCompare(b.label, 'zh');
+}
+
+/** 课程列表里出现过的所有学期（新学期在前）—— 学期下拉的选项。 */
+function lmsSemesterOptions() {
+  const semesters = new Map();
+  for (const course of lmsUi.courses?.items ?? []) {
+    const key = lmsSemesterKey(course.semester);
+    if (!semesters.has(key)) {
+      semesters.set(key, {
         key,
-        name: item.courseName || '（未标注课程）',
-        items: [],
-        pending: 0,
-        unknown: 0,
-        latest: '',
+        label: course.semester ? lmsSemesterLabel(course.semester) : '未知学期',
+        rank: '',
+        courses: [],
       });
     }
-    const group = groups.get(key);
-    group.items.push(item);
+    semesters.get(key).courses.push(course);
+  }
+  const list = [...semesters.values()];
+  for (const semester of list) semester.rank = lmsSemesterRank('', semester.courses);
+  return list.sort(lmsSemesterSort);
+}
+
+/* ------------------------------------------------------------------ 分组 */
+
+/** 一组活动的统计：明确未提交数、还没查过的条数、最近时间。 */
+function lmsActivityStats(items) {
+  let pending = 0;
+  let unknown = 0;
+  let latest = '';
+  for (const item of items) {
     if (item.type === 'homework') {
-      if (lmsSubmitPending(item)) group.pending += 1;
-      else if (!lmsSubmitKnown(item)) group.unknown += 1;
+      if (lmsSubmitPending(item)) pending += 1;
+      else if (!lmsSubmitKnown(item)) unknown += 1;
     }
     const stamp = lmsActivityStamp(item);
-    if (stamp > group.latest) group.latest = stamp;
+    if (stamp > latest) latest = stamp;
   }
-  return [...groups.values()].sort(
-    (a, b) => b.latest.localeCompare(a.latest) || a.name.localeCompare(b.name, 'zh'),
-  );
+  return { pending, unknown, latest };
 }
 
-/** 某个分组是否展开：用户点过就听用户的，没点过走自适应默认。 */
-function lmsGroupExpanded(key) {
-  const explicit = lmsUi.groupToggle.get(key);
+/** 一组活动再按课程分一层（组内按"最近有活动"排前面）。 */
+function lmsActivityCourseGroups(items) {
+  const courses = new Map();
+  for (const item of items) {
+    const key = item.courseId != null && item.courseId !== '' ? String(item.courseId) : `name:${item.courseName ?? ''}`;
+    if (!courses.has(key)) courses.set(key, { key, name: item.courseName || '（未标注课程）', items: [] });
+    courses.get(key).items.push(item);
+  }
+  return [...courses.values()]
+    .map((group) => ({ ...group, ...lmsActivityStats(group.items) }))
+    .sort((a, b) => b.latest.localeCompare(a.latest) || a.name.localeCompare(b.name, 'zh'));
+}
+
+/**
+ * 把当前筛选结果按 **学期 → 课程** 两级分组。
+ *
+ * 课程缓存里查不到的（比如课程刷新过、活动还是旧的）落到「未知学期」，
+ * 不硬塞进某个学期 —— 分组错了比不分组更糟。
+ */
+function lmsActivitySemesterGroups() {
+  const index = lmsCourseSemesterIndex();
+  const semesters = new Map();
+  for (const item of lmsVisibleActivities()) {
+    const found = index.get(String(item.courseId));
+    const key = found?.key ?? '__none__';
+    if (!semesters.has(key)) {
+      semesters.set(key, { key, label: found?.label ?? '未知学期', items: [], rank: '' });
+    }
+    semesters.get(key).items.push(item);
+  }
+  const list = [...semesters.values()];
+  for (const semester of list) {
+    semester.courses = lmsActivityCourseGroups(semester.items);
+    Object.assign(semester, lmsActivityStats(semester.items));
+    semester.rank = lmsSemesterRank(
+      semester.latest,
+      semester.courses.map((group) => ({ endDate: group.latest })),
+    );
+  }
+  return list.sort(lmsSemesterSort);
+}
+
+/**
+ * 分组展开与否。三档优先：**手动点过 > 全部展开/收起 > 自适应默认**。
+ *
+ * 自适应默认：这一层不超过 12 条就展开（小列表直接看内容），超了就收起（先看概览）。
+ * 两层的"这一层"判据不同，故意的：
+ *   - **学期层**看**整批**条数 —— 大账号（上千条）进来只展开最新学期，先看概览；
+ *   - **课程层**看**这个学期自己**的条数 —— 展开一个小学期时，里面的课直接铺开。
+ * 学期层还额外保证**最新学期一定展开**，否则大账号第一眼是一片折叠标题。
+ */
+function lmsGroupExpandedIn(map, allOverride, key, { isNewest = false, smallEnough = true } = {}) {
+  const explicit = map.get(key);
   if (explicit !== undefined) return explicit;
-  return lmsGroupAllExpanded();
+  if (allOverride !== null) return allOverride;
+  return smallEnough || isNewest;
 }
 
-/** 自适应默认：条数少就全展开（直接看内容），多了就全收起（先看课程概览）。 */
-function lmsGroupAllExpanded() {
-  if (lmsUi.groupsAll !== null) return lmsUi.groupsAll;
-  return lmsVisibleActivities().length <= LMS_GROUP_AUTO_EXPAND;
+/** 分组表头上的小标记：条数 / 未提交 / 未查 / 最近时间。 */
+function lmsGroupTags({ count, pending = 0, unknown = 0, latest = '' }) {
+  const tags = [mk('span', 'lms-hint', `${count} 条`)];
+  if (pending) tags.push(mk('span', 'tag late', `未提交 ${pending}`));
+  if (unknown) {
+    const tag = mk('span', 'lms-hint', `未查 ${unknown}`);
+    tag.title = '活动列表不含作业提交状态；「预览同步」时会补拉详情，那时才知道交没交';
+    tags.push(tag);
+  }
+  if (latest) tags.push(mk('span', 'lms-hint lms-group-latest', `最近 ${lmsFormatTime(latest)}`));
+  return tags;
 }
 
-/** 一个课程分组：可折叠的表头 + 组内活动。 */
-function lmsCourseGroup(group) {
-  const box = mk('div', 'lms-group');
-  const expanded = lmsGroupExpanded(group.key);
-
+/**
+ * 通用可折叠分组：表头（箭头 + 标题 + 标记）+ 内容。
+ *
+ * 三处共用（活动卡的学期层、学期里的课程层、课程卡的学期层），免得三份各写一遍还长歪。
+ * `render` 只在展开时调用 —— 活动上千条时这一步很关键。
+ */
+function lmsCollapsibleGroup({ label, level = 1, tags = [], expanded, onToggle, render }) {
+  const box = mk('div', `lms-group lms-group-l${level}`);
   const head = mk('button', 'lms-group-head');
   head.type = 'button';
   head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
   head.appendChild(mk('span', 'lms-group-caret', expanded ? '▾' : '▸'));
-  head.appendChild(mk('span', 'lms-group-name', group.name));
-  head.appendChild(mk('span', 'lms-hint', `${group.items.length} 条`));
-  if (group.pending) head.appendChild(mk('span', 'tag late', `未提交 ${group.pending}`));
-  if (group.unknown) {
-    const unknownTag = mk('span', 'lms-hint', `未查 ${group.unknown}`);
-    unknownTag.title = '活动列表不含作业提交状态；「预览同步」时会补拉详情，那时才知道交没交';
-    head.appendChild(unknownTag);
-  }
-  if (group.latest) head.appendChild(mk('span', 'lms-hint lms-group-latest', `最近 ${lmsFormatTime(group.latest)}`));
-  head.addEventListener('click', () => {
-    lmsUi.groupToggle.set(group.key, !lmsGroupExpanded(group.key));
-    // 手动逐个点过之后，"全部展开/收起"这个整体开关就不再代表实际状态了
-    lmsUi.groupsAll = null;
-    lmsPaint();
-  });
+  head.appendChild(mk('span', 'lms-group-name', label));
+  for (const tag of tags) if (tag) head.appendChild(tag);
+  head.addEventListener('click', () => onToggle(!expanded));
   box.appendChild(head);
-
   if (expanded) {
-    const list = mk('div', 'lms-list lms-group-body');
-    // 组内不再重复显示课程名（表头已经写了）
-    for (const item of group.items) list.appendChild(lmsActivityRow(item, { showCourse: false }));
-    box.appendChild(list);
+    const body = mk('div', `lms-list lms-group-body lms-group-body-l${level}`);
+    for (const child of render()) body.appendChild(child);
+    box.appendChild(body);
   }
   return box;
+}
+
+/** 「全部展开 / 全部收起」按钮（一层状态，按钮文案跟着实际状态走）。 */
+function lmsAllToggleButton({ expanded, onClick }) {
+  const button = mk('button', 'ghost-btn lms-group-all', expanded ? '全部收起' : '全部展开');
+  button.type = 'button';
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+/** 当前是否"整体展开"（决定按钮文案）。 */
+function lmsEverythingExpanded(override, total) {
+  if (override !== null) return override;
+  return total <= LMS_GROUP_AUTO_EXPAND;
+}
+
+/** 换页签 / 换过滤 / 整体展开收起时重置折叠状态（别把上一批的折叠继承过来）。 */
+function lmsResetGroupState({ keep } = {}) {
+  if (keep !== 'semestersAll') lmsUi.semestersAll = null;
+  if (keep !== 'groupsAll') lmsUi.groupsAll = null;
+  if (keep !== 'courseSemestersAll') lmsUi.courseSemestersAll = null;
+  lmsUi.semesterToggle = new Map();
+  lmsUi.groupToggle = new Map();
+  lmsUi.courseSemesterToggle = new Map();
+}
+
+/** 活动卡：一个学期（里面是按课程分的组）。 */
+function lmsSemesterSection(semester, isNewest, totalItems) {
+  const expanded = lmsGroupExpandedIn(lmsUi.semesterToggle, lmsUi.semestersAll, semester.key, {
+    isNewest,
+    // 学期层看整批：14 条以上就只展开最新那个学期，先给概览
+    smallEnough: totalItems <= LMS_GROUP_AUTO_EXPAND,
+  });
+  return lmsCollapsibleGroup({
+    label: semester.label,
+    level: 1,
+    tags: lmsGroupTags({
+      count: semester.items.length,
+      pending: semester.pending,
+      unknown: semester.unknown,
+      latest: semester.latest,
+    }),
+    expanded,
+    onToggle: (next) => {
+      lmsUi.semesterToggle.set(semester.key, next);
+      lmsUi.semestersAll = null;
+      lmsPaint();
+    },
+    render: () => semester.courses.map((course) => lmsCourseSection(course, semester)),
+  });
+}
+
+/** 活动卡：学期里的一个课程组。 */
+function lmsCourseSection(group, semester) {
+  const expanded = lmsGroupExpandedIn(lmsUi.groupToggle, lmsUi.groupsAll, group.key, {
+    smallEnough: semester.items.length <= LMS_GROUP_AUTO_EXPAND,
+  });
+  return lmsCollapsibleGroup({
+    label: group.name,
+    level: 2,
+    tags: lmsGroupTags({
+      count: group.items.length,
+      pending: group.pending,
+      unknown: group.unknown,
+      latest: group.latest,
+    }),
+    expanded,
+    onToggle: (next) => {
+      lmsUi.groupToggle.set(group.key, next);
+      lmsUi.groupsAll = null;
+      lmsPaint();
+    },
+    // 组内不再重复显示课程名（表头已经写了）
+    render: () => group.items.map((item) => lmsActivityRow(item, { showCourse: false })),
+  });
 }
 
 function lmsActivitiesCard() {
   const card = mk('div', 'card');
   const visible = lmsVisibleActivities();
-  const groups = lmsActivityGroups();
+  const semesters = lmsActivitySemesterGroups();
+  const courseCount = new Set(visible.map((item) => String(item.courseId ?? item.courseName))).size;
 
   const head = mk('div', 'lms-head');
   head.appendChild(mk('div', 'card-title', '活动'));
-  head.appendChild(mk('span', 'lms-hint', `${visible.length} 条 · ${groups.length} 门课`));
+  head.appendChild(mk('span', 'lms-hint', `${visible.length} 条 · ${semesters.length} 个学期 · ${courseCount} 门课`));
   head.appendChild(mk('div', 'spacer'));
   head.appendChild(lmsActionButton('刷新活动', '刷新中…', lmsUi.activitiesBusy, () => void lmsLoadActivities(true)));
   card.appendChild(head);
@@ -1110,39 +1345,55 @@ function lmsActivitiesCard() {
     button.addEventListener('click', () => {
       if (lmsUi.activityType === value) return;
       lmsUi.activityType = value;
-      // 换了页签就是换了一批内容，分组展开状态跟着重来（不然会继承上一批的折叠）
-      lmsUi.groupToggle = new Map();
-      lmsUi.groupsAll = null;
+      lmsResetGroupState();
       lmsPaint();
     });
     seg.appendChild(button);
   }
   filters.appendChild(seg);
 
-  const select = mk('select');
-  select.appendChild(option('', '只看课程：全部', !lmsUi.activityCourseId));
+  // 学期筛选：课程多的时候这是主要的导航方式
+  const semesterSelect = mk('select');
+  semesterSelect.appendChild(option('', '全部学期', !lmsUi.semesterFilter));
+  for (const semester of lmsSemesterOptions()) {
+    semesterSelect.appendChild(option(semester.key, semester.label, semester.key === lmsUi.semesterFilter));
+  }
+  semesterSelect.addEventListener('change', () => {
+    lmsUi.semesterFilter = semesterSelect.value;
+    // 换了学期，原来选中的课程可能根本不在这个学期里
+    lmsUi.activityCourseId = '';
+    lmsResetGroupState();
+    lmsPaint();
+  });
+  filters.appendChild(semesterSelect);
+
+  // 只看课程：选项跟着学期筛选走，免得在几十门课里翻
+  const courseSelect = mk('select');
+  courseSelect.appendChild(option('', '只看课程：全部', !lmsUi.activityCourseId));
   for (const course of lmsUi.courses?.items ?? []) {
-    select.appendChild(
+    if (lmsUi.semesterFilter && lmsSemesterKey(course.semester) !== lmsUi.semesterFilter) continue;
+    courseSelect.appendChild(
       option(String(course.id), course.name ?? String(course.id), String(course.id) === String(lmsUi.activityCourseId)),
     );
   }
-  select.addEventListener('change', () => {
-    lmsUi.activityCourseId = select.value;
-    lmsUi.groupToggle = new Map();
-    lmsUi.groupsAll = null;
+  courseSelect.addEventListener('change', () => {
+    lmsUi.activityCourseId = courseSelect.value;
+    lmsResetGroupState();
     lmsPaint();
   });
-  filters.appendChild(select);
+  filters.appendChild(courseSelect);
 
-  if (groups.length > 1) {
-    const all = mk('button', 'ghost-btn lms-group-all', lmsGroupAllExpanded() ? '全部收起' : '全部展开');
-    all.type = 'button';
-    all.addEventListener('click', () => {
-      lmsUi.groupsAll = !lmsGroupAllExpanded();
-      lmsUi.groupToggle = new Map();
-      lmsPaint();
-    });
-    filters.appendChild(all);
+  if (semesters.length > 1) {
+    filters.appendChild(
+      lmsAllToggleButton({
+        expanded: lmsEverythingExpanded(lmsUi.semestersAll, visible.length),
+        onClick: () => {
+          lmsUi.semestersAll = !lmsEverythingExpanded(lmsUi.semestersAll, visible.length);
+          lmsResetGroupState({ keep: 'semestersAll' });
+          lmsPaint();
+        },
+      }),
+    );
   }
   card.appendChild(filters);
 
@@ -1158,7 +1409,11 @@ function lmsActivitiesCard() {
     return card;
   }
 
-  for (const group of groups) card.appendChild(lmsCourseGroup(group));
+  // 传总数进去：学期层用**整批**条数判断"要不要默认全展开"，
+  // 课程层才用"这个学期自己的条数"—— 两层判据不同，见 lmsGroupExpandedIn 的注释
+  semesters.forEach((semester, index) =>
+    card.appendChild(lmsSemesterSection(semester, index === 0, visible.length)),
+  );
   if (lmsUi.activities?.fetchedAt) {
     card.appendChild(mk('div', 'lms-hint', `更新于 ${lmsFormatStamp(lmsUi.activities.fetchedAt)}`));
   }
