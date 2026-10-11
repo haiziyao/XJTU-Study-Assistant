@@ -22,11 +22,21 @@ import { startMockLms } from './helpers/lms-mock.js';
 const TODAY = '2026-10-11';
 
 /** 起一套「后端 + 指向 mock 的思源学堂客户端」。 */
-async function startApp(mock, { dataDir } = {}) {
+async function startApp(mock, { dataDir, downloadDir } = {}) {
   const dir = dataDir ?? (await mkdtemp(path.join(tmpdir(), 'potato-lms-')));
   const app = await createServer({
     dataDir: dir,
-    lms: { config: { baseUrl: mock.origin, casOrigin: mock.origin, userAgent: 'test-agent', concurrency: 2 } },
+    lms: {
+      config: {
+        baseUrl: mock.origin,
+        casOrigin: mock.origin,
+        // 录播站（课程回放的视频不在 lms 上）：mock 把 /rms 挂在同一个进程里
+        rmsBaseUrl: `${mock.origin}/rms`,
+        downloadDir: downloadDir ?? path.join(dir, 'downloads'),
+        userAgent: 'test-agent',
+        concurrency: 2,
+      },
+    },
   });
   const info = await app.listen({ port: 0 });
   const call = async (method, route, body) => {
@@ -659,10 +669,18 @@ test('LMS：预置接口返回 501 而不是 404（让 AI 能区分"没实现"�
     const capabilities = await (await fetch(`${info.baseUrl}/ai/capabilities`)).json();
     const mine = capabilities.aiTools.filter((tool) => tool.module === 'lms');
     assert.equal(mine.filter((tool) => tool.implemented === false).length, planned.length);
-    assert.equal(mine.filter((tool) => tool.implemented !== false).length, 8, '已实现的 8 个不该变成"未实现"');
-    // 每个已实现工具都必须真的存在（不能出现"清单说有、调用 404"）
+    assert.ok(mine.filter((tool) => tool.implemented !== false).length >= 11, '课程页与回放下载已实现');
+
+    // 清单说"已实现"的，路径就必须真的存在 —— 调用不能返回 501 NOT_IMPLEMENTED
+    // （401/404 都算"路由在"：401 是没登录，404 是本地缓存里没这条记录）
     for (const tool of mine.filter((item) => item.implemented !== false)) {
       assert.ok(tool.path.startsWith('/lms/'), `${tool.name} 路径应在 /lms 下`);
+      const response = await fetch(`${info.baseUrl}${tool.path.replace('{id}', '1')}`, {
+        method: tool.method,
+        headers: { 'Content-Type': 'application/json' },
+        body: tool.method === 'POST' ? '{}' : undefined,
+      });
+      assert.notEqual(response.status, 501, `${tool.name} 标了已实现，实际却返回 501`);
     }
   } finally {
     await app.close();
@@ -683,4 +701,167 @@ test('接口文档与 LMS 工具清单一致（含"预置未实现"必须标明�
     const around = doc.slice(Math.max(0, index - 400), index + 400);
     assert.ok(/尚未实现|预置|未实现/.test(around), `${tool.name} 附近必须写明"尚未实现"`);
   }
+});
+
+test('LMS：课程页 —— 课程信息 + 该课活动按 回放/作业/资料/直播 分组（全走缓存）', async () => {
+  const mock = await startMockLms();
+  const { app, call } = await startApp(mock);
+  try {
+    await login(call);
+    await call('GET', '/lms/courses?refresh=1');
+    await call('GET', '/lms/activities?refresh=1');
+
+    const page = await call('GET', '/lms/courses/1001');
+    assert.equal(page.status, 200);
+    assert.equal(page.body.course.name, '数据结构');
+    assert.equal(Number(page.body.course.credit), 3, '学分接口给的是字符串，别在断言里假设是数字');
+    assert.ok(page.body.course.instructors.some((item) => item.name === '李老师'));
+    assert.deepEqual(page.body.counts, { replay: 1, homework: 3, material: 1, live: 1, other: 0 });
+    assert.equal(page.body.groups.replay[0].title, '第 5 周回放');
+    assert.equal(page.body.groups.homework.length, 3);
+    // 活动行要能直接喂给回放接口，所以 id 必须是学校的数字 id
+    assert.equal(page.body.groups.replay[0].id, 5007);
+
+    // 缓存里没有的课程 → 404（而不是编一个空课程出来）
+    assert.equal((await call('GET', '/lms/courses/9999')).status, 404);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('LMS：课程回放取链真的走完三步（lms player-url → 录播站 embed-token → captures）', async () => {
+  const mock = await startMockLms();
+  const { app, call } = await startApp(mock);
+  try {
+    await login(call);
+    await call('GET', '/lms/courses?refresh=1');
+    await call('GET', '/lms/activities?refresh=1');
+
+    const replays = await call('GET', '/lms/activities/5007/replays');
+    assert.equal(replays.status, 200);
+    assert.equal(replays.body.replayCode, 'rc-5007');
+    assert.equal(replays.body.videos.length, 2);
+    const [instructor, encoder] = replays.body.videos;
+    assert.equal(instructor.labelText, '教室录像');
+    assert.equal(encoder.labelText, '电脑内录');
+    assert.equal(instructor.isBestAudio, true);
+    assert.match(instructor.downloadUrl, /\/rms\/media\/rc-5007-instructor\.mp4$/);
+    assert.equal(instructor.size, 1024);
+    assert.equal(instructor.sizeText, '1.00KB');
+
+    // 三步都得留痕：少一步就说明链路被抄近路了
+    assert.deepEqual(mock.state.playerUrlFetched, [5007], '第一步：lms 换播放地址');
+    assert.deepEqual(mock.state.embedTokenFetched, ['tk-5007'], '第二步：用 token 换录播站票据');
+    assert.deepEqual(mock.state.capturesFetched, ['rc-5007'], '第三步：用 replay_code 要视频列表');
+
+    // 拿作业去要回放 → 学堂说这不是 lesson，我们不该硬编一个视频出来
+    const wrong = await call('GET', '/lms/activities/5001/replays');
+    assert.ok(wrong.status >= 400 && wrong.status !== 501, `作业不该给出回放地址，实际 ${wrong.status}`);
+    assert.ok(wrong.body.error, '应有结构化错误');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('LMS：回放下载真落盘 —— 按课程/活动分层、先写 .part 再改名、字节与源一致', async () => {
+  const mock = await startMockLms();
+  const { app, call, dataDir } = await startApp(mock);
+  try {
+    await login(call);
+    await call('GET', '/lms/courses?refresh=1');
+    await call('GET', '/lms/activities?refresh=1');
+    const replays = await call('GET', '/lms/activities/5007/replays');
+    const video = replays.body.videos[0];
+
+    const started = await call('POST', '/lms/downloads', { activityId: 5007, video });
+    assert.equal(started.status, 200);
+    assert.equal(started.body.status, 'running');
+    assert.match(started.body.path, /downloads\/数据结构\/第 5 周回放\/教室录像_1\.00KB\.mp4$/);
+
+    let job = started.body;
+    for (let i = 0; i < 60 && job.status === 'running'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const listed = await call('GET', '/lms/downloads');
+      job = listed.body.items.find((item) => item.id === started.body.id);
+    }
+    assert.equal(job.status, 'done', `下载应完成，实际 ${job.status} ${job.error ?? ''}`);
+    assert.equal(job.total, 64);
+    assert.equal(job.bytes, 64);
+    assert.equal(job.percent, 100);
+
+    const bytes = await readFile(job.path);
+    assert.equal(bytes.length, 64);
+    assert.equal(bytes[0], 0x49, '教室录像应该是 0x49 填充的假视频');
+    // .part 必须已经不在了（下完改名）
+    await assert.rejects(() => readFile(`${job.path}.part`));
+
+    // 落盘目录就报给前端（界面要显示"存到哪了"）
+    const listed = await call('GET', '/lms/downloads');
+    assert.equal(listed.body.downloadDir, path.join(dataDir, 'downloads'));
+    assert.equal(listed.body.active, 0);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('LMS：回放下载能取消（半成品 .part 删掉）、同一视频重复点不会下两份', async () => {
+  // 让假视频慢一点，好让任务停在"下载中"
+  const mock = await startMockLms({ mediaDelayMs: 400, mediaBytes: 4096 });
+  const { app, call } = await startApp(mock);
+  try {
+    await login(call);
+    await call('GET', '/lms/courses?refresh=1');
+    await call('GET', '/lms/activities?refresh=1');
+    const replays = await call('GET', '/lms/activities/5007/replays');
+    const video = replays.body.videos[0];
+
+    const first = await call('POST', '/lms/downloads', { activityId: 5007, video });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const second = await call('POST', '/lms/downloads', { activityId: 5007, video });
+    assert.equal(second.body.id, first.body.id, '同一个视频正在下就别再开一个任务');
+
+    const cancelled = await call('POST', `/lms/downloads/${first.body.id}/cancel`);
+    assert.equal(cancelled.status, 200);
+    for (let i = 0; i < 40 && cancelled.body.status === 'running'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const listed = await call('GET', '/lms/downloads');
+      const job = listed.body.items.find((item) => item.id === first.body.id);
+      if (job.status !== 'running') {
+        assert.equal(job.status, 'cancelled');
+        assert.equal(job.error, null, '用户取消不是错误');
+        await assert.rejects(() => readFile(job.path), '取消后不该留下"看起来正常"的文件');
+        await assert.rejects(() => readFile(`${job.path}.part`), '.part 半成品要清掉');
+        return;
+      }
+    }
+    assert.fail('任务应该被取消');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('回放下载器：文件名安全化 / 体积文案 / 非法分段不越界', async () => {
+  const { sanitizeSegment, humanSize } = await import('../src/modules/lms/replay-download.js');
+  // 学堂的标题里什么都有：冒号、斜杠、问号、前后空白
+  // 中文冒号是安全的，保留；半角 / 与 ? 必须换掉
+  assert.equal(sanitizeSegment('第6周：直播/回放?'), '第6周：直播_回放_');
+  assert.equal(sanitizeSegment('   '), '未命名');
+  assert.equal(sanitizeSegment('...'), '未命名');
+  // 关键不是"变成某个具体字符串"，而是**不能越界**：没有分隔符、不以点开头
+  const traversal = sanitizeSegment('../../../etc/passwd');
+  assert.ok(!traversal.includes('/'), '路径分隔符必须被替换掉');
+  assert.ok(!/^\./.test(traversal), '不能以点开头（避免 .. 之类的相对路径语义）');
+  assert.equal(traversal, '_.._.._etc_passwd');
+  assert.ok(!sanitizeSegment('a'.repeat(200)).includes('/'));
+  assert.ok(sanitizeSegment('a'.repeat(200)).length <= 80);
+
+  assert.equal(humanSize(64), '64B');
+  assert.equal(humanSize(1024), '1.00KB');
+  assert.equal(humanSize(1024 * 1024 * 350), '350MB');
+  assert.equal(humanSize(0), '');
+  assert.equal(humanSize(null), '');
 });

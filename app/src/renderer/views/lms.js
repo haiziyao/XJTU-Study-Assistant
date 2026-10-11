@@ -18,30 +18,28 @@
  */
 const lmsUi = {
   mount: null,
+  /** 当前页：`home`（首页：账号状态 + 课程） 或 `course`（课程页）。 */
+  page: 'home',
+  /** 课程页正在看哪门课。 */
+  courseId: null,
+  /** 课程页数据（课程信息 + 该课活动分组），来自 GET /lms/courses/:id。 */
+  coursePage: null,
+  courseBusy: false,
+  courseError: null,
   status: null,
   statusLoading: false,
   statusError: null,
   courses: null,
   coursesBusy: false,
   coursesError: null,
+  /**
+   * 活动缓存。首页只用它算"这门课有多少作业/网课"（课程行下面那行分布），
+   * 课程页的内容走 `/lms/courses/:id`。
+   */
   activities: null,
   activitiesBusy: false,
   activitiesError: null,
-  activityType: '',
-  activityCourseId: '',
-  /** 学期筛选（空 = 全部学期） */
-  semesterFilter: '',
-  /**
-   * 分组折叠状态。三处各记一份，互不干扰：
-   *   semesterToggle       活动卡：学期层（key = 学期键）
-   *   groupToggle          活动卡：学期里的课程层（key = 课程键）
-   *   courseSemesterToggle 课程卡：学期层
-   * 没记录过的走"自适应默认"（见 lmsGroupExpandedIn）；`*All` 是「全部展开/收起」的覆盖。
-   */
-  semesterToggle: new Map(),
-  semestersAll: null,
-  groupToggle: new Map(),
-  groupsAll: null,
+  /** 课程卡的学期折叠：key → true/false；`courseSemestersAll` 是「全部展开/收起」的覆盖。 */
   courseSemesterToggle: new Map(),
   courseSemestersAll: null,
   /** 只记住学号（方便切走再切回来），明文密码不留在内存里。 */
@@ -50,26 +48,26 @@ const lmsUi = {
   mfaSent: false,
   mfaPhoneMasked: null,
   mfaError: null,
-  /** 同步选项：默认值保持后端默认语义（见 lmsSyncBody 的注释）。 */
-  options: {
-    includePast: false,
-    includeSubmitted: false,
-    includeLesson: false,
-    includeCourseRange: false,
-    pruneStale: false,
-  },
-  preview: null,
-  previewBusy: false,
-  previewError: null,
-  selected: new Set(),
-  applyBusy: false,
-  applyResult: null,
-  applyError: null,
-  /** 自动同步设置（POST /lms/settings）的忙碌态与错误。 */
+  /** 自动同步设置（在账号状态卡里）的忙碌态与错误。 */
   autoSyncBusy: false,
   autoSyncError: null,
-  /** 当前这一次渲染出来的节点，用于不重画的原地更新（勾选 / 计数 / 设置项）。 */
-  refs: { syncCount: null, syncButton: null, syncBoxes: [], autoSync: null },
+  /** 回放：已取到的视频列表（按活动 id 缓存）与展开/忙碌状态。 */
+  replays: new Map(),
+  replayOpen: null,
+  replayBusy: false,
+  replayError: null,
+  /** 课程页各分节的折叠状态（key = `${courseId}:${kind}`，默认展开）。 */
+  sectionToggle: new Map(),
+  /** 下载任务列表（轮询 GET /lms/downloads）、落盘目录、轮询定时器。 */
+  downloads: null,
+  downloadDir: null,
+  downloadTimer: null,
+  /** 这一屏渲染出来的下载状态节点（按任务 id），用于轮询时原地更新、不整屏重画。 */
+  downloadNodes: new Map(),
+  /** 上一次看到的任务状态，用来判断"刚跑完"要补一次重画。 */
+  downloadStatus: new Map(),
+  /** 当前这一次渲染出来的节点，用于不重画的原地更新（自动同步那一行）。 */
+  refs: { autoSync: null },
 };
 
 const LMS_STATUS_LABEL = {
@@ -93,6 +91,12 @@ const LMS_TYPE_TABS = [
   ['online', '网课'],
   ['material', '资料'],
 ];
+
+/**
+ * 分组默认全展开的阈值：这一层不超过 12 条就展开（小列表直接看内容），
+ * 超了就收起先看概览。课程卡的学期分组、课程页的分节都用它。
+ */
+const LMS_GROUP_AUTO_EXPAND = 12;
 
 /** 页签值 -> 命中的底层类型；不在表里就按 type 精确匹配。 */
 const LMS_TYPE_MATCH = {
@@ -210,23 +214,6 @@ function lmsLoadCaptcha(img, note) {
   img.src = url;
 }
 
-/** 同步请求体：界面勾选项 ↔ 后端选项的唯一映射点。 */
-function lmsSyncBody(extra) {
-  const options = lmsUi.options;
-  return {
-    // 后端默认只关心作业 + 直播；勾选「导入课程回放」后再把 lesson 加进 types
-    types: ['homework', 'lecture_live'].concat(options.includeLesson ? ['lesson'] : []),
-    includePast: options.includePast,
-    // 后端语义：skipSubmitted=true 表示「已提交的作业不导入」，和界面上的勾选正好相反
-    skipSubmitted: !options.includeSubmitted,
-    // 后端默认把已提交的作业直接建成「已完成」，保持默认
-    markSubmittedDone: true,
-    includeCourseRange: options.includeCourseRange,
-    pruneStale: options.pruneStale,
-    ...extra,
-  };
-}
-
 /* --------------------------------------------------------------- 数据加载 */
 
 /**
@@ -310,10 +297,9 @@ function lmsOnLoggedIn() {
   lmsUi.coursesError = null;
   lmsUi.activities = null;
   lmsUi.activitiesError = null;
-  lmsUi.preview = null;
-  lmsUi.selected = new Set();
-  lmsUi.applyResult = null;
-  lmsUi.applyError = null;
+  lmsUi.coursePage = null;
+  lmsUi.replays = new Map();
+  lmsUi.replayOpen = null;
   lmsUi.autoSyncError = null;
   PC.toast('已登录思源学堂');
   lmsPaint();
@@ -325,9 +311,9 @@ async function lmsLogout() {
     lmsUi.status = status;
     lmsUi.courses = null;
     lmsUi.activities = null;
-    lmsUi.preview = null;
-    lmsUi.selected = new Set();
-    lmsUi.applyResult = null;
+    lmsUi.coursePage = null;
+    lmsUi.replays = new Map();
+    lmsUi.replayOpen = null;
     lmsUi.loginError = null;
     lmsUi.mfaSent = false;
     lmsUi.mfaPhoneMasked = null;
@@ -641,149 +627,6 @@ function lmsMfaCard() {
   return card;
 }
 
-/* --------------------------------------------------------------- 同步 */
-
-async function lmsPreviewSync() {
-  if (lmsUi.previewBusy) return;
-  lmsUi.previewBusy = true;
-  lmsUi.previewError = null;
-  lmsUi.applyResult = null;
-  lmsUi.applyError = null;
-  lmsPaint();
-  try {
-    const data = await PC.api('/lms/sync/preview', { method: 'POST', body: lmsSyncBody({}) });
-    lmsUi.preview = data;
-    // 默认只勾选会真正写库的条目，跳过/失效交给用户自己决定
-    lmsUi.selected = new Set(
-      (data.items ?? []).filter((item) => item.action === 'create' || item.action === 'update').map((item) => item.key),
-    );
-  } catch (error) {
-    lmsUi.previewError = error.message;
-    lmsUi.preview = null;
-    lmsUi.selected = new Set();
-    lmsCheckAuthLost(error);
-  } finally {
-    lmsUi.previewBusy = false;
-    lmsPaint();
-  }
-}
-
-async function lmsApplySync() {
-  if (lmsUi.applyBusy) return;
-  const keys = [...lmsUi.selected];
-  if (!keys.length) {
-    lmsUi.applyError = '请先勾选要同步的条目';
-    lmsPaint();
-    return;
-  }
-  lmsUi.applyBusy = true;
-  lmsUi.applyError = null;
-  lmsPaint();
-  try {
-    const result = await PC.api('/lms/sync/apply', { method: 'POST', body: lmsSyncBody({ keys }) });
-    lmsUi.applyResult = result;
-    lmsUi.preview = null; // 落库后旧的预览已经过期，清掉避免误点
-    lmsUi.selected = new Set();
-    PC.toast(`同步完成：新建 ${result.created ?? 0} · 更新 ${result.updated ?? 0}`);
-    try {
-      lmsUi.status = await PC.api('/lms/status'); // 刷新已同步条数 / 上次同步时间
-    } catch {
-      /* 状态刷新失败不影响同步结果展示 */
-    }
-  } catch (error) {
-    lmsUi.applyError = error.message;
-    lmsCheckAuthLost(error);
-  } finally {
-    lmsUi.applyBusy = false;
-    lmsPaint();
-  }
-}
-
-function lmsSelectAll(checked) {
-  lmsUi.selected = new Set();
-  if (checked) for (const item of lmsUi.preview?.items ?? []) lmsUi.selected.add(item.key);
-  for (const { input, key } of lmsUi.refs.syncBoxes) input.checked = lmsUi.selected.has(key);
-  lmsUpdateSyncFoot();
-}
-
-/** 只原地更新「已选 N 条 / 同步选中 N 条」，避免勾选时重画导致列表滚动位置丢失。 */
-function lmsUpdateSyncFoot() {
-  const count = lmsUi.selected.size;
-  const { syncButton, syncCount } = lmsUi.refs;
-  if (syncCount && syncCount.isConnected) syncCount.textContent = `已选 ${count} 条`;
-  if (syncButton && syncButton.isConnected) {
-    syncButton.textContent = lmsUi.applyBusy ? '同步中…' : `同步选中 ${count} 条`;
-    syncButton.disabled = lmsUi.applyBusy || count === 0;
-  }
-}
-
-/** 后端现在保证每条预览条目都带 kind（skip/stale 的 payload 为 null），这里再留一层兜底。 */
-function lmsItemKind(item) {
-  if (item.kind === 'event') return '日历事件';
-  if (item.kind === 'schedule') return '日程';
-  if (item.payload?.startDate !== undefined) return '日历事件';
-  if (item.payload?.date) return '日程';
-  return null;
-}
-
-function lmsItemWhen(item) {
-  const payload = item.payload;
-  if (payload) {
-    if (payload.date) {
-      const time = payload.allDay ? '全天' : `${payload.startTime ?? ''}${payload.endTime ? `–${payload.endTime}` : ''}`;
-      return `${payload.date} ${time}`.trim();
-    }
-    if (payload.startDate) {
-      const same = !payload.endDate || payload.endDate === payload.startDate;
-      return `${payload.startDate}${same ? '' : ` ~ ${payload.endDate}`} 全天`;
-    }
-  }
-  const start = lmsFormatTime(item.startTime);
-  const end = lmsFormatTime(item.endTime);
-  if (start || end) return [start, end].filter(Boolean).join(' → ');
-  return '';
-}
-
-function lmsSyncRow(item) {
-  const row = mk('label', 'lms-sync-row');
-  const box = mk('input');
-  box.type = 'checkbox';
-  box.checked = lmsUi.selected.has(item.key);
-  box.addEventListener('change', () => {
-    if (box.checked) lmsUi.selected.add(item.key);
-    else lmsUi.selected.delete(item.key);
-    lmsUpdateSyncFoot();
-  });
-  lmsUi.refs.syncBoxes.push({ input: box, key: item.key });
-
-  const main = mk('div', 'lms-sync-main');
-  const title = mk('div', 'lms-row-title');
-  title.append(
-    mk('span', `lms-badge ${item.action ?? ''}`.trim(), LMS_ACTION_LABEL[item.action] ?? item.action ?? '条目'),
-    mk('span', null, item.title ?? item.key),
-  );
-  main.appendChild(title);
-
-  const meta = [
-    item.courseName,
-    item.typeLabel ?? (item.type ? LMS_ACTIVITY_LABEL[item.type] ?? item.type : null),
-    lmsItemKind(item),
-    item.submitted ? '已提交' : null,
-  ]
-    .filter(Boolean)
-    .join(' · ');
-  if (meta) main.appendChild(mk('div', 'lms-row-meta', meta));
-
-  const when = lmsItemWhen(item);
-  if (when) main.appendChild(mk('div', 'lms-row-meta', when));
-
-  const detail = item.action === 'update' && item.changes?.length ? `变更：${item.changes.join('、')}` : item.reason;
-  if (detail) main.appendChild(mk('div', 'lms-row-meta', detail));
-
-  row.append(box, main);
-  return row;
-}
-
 /* --------------------------------------------------------------- 卡片 */
 
 function lmsStatusCard() {
@@ -962,12 +805,25 @@ function lmsCourseSemesterSection(semester, isNewest, totalCourses) {
       lmsUi.courseSemestersAll = null;
       lmsPaint();
     },
-    render: () => semester.courses.map((course) => lmsCourseRow(course)),
+    render: () => semester.courses.map((course) => lmsCourseRow(course, { clickable: true })),
   });
 }
 
-function lmsCourseRow(course) {
-  const row = mk('div', 'lms-row');
+function lmsCourseRow(course, { clickable = false } = {}) {
+  const row = mk('div', clickable ? 'lms-row lms-row-clickable' : 'lms-row');
+  if (clickable) {
+    row.setAttribute('role', 'button');
+    row.setAttribute('tabindex', '0');
+    row.title = '打开课程页';
+    const open = () => lmsOpenCourse(course.id);
+    row.addEventListener('click', open);
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        open();
+      }
+    });
+  }
   const title = mk('div', 'lms-row-title');
   title.appendChild(mk('span', null, course.name ?? '（未命名课程）'));
   if (course.courseCode) title.appendChild(mk('span', 'tag', course.courseCode));
@@ -994,8 +850,25 @@ function lmsCourseRow(course) {
   // 课程列表也能一眼看出哪门课有东西待办
   const counts = lmsCourseActivityCounts(course.id);
   if (counts) row.appendChild(mk('div', 'lms-row-meta lms-course-counts', counts));
+  if (clickable) row.appendChild(mk('div', 'lms-row-more', '进入课程页 ›'));
 
   return row;
+}
+
+/**
+ * 作业的提交状态是不是"已知"。
+ *
+ * 活动列表接口**不返回**提交状态（`userSubmitCount`），它是补拉活动详情才有的字段，
+ * 而且一次预览最多补拉 40 条。所以"没有这个字段"≠"没提交" —— 是**还没查**。
+ * 两者必须分开：混在一起就是在骗用户。
+ */
+function lmsSubmitKnown(item) {
+  return item?.userSubmitCount !== undefined && item?.userSubmitCount !== null;
+}
+
+/** 明确未提交（查过了，确实是 0）。 */
+function lmsSubmitPending(item) {
+  return lmsSubmitKnown(item) && Number(item.userSubmitCount) === 0;
 }
 
 /** 某门课在活动缓存里的分布，形如「作业 3（未提交 2） · 网课 12 · 资料 5」。 */
@@ -1018,49 +891,6 @@ function lmsCourseActivityCounts(courseId) {
 }
 
 /** 活动列表：类型与课程都在前端过滤（后端 refresh 时不做类型过滤）。 */
-function lmsVisibleActivities() {
-  let items = lmsUi.activities?.items ?? [];
-  if (lmsUi.activityType) {
-    // 「网课」页签命中直播 + 回放两种类型，其余页签精确匹配
-    const types = LMS_TYPE_MATCH[lmsUi.activityType] ?? [lmsUi.activityType];
-    items = items.filter((item) => types.includes(item.type));
-  }
-  if (lmsUi.activityCourseId) {
-    items = items.filter((item) => String(item.courseId) === String(lmsUi.activityCourseId));
-  }
-  if (lmsUi.semesterFilter) {
-    // 活动本身不带学期，得从课程表查（查不到算「未知学期」，与分组口径一致）
-    const index = lmsCourseSemesterIndex();
-    items = items.filter((item) => (index.get(String(item.courseId))?.key ?? '__none__') === lmsUi.semesterFilter);
-  }
-  return items;
-}
-
-/** 筛选结果少于这么多条时，分组默认全部展开（小列表没必要再点一次）。 */
-const LMS_GROUP_AUTO_EXPAND = 12;
-
-/** 某条活动的排序用时间戳（取结束时间，没结束就用开始时间）。 */
-function lmsActivityStamp(item) {
-  const raw = String(item?.endTime || item?.startTime || '').trim();
-  return raw || '';
-}
-
-/**
- * 作业的提交状态是不是"已知"。
- *
- * 活动列表接口**不返回**提交状态（`userSubmitCount`），它是补拉活动详情才有的字段，
- * 而且一次预览最多补拉 40 条。所以"没有这个字段"≠"没提交" —— 是**还没查**。
- * 这里必须分开：把它们混成"未提交"就是在骗用户。
- */
-function lmsSubmitKnown(item) {
-  return item?.userSubmitCount !== undefined && item?.userSubmitCount !== null;
-}
-
-/** 明确未提交（查过了，确实是 0）。 */
-function lmsSubmitPending(item) {
-  return lmsSubmitKnown(item) && Number(item.userSubmitCount) === 0;
-}
-
 /* ------------------------------------------------------------------ 学期 */
 
 /** 学期的身份：优先 id，其次 code，最后 label（同一学期必须落到同一个键上）。 */
@@ -1138,64 +968,6 @@ function lmsSemesterOptions() {
 
 /* ------------------------------------------------------------------ 分组 */
 
-/** 一组活动的统计：明确未提交数、还没查过的条数、最近时间。 */
-function lmsActivityStats(items) {
-  let pending = 0;
-  let unknown = 0;
-  let latest = '';
-  for (const item of items) {
-    if (item.type === 'homework') {
-      if (lmsSubmitPending(item)) pending += 1;
-      else if (!lmsSubmitKnown(item)) unknown += 1;
-    }
-    const stamp = lmsActivityStamp(item);
-    if (stamp > latest) latest = stamp;
-  }
-  return { pending, unknown, latest };
-}
-
-/** 一组活动再按课程分一层（组内按"最近有活动"排前面）。 */
-function lmsActivityCourseGroups(items) {
-  const courses = new Map();
-  for (const item of items) {
-    const key = item.courseId != null && item.courseId !== '' ? String(item.courseId) : `name:${item.courseName ?? ''}`;
-    if (!courses.has(key)) courses.set(key, { key, name: item.courseName || '（未标注课程）', items: [] });
-    courses.get(key).items.push(item);
-  }
-  return [...courses.values()]
-    .map((group) => ({ ...group, ...lmsActivityStats(group.items) }))
-    .sort((a, b) => b.latest.localeCompare(a.latest) || a.name.localeCompare(b.name, 'zh'));
-}
-
-/**
- * 把当前筛选结果按 **学期 → 课程** 两级分组。
- *
- * 课程缓存里查不到的（比如课程刷新过、活动还是旧的）落到「未知学期」，
- * 不硬塞进某个学期 —— 分组错了比不分组更糟。
- */
-function lmsActivitySemesterGroups() {
-  const index = lmsCourseSemesterIndex();
-  const semesters = new Map();
-  for (const item of lmsVisibleActivities()) {
-    const found = index.get(String(item.courseId));
-    const key = found?.key ?? '__none__';
-    if (!semesters.has(key)) {
-      semesters.set(key, { key, label: found?.label ?? '未知学期', items: [], rank: '' });
-    }
-    semesters.get(key).items.push(item);
-  }
-  const list = [...semesters.values()];
-  for (const semester of list) {
-    semester.courses = lmsActivityCourseGroups(semester.items);
-    Object.assign(semester, lmsActivityStats(semester.items));
-    semester.rank = lmsSemesterRank(
-      semester.latest,
-      semester.courses.map((group) => ({ endDate: group.latest })),
-    );
-  }
-  return list.sort(lmsSemesterSort);
-}
-
 /**
  * 分组展开与否。三档优先：**手动点过 > 全部展开/收起 > 自适应默认**。
  *
@@ -1263,280 +1035,385 @@ function lmsEverythingExpanded(override, total) {
   return total <= LMS_GROUP_AUTO_EXPAND;
 }
 
-/** 换页签 / 换过滤 / 整体展开收起时重置折叠状态（别把上一批的折叠继承过来）。 */
+/** 课程卡的「全部展开/收起」：清掉逐个点过的记录（`keep` 的那个覆盖值留着）。 */
 function lmsResetGroupState({ keep } = {}) {
-  if (keep !== 'semestersAll') lmsUi.semestersAll = null;
-  if (keep !== 'groupsAll') lmsUi.groupsAll = null;
   if (keep !== 'courseSemestersAll') lmsUi.courseSemestersAll = null;
-  lmsUi.semesterToggle = new Map();
-  lmsUi.groupToggle = new Map();
   lmsUi.courseSemesterToggle = new Map();
 }
 
-/** 活动卡：一个学期（里面是按课程分的组）。 */
-function lmsSemesterSection(semester, isNewest, totalItems) {
-  const expanded = lmsGroupExpandedIn(lmsUi.semesterToggle, lmsUi.semestersAll, semester.key, {
-    isNewest,
-    // 学期层看整批：14 条以上就只展开最新那个学期，先给概览
-    smallEnough: totalItems <= LMS_GROUP_AUTO_EXPAND,
-  });
+/* --------------------------------------------------------------- 课程页 */
+
+/** 打开某门课的课程页（首页课程行点一下走这里）。 */
+function lmsOpenCourse(courseId) {
+  lmsUi.page = 'course';
+  lmsUi.courseId = String(courseId);
+  lmsUi.coursePage = null;
+  lmsUi.courseError = null;
+  lmsUi.replayOpen = null;
+  lmsUi.replayError = null;
+  lmsUi.sectionToggle = new Map();
+  lmsPaint();
+}
+
+/** 回首页（课程页左上角返回键）。 */
+function lmsBackHome() {
+  lmsUi.page = 'home';
+  lmsUi.courseId = null;
+  lmsUi.coursePage = null;
+  lmsUi.courseError = null;
+  lmsStopDownloadPolling();
+  lmsPaint();
+}
+
+/** 课程页数据：后端 `GET /lms/courses/:id` 读本地缓存，`refresh=1` 时先拉这门课的活动。 */
+async function lmsLoadCoursePage({ refresh = false } = {}) {
+  if (!lmsUi.courseId || lmsUi.courseBusy) return;
+  lmsUi.courseBusy = true;
+  lmsUi.courseError = null;
+  if (refresh) lmsUi.coursePage = null;
+  lmsPaint();
+  try {
+    if (refresh) {
+      await PC.api('/lms/activities/refresh', { method: 'POST', body: { courseIds: [Number(lmsUi.courseId)] } });
+    }
+    lmsUi.coursePage = await PC.api(`/lms/courses/${encodeURIComponent(lmsUi.courseId)}`);
+  } catch (error) {
+    lmsUi.courseError = error.message ?? String(error);
+  } finally {
+    lmsUi.courseBusy = false;
+    lmsPaint();
+  }
+}
+
+/** 重画后按需补课程页数据。 */
+function lmsMaybeLoadCourse() {
+  if (lmsUi.coursePage === null && !lmsUi.courseBusy) void lmsLoadCoursePage();
+}
+
+/** 某个分节是否展开（默认展开 —— 课程页一共就几节，全收起反而要多点）。 */
+function lmsSectionExpanded(kind, fallback = true) {
+  const explicit = lmsUi.sectionToggle.get(`${lmsUi.courseId}:${kind}`);
+  return explicit === undefined ? fallback : explicit;
+}
+
+/** 课程页的一个分节（标题 + 计数 + 可折叠内容）。 */
+function lmsCourseSection({ kind, title, hint, items, renderItem, defaultExpanded = true }) {
   return lmsCollapsibleGroup({
-    label: semester.label,
+    label: title,
     level: 1,
-    tags: lmsGroupTags({
-      count: semester.items.length,
-      pending: semester.pending,
-      unknown: semester.unknown,
-      latest: semester.latest,
-    }),
-    expanded,
+    tags: [mk('span', 'lms-hint', `${items.length} 条${hint ? ` · ${hint}` : ''}`)],
+    expanded: lmsSectionExpanded(kind, defaultExpanded),
     onToggle: (next) => {
-      lmsUi.semesterToggle.set(semester.key, next);
-      lmsUi.semestersAll = null;
+      lmsUi.sectionToggle.set(`${lmsUi.courseId}:${kind}`, next);
       lmsPaint();
     },
-    render: () => semester.courses.map((course) => lmsCourseSection(course, semester)),
-  });
-}
-
-/** 活动卡：学期里的一个课程组。 */
-function lmsCourseSection(group, semester) {
-  const expanded = lmsGroupExpandedIn(lmsUi.groupToggle, lmsUi.groupsAll, group.key, {
-    smallEnough: semester.items.length <= LMS_GROUP_AUTO_EXPAND,
-  });
-  return lmsCollapsibleGroup({
-    label: group.name,
-    level: 2,
-    tags: lmsGroupTags({
-      count: group.items.length,
-      pending: group.pending,
-      unknown: group.unknown,
-      latest: group.latest,
-    }),
-    expanded,
-    onToggle: (next) => {
-      lmsUi.groupToggle.set(group.key, next);
-      lmsUi.groupsAll = null;
-      lmsPaint();
+    render: () => {
+      const list = mk('div', 'lms-list');
+      for (const item of items) list.appendChild(renderItem(item));
+      return [list];
     },
-    // 组内不再重复显示课程名（表头已经写了）
-    render: () => group.items.map((item) => lmsActivityRow(item, { showCourse: false })),
   });
 }
 
-function lmsActivitiesCard() {
-  const card = mk('div', 'card');
-  const visible = lmsVisibleActivities();
-  const semesters = lmsActivitySemesterGroups();
-  const courseCount = new Set(visible.map((item) => String(item.courseId ?? item.courseName))).size;
-
-  const head = mk('div', 'lms-head');
-  head.appendChild(mk('div', 'card-title', '活动'));
-  head.appendChild(mk('span', 'lms-hint', `${visible.length} 条 · ${semesters.length} 个学期 · ${courseCount} 门课`));
-  head.appendChild(mk('div', 'spacer'));
-  head.appendChild(lmsActionButton('刷新活动', '刷新中…', lmsUi.activitiesBusy, () => void lmsLoadActivities(true)));
-  card.appendChild(head);
-
-  const filters = mk('div', 'lms-filters');
-  const seg = mk('div', 'seg');
-  for (const [value, label] of LMS_TYPE_TABS) {
-    const button = mk('button', `seg-btn${lmsUi.activityType === value ? ' active' : ''}`, label);
-    button.type = 'button';
-    button.addEventListener('click', () => {
-      if (lmsUi.activityType === value) return;
-      lmsUi.activityType = value;
-      lmsResetGroupState();
-      lmsPaint();
-    });
-    seg.appendChild(button);
+/** 课程信息：教师 / 学分 / 学期 / 教学班 / 起止 / 必修。 */
+function lmsCourseInfoBody(course) {
+  const box = mk('div', 'lms-info');
+  const teachers = (course.instructors ?? []).map((item) => item?.name).filter(Boolean).join('、');
+  const semester = course.semester?.label || course.semester?.realName || course.semester?.name;
+  const rows = [
+    ['课程代码', course.courseCode],
+    ['教师', teachers],
+    ['学分', course.credit],
+    ['学期', semester],
+    ['教学班', course.teachingClassName || course.klass],
+    ['起止', course.startDate || course.endDate ? `${course.startDate ?? '?'} ~ ${course.endDate ?? '?'}` : null],
+    ['类型', course.compulsory ? '必修' : null],
+  ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '');
+  for (const [label, value] of rows) {
+    const line = mk('div', 'lms-info-row');
+    line.append(mk('span', 'lms-info-key', label), mk('span', 'lms-info-val', String(value)));
+    box.appendChild(line);
   }
-  filters.appendChild(seg);
-
-  // 学期筛选：课程多的时候这是主要的导航方式
-  const semesterSelect = mk('select');
-  semesterSelect.appendChild(option('', '全部学期', !lmsUi.semesterFilter));
-  for (const semester of lmsSemesterOptions()) {
-    semesterSelect.appendChild(option(semester.key, semester.label, semester.key === lmsUi.semesterFilter));
-  }
-  semesterSelect.addEventListener('change', () => {
-    lmsUi.semesterFilter = semesterSelect.value;
-    // 换了学期，原来选中的课程可能根本不在这个学期里
-    lmsUi.activityCourseId = '';
-    lmsResetGroupState();
-    lmsPaint();
-  });
-  filters.appendChild(semesterSelect);
-
-  // 只看课程：选项跟着学期筛选走，免得在几十门课里翻
-  const courseSelect = mk('select');
-  courseSelect.appendChild(option('', '只看课程：全部', !lmsUi.activityCourseId));
-  for (const course of lmsUi.courses?.items ?? []) {
-    if (lmsUi.semesterFilter && lmsSemesterKey(course.semester) !== lmsUi.semesterFilter) continue;
-    courseSelect.appendChild(
-      option(String(course.id), course.name ?? String(course.id), String(course.id) === String(lmsUi.activityCourseId)),
-    );
-  }
-  courseSelect.addEventListener('change', () => {
-    lmsUi.activityCourseId = courseSelect.value;
-    lmsResetGroupState();
-    lmsPaint();
-  });
-  filters.appendChild(courseSelect);
-
-  if (semesters.length > 1) {
-    filters.appendChild(
-      lmsAllToggleButton({
-        expanded: lmsEverythingExpanded(lmsUi.semestersAll, visible.length),
-        onClick: () => {
-          lmsUi.semestersAll = !lmsEverythingExpanded(lmsUi.semestersAll, visible.length);
-          lmsResetGroupState({ keep: 'semestersAll' });
-          lmsPaint();
-        },
-      }),
-    );
-  }
-  card.appendChild(filters);
-
-  if (lmsUi.activitiesError) card.appendChild(mk('div', 'lms-error', `活动加载失败：${lmsUi.activitiesError}`));
-
-  if (lmsUi.activities === null || (lmsUi.activitiesBusy && !(lmsUi.activities?.items ?? []).length)) {
-    card.appendChild(mk('div', 'loading', '加载中…'));
-    return card;
-  }
-  if (!visible.length) {
-    const any = (lmsUi.activities?.items ?? []).length > 0;
-    card.appendChild(emptyBox(any ? '当前筛选条件下没有活动。' : '还没有活动缓存，点「刷新活动」拉取。'));
-    return card;
-  }
-
-  // 传总数进去：学期层用**整批**条数判断"要不要默认全展开"，
-  // 课程层才用"这个学期自己的条数"—— 两层判据不同，见 lmsGroupExpandedIn 的注释
-  semesters.forEach((semester, index) =>
-    card.appendChild(lmsSemesterSection(semester, index === 0, visible.length)),
-  );
-  if (lmsUi.activities?.fetchedAt) {
-    card.appendChild(mk('div', 'lms-hint', `更新于 ${lmsFormatStamp(lmsUi.activities.fetchedAt)}`));
-  }
-  return card;
+  if (!rows.length) box.appendChild(mk('div', 'lms-hint', '学堂没有给出这门课的更多信息'));
+  return box;
 }
 
-function lmsActivityRow(item, { showCourse = true } = {}) {
+/** 活动行（作业/资料/直播共用）：标题 + 时间 + 提交状态。 */
+function lmsCourseActivityRow(item) {
   const row = mk('div', 'lms-row');
   const title = mk('div', 'lms-row-title');
   title.appendChild(mk('span', null, item.title ?? '（无标题）'));
   title.appendChild(mk('span', 'tag', LMS_ACTIVITY_LABEL[item.type] ?? item.type ?? '活动'));
-  // 只在"确实查到已提交"时打标；没查到就什么都不说（别把未知标成未提交，也别标成已提交）
   if (lmsSubmitKnown(item) && Number(item.userSubmitCount) > 0) title.appendChild(mk('span', 'tag submitted', '已提交'));
-  if (item.published === false) title.appendChild(mk('span', 'tag late', '未发布'));
+  if (lmsSubmitKnown(item) && Number(item.userSubmitCount) === 0) title.appendChild(mk('span', 'tag late', '未提交'));
+  if (item.published === false) title.appendChild(mk('span', 'tag', '未发布'));
   row.appendChild(title);
-
-  if (showCourse && item.courseName) row.appendChild(mk('div', 'lms-row-meta', item.courseName));
   const start = lmsFormatTime(item.startTime);
   const end = lmsFormatTime(item.endTime);
-  row.appendChild(
-    mk('div', 'lms-row-meta', start || end ? `开始 ${start || '—'} · 结束 ${end || '—'}` : '无时间信息'),
-  );
+  row.appendChild(mk('div', 'lms-row-meta', start || end ? `开始 ${start || '—'} · 结束 ${end || '—'}` : '无时间信息'));
   return row;
 }
 
-function lmsApplyResultBox(result) {
-  const box = mk('div', 'lms-result');
-  box.appendChild(mk('div', 'lms-row-title', '同步结果'));
-  box.appendChild(
-    mk(
-      'div',
-      'lms-row-meta',
-      `新建 ${result.created ?? 0} · 更新 ${result.updated ?? 0} · 删除 ${result.removed ?? 0}` +
-        ` · 跳过 ${result.skipped ?? 0} · 失败 ${(result.errors ?? []).length}`,
-    ),
-  );
-  if (result.lastSyncAt) box.appendChild(mk('div', 'lms-row-meta', `最近同步：${lmsFormatStamp(result.lastSyncAt)}`));
-  for (const error of (result.errors ?? []).slice(0, 10)) {
-    const text = `${error.key ?? ''} ${error.message ?? ''}`.trim();
-    if (text) box.appendChild(mk('div', 'lms-error', text));
+/** 体积文案（1024 进制），和后端 humanSize 保持一致的口径。 */
+function lmsSizeText(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
   }
-  return box;
+  const digits = size >= 100 || unit === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(digits)}${units[unit]}`;
 }
 
-function lmsSyncCard(ready) {
-  const card = mk('div', 'card');
-  const head = mk('div', 'lms-head');
-  head.appendChild(mk('div', 'card-title', '同步到日历'));
-  head.appendChild(mk('div', 'spacer'));
-  head.appendChild(mk('span', 'lms-hint', '先预览，勾选后再写入'));
-  card.appendChild(head);
+/** 找一个回放视频对应的下载任务（按 活动 + 标签 匹配）。 */
+function lmsJobFor(activityId, video) {
+  return (lmsUi.downloads?.items ?? []).find(
+    (job) => String(job.activityId ?? '') === String(activityId ?? '') && job.labelText === (video.labelText || '视频'),
+  );
+}
 
-  const checks = mk('div', 'lms-checks');
-  const optionRow = (key, label, hint) => {
-    const wrap = mk('label', 'check-field');
-    const input = mk('input');
-    input.type = 'checkbox';
-    input.checked = Boolean(lmsUi.options[key]);
-    input.addEventListener('change', () => {
-      lmsUi.options[key] = input.checked;
-    });
-    wrap.append(input, mk('span', null, hint ? `${label}（${hint}）` : label));
-    checks.appendChild(wrap);
-  };
-  optionRow('includePast', '包含过期内容');
-  optionRow('includeSubmitted', '包含已提交作业', '默认不导入');
-  optionRow('includeLesson', '导入网课回放');
-  optionRow('includeCourseRange', '整学期课程做成日历事件', '整段日期内都会显示');
-  optionRow('pruneStale', '同步时清理失效记录', '删除学堂已下架的条目');
-  card.appendChild(checks);
+function lmsDownloadText(job) {
+  if (job.status === 'running') {
+    const percent = job.percent === null || job.percent === undefined ? '…' : `${job.percent}%`;
+    const speed = job.speed ? ` · ${lmsSizeText(job.speed)}/s` : '';
+    return `下载中 ${percent}${speed}`;
+  }
+  if (job.status === 'done') return `已保存（${lmsSizeText(job.total ?? job.bytes)}）`;
+  if (job.status === 'cancelled') return '已取消';
+  return `失败：${job.error ?? '未知原因'}`;
+}
 
-  const actions = mk('div', 'lms-actions');
-  const preview = mk('button', 'primary-btn', lmsUi.previewBusy ? '预览中…' : '预览同步');
-  preview.type = 'button';
-  preview.disabled = !ready || lmsUi.previewBusy;
-  preview.addEventListener('click', () => void lmsPreviewSync());
-  actions.appendChild(preview);
-  if (!ready) actions.appendChild(mk('span', 'lms-hint', '登录后才能预览与同步'));
-  card.appendChild(actions);
+/** 下载状态节点（渲染时记进 downloadNodes，轮询时原地改文字，不整屏重画）。 */
+function lmsDownloadStatus(job) {
+  const node = mk('span', `lms-download-status is-${job.status}`, lmsDownloadText(job));
+  if (job.path) node.title = job.path;
+  lmsUi.downloadNodes.set(job.id, node);
+  lmsUi.downloadStatus.set(job.id, job.status);
+  return node;
+}
 
-  if (lmsUi.previewError) card.appendChild(mk('div', 'lms-error', `预览失败：${lmsUi.previewError}`));
+/** 回放分节里的一行：一个回放活动 + 取到的视频 + 下载按钮/进度。 */
+function lmsReplayRow(item) {
+  const row = mk('div', 'lms-row');
+  const title = mk('div', 'lms-row-title');
+  title.appendChild(mk('span', null, item.title ?? '（无标题）'));
+  title.appendChild(mk('span', 'tag', '课程回放'));
+  row.appendChild(title);
 
-  const summary = lmsUi.preview?.summary;
-  if (lmsUi.preview) {
-    const sum = mk('div', 'lms-summary');
-    for (const [key, label] of [
-      ['create', '新建'],
-      ['update', '更新'],
-      ['skip', '跳过'],
-      ['stale', '失效'],
-    ]) {
-      sum.appendChild(statPill(label, summary?.[key] ?? 0));
+  const start = lmsFormatTime(item.startTime);
+  const end = lmsFormatTime(item.endTime);
+  row.appendChild(mk('div', 'lms-row-meta', start || end ? `开始 ${start || '—'} · 结束 ${end || '—'}` : '无时间信息'));
+
+  const actions = mk('div', 'lms-row-actions');
+  const busy = lmsUi.replayBusy && String(lmsUi.replayOpen) === String(item.id);
+  const button = mk('button', 'ghost-btn', busy ? '取视频…' : lmsUi.replays.has(String(item.id)) ? '重新取视频' : '取视频');
+  button.type = 'button';
+  button.disabled = busy;
+  button.addEventListener('click', () => void lmsLoadReplays(item));
+  actions.appendChild(button);
+  row.appendChild(actions);
+
+  const videos = lmsUi.replays.get(String(item.id));
+  if (videos) {
+    const list = mk('div', 'lms-replay-videos');
+    if (!videos.length) list.appendChild(mk('div', 'lms-hint', '这次回放没有可下载的视频'));
+    for (const video of videos) {
+      const line = mk('div', 'lms-replay-video');
+      line.appendChild(mk('span', 'lms-replay-name', `${video.labelText}${video.sizeText ? ` · ${video.sizeText}` : ''}`));
+      if (video.isBestAudio) line.appendChild(mk('span', 'tag', '音质更好'));
+      const job = lmsJobFor(item.id, video);
+      if (job) {
+        line.appendChild(lmsDownloadStatus(job));
+        if (job.status === 'running') {
+          const cancel = mk('button', 'ghost-btn', '取消');
+          cancel.type = 'button';
+          cancel.addEventListener('click', () => void lmsCancelDownload(job.id));
+          line.appendChild(cancel);
+        }
+      } else {
+        const download = mk('button', 'ghost-btn', '下载');
+        download.type = 'button';
+        download.addEventListener('click', () => void lmsStartDownload(item, video));
+        line.appendChild(download);
+      }
+      list.appendChild(line);
     }
-    sum.appendChild(mk('span', 'lms-hint', `共 ${summary?.total ?? (lmsUi.preview.items ?? []).length} 条`));
-    card.appendChild(sum);
+    row.appendChild(list);
+  }
+  if (lmsUi.replayError && String(lmsUi.replayOpen) === String(item.id)) {
+    row.appendChild(mk('div', 'lms-error', lmsUi.replayError));
+  }
+  return row;
+}
 
-    const list = mk('div', 'lms-sync-list');
-    const items = lmsUi.preview.items ?? [];
-    if (!items.length) list.appendChild(emptyBox('没有需要同步的条目。'));
-    for (const item of items) list.appendChild(lmsSyncRow(item));
-    card.appendChild(list);
+/** 取一次回放的视频列表（后端去学堂与录播站换票据，注意别把地址打日志）。 */
+async function lmsLoadReplays(item) {
+  if (lmsUi.replayBusy) return;
+  lmsUi.replayBusy = true;
+  lmsUi.replayOpen = item.id;
+  lmsUi.replayError = null;
+  lmsPaint();
+  try {
+    const data = await PC.api(`/lms/activities/${encodeURIComponent(item.id)}/replays`);
+    lmsUi.replays.set(String(item.id), data.videos ?? []);
+  } catch (error) {
+    lmsUi.replayError = error.message ?? String(error);
+  } finally {
+    lmsUi.replayBusy = false;
+    lmsPaint();
+  }
+}
 
-    const foot = mk('div', 'lms-actions');
-    const all = mk('button', 'ghost-btn', '全选');
-    all.type = 'button';
-    const none = mk('button', 'ghost-btn', '全不选');
-    none.type = 'button';
-    all.addEventListener('click', () => lmsSelectAll(true));
-    none.addEventListener('click', () => lmsSelectAll(false));
-    const count = mk('span', 'lms-hint', `已选 ${lmsUi.selected.size} 条`);
-    const apply = mk('button', 'primary-btn', lmsUi.applyBusy ? '同步中…' : `同步选中 ${lmsUi.selected.size} 条`);
-    apply.type = 'button';
-    apply.disabled = lmsUi.applyBusy || lmsUi.selected.size === 0;
-    apply.addEventListener('click', () => void lmsApplySync());
-    lmsUi.refs.syncCount = count;
-    lmsUi.refs.syncButton = apply;
-    foot.append(all, none, mk('div', 'spacer'), count, apply);
-    card.appendChild(foot);
+async function lmsStartDownload(item, video) {
+  try {
+    await PC.api('/lms/downloads', {
+      method: 'POST',
+      body: {
+        activityId: item.id,
+        video: {
+          downloadUrl: video.downloadUrl,
+          playUrl: video.playUrl,
+          label: video.label,
+          labelText: video.labelText,
+          size: video.size,
+        },
+      },
+    });
+    PC.toast?.(`开始下载：${item.title ?? '回放'}`);
+    await lmsRefreshDownloads();
+    lmsStartDownloadPolling();
+  } catch (error) {
+    lmsUi.replayError = error.message ?? String(error);
+  }
+  lmsPaint();
+}
+
+async function lmsCancelDownload(id) {
+  try {
+    await PC.api(`/lms/downloads/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+  } catch (error) {
+    PC.toast?.(`取消失败：${error.message}`);
+  }
+  await lmsRefreshDownloads();
+  lmsPaint();
+}
+
+async function lmsRefreshDownloads() {
+  try {
+    const data = await PC.api('/lms/downloads');
+    lmsUi.downloads = data;
+    lmsUi.downloadDir = data.downloadDir ?? lmsUi.downloadDir;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 下载进度轮询：只在有任务在跑时开着。
+ *
+ * 更新策略：**原地改文字**（节点在渲染时记进 `downloadNodes`）。否则每 800ms 整屏重画，
+ * 列表会闪、折叠状态和滚动位置也保不住。任务从"跑着"变成终态时补一次重画 ——
+ * 那一刻按钮要从「取消」变回「下载」。
+ */
+function lmsStartDownloadPolling() {
+  if (lmsUi.downloadTimer) return;
+  lmsUi.downloadTimer = setInterval(async () => {
+    const data = await lmsRefreshDownloads();
+    if (!data) return;
+    let finished = false;
+    for (const job of data.items) {
+      if (lmsUi.downloadStatus.get(job.id) === 'running' && job.status !== 'running') finished = true;
+      lmsUi.downloadStatus.set(job.id, job.status);
+      const node = lmsUi.downloadNodes.get(job.id);
+      if (node) {
+        node.textContent = lmsDownloadText(job);
+        node.className = `lms-download-status is-${job.status}`;
+      }
+    }
+    if (!data.active) {
+      lmsStopDownloadPolling();
+      if (finished) lmsPaint();
+    }
+  }, 800);
+}
+
+function lmsStopDownloadPolling() {
+  if (lmsUi.downloadTimer) {
+    clearInterval(lmsUi.downloadTimer);
+    lmsUi.downloadTimer = null;
+  }
+}
+
+/** 课程页整屏：返回键 + 课程信息 + 回放（可下载）+ 作业/资料/直播。 */
+function lmsCourseView() {
+  const wrap = mk('div', 'lms-course');
+  const page = lmsUi.coursePage;
+  const course = page?.course;
+
+  const bar = mk('div', 'lms-course-bar');
+  const back = mk('button', 'ghost-btn lms-back', '← 返回');
+  back.type = 'button';
+  back.addEventListener('click', lmsBackHome);
+  bar.appendChild(back);
+  bar.appendChild(mk('div', 'card-title', course?.name ?? '课程'));
+  if (course?.courseCode) bar.appendChild(mk('span', 'tag', course.courseCode));
+  if (course?.compulsory) bar.appendChild(mk('span', 'tag', '必修'));
+  bar.appendChild(mk('div', 'spacer'));
+  if (lmsUi.downloadDir) bar.appendChild(mk('span', 'lms-hint', `下载到 ${lmsUi.downloadDir}`));
+  bar.appendChild(
+    lmsActionButton('刷新本课活动', '刷新中…', lmsUi.activitiesBusy, () => void lmsLoadCoursePage({ refresh: true })),
+  );
+  wrap.appendChild(bar);
+
+  if (lmsUi.courseError) wrap.appendChild(mk('div', 'lms-error', `课程页加载失败：${lmsUi.courseError}`));
+  if (!page) {
+    wrap.appendChild(mk('div', 'loading', lmsUi.courseBusy ? '加载中…' : '没有数据，点「刷新本课活动」'));
+    return wrap;
   }
 
-  if (lmsUi.applyError) card.appendChild(mk('div', 'lms-error', `同步失败：${lmsUi.applyError}`));
-  if (lmsUi.applyResult) card.appendChild(lmsApplyResultBox(lmsUi.applyResult));
-  return card;
+  // 1) 课程信息
+  wrap.appendChild(
+    lmsCollapsibleGroup({
+      label: '课程信息',
+      level: 1,
+      tags: [mk('span', 'lms-hint', course?.semester?.label || course?.semester?.name || '')],
+      expanded: lmsSectionExpanded('info'),
+      onToggle: (next) => {
+        lmsUi.sectionToggle.set(`${lmsUi.courseId}:info`, next);
+        lmsPaint();
+      },
+      render: () => [lmsCourseInfoBody(course)],
+    }),
+  );
+
+  // 2) 课程回放（第一个可用功能：可下载）
+  const replays = page.groups?.replay ?? [];
+  if (replays.length) {
+    wrap.appendChild(
+      lmsCourseSection({ kind: 'replay', title: '课程回放', items: replays, renderItem: lmsReplayRow, hint: '可下载' }),
+    );
+  }
+
+  // 3) 作业 / 资料 / 直播 / 其它
+  const sections = [
+    ['homework', '作业', page.groups?.homework ?? []],
+    ['material', '资料', page.groups?.material ?? []],
+    ['live', '直播', page.groups?.live ?? []],
+    ['other', '其它', page.groups?.other ?? []],
+  ];
+  for (const [kind, title, items] of sections) {
+    if (!items.length) continue;
+    wrap.appendChild(lmsCourseSection({ kind, title, items, renderItem: lmsCourseActivityRow }));
+  }
+  if (!replays.length && !sections.some(([, , items]) => items.length)) {
+    wrap.appendChild(emptyBox('这门课在本地缓存里还没有活动，点「刷新本课活动」拉一次。'));
+  }
+  return wrap;
 }
 
 /** 整体重画：所有文本都经 textContent 写入（等价于 escapeHtml），不使用 innerHTML 拼接。 */
@@ -1544,7 +1421,7 @@ function lmsPaint() {
   const mount = lmsUi.mount;
   if (!mount) return;
   mount.innerHTML = '';
-  lmsUi.refs = { syncCount: null, syncButton: null, syncBoxes: [], autoSync: null };
+  lmsUi.refs = { autoSync: null };
 
   const bar = mk('div', 'toolbar');
   bar.appendChild(mk('div', 'toolbar-title', '账号与同步'));
@@ -1560,13 +1437,15 @@ function lmsPaint() {
   mount.appendChild(content);
 
   const ready = lmsUi.status?.status === 'ready';
+  if (lmsUi.page === 'course' && ready) {
+    // 课程页：单独一屏，左上角返回首页
+    content.appendChild(lmsCourseView());
+    lmsMaybeLoadCourse();
+    return;
+  }
   content.appendChild(lmsStatusCard());
   if (lmsUi.status && !ready) content.appendChild(lmsUi.status.status === 'need_mfa' ? lmsMfaCard() : lmsLoginCard());
-  if (ready) {
-    content.appendChild(lmsCoursesCard());
-    content.appendChild(lmsActivitiesCard());
-  }
-  if (lmsUi.status) content.appendChild(lmsSyncCard(ready));
+  if (ready) content.appendChild(lmsCoursesCard());
 
   lmsMaybeLoad();
 }

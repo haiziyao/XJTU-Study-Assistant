@@ -164,10 +164,44 @@ export class HttpClient {
   }
 
   /**
-   * 发起请求并手动跟随重定向，返回最终响应。
+   * 发起请求并手动跟随重定向，返回最终响应（正文已读进内存）。
    * @returns {Promise<{status:number,url:string,headers:Headers,text:string,bytes:Uint8Array,redirects:string[]}>}
    */
-  async request(url, { method = 'GET', headers = {}, body, follow = true, timeoutMs } = {}) {
+  async request(url, options = {}) {
+    const { response, finalUrl, redirects } = await this.#open(url, { ...options, bodyTimeout: 'full' });
+    const buffer = new Uint8Array(await response.arrayBuffer());
+    return {
+      status: response.status,
+      url: finalUrl,
+      headers: response.headers,
+      bytes: buffer,
+      text: new TextDecoder('utf-8').decode(buffer),
+      redirects,
+    };
+  }
+
+  /**
+   * 同一条重定向/种票逻辑，但**不把正文读进内存**，直接交出 `response.body`。
+   *
+   * 回放视频动辄几百 MB，走 `request()` 会先 `arrayBuffer()` 全读一遍（内存直接爆），
+   * 所以下载单独走这里，由调用方 `pipeline` 到文件。
+   *
+   * 超时语义也不同：这里的 `timeoutMs` **只管到响应头为止**。正文传输不限时
+   * （否则一个大视频下到一半会被超时掐断），取消靠调用方传 `signal`。
+   *
+   * @returns {Promise<{status:number,url:string,headers:Headers,body:ReadableStream|null,redirects:string[]}>}
+   */
+  async stream(url, options = {}) {
+    const { response, finalUrl, redirects } = await this.#open(url, { ...options, bodyTimeout: 'headers' });
+    return { status: response.status, url: finalUrl, headers: response.headers, body: response.body, redirects };
+  }
+
+  /**
+   * 重定向 + Cookie 的核心循环，两种读法共用。
+   * @param {'full'|'headers'} options.bodyTimeout `full` = 超时覆盖整个请求（含正文）；
+   *   `headers` = 超时只到响应头，正文交给调用方（下载用）
+   */
+  async #open(url, { method = 'GET', headers = {}, body, follow = true, timeoutMs, signal, bodyTimeout = 'full' } = {}) {
     let currentUrl = typeof url === 'string' ? url : String(url);
     let currentMethod = method.toUpperCase();
     let currentBody = body;
@@ -188,7 +222,16 @@ export class HttpClient {
         requestHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
       }
 
-      const signal = effectiveTimeout > 0 ? AbortSignal.timeout(effectiveTimeout) : undefined;
+      // 超时 + 调用方取消信号合并；`headers` 模式下计时器一拿到响应头就清掉，
+      // 这样正文可以慢慢传，而"连不上/不响应"仍然会在 timeoutMs 内失败
+      const controller = bodyTimeout === 'headers' ? new AbortController() : null;
+      const timer = controller && effectiveTimeout > 0 ? setTimeout(() => controller.abort(), effectiveTimeout) : null;
+      const signals = [];
+      if (!controller && effectiveTimeout > 0) signals.push(AbortSignal.timeout(effectiveTimeout));
+      if (controller) signals.push(controller.signal);
+      if (signal) signals.push(signal);
+      const combined = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+
       let response;
       try {
         response = await this.fetchImpl(currentUrl, {
@@ -196,10 +239,12 @@ export class HttpClient {
           headers: requestHeaders,
           body: currentBody,
           redirect: 'manual',
-          signal,
+          signal: combined,
         });
       } catch (error) {
         throw new HttpError(`请求 ${parsed.origin}${parsed.pathname} 失败：${error.message ?? error}`, { url: currentUrl });
+      } finally {
+        if (timer) clearTimeout(timer);
       }
 
       this.jar.setFromResponse(currentUrl, response.headers);
@@ -220,15 +265,7 @@ export class HttpClient {
         continue;
       }
 
-      const buffer = new Uint8Array(await response.arrayBuffer());
-      return {
-        status: response.status,
-        url: currentUrl,
-        headers: response.headers,
-        bytes: buffer,
-        text: new TextDecoder('utf-8').decode(buffer),
-        redirects,
-      };
+      return { response, finalUrl: currentUrl, redirects };
     }
 
     throw new HttpError(`重定向次数超过 ${MAX_REDIRECTS} 次`, { url: currentUrl });
