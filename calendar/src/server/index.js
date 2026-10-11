@@ -20,6 +20,7 @@ import { CommandService } from './services/command-service.js';
 import { CommandParser } from './parser/command-parser.js';
 import { AiBridge } from './ai/ai-bridge.js';
 import { LmsService } from './lms/service.js';
+import { TimetableService } from './timetable/service.js';
 import { registerRoutes } from './routes/index.js';
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -40,9 +41,13 @@ export async function createServer(options = {}) {
   // 思源学堂接入：登录态 + 课程/活动缓存 + 同步。可用 options.lms 覆盖配置（测试时指向 mock 服务器）。
   const lms = new LmsService({ store, services: { events, schedules }, broadcast, dataDir, ...(options.lms ?? {}) });
   await lms.restore();
+  // 教务课表导入：复用同一套 CAS 状态机与 HTTP 客户端，只是入口 URL 换成 ehall 的 jwapp 业务地址。
+  // 可用 options.timetable 覆盖配置（测试时指向 mock 服务器）。
+  const timetable = new TimetableService({ store, services: { events, schedules }, broadcast, dataDir, ...(options.timetable ?? {}) });
+  await timetable.restore();
 
   const router = createRouter();
-  const services = { store, events, schedules, commands, reminders, lms };
+  const services = { store, events, schedules, commands, reminders, lms, timetable };
   registerRoutes(router, { services, aiBridge, hub, version: options.version });
 
   const server = http.createServer((req, res) => {
