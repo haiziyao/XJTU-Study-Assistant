@@ -14,6 +14,7 @@ import { ReminderService } from './reminder-service.js';
 import { CommandParser } from './parser.js';
 import { createCalendarCommands } from './commands.js';
 import { registerCalendarRoutes } from './routes.js';
+import { CALENDAR_TOOL_SPECS } from './tools.js';
 
 export default {
   id: 'calendar',
@@ -24,6 +25,9 @@ export default {
     { name: 'events', file: 'events.json' },
     { name: 'schedules', file: 'schedules.json' },
   ],
+
+  /** 聚合进 GET /api/v1/ai/capabilities —— AI 靠这份清单才知道自己能读写日程/待办/事件。 */
+  aiTools: CALENDAR_TOOL_SPECS,
 
   createServices({ store, broadcast, services }) {
     const events = new EventService({ store, broadcast });
