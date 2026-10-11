@@ -14,9 +14,11 @@
  * 还可以额外扫描任意串（逗号分隔）：
  *   PC_SECRETS_EXTRA='张三,2021001' npm run check:secrets
  *
- * 扫描范围 = 「可能被提交的内容」：工作区全部文本文件，跳过 .git / node_modules /
- * data / dist / out / .electron-bundle 等已知不入库的目录。不依赖 git 命令，
- * 因此在任何环境下都能跑。
+ * 扫描范围 = 「可能被提交的内容」。**默认扫到仓库根**（`app/` 的上一级，存在 `.git`
+ * 或根 `.gitignore` 时才算），因为要上传的是整个仓库而不是 `app/` —— 仓库根下还有
+ * `参考/` 这类目录，只扫 `app/` 会留一个看不见的缺口（这个缺口真的存在过）。
+ * 跳过 `.git` / node_modules / data / dist / out 等已知不入库的目录，并跳过二进制与大文件。
+ * 不依赖 git 命令，因此在任何环境下都能跑。
  *
  * 退出码：0 = 干净；1 = 命中（会打印 文件:行号:片段）；2 = 没给敏感串（fail-closed）。
  */
@@ -25,7 +27,29 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+/** 本包（`app/`）的根。 */
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * 实际扫描起点：优先仓库根（`app/` 的上一级），拿不到就退回 `app/`。
+ *
+ * 为什么要往上找：`npm run check:secrets` 在 `app/` 下执行，但 `git push` 推的是整个仓库。
+ * 仓库根可能还有别的目录（本项目就有 `参考/`），只扫 `app/` 等于没扫全。
+ * 用「存在 .git 或根 .gitignore」来判定，避免把 `app/` 拷到别处时误扫到无关目录。
+ */
+async function resolveScanRoot() {
+  const candidate = path.resolve(PACKAGE_ROOT, '..');
+  if (candidate === PACKAGE_ROOT) return PACKAGE_ROOT;
+  for (const marker of ['.git', '.gitignore']) {
+    try {
+      await stat(path.join(candidate, marker));
+      return candidate;
+    } catch {
+      /* 换下一个标记 */
+    }
+  }
+  return PACKAGE_ROOT;
+}
 
 /** 这些目录不会进仓库，跳过（`.git` 尤其要跳过：里面本来就有历史）。 */
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'data', 'dist', 'out', '.electron-bundle', '.cache']);
@@ -104,16 +128,18 @@ async function main() {
     return;
   }
 
+  const root = await resolveScanRoot();
   const found = [];
   let scanned = 0;
-  for await (const file of walk(PACKAGE_ROOT)) {
+  for await (const file of walk(root)) {
     scanned += 1;
     const hits = await scanFile(file, secrets);
-    for (const hit of hits) found.push({ file: path.relative(PACKAGE_ROOT, file), ...hit });
+    for (const hit of hits) found.push({ file: path.relative(root, file), ...hit });
   }
 
+  const scope = path.relative(PACKAGE_ROOT, root) || '(app)';
   if (!found.length) {
-    console.log(`干净：扫描 ${scanned} 个文件，${secrets.length} 个敏感串均未出现。`);
+    console.log(`干净：扫描 ${scanned} 个文件（范围 ${scope === '(app)' ? 'app/' : `${scope}/ 整个仓库`}），${secrets.length} 个敏感串均未出现。`);
     return;
   }
 
