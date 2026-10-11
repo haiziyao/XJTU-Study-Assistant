@@ -15,7 +15,7 @@
  */
 
 import { addDays } from '../../shared/time.js';
-import { normalizeLooseClock, normalizeLooseDate, repeatFromDschat } from '../services/compat.js';
+import { normalizeLooseClock, normalizeLooseDate, repeatFromDschat } from './compat.js';
 
 const MARKUP_RE = /^\s*[\[【]\s*(新增|删除|添加|完成)?\s*(日程|待办|学期)\s*[\]】]\s*(.*)$/;
 

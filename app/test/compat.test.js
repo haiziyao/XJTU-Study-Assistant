@@ -9,9 +9,9 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { parseMarkup } from '../src/server/parser/markup-parser.js';
-import { fromDschatEvent, normalizeLooseDate, repeatFromDschat, toDschatEvent } from '../src/server/services/compat.js';
-import { buildIcs, toRrule } from '../src/server/services/ics-service.js';
+import { parseMarkup } from '../src/modules/calendar/markup-parser.js';
+import { fromDschatEvent, normalizeLooseDate, repeatFromDschat, toDschatEvent } from '../src/modules/calendar/compat.js';
+import { buildIcs, toRrule } from '../src/modules/calendar/ics-service.js';
 import { createServer } from '../src/server/index.js';
 
 async function startApp() {

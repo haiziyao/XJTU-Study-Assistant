@@ -17,8 +17,8 @@
  * 测试即用 `{ config: { baseUrl, casOrigin, ... } }` 指向 mock 站点。
  */
 
-import { LmsService } from '../../server/lms/service.js';
-import { LMS_TOOL_SPECS } from '../../server/lms/tools.js';
+import { LmsService } from './service.js';
+import { LMS_TOOL_SPECS } from './tools.js';
 
 export default {
   id: 'lms',

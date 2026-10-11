@@ -8,9 +8,9 @@
  * 因此本模块的 order 必须更小。
  */
 
-import { EventService } from '../../server/services/event-service.js';
-import { ScheduleService } from '../../server/services/schedule-service.js';
-import { ReminderService } from '../../server/services/reminder-service.js';
+import { EventService } from './event-service.js';
+import { ScheduleService } from './schedule-service.js';
+import { ReminderService } from './reminder-service.js';
 
 export default {
   id: 'calendar',

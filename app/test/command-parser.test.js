@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CommandParser } from '../src/server/parser/command-parser.js';
+import { CommandParser } from '../src/modules/calendar/parser.js';
 
 /** 固定为 2025-10-15（周三）10:00。 */
 const FIXED = new Date(2025, 9, 15, 10, 0, 0);

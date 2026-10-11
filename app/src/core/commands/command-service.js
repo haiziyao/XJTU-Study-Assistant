@@ -1,13 +1,15 @@
 /**
  * 指令服务：把「指令对象」落到具体业务服务上，并记录指令日志。
  *
- * 指令对象既可以来自本地规则解析器（CommandParser），也可以来自未来的 AI provider，
+ * 指令对象既可以来自本地规则解析器（各模块自己的 parser），也可以来自未来的 AI provider，
  * 两者结构一致，因此这里不需要关心来源。
+ *
+ * 本文件属于框架层，**不认识任何具体业务**：
+ * - 目标记录怎么读写，由各模块通过 `registerHandler` 注册（见命令处理器契约）；
+ * - 多行标记文本怎么解析，由调用方把解析函数传进 `runBatch()`。
  */
 
-import { HttpError } from '../../core/http/router.js';
-import { describeRepeat } from './recurrence.js';
-import { parseMarkup } from '../parser/markup-parser.js';
+import { HttpError } from '../http/router.js';
 
 export class CommandService {
   constructor({ parser, eventService, scheduleService, store, aiBridge }) {
@@ -33,11 +35,17 @@ export class CommandService {
   }
 
   /**
-   * 解析 dschat 2 风格的中文标记行并逐条执行（伪工具调用入口）。
+   * 解析并逐条执行「多行标记」文本。
+   *
+   * 解析函数由调用方注入（例如日历模块的 dschat 标记行解析器），因此框架不依赖任何具体格式。
    * 单条失败不影响其它条目，结果按行返回，便于前端逐条反馈。
+   *
+   * @param {string} text 原始多行文本
+   * @param {(text: string) => { drafts: object[], unparsed: string[] }} parse 解析函数
+   * @param {{ dryRun?: boolean }} [options]
    */
-  async runMarkup(text, options = {}) {
-    const { drafts, unparsed } = parseMarkup(text);
+  async runBatch(text, parse, options = {}) {
+    const { drafts, unparsed } = parse(text);
     const results = [];
     for (const draft of drafts) {
       if (!draft.ok) {
@@ -250,5 +258,3 @@ function summarize(statuses) {
 function describeTarget(target) {
   return target === 'schedule' ? '日程' : '日历事件';
 }
-
-export { describeRepeat };

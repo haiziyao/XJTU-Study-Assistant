@@ -7,9 +7,9 @@
  *   node scripts/lms-probe.js
  */
 
-import { resolveLmsConfig } from '../src/server/lms/config.js';
-import { CasAuth, extractExecution, extractMfaEnabled, isSafetyVerifyPage } from '../src/server/lms/cas-auth.js';
-import { CookieJar, HttpClient } from '../src/server/lms/http-client.js';
+import { resolveLmsConfig } from '../src/modules/lms/config.js';
+import { CasAuth, extractExecution, extractMfaEnabled, isSafetyVerifyPage } from '../src/modules/lms/cas-auth.js';
+import { CookieJar, HttpClient } from '../src/modules/lms/http-client.js';
 
 const config = resolveLmsConfig();
 const http = new HttpClient({ userAgent: config.userAgent, timeoutMs: config.timeoutMs, jar: new CookieJar() });

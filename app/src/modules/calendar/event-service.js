@@ -10,16 +10,8 @@
 import { HttpError } from '../../core/http/router.js';
 import { rangeOverlaps } from '../../shared/time.js';
 import { expandDates } from './recurrence.js';
-import {
-  enumValue,
-  normalizeRepeat,
-  optionalDate,
-  optionalText,
-  pickDefined,
-  requireDate,
-  requireTitle,
-  stringArray,
-} from './validate.js';
+import { enumValue, optionalText, pickDefined, requireTitle, stringArray } from '../../core/validate.js';
+import { normalizeRepeat, optionalDate, requireDate } from './schema.js';
 import { EVENT_CATEGORIES } from '../../shared/constants.js';
 import { normalizeAliases } from './compat.js';
 

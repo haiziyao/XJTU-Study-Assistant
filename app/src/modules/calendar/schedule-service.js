@@ -10,20 +10,8 @@ import { HttpError } from '../../core/http/router.js';
 import { addDays, clockToMinutes, todayKey, weekRange } from '../../shared/time.js';
 import { SCHEDULE_CATEGORIES, SCHEDULE_STATUS } from '../../shared/constants.js';
 import { expandDates, isoWeekday } from './recurrence.js';
-import {
-  complexityOf,
-  enumValue,
-  intValue,
-  normalizeReminders,
-  normalizeRepeat,
-  optionalClock,
-  optionalText,
-  pickDefined,
-  requireClock,
-  requireDate,
-  requireTitle,
-  stringArray,
-} from './validate.js';
+import { enumValue, intValue, optionalText, pickDefined, requireTitle, stringArray } from '../../core/validate.js';
+import { complexityOf, normalizeReminders, normalizeRepeat, optionalClock, requireClock, requireDate } from './schema.js';
 import { normalizeAliases } from './compat.js';
 
 const EDITABLE = [

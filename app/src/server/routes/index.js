@@ -6,12 +6,12 @@
 
 import { AI_CONTRACT_VERSION } from '../../core/ai/ai-bridge.js';
 import { HttpError } from '../../core/http/router.js';
-import { COMMAND_GRAMMAR } from '../parser/command-parser.js';
-import { MARKUP_GRAMMAR } from '../parser/markup-parser.js';
-import { buildIcs } from '../services/ics-service.js';
-import { fromDschatEvent, toDschatEvent } from '../services/compat.js';
-import { LMS_TOOL_SPECS } from '../lms/tools.js';
-import { registerLmsRoutes } from './lms.js';
+import { COMMAND_GRAMMAR } from '../../modules/calendar/parser.js';
+import { MARKUP_GRAMMAR, parseMarkup } from '../../modules/calendar/markup-parser.js';
+import { buildIcs } from '../../modules/calendar/ics-service.js';
+import { fromDschatEvent, toDschatEvent } from '../../modules/calendar/compat.js';
+import { LMS_TOOL_SPECS } from '../../modules/lms/tools.js';
+import { registerLmsRoutes } from '../../modules/lms/routes.js';
 import { API_PREFIX, WS_PATH } from '../../shared/constants.js';
 import { THEME } from '../../shared/theme.js';
 import { addDays } from '../../shared/time.js';
@@ -241,7 +241,7 @@ export function registerRoutes(router, context) {
   /** dschat 2 兼容：解析中文标记行（`[新增日程] 标题 | 日期 | …`）并逐条执行。 */
   router.post(`${API_PREFIX}/commands/markup`, async ({ body }) => {
     if (!body?.text) throw HttpError.badRequest('text 为必填');
-    return services.commands.runMarkup(body.text, { dryRun: Boolean(body.dryRun) });
+    return services.commands.runBatch(body.text, parseMarkup, { dryRun: Boolean(body.dryRun) });
   });
 
   // ---------------------------------------------------------------- 导出（ICS）

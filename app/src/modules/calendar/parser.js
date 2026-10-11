@@ -33,8 +33,8 @@ import {
   parseRepeatExpr,
   parseTimeRangeExpr,
   parseWeekdayRepeat,
-} from './nlp-rules.js';
-import { matchesRepeat } from '../services/recurrence.js';
+} from '../../core/commands/nlp-rules.js';
+import { matchesRepeat } from './recurrence.js';
 
 /** 两个日期键相差的天数。 */
 function dayDiff(fromKey, toKey) {

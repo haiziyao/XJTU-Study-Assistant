@@ -13,10 +13,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { createServer } from '../src/server/index.js';
-import { normalizeCourse } from '../src/server/lms/api.js';
-import { ACTIVITY_TYPE_LABEL } from '../src/server/lms/config.js';
-import { buildSyncPlan, refineActivityTitle } from '../src/server/lms/sync.js';
-import { parseLmsTime } from '../src/server/lms/time.js';
+import { normalizeCourse } from '../src/modules/lms/api.js';
+import { ACTIVITY_TYPE_LABEL } from '../src/modules/lms/config.js';
+import { buildSyncPlan, refineActivityTitle } from '../src/modules/lms/sync.js';
+import { parseLmsTime } from '../src/modules/lms/time.js';
 import { startMockLms } from './helpers/lms-mock.js';
 
 const TODAY = '2026-10-11';

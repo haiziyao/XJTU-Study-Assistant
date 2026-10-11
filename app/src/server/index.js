@@ -25,8 +25,8 @@ import { createRouter } from '../core/http/router.js';
 import { WebSocketHub } from '../core/http/websocket.js';
 import { AiBridge } from '../core/ai/ai-bridge.js';
 import { describeModules, loadModules } from '../core/module/registry.js';
-import { CommandService } from './services/command-service.js';
-import { CommandParser } from './parser/command-parser.js';
+import { CommandService } from '../core/commands/command-service.js';
+import { CommandParser } from '../modules/calendar/parser.js';
 import { registerRoutes } from './routes/index.js';
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
