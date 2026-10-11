@@ -39,6 +39,43 @@
 - 日程新增 `externalId` 字段（幂等同步用）；`ERROR_CODES` 新增 `UNAUTHORIZED` / `UPSTREAM_ERROR`；`HttpError` 新增 `unauthorized()` / `upstream()`。
 - 文档：[接口文档.md](接口文档.md) 新增第 9 节「思源学堂接入（LMS）」（含登录流程、接口清单、映射表、同步动作表、安全说明）；README 新增「思源学堂接入（LMS）」一节。
 
+### 新增（教务课表导入：jwapp 课表 → 逐周日程）
+
+- **调研文档** [docs/课表接入调研.md](docs/课表接入调研.md)：核实数据源（本科课表已迁到移动教务 jwapp）、
+  接口清单、**完整节次时刻表（冬/夏两套 11 节）**、周次位图、映射方案、`externalId` 方案与风险。
+- **节次时刻表**（`src/server/timetable/periods.js`）：11 节冬/夏两套数据 + `getClassTime(start, end, date)`。
+  **按日期选表**（`month ∈ 5..9` 为夏季），因为秋季学期会横跨 9→10 月的作息切换；越界节次直接抛错，不静默返回 `undefined`。
+- **周次解析**（`src/server/timetable/weeks.js`）：支持 `第1-4，6-16周` / `1-16单周` / `2-16双周` / `第1-16周(单)` /
+  `3,5,7周`，以及 `SKZC` 位图互转。**显式支持单双周**（参考实现遇到 `1-16单周` 会静默丢掉整门课），
+  无法识别的片段一律抛 `WeekParseError`，与「本来就没有周次」严格区分。
+- **学期与起始日**（`src/server/timetable/term.js`、`timetable/service.js`）：解析 `2025-2026-1` 形式的学期编号、
+  推断起始日（学期 1 → 9 月第一个周一；学期 2/3 → 离 3/1、7/1 最近的周一）、`weekToDate` / `dateToWeek`；
+  起始日落 `data/timetable-terms.json` 并标 `source: ehall | guess | manual`，**手改值永不被自动结果覆盖**，
+  并校验「必须是周一 + 展开区间落在学年内」。
+- **接口封装**（`src/server/timetable/api.js`）：`xskcb.do`（课表）/ `dqxnxq.do`（当前学期）/ `cxjcs.do`（起始日），
+  统一 `POST` + 表单编码 + `X-Requested-With: XMLHttpRequest`；**校验 `{code:"0"}` 字符串外壳**（不是数字 0）。
+- **课表 → 日程**（`src/server/timetable/to-calendar.js`，纯函数）：**逐周展开成独立 `Schedule`**（默认不用 `repeat`），
+  `title/location/category=class/tags/reminders=提前 15 分钟/source=import` 按调研文档第 5 节；
+  `externalId = tt:<学期>:<hash8(规范化后的 课程名|教师|星期|节次|教室)>:<周次>`，
+  `hash8` 用零依赖 FNV-1a（不用 crypto，保证跨版本稳定），规范化规则（去空白 + 全角逗号/顿号统一）**写进注释并冻结**。
+  默认不导入已经过去的周次；`compact: true` 时才把「每周时刻完全一致」的连续周折叠成一条 `repeat`。
+- **REST 接口** `/api/v1/tt/*`（`src/server/routes/timetable.js`）：status / login / mfa/send / mfa/verify / captcha /
+  logout / terms / terms/:term（手改起始日）/ courses（去重后的课）/ refresh / preview / apply；
+  写操作一律「先预览后应用」，未登录返回 `401 UNAUTHORIZED`。
+- **AI 工具契约**（`src/server/timetable/tools.js`）：9 个工具（name / method / path / params / requiresAuth / mutates），
+  通过 `GET /ai/capabilities` 的 `timetableTools` 暴露。
+- **本地缓存与会话**：`data/timetable-cache.json`（课表原始行）、`data/timetable-terms.json`（学期起始日）、
+  `data/timetable-session.json`（会话票据，`0600`，7 天失效，**不保存密码**）。
+- **同步安全**：只动 `externalId` 以 `tt:` 开头的日程，**绝不删除用户手改的日程**；学校已删掉的课以 `stale` 列出，
+  只有 `pruneStale: true` 才清理；单条失败进 `errors` 不中断整批。
+- **测试**：`test/helpers/timetable-mock.js` 复刻「未登录 302 → `amp-auth-adapter/login?service=…` → CAS 登录页 →
+  RSA 密码校验 → 种票」整条链路与 `{code:"0",datas:…}` 外壳、`SKZC` 位图、`cxjcs` 起始日、
+  `termStartFails`（起始日取不到）；`test/timetable.test.js` 21 项用例覆盖：
+  401、登录链路、两步验证、学期列表 + guess 兜底 + 手改不被覆盖、周次解析（含无法解析必须报错）、
+  冬夏作息（5 月 14:30 / 11 月 14:00）、逐周展开、`includePast`、幂等、改教室、`stale` + `pruneStale`、`compact` 开关。
+  用例总数 51 → 72。
+- 文档：[接口文档.md](接口文档.md) 新增第 10 节「教务课表导入（jwapp）」（接口清单、同步参数、节次时刻表、周次规则、安全说明、已知限制）；README 新增「教务课表导入」一节。
+
 ### 新增（测试窗口重做为三栏界面）
 
 - **三栏布局**：左栏功能栏（约 10% 宽，日历 / 待办 / 学情 / 拍题 / 网课 / 消息 + 底部设置）、中间对话面板、右侧功能视图；
@@ -53,6 +90,19 @@
   查询类指令直接在对话里列出结果并可跳转到右侧对应日期。AI 未接入时由本地规则解析（`fallback: rules`）。
 - **演示数据脚本** `scripts/seed-demo.js`：写入 16 条相对今天的演示记录（带 `tags: ["demo"]`），`--clear` 只删演示数据。
 - 新增 `GET /app/views.js` 静态白名单；README 增补「测试窗口界面」一节。
+
+### 新增（思源学堂：按学期筛选）
+
+- **`GET /lms/semesters`**：按本地课程缓存聚合出学期列表（`id / code / label / academicYear / courseCount / startDate / endDate / started / containsToday` 与 `currentId`）。
+- `GET /lms/courses`、`GET /lms/activities`、`/lms/sync/preview|apply` 全部支持 `semesterId`：只看/只同步所选学期的课程与作业（实测同一账号有 6 个学期，不筛选会把好几年的内容混在一起）。
+- 学期判定按真实数据修正：学校**几乎不给 `end_date`**，因此「当前学期」= 优先「今天在区间内」，否则「已开学且最新」；不再把 2024 年的学期误判成当前学期。
+- 每门课记录新增 `activitiesFetchedAt`：切学期时能判断「这门课的活动还没拉过」并自动补拉，而不是因为列表为空就以为没有作业。
+- 用例 49 → 51（新增「按学期筛选课程/活动/同步范围」「无结束日期时判定当前学期」两条，后者顺带揪出同步范围没跟着学期收窄的 bug）。
+
+### 变更（课表：标准学期按 18 周）
+
+- 标准学期总周数 **22 → 18**（`DEFAULT_TERM_WEEKS` 与 `config.totalWeeks`），小学期仍为 8 周；周次位图上限、学期结束日与相关断言同步调整。
+- 依据：一个标准学期一般是 18 周（22 周是参考实现的硬编码，偏长会让「学期结束日」算到 2 月）。
 
 ### 修复
 
