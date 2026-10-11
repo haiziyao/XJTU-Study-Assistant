@@ -107,11 +107,11 @@ function wireNotifications() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 720,
-    minWidth: 720,
-    minHeight: 520,
-    title: 'Potato Calendar · 测试窗口',
+    width: 1360,
+    height: 880,
+    minWidth: 1000,
+    minHeight: 640,
+    title: 'AI 智学 · 日历与待办（测试窗口）',
     backgroundColor: esm?.theme?.background?.base ?? '#1b1b1f',
     webPreferences: {
       preload: path.join(CURRENT_DIR, 'preload.cjs'),

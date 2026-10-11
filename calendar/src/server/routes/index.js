@@ -19,13 +19,13 @@ import { fileURLToPath } from 'node:url';
 
 const MAX_AGGREGATE_DAYS = 400;
 
-/** 测试页面（渲染层）静态文件映射：只暴露白名单内的三个文件，避免任意路径读取。 */
+/** 测试页面（渲染层）静态文件映射：只暴露白名单内的文件，避免任意路径读取。 */
 const RENDERER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'renderer');
 const RENDERER_FILES = {
-  '/app': 'index.html',
-  '/app/': 'index.html',
+  // `/app` 与 `/app/` 由下方专门的路由处理（裸路径需要 302 到带斜杠的目录路径）
   '/app/index.html': 'index.html',
   '/app/app.js': 'app.js',
+  '/app/views.js': 'views.js',
   '/app/styles.css': 'styles.css',
 };
 const CONTENT_TYPES = {
@@ -304,13 +304,35 @@ export function registerRoutes(router, context) {
 
   // ---------------------------------------------------------------- 测试页面（浏览器直开）
   // Electron 不可用时（例如二进制下载失败或运行时崩溃），可用浏览器直接打开本模块的测试页面联调。
+  //
+  // 注意：页面内的 styles.css / app.js / views.js 都是**相对路径**。
+  // 若直接访问 `/app`（无尾斜杠），浏览器会以 `/` 为基准解析成 `/styles.css`，导致整页无样式、无脚本；
+  // 因此裸路径 302 到 `/app/`（Electron 用 file:// 加载本地文件，不受影响）。
+  // 路由编译允许可选尾斜杠，所以 `/app` 与 `/app/` 命中同一个模式，这里在处理器内区分。
+  const rendererFile = (file) => ({
+    __raw: {
+      contentType: CONTENT_TYPES[path.extname(file)] ?? 'application/octet-stream',
+      body: readFileSync(path.join(RENDERER_DIR, file), 'utf8'),
+    },
+  });
+
+  router.get('/app', ({ req }) => {
+    const { pathname } = new URL(req.url, `http://${req.headers.host ?? '127.0.0.1'}`);
+    if (pathname === '/app') {
+      return {
+        __raw: {
+          status: 302,
+          contentType: 'text/plain; charset=utf-8',
+          headers: { Location: '/app/' },
+          body: '',
+        },
+      };
+    }
+    return rendererFile(RENDERER_FILES['/app/index.html']);
+  });
+
   for (const [pattern, file] of Object.entries(RENDERER_FILES)) {
-    router.get(pattern, () => ({
-      __raw: {
-        contentType: CONTENT_TYPES[path.extname(file)] ?? 'application/octet-stream',
-        body: readFileSync(path.join(RENDERER_DIR, file), 'utf8'),
-      },
-    }));
+    router.get(pattern, () => rendererFile(file));
   }
 
   return router;

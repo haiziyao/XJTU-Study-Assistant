@@ -266,14 +266,27 @@ test('测试页面由后端托管（/app），无需 Electron 也能联调', asy
     return { status: response.status, contentType: response.headers.get('content-type'), text: await response.text() };
   };
   try {
-    const page = await getRaw('/app');
+    // `/app`（无尾斜杠）必须跳转到 `/app/`，否则相对路径的 css/js 会被解析到根目录而 404（整页无样式）
+    const bare = await fetch(`${origin}/app`, { redirect: 'manual' });
+    assert.equal(bare.status, 302);
+    assert.equal(bare.headers.get('location'), '/app/');
+    await bare.body?.cancel();
+
+    const page = await getRaw('/app/');
     assert.equal(page.status, 200);
     assert.match(page.contentType, /text\/html/);
-    assert.match(page.text, /Potato Calendar/);
+    assert.match(page.text, /日历与待办/);
+    assert.match(page.text, /id="chat-log"/);
+    assert.match(page.text, /id="panel-body"/);
 
     const script = await getRaw('/app/app.js');
     assert.match(script.contentType, /javascript/);
     assert.match(script.text, /resolveInfo/);
+
+    // 视图层与外壳分离：views.js 也必须可被托管，否则界面只有骨架
+    const views = await getRaw('/app/views.js');
+    assert.match(views.contentType, /javascript/);
+    assert.match(views.text, /PCViews/);
 
     const style = await getRaw('/app/styles.css');
     assert.match(style.contentType, /text\/css/);

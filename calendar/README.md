@@ -19,7 +19,7 @@
 | 聚合视图接口（日/周/月/年通用） | ✅ 已实现 |
 | ICS 导出（可订阅到系统日历） | ✅ 已实现 |
 | dschat 2 兼容（字段别名 / 标记行 / 兼容接口） | ✅ 已实现 |
-| 测试窗口（浏览器 `/app` 或 Electron） | ✅ 已实现（Electron 运行时受宿主沙箱限制，见下） |
+| 测试窗口（浏览器 `/app` 或 Electron） | ✅ 已实现（三栏界面：功能栏 / 对话 / 功能视图） |
 | AI 接入（NL → 指令对象） | 🚧 仅契约与占位（`/ai/*`） |
 | 农历 / 学习记录导入 | 🚧 仅契约 |
 
@@ -36,7 +36,7 @@ npm run dev:server            # 带 --watch 自动重启
 npm install                   # electron 为 devDependency
 npm run dev:app
 
-# 3) 测试（零依赖，29 个用例）
+# 3) 测试（零依赖，30 个用例）
 npm test
 ```
 
@@ -51,7 +51,8 @@ npm run start:server
 open http://127.0.0.1:3210/app        # 页面与接口同源，无需额外配置
 ```
 
-`/app`、`/app/app.js`、`/app/styles.css` 由后端直接托管（白名单静态文件），页面会自动使用同源地址作为 API 基址。
+`/app`、`/app/app.js`、`/app/views.js`、`/app/styles.css` 由后端直接托管（白名单静态文件），页面会自动使用同源地址作为 API 基址。
+访问 `/app`（无尾斜杠）会 302 到 `/app/`：页面内的资源都是相对路径，否则浏览器会以 `/` 为基准解析导致整页无样式无脚本。
 
 **方式 B：Electron 测试窗口**
 
@@ -89,6 +90,30 @@ ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ node node_modules/electr
 主进程刻意使用 CommonJS（`src/main/main.cjs`）：在 ESM 下 `import ... from 'electron'` 会被 Node 解析到
 node_modules 里的 npm 包（导出二进制路径字符串），拿不到 `app`/`BrowserWindow`；需要 ESM 模块时用动态 `import()`。
 
+### 测试窗口界面
+
+三栏布局，无框架、无构建步骤（原生 HTML/CSS/JS）：
+
+| 区域 | 内容 |
+| --- | --- |
+| 左栏（约 10% 宽） | 日历 / 待办 / 学情 / 拍题 / 网课 / 消息，底部独立「设置」 |
+| 中栏 | 对话：自然语言 → **指令草稿确认卡** → 点「确认执行」才落库（可取消）；AI 未接入时由本地规则解析 |
+| 右栏 | 左栏所选功能的视图，右上角 `⟩` 可收起（收起后中间变宽，周视图置灰） |
+
+功能视图（本模块负责的部分）：
+
+- **日历**：月视图（7×6 格子、分类色条、今日高亮、悬停 `+` 快捷新建）、周视图（24 小时时间轴、重叠日程自动分列、点空白按 30 分钟吸附新建）、日视图（全天 / 时段分段，逐条可完成·取消·编辑·删除）；周视图需要右栏展开（宽度不足时自动回退月视图）。
+- **待办**：全部 / 今天 / 本周 / 逾期 / 已完成筛选，顶部快速添加（不填时间即全天待办），按日期分组并标注「今天 / 已逾期 N 天」，支持勾选完成、顺延未完成到本周，底部显示本周完成率与计划时长。
+- **新建 / 编辑弹层**：日程与日历事件两个页签，支持重复规则（每天 / 每周 + 星期集合 / 每月 / 每年 / 工作日 + 间隔 + 结束条件）、提醒档位、优先级、预估时长、地点、备注。
+- 学情 / 拍题 / 网课为**占位页**（说明各自的数据挂载点，能力属于 AI 智学主程序）。
+
+演示数据（可选，方便评审各视图）：
+
+```bash
+node scripts/seed-demo.js          # 写入 16 条演示记录（日期相对今天生成，带 tags: ["demo"]）
+node scripts/seed-demo.js --clear  # 只删除演示记录，不影响手动添加的数据
+```
+
 ### 冒烟示例
 
 ```bash
@@ -117,8 +142,8 @@ curl -s localhost:3210/api/v1/commands/grammar | jq
 calendar/
 ├── bin/server.js               # 独立启动后端（联调 / 自动化）
 ├── src/
-│   ├── main/                   # Electron 主进程（main.js + preload.cjs）
-│   ├── renderer/               # 测试窗口（原生 HTML/CSS/JS，无构建步骤）
+│   ├── main/                   # Electron 主进程（main.cjs + preload.cjs）
+│   ├── renderer/               # 测试窗口：index.html + styles.css + app.js（外壳/对话）+ views.js（视图）
 │   ├── shared/                 # 前后端共享：constants.js / time.js / theme.js
 │   └── server/
 │       ├── index.js            # 装配：store + services + router + ws + 提醒
@@ -129,13 +154,14 @@ calendar/
 │       ├── routes/             # 全部 REST 路由
 │       └── ai/ai-bridge.js     # AI provider 注册与契约（占位）
 ├── data/                       # 运行时数据（events / schedules / command-logs）
-└── test/                       # node:test 用例（解析器 + 接口 + 兼容层，29 个）
+├── scripts/                    # run-electron-macos.sh（沙箱启动）+ seed-demo.js（演示数据）
+└── test/                       # node:test 用例（解析器 + 接口 + 兼容层，30 个）
 ```
 
 ## 架构
 
 ```
-Electron 渲染层（测试窗口：指令框 + 今日日程）
+Electron 渲染层（测试窗口：左功能栏 + 中对话 + 右功能视图）
         │  HTTP + WebSocket（仅 127.0.0.1）
         ▼
 Node.js 后端 ── 路由层 ── 服务层 ── JSON 存储（原子写）
