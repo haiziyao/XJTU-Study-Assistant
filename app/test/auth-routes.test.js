@@ -1,0 +1,275 @@
+/**
+ * 全局认证的 HTTP 端点测试。
+ *
+ * 关注**状态码与可操作性** —— 前端与 AI 都靠它们决定下一步：
+ *   - 需要登录 → 401；
+ *   - 参数不对 → 400；
+ *   - 站点没注册 → 404（而不是含糊的 500）；
+ *   - 验证码端点回的是**二进制图片**，不是 JSON。
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import { createServer } from '../src/server/index.js';
+import { startMockSso } from './helpers/sso-mock.js';
+
+const USER = '2024001';
+const PASS = 'secret-pass';
+
+/**
+ * 起一套服务，并在装配后注册两个指向 SSO mock 的站点。
+ *
+ * 之所以能在装配后注册：`registerSite` 就是普通方法，站点表是运行时可变的。
+ * （S4/S5 之后 lms/academic 会在各自的 createServices 里注册，这里不需要它们。）
+ */
+async function startApp({ mock } = {}) {
+  const server = mock ?? (await startMockSso());
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'potato-auth-http-'));
+  const app = await createServer({ dataDir, auth: { casOrigin: server.origin } });
+  const info = await app.listen({ port: 0 });
+
+  app.services.auth.registerSite({ id: 'a', label: '站点A', loginUrl: server.siteAUrl });
+  app.services.auth.registerSite({ id: 'b', label: '站点B', loginUrl: server.siteBUrl });
+
+  const call = async (method, route, body) => {
+    const response = await fetch(`${info.baseUrl}${route}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await response.text();
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = text;
+    }
+    return { status: response.status, body: parsed, headers: response.headers };
+  };
+  /** 拿原始 Response —— 验证二进制/内容类型时用（`call` 会把 body 读成文本）。 */
+  const raw = (method, route) => fetch(`${info.baseUrl}${route}`, { method });
+  return { app, call, raw, info, mock: server, dataDir };
+}
+
+/* ------------------------------------------------------------------ 状态 */
+
+test('auth HTTP：/auth/status 逐站点报告，未登录时 loggedIn=false', async () => {
+  const { app, call, mock } = await startApp();
+  try {
+    const result = await call('GET', '/auth/status');
+    assert.equal(result.status, 200);
+    assert.equal(result.body.loggedIn, false);
+    assert.equal(result.body.siteCount, 2);
+    assert.deepEqual(
+      result.body.sites.map((site) => site.id),
+      ['a', 'b'],
+    );
+    assert.equal(result.body.sites[0].label, '站点A');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('auth HTTP：/auth/sites/:id 返回单站点状态；未注册的站点 404', async () => {
+  const { app, call, mock } = await startApp();
+  try {
+    const ok = await call('GET', '/auth/sites/a');
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.id, 'a');
+    assert.equal(ok.body.ready, false);
+
+    const missing = await call('GET', '/auth/sites/ghost');
+    assert.equal(missing.status, 404);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+/* ------------------------------------------------------------------ 登录 */
+
+test('auth HTTP：登录缺字段返回 400 而不是 500', async () => {
+  const { app, call, mock } = await startApp();
+  try {
+    const noUser = await call('POST', '/auth/login', { password: PASS });
+    assert.equal(noUser.status, 400);
+    assert.equal(noUser.body.error.code, 'BAD_REQUEST');
+
+    const noPass = await call('POST', '/auth/login', { username: USER });
+    assert.equal(noPass.status, 400);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('auth HTTP：★ 登录一次，两个站点都就绪（SSO 走完整 HTTP 栈）', async () => {
+  const { app, call, mock } = await startApp();
+  try {
+    const login = await call('POST', '/auth/login', { username: USER, password: PASS });
+    assert.equal(login.status, 200);
+    assert.equal(login.body.status, 'ready');
+    assert.equal(login.body.loggedIn, true);
+    assert.equal(login.body.username, USER);
+    assert.equal(login.body.readyCount, 2, '两个站点都应就绪');
+    assert.ok(login.body.sso.some((entry) => entry.id === 'b' && entry.ok === true), 'sso 字段应报告 B 已就绪');
+    assert.equal(mock.state.passwordLogins, 1, '密码只应使用一次');
+
+    const status = await call('GET', '/auth/status');
+    assert.equal(status.body.readyCount, 2);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('auth HTTP：账号密码错误时状态为 error，但仍返回 200（前端据此原地提示）', async () => {
+  const { app, call, mock } = await startApp();
+  try {
+    const result = await call('POST', '/auth/login', { username: USER, password: 'wrong-password' });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.status, 'error');
+    assert.ok(result.body.error);
+
+    const status = await call('GET', '/auth/status');
+    assert.equal(status.body.loggedIn, false);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('auth HTTP：可以指定只为某个站点登录', async () => {
+  const { app, call, mock } = await startApp();
+  try {
+    const result = await call('POST', '/auth/sites/b/login', { username: USER, password: PASS });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.status, 'ready');
+    assert.equal(mock.state.passwordLogins, 1);
+
+    const sso = await call('POST', '/auth/sites/a/ensure', {});
+    assert.equal(sso.status, 200);
+    assert.equal(sso.body.ok, true, 'A 应能靠 SSO 就绪');
+    assert.equal(mock.state.passwordLogins, 1, 'ensure 不该再要密码');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('auth HTTP：给未注册站点发登录请求返回 404', async () => {
+  const { app, call, mock } = await startApp();
+  try {
+    const result = await call('POST', '/auth/sites/ghost/login', { username: USER, password: PASS });
+    assert.equal(result.status, 404);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+/* ------------------------------------------------------------------ ensure */
+
+test('auth HTTP：未登录时 ensure 返回 ok:false + needsLogin，而不是 401 抛错', async () => {
+  const { app, call, mock } = await startApp();
+  try {
+    const result = await call('POST', '/auth/sites/a/ensure', {});
+    assert.equal(result.status, 200, 'ensure 是"问答"而非"断言"，不该用错误码表达未登录');
+    assert.equal(result.body.ok, false);
+    assert.equal(result.body.needsLogin, true);
+    assert.match(result.body.reason, /重新登录/);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+/* ------------------------------------------------------------------ 退出 */
+
+test('auth HTTP：退出后两个站点都不可用，且会话文件消失', async () => {
+  const { app, call, mock, dataDir } = await startApp();
+  try {
+    await call('POST', '/auth/login', { username: USER, password: PASS });
+    const logout = await call('POST', '/auth/logout', {});
+    assert.equal(logout.status, 200);
+    assert.equal(logout.body.loggedIn, false);
+    assert.equal(logout.body.readyCount, 0);
+
+    const ensure = await call('POST', '/auth/sites/a/ensure', {});
+    assert.equal(ensure.body.ok, false);
+
+    const fs = await import('node:fs/promises');
+    await assert.rejects(() => fs.stat(path.join(dataDir, 'auth-session.json')));
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+/* ------------------------------------------------------------------ 验证码 */
+
+test('auth HTTP：验证码端点回二进制图片，而不是被 JSON 包一层', async () => {
+  const { app, raw, mock } = await startApp();
+  try {
+    const response = await raw('GET', '/auth/captcha');
+    assert.equal(response.status, 200);
+    assert.match(String(response.headers.get('content-type')), /image\/png/, '必须是图片类型');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    // PNG 魔数：确认拿到的是原始字节，而不是被 JSON.stringify 过的文本
+    assert.deepEqual([...bytes.slice(0, 4)], [0x89, 0x50, 0x4e, 0x47], '应当是原始 PNG 字节');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('auth HTTP：没有注册任何站点时，验证码端点给出明确失败', async () => {
+  const mock = await startMockSso();
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'potato-auth-nosite-'));
+  const app = await createServer({ dataDir, auth: { casOrigin: mock.origin } });
+  const info = await app.listen({ port: 0 });
+  try {
+    // 刻意不注册任何站点
+    const response = await fetch(`${info.baseUrl}/auth/captcha`);
+    assert.equal(response.status, 500, '没有站点时应当是明确的装配期错误，而不是静默 200');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+/* ------------------------------------------------------------------ 模块自描述 */
+
+test('auth HTTP：模块出现在 /modules 且 order 最小（要早于所有业务模块）', async () => {
+  const { app, call, mock } = await startApp();
+  try {
+    const listed = await call('GET', '/modules');
+    const items = listed.body.items;
+    const authIndex = items.findIndex((item) => item.id === 'auth');
+    assert.ok(authIndex >= 0, 'auth 应被装配');
+    assert.equal(authIndex, 0, 'auth 必须是第一个（order 最小），否则业务模块拿不到 services.auth');
+    assert.equal(items[0].order, 5);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('auth HTTP：aiTools 聚合进 /ai/capabilities', async () => {
+  const { app, call, mock } = await startApp();
+  try {
+    const result = await call('GET', '/ai/capabilities');
+    const mine = (result.body.aiTools ?? []).filter((tool) => tool.module === 'auth');
+    assert.equal(mine.length, 2);
+    assert.ok(mine.every((tool) => tool.implemented === true));
+    assert.ok(mine.some((tool) => tool.name === 'auth_status'));
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
