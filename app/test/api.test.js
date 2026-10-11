@@ -34,7 +34,10 @@ test('健康检查返回数据量统计', async () => {
     assert.equal(status, 200);
     assert.equal(body.ok, true);
     assert.equal(body.status, 'ok');
-    assert.deepEqual(body.counts, { events: 0, schedules: 0, commandLogs: 0 });
+    // counts 由各模块声明的集合自动汇总（不再由路由硬编码），因此这里按集合名逐个核对
+    for (const name of ['events', 'schedules', 'commandLogs', 'lmsCourses', 'lmsActivities']) {
+      assert.equal(body.counts[name], 0, `集合 ${name} 初始应为空`);
+    }
   } finally {
     await app.close();
   }

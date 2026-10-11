@@ -19,6 +19,7 @@
 
 import { LmsService } from './service.js';
 import { LMS_TOOL_SPECS } from './tools.js';
+import { registerLmsRoutes } from './routes.js';
 
 export default {
   id: 'lms',
@@ -36,6 +37,11 @@ export default {
   createServices({ store, broadcast, services, dataDir, options }) {
     const lms = new LmsService({ store, services, broadcast, dataDir, ...options });
     return { lms };
+  },
+
+  /** 全部路由挂在 `/api/v1/lms` 下，见 ./routes.js。 */
+  registerRoutes(router, ctx) {
+    registerLmsRoutes(router, { lms: ctx.own.lms, apiPrefix: ctx.apiPrefix });
   },
 
   /** 恢复上次会话（可能读盘失败，由装配层兜底降级）。 */

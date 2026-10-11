@@ -26,8 +26,8 @@ import { WebSocketHub } from '../core/http/websocket.js';
 import { AiBridge } from '../core/ai/ai-bridge.js';
 import { describeModules, loadModules } from '../core/module/registry.js';
 import { CommandService } from '../core/commands/command-service.js';
+import { registerCoreRoutes } from '../core/routes.js';
 import { CommandParser } from '../modules/calendar/parser.js';
-import { registerRoutes } from './routes/index.js';
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -97,9 +97,13 @@ export async function createServer(options = {}) {
     dataDir,
     version: options.version ?? '0.1.0',
     apiPrefix: API_PREFIX,
+    // 测试窗口：整个 renderer 目录按前缀放行，新增前端文件不必改路由
+    staticDir: options.staticDir ?? path.join(PACKAGE_ROOT, 'src', 'renderer'),
+    staticPrefix: '/app',
+    describeModules: () => describeModules(modules),
   };
 
-  registerRoutes(router, routeCtx);
+  registerCoreRoutes(router, routeCtx);
   for (const { mod, ctx } of booted) {
     mod.registerRoutes?.(router, { ...ctx, ...routeCtx });
   }

@@ -11,6 +11,7 @@
 import { EventService } from './event-service.js';
 import { ScheduleService } from './schedule-service.js';
 import { ReminderService } from './reminder-service.js';
+import { registerCalendarRoutes } from './routes.js';
 
 export default {
   id: 'calendar',
@@ -27,6 +28,10 @@ export default {
     const schedules = new ScheduleService({ store, broadcast });
     const reminders = new ReminderService({ store, scheduleService: schedules, broadcast });
     return { events, schedules, reminders };
+  },
+
+  registerRoutes(router, ctx) {
+    registerCalendarRoutes(router, ctx);
   },
 
   /** 提醒扫描持有 setInterval，必须在 listen 成功后启动、close 时停止。 */

@@ -102,11 +102,23 @@ async function readBody(req) {
   }
 }
 
+/**
+ * 把路由模式编译成正则。
+ *
+ * 支持两种占位：
+ *   `:name`  匹配单个路径段（`([^/]+)`），放进 params[name]
+ *   `*`      只允许出现在末尾，匹配剩余任意路径（含空串），放进 params.rest
+ *            —— 静态资源服务需要它来覆盖任意深度的文件
+ */
 function compile(pattern) {
   const names = [];
   const source = pattern
     .split('/')
     .map((segment) => {
+      if (segment === '*') {
+        names.push('rest');
+        return '(.*)';
+      }
       if (!segment.startsWith(':')) return segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       names.push(segment.slice(1));
       return '([^/]+)';
@@ -114,6 +126,7 @@ function compile(pattern) {
     .join('/');
   return { regex: new RegExp(`^${source}/?$`), names };
 }
+
 
 export function createRouter() {
   const routes = [];
