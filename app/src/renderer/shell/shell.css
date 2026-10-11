@@ -1321,3 +1321,299 @@ body.panel-collapsed .panel {
   color: var(--fg-3);
   opacity: 0.85;
 }
+
+/* ------------------------------------------------------------------ 追加：公式 / 图形 / 操作卡 */
+
+/* 富文本（kit/richtext.js 生成的 HTML）：段落、标题、列表、引用、代码 */
+.bubble-text .rt-p {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+}
+.bubble-text .rt-p:last-child {
+  margin-bottom: 0;
+}
+.rt-h {
+  margin: 8px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.rt-list {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+.rt-list li {
+  margin: 2px 0;
+}
+.rt-quote {
+  margin: 4px 0;
+  padding: 2px 0 2px 8px;
+  border-left: 2px solid var(--line);
+  color: var(--fg-2);
+}
+.rt-hr {
+  margin: 8px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+.rt-code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-base);
+  border: 1px solid var(--line);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.rt-pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  border: 1px solid var(--line);
+  overflow-x: auto;
+}
+.rt-pre code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre;
+}
+.rt-link {
+  color: var(--blue);
+}
+
+/*
+ * 公式（LaTeX 子集）。
+ * 用 HTML + CSS 拼版式，不引任何数学字体或外部库：本项目 CSP 是 default-src 'self'。
+ */
+.math {
+  font-family: 'Times New Roman', 'Songti SC', serif;
+  font-size: 1.04em;
+  line-height: 1;
+}
+.math-block {
+  /* 用 flex 居中而不是 text-align: 块级公式常常是「x = 一个分数」这种混排，
+     按基线对齐时分数会掉到下标位置，看上去像"x= 飘在上面"。flex 的 align-items
+     会把分数、根号、大运算符与两侧文字对齐到同一中线。 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.15em;
+  margin: 8px 0;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  overflow-x: auto;
+}
+
+/* 图形还在流式接收时的占位（半截 SVG 不注入，见 kit/richtext.js） */
+.diagram-pending {
+  color: var(--fg-3);
+  font-size: 12px;
+  padding: 14px 10px;
+}
+.m-var {
+  font-style: italic;
+}
+.m-fn {
+  font-style: normal;
+  margin-right: 1px;
+}
+.m-sym,
+.m-op {
+  font-style: normal;
+}
+.m-text {
+  font-style: normal;
+  font-family: inherit;
+}
+/* 分数：上下两行，中间一条横线 */
+.m-frac {
+  display: inline-flex;
+  flex-direction: column;
+  vertical-align: -0.5em;
+  text-align: center;
+  margin: 0 1px;
+}
+.m-num {
+  padding: 0 3px 1px;
+  border-bottom: 1px solid currentColor;
+}
+.m-den {
+  padding: 1px 3px 0;
+}
+/* 根号：左侧符号 + 上方横线 */
+.m-sqrt {
+  display: inline-flex;
+  align-items: stretch;
+}
+.m-radical {
+  transform: scaleY(1.1);
+}
+.m-radicand {
+  border-top: 1px solid currentColor;
+  padding: 1px 2px 0;
+}
+.m-root-index {
+  font-size: 0.62em;
+  vertical-align: 0.6em;
+  align-self: flex-start;
+}
+/* 大运算符：上下限排在正上下方 */
+.m-bigop {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  vertical-align: -0.45em;
+  margin: 0 1px;
+}
+.m-bigop .m-op {
+  font-size: 1.35em;
+  line-height: 0.9;
+}
+.m-lim {
+  font-size: 0.64em;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+.m-sup,
+.m-sub {
+  font-size: 0.72em;
+}
+/* 重音（向量箭头、上划线等）：符号压在内容上方 */
+.m-accent {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  vertical-align: -0.25em;
+}
+.m-accent-mark {
+  font-size: 0.7em;
+  line-height: 0.8;
+}
+.m-accent-body {
+  line-height: 1;
+}
+.m-bb {
+  font-family: 'STIX Two Math', 'Cambria Math', serif;
+}
+.m-rm,
+.m-it,
+.m-cal,
+.m-frak,
+.m-bf {
+  font-style: normal;
+}
+.m-bf {
+  font-weight: 700;
+}
+/* 不认识的命令：留个浅色标记，方便一眼看出"这里没渲染出来" */
+.m-unknown {
+  color: var(--orange);
+  font-style: normal;
+  font-size: 0.92em;
+}
+
+/* AI 画的内联图形（```svg 代码块） */
+.diagram {
+  margin: 8px 0;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  border: 1px solid var(--line);
+  text-align: center;
+  overflow-x: auto;
+  color: var(--fg-2);
+}
+.diagram svg {
+  max-width: 100%;
+  height: auto;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/*
+ * AI 操作卡：默认**折叠**，点标题展开；按作用对象配色（日程橙 / 待办紫 / 事件蓝）。
+ * 配色用 color-mix 从主题令牌派生，主题换了不会跑偏；不支持 color-mix 的浏览器
+ * 只会少一层底色（边框仍是实色），不影响可用性。
+ */
+.chat-card.op-card {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+.op-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.op-head:hover {
+  background: var(--bg-hover);
+}
+.op-chip {
+  flex: none;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  opacity: 0.95;
+}
+.op-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.op-caret {
+  flex: none;
+  color: var(--fg-3);
+  transition: transform 0.18s ease;
+}
+.op-card.open .op-caret {
+  transform: rotate(90deg);
+}
+.op-body {
+  display: none;
+  padding: 0 12px 10px;
+}
+.op-card.open .op-body {
+  display: block;
+}
+.op-schedule {
+  border-color: color-mix(in srgb, var(--orange) 55%, var(--line));
+  background: color-mix(in srgb, var(--orange) 10%, var(--bg-surface));
+}
+.op-schedule .op-chip {
+  color: var(--orange);
+}
+.op-todo {
+  border-color: color-mix(in srgb, var(--purple) 55%, var(--line));
+  background: color-mix(in srgb, var(--purple) 10%, var(--bg-surface));
+}
+.op-todo .op-chip {
+  color: var(--purple);
+}
+.op-event {
+  border-color: color-mix(in srgb, var(--blue) 55%, var(--line));
+  background: color-mix(in srgb, var(--blue) 10%, var(--bg-surface));
+}
+.op-event .op-chip {
+  color: var(--blue);
+}
+.op-write {
+  border-color: color-mix(in srgb, var(--green) 50%, var(--line));
+  background: color-mix(in srgb, var(--green) 8%, var(--bg-surface));
+}
+.op-write .op-chip {
+  color: var(--green);
+}

@@ -35,7 +35,7 @@ npm run dev:server            # 带 --watch 自动重启
 npm install                   # electron 为 devDependency
 npm run dev:app
 
-# 3) 测试（零依赖，117 个用例；含思源学堂与 AI 上游的本地 mock、农历权威向量、分类注册表与日历/待办端到端测试）
+# 3) 测试（零依赖，133 个用例；含思源学堂与 AI 上游的本地 mock、农历权威向量、分类注册表与日历/待办端到端测试）
 npm test
 ```
 
@@ -45,6 +45,9 @@ npm test
 
 AI 模块（`src/modules/ai/`）兼容任何 OpenAI 协议的端点，默认指向 DeepSeek。**不配密钥时一切照旧**：
 `/ai/nl2command` 返回 501，传 `fallback: "rules"` 仍然走本地规则，`/ai/capabilities` 的 `available` 为 `false`。
+
+对话支持：Markdown + **LaTeX 公式排版**（`$…$` / `$$…$$`）、**```svg 绘图**（设置页可开关，
+说「画个图」也能临时触发）、以及**默认折叠的操作卡**（日程橙 / 待办紫 / 事件蓝）。
 
 ```bash
 export PC_AI_API_KEY=sk-…      # 或启动后在「设置 → AI 接入」里填（落 data/ai-config.json，0600）
@@ -147,7 +150,7 @@ node_modules 里的 npm 包（导出二进制路径字符串），拿不到 `app
 | 区域 | 内容 |
 | --- | --- |
 | 左栏（约 10% 宽） | 日历 / 待办 / 思源学堂 / 学情 / 笔记系统 / 随手拍 / 消息，底部独立「设置」 |
-| 中栏 | 对话：配了 AI 密钥就走模型（**边生成边渲染**，回复里的安排渲染成**指令草稿确认卡** → 点「确认执行」才落库，可取消）；没配则走本地规则解析 |
+| 中栏 | 对话：配了 AI 密钥就走模型（**边生成边渲染**）：回复按 Markdown + LaTeX 渲染（**公式排版**、可画 **```svg 图形**），安排渲染成**指令草稿确认卡** → 点「确认执行」才落库；查询/写入结果渲染成**默认折叠的操作卡**（日程橙 / 待办紫 / 事件蓝 / 写入绿，点开看明细）；没配密钥则走本地规则解析 |
 | 右栏 | 左栏所选功能的视图，右上角 `⟩` 可收起（收起后中间变宽，周视图置灰）；设置页内容超高时可滚动 |
 
 功能视图（本模块负责的部分）：
@@ -357,6 +360,9 @@ app/
 | **前端接线** | `src/renderer/shell/app.js`（中栏）+ `shell/settings.js`（配置区） | ✅ 配了密钥就走 `/ai/chat`：**边生成边渲染**（WS `ai_delta`，实测 35 块增量）、回复里的草稿渲染成确认卡、失败卡片给「改用本地规则」按钮；设置页能填密钥/模型/接口地址，并管理会话 |
 | 降级与文案 | `send()` 按 `state.ai.available` 分流 | ✅ 没配密钥时中栏走本地规则，徽标/欢迎语/底部提示都说明"当前是规则解析"并指路设置页 |
 | **只读查询自动执行** | `modules/ai/chat-service.js` 的 `#runReadOnlyQueries` / `#withQueryResults` | ✅ 「我明天有什么日程」不再变成一张确认卡：查询（`dryRun`，只读）自动跑 → 结果回灌 → 模型用自然语言答，界面同时列出数据行；**写操作仍然必须点确认** |
+| **公式与富文本** | `kit/richtext.js`（零依赖，纯字符串→HTML） | ✅ Markdown 子集 + LaTeX 子集（分数/根号/上下标/求和/希腊字母/函数/向量/文本）；识别不了的命令**原样显示**不静默吞；流式半截公式不崩。刻意**不引** MathJax/KaTeX —— CSP 是 `default-src 'self'` 且零依赖 |
+| **AI 绘图** | `prompt.js` 的 `DRAW_NOTE` + `chat-service.js` 的 `DRAW_KEYWORDS` + `richtext.js` 的 sanitize | ✅ 按 dschat2 的 ```svg 约定；比 dschat2 多两条本地约束：**禁用 `style` 属性**（CSP 会拦）与深色背景配色。设置页可开关；关掉后说「画个图」仍临时触发 |
+| **操作卡折叠** | `app.js` 的 `opCard()` | ✅ 查询/写入结果默认折叠成一行（「查看日程 · 2026-10-12 · 点开看明细」），点击展开；按 target 配色：日程橙 / 待办紫 / 事件蓝 / 写入绿 |
 | provider 注册位 | `src/server/index.js` 的 `services = { store, commands, aiBridge, hub, broadcast }` | ✅ 模块在自己的 `createServices({ services })` 里就能注册 provider |
 
 ### 还差的（按重要性）

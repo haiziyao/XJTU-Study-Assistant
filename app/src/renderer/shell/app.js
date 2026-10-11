@@ -195,10 +195,25 @@
     return node;
   }
 
+  /**
+   * 气泡。
+   * - 用户消息按纯文本渲染（自己敲的字不该被 Markdown 规则改样）；
+   * - 机器人消息走富文本（Markdown 子集 + LaTeX 子集 + ```svg 图形）。
+   */
   function bubble(role, text) {
     const node = mk('div', `bubble ${role}`);
-    node.appendChild(mk('div', 'bubble-text', text));
+    const body = mk('div', 'bubble-text');
+    node.appendChild(body);
+    if (role === 'user') body.textContent = String(text ?? '');
+    else if (text) window.PCRichText?.render(body, text);
     return push(node);
+  }
+
+  /** 流式更新：每次增量都重渲染（公式/图形会随内容长出来），半截输入由 richtext 兜住不崩。 */
+  function setBubbleText(node, text) {
+    if (!node) return;
+    if (window.PCRichText) window.PCRichText.render(node, text);
+    else node.textContent = String(text ?? '');
   }
 
   function systemNote(text, kind = '') {
@@ -338,59 +353,104 @@
     });
   }
 
-  function resultCard(result) {
+  /**
+   * AI 操作卡：**默认折叠**，点标题栏展开；按作用对象配色。
+   *
+   * 为什么折叠：一轮对话里"查了什么、改了什么"会堆很多张卡，全展开会把真正的对话挤没。
+   * 折叠后一行说清「干了什么 · 影响了几条」，想看细节再点开。
+   * 配色（日程橙 / 待办紫 / 事件蓝 / 写入绿）让人不点开也知道这张卡在说哪类东西。
+   */
+  function opCard({ kind, chip, title, details, defaultOpen = false }) {
     const card = mk('div', 'bubble bot has-card');
-    const box = mk('div', 'chat-card ok');
-    box.appendChild(mk('div', 'cc-title', result.explain ?? `${actionText(result)}完成`));
-    if (result.dryRun) box.appendChild(mk('div', 'cc-explain', '（试运行，未写入数据）'));
-    if (Array.isArray(result.affected) && result.affected.length) {
-      const list = mk('div', 'cc-list');
-      for (const item of result.affected.slice(0, 10)) {
-        list.appendChild(mk('div', 'cc-list-row', `${item.date ?? ''} ${item.title ?? item.id ?? ''}`.trim()));
-      }
-      if (result.affected.length > 10) list.appendChild(mk('div', 'cc-list-row', `…还有 ${result.affected.length - 10} 条`));
-      box.appendChild(list);
-    }
-    if (result.conflicts?.length) {
-      box.appendChild(mk('div', 'cc-warning', `提示：与 ${result.conflicts.length} 条日程时间重叠`));
-    }
-    if (result.ambiguous) box.appendChild(mk('div', 'cc-warning', '匹配到多条记录，已全部处理，请确认是否符合预期'));
+    const box = mk('div', `chat-card op-card op-${kind}`);
+
+    const head = mk('button', 'op-head');
+    head.type = 'button';
+    head.setAttribute('aria-expanded', defaultOpen ? 'true' : 'false');
+    head.append(
+      mk('span', 'op-chip', chip),
+      mk('span', 'op-title', title),
+      mk('span', 'op-caret', '›'),
+    );
+
+    const body = mk('div', 'op-body');
+    for (const node of [].concat(details ?? [])) if (node) body.appendChild(node);
+
+    const toggle = (open) => {
+      const next = open ?? !box.classList.contains('open');
+      box.classList.toggle('open', next);
+      head.setAttribute('aria-expanded', next ? 'true' : 'false');
+    };
+    head.addEventListener('click', () => toggle());
+    if (defaultOpen) box.classList.add('open');
+
+    box.append(head, body);
     card.appendChild(box);
     push(card);
+    return { card, box, body, toggle };
   }
 
-  function queryCard(result) {
-    const card = mk('div', 'bubble bot has-card');
-    const box = mk('div', 'chat-card');
-    box.appendChild(mk('div', 'cc-title', result.explain ?? `共 ${result.count ?? 0} 条`));
-    const items = result.items ?? [];
-    if (!items.length) {
-      box.appendChild(mk('div', 'cc-explain', '没有符合条件的记录。'));
-    } else {
-      const list = mk('div', 'cc-list');
-      for (const item of items.slice(0, 12)) {
-        const when = item.date ?? item.startDate ?? '';
-        const time = item.allDay || !item.startTime ? '' : ` ${item.startTime}${item.endTime ? `–${item.endTime}` : ''}`;
-        const row = mk('div', 'cc-list-row');
-        row.append(mk('span', 'cc-list-time', `${when}${time}`), mk('span', null, item.title));
-        list.appendChild(row);
-      }
-      if (items.length > 12) list.appendChild(mk('div', 'cc-list-row', `…还有 ${items.length - 12} 条`));
-      box.appendChild(list);
+  /** 影响对象的列表（写入结果 / 查询结果共用一种行样式）。 */
+  function itemList(items, { limit = 12 } = {}) {
+    const list = mk('div', 'cc-list');
+    for (const item of items.slice(0, limit)) {
+      const when = item.date ?? item.startDate ?? item.deadline ?? '';
+      const time = !item.startTime || item.allDay ? '' : ` ${item.startTime}${item.endTime ? `–${item.endTime}` : ''}`;
+      const row = mk('div', 'cc-list-row');
+      row.append(mk('span', 'cc-list-time', `${when}${time}`.trim()), mk('span', null, item.title ?? item.id ?? ''));
+      list.appendChild(row);
     }
-    const actions = mk('div', 'cc-actions');
-    const jump = mk('button', 'ghost-btn', '在右侧查看');
-    jump.type = 'button';
-    jump.addEventListener('click', () => {
-      state.view = 'calendar';
-      state.calendar.mode = 'day';
-      state.calendar.anchor = items[0]?.date ?? items[0]?.startDate ?? U.todayKey();
-      selectView('calendar');
+    if (items.length > limit) list.appendChild(mk('div', 'cc-list-row', `…还有 ${items.length - limit} 条`));
+    return list;
+  }
+
+  /** 写操作结果（新建 / 修改 / 删除 / 完成 / 顺延）。 */
+  function resultCard(result) {
+    const affected = Array.isArray(result.affected) ? result.affected : [];
+    const details = [];
+    if (result.dryRun) details.push(mk('div', 'cc-explain', '（试运行，未写入数据）'));
+    if (result.explain) details.push(mk('div', 'cc-explain', result.explain));
+    if (affected.length) details.push(itemList(affected, { limit: 10 }));
+    if (result.conflicts?.length) details.push(mk('div', 'cc-warning', `提示：与 ${result.conflicts.length} 条日程时间重叠`));
+    if (result.ambiguous) details.push(mk('div', 'cc-warning', '匹配到多条记录，已全部处理，请确认是否符合预期'));
+
+    opCard({
+      kind: 'write',
+      chip: actionText(result),
+      title: affected.length ? `${affected.length} 条 · 点开看明细` : '已完成',
+      details,
     });
-    if (items.length) actions.appendChild(jump);
-    box.appendChild(actions);
-    card.appendChild(box);
-    push(card);
+  }
+
+  /** 查询结果（只读）：默认折叠，配色按 target（日程橙 / 待办紫 / 事件蓝）。 */
+  function queryCard(result) {
+    const items = result.items ?? [];
+    const kind = ['schedule', 'todo', 'event'].includes(result.target) ? result.target : 'write';
+    const summary = result.explain ?? `共 ${result.count ?? items.length} 条`;
+
+    const details = [];
+    if (!items.length) details.push(mk('div', 'cc-explain', '没有符合条件的记录。'));
+    else {
+      details.push(itemList(items));
+      const actions = mk('div', 'cc-actions');
+      const jump = mk('button', 'ghost-btn', '在右侧查看');
+      jump.type = 'button';
+      jump.addEventListener('click', () => {
+        state.view = 'calendar';
+        state.calendar.mode = 'day';
+        state.calendar.anchor = items[0]?.date ?? items[0]?.startDate ?? items[0]?.deadline ?? U.todayKey();
+        selectView('calendar');
+      });
+      actions.appendChild(jump);
+      details.push(actions);
+    }
+
+    opCard({
+      kind,
+      chip: `查看${TARGET_LABEL[result.target] ?? result.target ?? '记录'}`,
+      title: `${summary}${items.length ? ' · 点开看明细' : ''}`,
+      details,
+    });
   }
 
   /**
@@ -470,7 +530,7 @@
   async function runAiChat(content) {
     const card = bubble('bot', '');
     const textEl = card.querySelector('.bubble-text');
-    textEl.textContent = '正在思考…';
+    textEl.textContent = '正在思考…';   // 尚未有内容时先给占位，第一块增量到达就被覆盖
     const streaming = { messageId: null, text: '', node: textEl, done: false };
     state.streaming = streaming;
     try {
@@ -486,7 +546,7 @@
       state.conversationId = result.conversation?.id ?? state.conversationId;
       streaming.done = true;
       textEl.classList.remove('streaming');
-      textEl.textContent = result.assistant?.content || '（模型没有返回内容）';
+      setBubbleText(textEl, result.assistant?.content || '（模型没有返回内容）');
       // 只读查询由后端自动执行了：把数据原样列出来（模型的话可能概括得太粗，用户要看的是具体条目）
       const queried = result.queried ?? [];
       for (const entry of queried) {
@@ -504,7 +564,7 @@
       textEl.classList.remove('streaming');
       // 失败时后端已经把部分内容落库了：气泡里保留收到的那部分，不假装什么都没发生
       if (!streaming.text) card.remove();
-      else textEl.textContent = streaming.text;
+      else setBubbleText(textEl, streaming.text);
       const details = error?.payload?.error?.details ?? {};
       if (details.conversationId) state.conversationId = details.conversationId;
       errorCard(error, { retry: content });
@@ -646,7 +706,7 @@
     streaming.messageId = streaming.messageId ?? payload.messageId ?? null;
     streaming.text += payload.delta ?? '';
     streaming.node.classList.add('streaming');
-    streaming.node.textContent = streaming.text;
+    setBubbleText(streaming.node, streaming.text);
     dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
   }
 

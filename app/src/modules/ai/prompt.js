@@ -70,6 +70,41 @@ function memoryBlock(context = {}) {
   return `\n【关于这个用户的长期记忆（来自历史对话，供参考，不要主动逐条复述）】\n${lines}\n`;
 }
 
+/**
+ * 公式输出规范。
+ *
+ * 客户端的公式渲染器是自己写的 LaTeX 子集（CSP 不许引 MathJax/KaTeX），支持范围有限，
+ * 所以这里要把"可用的写法"和"渲染不出来的写法"都讲清楚 —— 否则模型写得很漂亮，
+ * 界面上却是一堆原始反斜杠。
+ */
+const MATH_NOTE = `【数学公式：用 LaTeX，别用 Unicode 糊】
+- 行内公式用 $…$，独立成行的用 $$…$$；不要用 \\( \\) 之外的其它分隔符，也不要贴图片。
+- 支持的写法：上下标 a^2 / x_1、\\frac{}{}、\\sqrt{}、\\sqrt[n]{}、\\sum_{i=1}^{n}、\\int_a^b、
+  希腊字母 \\alpha…\\Omega、关系符 \\le \\ge \\ne \\approx \\to \\in、函数名 \\sin \\cos \\ln \\lim、
+  向量 \\vec{v}、文本 \\text{中文}。
+- **不支持**：矩阵/分段函数（\\begin{…}）、\\displaystyle、自定义宏、化学式 \\ce{}。
+  需要这些时改用文字描述，或者拆成几条简单公式；写了也不会渲染，只会显示成原文。
+- 公式里不要塞中文变量名；单位和中文说明写在公式外面。`;
+
+/**
+ * 绘图能力说明（沿用 dschat2 的 ```svg 约定）。
+ *
+ * 与 dschat2 的两处差异是环境逼出来的：
+ *   - 本项目 CSP 是 `style-src 'self'`，SVG 里的 `style="fill:red"` 会被浏览器拦掉，
+ *     所以必须用表现属性（fill= / stroke= / font-size=）；
+ *   - 界面是深色底，默认黑字看不见，所以给一套深色可用的配色。
+ */
+const DRAW_NOTE = `【绘图能力】
+用户要几何图形、函数图像、示意图、流程图或图表时，直接输出一个 \`\`\`svg 代码块，内容是完整的 SVG。
+要求：
+- 必须带 viewBox（例如 viewBox="0 0 400 300"）；只用标准元素：line / circle / rect / polygon / polyline / path / text / g / defs。
+- **不要用 style 属性**（本程序的安全策略会拦掉内联样式），颜色一律写成表现属性：
+  fill="…" stroke="…" stroke-width="1.5" font-size="12" text-anchor="middle"。
+- 界面是深色背景，配一组能看清的颜色：坐标轴/次要线 #8f9bb3、文字 #e6e6ef、
+  主色 #6c8cff、强调 #ffb86c、另一组 #5cdb8b / #c792ea。别用黑色或纯白大面积填充。
+- 标注要清楚：函数图标出坐标轴与刻度，几何图标出顶点字母与已知量。
+- 不要 script / foreignObject / animate，也不要外部图片链接。`;
+
 /** 当前时间块：绝对日期写死，避免模型自己推算。 */
 function timeBlock(context = {}) {
   const now = context.now ? new Date(context.now) : new Date();
@@ -95,6 +130,10 @@ export function buildChatSystemPrompt(context = {}) {
     DOMAIN_RULES,
     '',
     DRAFT_PROTOCOL,
+    '',
+    MATH_NOTE,
+    // 绘图说明只在开用作图时注入（dschat2 也是按开关注入，省 token）
+    ...(context.draw ? ['', DRAW_NOTE] : []),
     '',
     '【说话方式】中文；结论先行；不确定就问，不要编造用户的课程名、老师、成绩这类事实。',
   ].join('\n');

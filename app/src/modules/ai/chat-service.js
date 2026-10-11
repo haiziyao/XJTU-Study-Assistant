@@ -27,6 +27,12 @@ import { buildChatSystemPrompt, buildCommandSystemPrompt } from './prompt.js';
 /** 给上下文注入留的默认预算（与接口文档 §10.7 一致）。 */
 const DEFAULT_MEMORY_BUDGET = Object.freeze({ maxItems: 8, maxChars: 600 });
 
+/**
+ * 「指令词触发绘图」：即使设置里关掉了作图，用户明说要画也照给 ——
+ * 关掉的意思是"别主动画"，不是"用户要画也不给"。
+ */
+const DRAW_KEYWORDS = /画|绘制|作图|图形|图表|函数图|示意图|流程图|坐标|svg|diagram/i;
+
 /** 一轮对话最多自动执行几个只读查询（防止模型把"查一下"拆成八条）。 */
 const MAX_AUTO_QUERIES = 3;
 /** 回灌给模型的单次查询条数上限（只读；多了只会让提示词变贵、让它跑偏）。 */
@@ -258,8 +264,10 @@ export class AiChatService {
     const userMessage = await this.#appendMessage({ conversationId: conversation.id, role: 'user', content: trimmed });
 
     const enriched = await this.buildContext(context);
+    // 作图：设置里开着就给（默认开），关着但用户用了「画…」这类指令词也临时给
+    const draw = this.config.get().drawMode !== false || DRAW_KEYWORDS.test(trimmed);
     const messages = [
-      { role: 'system', content: buildChatSystemPrompt({ ...enriched, ...context }) },
+      { role: 'system', content: buildChatSystemPrompt({ ...enriched, ...context, draw }) },
       ...this.#history(conversation.id),
     ];
 

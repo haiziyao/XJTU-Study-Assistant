@@ -25,6 +25,11 @@ export const AI_DEFAULTS = Object.freeze({
   temperature: 0.3,
   /** 送进模型的历史轮数（一轮 = 一问一答）；0 表示不带历史。 */
   historyTurns: 12,
+  /**
+   * 是否允许模型输出 ```svg 图形（沿用 dschat2 的 draw_mode 语义，默认开）。
+   * 关掉只是"不再主动告诉模型可以画"，用户明说「画个图」时仍会临时开启（见 chat-service）。
+   */
+  drawMode: true,
 });
 
 /** 允许被持久化的字段白名单：接口不能往里塞任意键。 */
@@ -36,9 +41,20 @@ export const AI_CONFIG_FIELDS = Object.freeze([
   'timeoutMs',
   'temperature',
   'historyTurns',
+  'drawMode',
 ]);
 
 const str = (value) => (value === undefined || value === null ? undefined : String(value).trim());
+
+/** 宽松布尔：表单/环境变量传来的 "true"/"1"/"on" 都算真。 */
+function bool(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  const text = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(text)) return true;
+  if (['0', 'false', 'no', 'off'].includes(text)) return false;
+  return fallback;
+}
 
 function num(value, { fallback, min, max }) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -68,6 +84,8 @@ export function normalizeAiConfig(input = {}, base = AI_DEFAULTS) {
   out.timeoutMs = num(raw.timeoutMs, { fallback: base.timeoutMs, min: 1_000, max: 600_000 });
   out.temperature = num(raw.temperature, { fallback: base.temperature, min: 0, max: 2 });
   out.historyTurns = num(raw.historyTurns, { fallback: base.historyTurns, min: 0, max: 100 });
+  // 布尔字段：pickAiConfig 已把它转成字符串，这里再解释一次
+  out.drawMode = bool(raw.drawMode === undefined ? base.drawMode : raw.drawMode, base.drawMode);
   return out;
 }
 
@@ -81,6 +99,7 @@ export function maskAiConfig(config = {}) {
     temperature: config.temperature,
     timeoutMs: config.timeoutMs,
     historyTurns: config.historyTurns,
+    drawMode: config.drawMode !== false,
     configured: Boolean(key),
     hasKey: Boolean(key),
     keyHint: key ? `…${key.slice(-4)}` : null,
@@ -104,6 +123,7 @@ export function aiConfigFromEnv(env = process.env) {
     timeoutMs: env.PC_AI_TIMEOUT_MS,
     temperature: env.PC_AI_TEMPERATURE,
     historyTurns: env.PC_AI_HISTORY_TURNS,
+    drawMode: env.PC_AI_DRAW_MODE,
   });
 }
 

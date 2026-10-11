@@ -634,3 +634,47 @@ test('AI：总结那一步失败也不丢数据（查询结果照样返回给前
     await mock.close();
   }
 });
+
+test('AI：公式规范常驻提示词；绘图说明按开关注入，指令词能临时触发', async () => {
+  const mock = await startMockAi({ apiKey: KEY, replies: ['好', '好', '好'] });
+
+  // 1) 默认（drawMode 默认开）：公式 + 绘图说明都在
+  const on = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+  try {
+    const status = await on.call('GET', '/ai/status');
+    assert.equal(status.body.config.drawMode, true, '默认应开用作图');
+
+    await on.call('POST', '/ai/chat', { text: '这个公式怎么推' });
+    const system = mock.state.bodies[0].messages[0].content;
+    assert.match(system, /【数学公式：用 LaTeX/, '公式规范应常驻');
+    assert.match(system, /不支持.*矩阵|矩阵\/分段函数/s);
+    assert.match(system, /【绘图能力】/);
+    assert.match(system, /不要用 style 属性/, 'CSP 会拦内联样式，必须写进提示词');
+    assert.match(system, /深色背景/);
+  } finally {
+    await on.app.close();
+  }
+
+  // 2) 关掉作图 + 普通提问：不应注入绘图说明（省 token）
+  const off = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl, drawMode: false } });
+  try {
+    assert.equal((await off.call('GET', '/ai/config')).body.config.drawMode, false);
+    await off.call('POST', '/ai/chat', { text: '这个公式怎么推' });
+    const plain = mock.state.bodies[1].messages[0].content;
+    assert.match(plain, /【数学公式：用 LaTeX/);
+    assert.equal(plain.includes('【绘图能力】'), false, '关掉后不该注入绘图说明');
+
+    // 3) 但用户用了指令词「画个图」→ 临时触发
+    await off.call('POST', '/ai/chat', { text: '帮我画个函数图像' });
+    const byKeyword = mock.state.bodies[2].messages[0].content;
+    assert.match(byKeyword, /【绘图能力】/, '用户明说要画应临时开启');
+
+    // 4) 配置能保存与回读
+    const saved = await off.call('POST', '/ai/config', { drawMode: true });
+    assert.equal(saved.body.config.drawMode, true);
+    assert.equal((await off.call('GET', '/ai/config')).body.config.drawMode, true);
+  } finally {
+    await off.app.close();
+    await mock.close();
+  }
+});

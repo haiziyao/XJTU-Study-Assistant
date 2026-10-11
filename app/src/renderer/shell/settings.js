@@ -81,6 +81,7 @@ function aiCard(ai) {
     model: kv('模型', '读取中…'),
     baseUrl: kv('接口地址', '读取中…'),
     chat: kv('对话', '读取中…'),
+    draw: kv('绘图', '读取中…'),
   };
   for (const row of Object.values(stateRows)) state.appendChild(row.node);
   box.appendChild(state);
@@ -89,10 +90,17 @@ function aiCard(ai) {
   const keyInput = input({ type: 'password', placeholder: 'API Key（例如 sk-…）', autocomplete: 'off' });
   const modelInput = input({ type: 'text', placeholder: '模型，留空不改（默认 deepseek-chat）' });
   const baseInput = input({ type: 'text', placeholder: '接口地址，留空不改（OpenAI 兼容端点）' });
+  const drawBox = mk('input');
+  drawBox.type = 'checkbox';
+  drawBox.id = 'ai-draw-mode';
+  drawBox.checked = true;
+  const drawField = field('绘图', drawBox);
+  drawField.appendChild(mk('span', 'ai-hint', '允许用 ```svg 画函数图/示意图（关掉后说「画个图」也能临时触发）'));
   form.append(
     field('密钥', keyInput),
     field('模型', modelInput),
     field('接口地址', baseInput),
+    drawField,
   );
 
   const actions = mk('div', 'ai-actions');
@@ -115,14 +123,10 @@ function aiCard(ai) {
     save.disabled = true;
     save.textContent = '保存中…';
     try {
-      const body = {};
+      const body = { drawMode: drawBox.checked };
       if (keyInput.value.trim()) body.apiKey = keyInput.value.trim();
       if (modelInput.value.trim()) body.model = modelInput.value.trim();
       if (baseInput.value.trim()) body.baseUrl = baseInput.value.trim();
-      if (!Object.keys(body).length) {
-        PC.toast('没有需要保存的改动');
-        return;
-      }
       await PC.api('/ai/config', { method: 'POST', body });
       keyInput.value = '';
       PC.toast('已保存 AI 配置');
@@ -177,6 +181,8 @@ function aiCard(ai) {
       stateRows.model.set(config.model ?? '—');
       stateRows.baseUrl.set(config.baseUrl ?? '—');
       stateRows.chat.set(`${status.conversations ?? 0} 个会话 · ${status.messages ?? 0} 条消息`);
+      stateRows.draw.set(config.drawMode !== false ? '已开启（```svg）' : '已关闭（说「画个图」仍可触发）');
+      drawBox.checked = config.drawMode !== false;
       keyInput.placeholder = config.hasKey ? `API Key（已保存 ${config.keyHint}，留空不改）` : 'API Key（例如 sk-…）';
       modelInput.placeholder = `模型，留空不改（当前 ${config.model ?? '—'}）`;
       baseInput.placeholder = `接口地址，留空不改（当前 ${config.baseUrl ?? '—'}）`;
