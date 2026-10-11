@@ -114,7 +114,12 @@ export function registerAcademicRoutes(router, { academic, apiPrefix }) {
       if (result?.status === 'ready' && body?.sync !== false) {
         try {
           const synced = await academic.sync();
-          return { ...result, synced: { counts: synced.counts, gpa: synced.stats.gpa } };
+          // ★ 重新读一次状态：握手是在 sync 里才做的，若直接用登录那一刻的 status()，
+          //   返回的 handshake 会是空的（appId=null），看日志的人会以为握手没成功。
+          return {
+            ...academic.status(),
+            synced: { counts: synced.counts, gpa: synced.stats.gpa, handshake: synced.handshake },
+          };
         } catch (error) {
           // 同步失败不该让"登录成功"变成失败：把原因带回去让界面提示
           const translated = translateAcademicError(error);
