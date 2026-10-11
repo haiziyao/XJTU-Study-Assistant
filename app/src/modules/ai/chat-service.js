@@ -709,6 +709,9 @@ export class AiChatService {
       count: result.count ?? items.length,
       truncated: (result.items?.length ?? 0) > items.length,
       explain: result.explain ?? null,
+      // 有些模块（如学业）会在 items 之外给一份聚合口径（学分绩、总学分…）。
+      // 「我的学分绩多少」这类问题靠 items 是答不出来的，所以原样带上。
+      ...(result.summary && typeof result.summary === 'object' ? { summary: result.summary } : {}),
       items,
     };
   }

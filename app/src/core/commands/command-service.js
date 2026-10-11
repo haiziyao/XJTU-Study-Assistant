@@ -64,11 +64,16 @@ export class CommandService {
   // ---------------------------------------------------------------- 解析
 
   /**
-   * 依次尝试各模块注册的解析器，返回第一个解析成功的指令对象。
+   * 依次尝试各模块注册的解析器，返回**置信度最高**的指令对象（同分时先注册的胜）。
    * **不抛异常**：全部失败时返回 `{ ok: false, warnings }`，供 AI 降级路径使用。
+   *
+   * 为什么不是「取第一个成功的」：日历模块的解析器是**兜底型**的 —— 任何一句中文它都能
+   * 给出一个 0.82~0.9 的草稿。若按注册顺序取第一个，后注册的模块（比如学业）就永远
+   * 拿不到输入，哪怕它给出的是 0.9 的精确匹配。按置信度取最高的，才能让"更确定的那个"胜出。
    */
   tryParse(text, options = {}) {
     let fallback;
+    let best;
     for (const [id, parser] of this.parsers) {
       let draft;
       try {
@@ -76,8 +81,16 @@ export class CommandService {
       } catch (error) {
         draft = { ok: false, raw: text, warnings: [error.message] };
       }
-      if (draft?.ok) return { parser: id, ...draft };
-      fallback ??= draft;
+      if (draft?.ok) {
+        const confidence = Number(draft.confidence) || 0;
+        if (!best || confidence > best.confidence) best = { parser: id, confidence, draft };
+      } else {
+        fallback ??= draft;
+      }
+    }
+    if (best) {
+      const { confidence, ...rest } = best.draft;
+      return { parser: best.parser, confidence, ...rest };
     }
     return (
       fallback ?? {
