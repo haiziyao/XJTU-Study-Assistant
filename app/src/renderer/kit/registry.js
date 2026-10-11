@@ -18,6 +18,12 @@
  * 同名 id **后注册者覆盖先注册者** —— 这样「规划中的占位页」与「真实实现」可以共存：
  * shell/planned.js 先登记占位，真正的 views/<id>.js 后登记即自动接管。
  *
+ * 设置页区块（registerSettingsSection）
+ * ----------
+ * 模块可以往「设置」视图里加自己的一块 UI，不需要改外壳的设置页代码：
+ *   window.PCModules.registerSettingsSection({ id, title, order, render(mount) });
+ * 外壳（shell/settings.js）只负责按 order 依次调用 render(mount)，不关心内容。
+ *
  * 跨模块能力
  * ----------
  * 视图之间不要直接互相引用，改用 service()/getService()：
@@ -30,6 +36,8 @@ window.PCModules = (function () {
   const views = new Map();
   /** @type {Map<string, unknown>} */
   const services = new Map();
+  /** @type {Map<string, object>} 设置页区块，按 order 升序渲染 */
+  const sections = new Map();
 
   return {
     /** 登记一个视图。 */
@@ -60,6 +68,30 @@ window.PCModules = (function () {
 
     has(id) {
       return views.has(id);
+    },
+
+    /**
+     * 登记一个设置页区块（模块自带 UI，外壳只负责按顺序摆位置）。
+     * @param {object} descriptor
+     * @param {string} descriptor.id     唯一 id（如 `calendar.categories`）
+     * @param {string} descriptor.title  区块标题
+     * @param {number} [descriptor.order] 排序，小者在前（默认 100）
+     * @param {(mount: HTMLElement) => void} descriptor.render 渲染函数，mount 是已清空的卡片容器
+     */
+    registerSettingsSection(descriptor) {
+      if (!descriptor || typeof descriptor.id !== 'string' || !descriptor.id) {
+        throw new Error('PCModules.registerSettingsSection: id 必填');
+      }
+      if (typeof descriptor.render !== 'function') {
+        throw new Error(`PCModules.registerSettingsSection: ${descriptor.id} 缺少 render 函数`);
+      }
+      sections.set(descriptor.id, { order: 100, ...descriptor });
+      return descriptor.id;
+    },
+
+    /** 按 order 升序返回全部设置页区块（同 order 按 id 字典序，保证顺序稳定）。 */
+    settingsSections() {
+      return [...sections.values()].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
     },
 
     /** 提供一项跨模块能力。 */

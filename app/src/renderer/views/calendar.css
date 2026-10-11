@@ -1032,3 +1032,193 @@
   border-left-color: var(--fg-3);
   cursor: default;
 }
+
+/* ======================================================== 分类（可编辑注册表） */
+/* 颜色走 CSSOM 的 --cat（.cat-* 类保留作兜底），这里只写分类管理与下拉的版式。 */
+
+/* 设置页：分类管理 */
+
+.cat-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.cat-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  border-radius: var(--radius-sm);
+}
+
+.cat-row:hover {
+  background: var(--bg-hover);
+}
+
+.cat-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--fg-3);
+}
+
+.cat-name {
+  font-size: 12px;
+}
+
+.cat-use {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.cat-color {
+  flex: none;
+  width: 26px;
+  height: 22px;
+  padding: 0 2px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-base);
+  cursor: pointer;
+}
+
+.cat-create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+
+.cat-input {
+  flex: 1 1 160px;
+  min-width: 120px;
+}
+
+.cat-swatches {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.cat-swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.cat-swatch.active {
+  border-color: var(--fg);
+}
+
+/* 编辑器：带色点的分类下拉 */
+
+.category-picker {
+  position: relative;
+  min-width: 0;
+}
+
+.cp-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 28px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--fg);
+  font-size: 13px;
+  text-align: left;
+}
+
+.cp-trigger:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.cp-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--fg-3);
+}
+
+.cp-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cp-caret {
+  flex: none;
+  color: var(--fg-3);
+  font-size: 10px;
+}
+
+.cp-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 5;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cp-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font-size: 12px;
+  text-align: left;
+}
+
+.cp-option:hover {
+  background: var(--bg-hover);
+}
+
+.cp-option.active {
+  background: var(--bg-surface);
+}
+
+.cp-check {
+  margin-left: auto;
+  color: var(--green);
+  font-size: 11px;
+}
+
+/* 行内改名输入（替代 Electron 渲染进程里不可用的原生 prompt 弹窗） */
+
+.cat-rename-input {
+  flex: 0 1 140px;
+  min-width: 90px;
+  padding: 3px 6px;
+  font-size: 12px;
+}

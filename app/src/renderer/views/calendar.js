@@ -56,6 +56,85 @@ async function removeRecord(target, id, title) {
   }
 }
 
+/* ---------------------------------------------------------------- 分类注册表 */
+/* 分类不再是硬编码枚举：/categories 返回 { id, kind, key?, value, label, color, order, builtin, locked, inUse }。
+   - `value` 是写进日程/事件的那个值（内置项是裸 key，如 class/study；自建项是自己的 id）；
+   - 颜色用 CSSOM 写 --cat（`.cat-*` 类保留作兜底，CSP 禁止内联 style 属性，setProperty 不受限）。 */
+
+const CATEGORY_GROUPS = { schedule: [], event: [] };
+/** 最近一次拉取时间：refresh 很频繁，1 秒内复用缓存，避免每次重画都打一次接口。 */
+let categoryFetchedAt = 0;
+let categoryPending = null;
+/** 数据版本：拿到新数据后自增，用来决定「要不要再刷一次界面」。 */
+let categoryVersion = 0;
+
+function categoryGroups() {
+  return PC.state?.calendar?.categories ?? CATEGORY_GROUPS;
+}
+
+/** 分类写进记录的值就是它的 `id`（两个集合各自一套，所以不存在同名冲突）。 */
+function catValue(item) {
+  return item?.id;
+}
+
+function catOf(kind, value) {
+  return (categoryGroups()[kind] ?? []).find((item) => catValue(item) === value);
+}
+
+/** 分类显示名：以注册表为准，未知 id 回退到静态表（kit/labels.js）。 */
+function catLabel(kind, value) {
+  return catOf(kind, value)?.label ?? CATEGORY_LABEL[value] ?? value ?? '其它';
+}
+
+/** 把分类色刷到元素上：注册表里有颜色就写 --cat，同时保留 cat-<id> 类做兜底。 */
+function applyCategoryColor(node, kind, value) {
+  const id = value ?? 'other';
+  node.classList.add(`cat-${id}`);
+  const color = catOf(kind, id)?.color;
+  if (color) node.style.setProperty('--cat', color);
+  return node;
+}
+
+/**
+ * 拉分类注册表。缓存 1 秒；`force` 用于「刚改完分类」这种必须拿最新值的场景。
+ * 结果同时写进 PC.state.calendar.categories，供所有视图同步读取。
+ */
+function ensureCategories({ force = false } = {}) {
+  const fresh = categoryFetchedAt && !force && Date.now() - categoryFetchedAt < 1000;
+  if (fresh) return Promise.resolve(categoryGroups());
+  if (categoryPending && !force) return categoryPending;
+  categoryPending = PC.api('/categories')
+    .then(({ items }) => {
+      const groups = { schedule: [], event: [] };
+      for (const item of items ?? []) (groups[item.kind] ??= []).push(item);
+      if (PC.state?.calendar) PC.state.calendar.categories = groups;
+      categoryFetchedAt = Date.now();
+      categoryPending = null;
+      categoryVersion += 1;
+      return groups;
+    })
+    .catch((error) => {
+      categoryPending = null;
+      throw error;
+    });
+  return categoryPending;
+}
+
+/**
+ * 视图渲染时调用：先把当前（可能是缓存的）颜色画上去，若这次真的拉到了新数据就再刷一次。
+ * 这样首屏不会因为等待接口而空白，颜色到了也会立刻生效（也覆盖了 WS data_changed 后的重拉）。
+ */
+function syncCategories() {
+  const before = categoryVersion;
+  ensureCategories()
+    .then(() => {
+      if (categoryVersion !== before) PC.refresh();
+    })
+    .catch(() => {
+      /* 后端不可用时不阻塞渲染：颜色回退到 .cat-* 兜底 */
+    });
+}
+
 /* ================================================================== 日历视图 */
 
 const calendarView = {
@@ -63,6 +142,7 @@ const calendarView = {
 
   render(ctx) {
     const state = PC.state;
+    syncCategories();
     if (state.calendar.mode === 'week' && state.panelCollapsed) state.calendar.mode = 'month';
     ctx.mount.innerHTML = '';
     ctx.mount.appendChild(calendarToolbar());
@@ -218,7 +298,7 @@ function renderMonth(host, anchor) {
 }
 
 function chipEl(chip) {
-  const node = mk('div', `chip cat-${chip.category ?? 'other'}`);
+  const node = applyCategoryColor(mk('div', 'chip'), chip.kind === 'event' ? 'event' : 'schedule', chip.category);
   if (chip.kind === 'event') node.classList.add('is-event');
   if (chip.startTime) node.appendChild(mk('span', 'c-time', chip.startTime));
   node.appendChild(mk('span', 'c-title', chip.title));
@@ -267,7 +347,7 @@ function renderWeek(host, anchor) {
 
         // 日期粒度的事件
         for (const event of day.events) {
-          const chip = mk('div', `ad-chip cat-${event.category ?? 'other'}`, event.title);
+          const chip = applyCategoryColor(mk('div', 'ad-chip', event.title), 'event', event.category);
           chip.title = event.title;
           col.appendChild(chip);
         }
@@ -372,7 +452,7 @@ function layoutBlocks(items) {
 }
 
 function blockEl(block) {
-  const node = mk('div', `block cat-${block.category ?? 'other'}`);
+  const node = applyCategoryColor(mk('div', 'block'), 'schedule', block.category);
   node.style.top = `${(block.start / 60) * HOUR_HEIGHT}px`;
   node.style.height = `${Math.max(20, ((block.end - block.start) / 60) * HOUR_HEIGHT - 2)}px`;
   if (block.cols > 1) {
@@ -585,7 +665,7 @@ function dayHours() {
 }
 
 function dayBlock(block, hourHeight) {
-  const node = mk('div', `day-block cat-${block.category ?? 'other'}`);
+  const node = applyCategoryColor(mk('div', 'day-block'), 'schedule', block.category);
   if (block.status === 'done') node.classList.add('done');
   if (block.status === 'cancelled') node.classList.add('cancelled');
 
@@ -880,6 +960,204 @@ function todoRow(item) {
   actions.appendChild(iconBtn('删除', '🗑', () => removeTodo(item.id, item.title), 'danger'));
 
   row.append(check, main, actions);
+  return row;
+}
+
+/* ============================================================ 设置页：分类管理 */
+/* 通过 PCModules.registerSettingsSection 挂到「设置」视图里（见文件末尾的登记）。 */
+
+/** 新增分类时的预设色板：前 5 个是项目主题色，其余是常用扩展色。 */
+const CATEGORY_PALETTE = [
+  '#6c8cff',
+  '#5cdb8b',
+  '#ffb86c',
+  '#ff6b7a',
+  '#c792ea',
+  '#00c2a8',
+  '#5e5ce6',
+  '#ff8fbd',
+  '#b6d94c',
+  '#ffb400',
+  '#83838f',
+  '#4dd0e1',
+];
+
+/** 设置页区块：日程分类 + 日历事件分类。 */
+function renderCategorySettings(mount) {
+  mount.innerHTML = '';
+  mount.appendChild(mk('div', 'loading', '加载中…'));
+  ensureCategories({ force: true })
+    .then((groups) => {
+      mount.innerHTML = '';
+      mount.appendChild(categoryBlock('schedule', '日程分类', groups.schedule ?? []));
+      mount.appendChild(categoryBlock('event', '日历事件分类', groups.event ?? []));
+    })
+    .catch((error) => {
+      mount.innerHTML = '';
+      mount.appendChild(mk('div', 'eb-msg', `分类加载失败：${error.message}`));
+    });
+}
+
+function categoryBlock(kind, title, items) {
+  const box = mk('div', 'cat-block');
+  box.appendChild(mk('div', 'section-title', title));
+  for (const item of items) box.appendChild(categoryRow(item));
+  box.appendChild(categoryCreateRow(kind));
+  return box;
+}
+
+/**
+ * 写分类 + 刷新（任何写操作成功后都重新拉一次并整页刷新）。
+ * id 路由必须带 `kind`：两个集合共用 study/exam/other 这些内置 id。
+ */
+async function saveCategory(kind, id, patch, method = 'PATCH') {
+  try {
+    await PC.api(`/categories/${id}?kind=${kind}`, {
+      method,
+      body: method === 'DELETE' ? undefined : patch,
+    });
+    await ensureCategories({ force: true });
+    PC.refresh();
+    return true;
+  } catch (error) {
+    PC.toast(error.message);
+    return false;
+  }
+}
+
+function categoryRow(item) {
+  const row = mk('div', 'cat-row');
+  const dot = mk('span', 'cat-dot');
+  dot.style.background = item.color;
+  const name = mk('span', 'cat-name', item.label);
+  row.append(dot, name, mk('span', 'cat-use', `在用 ${item.inUse} 条`), mk('div', 'spacer'));
+
+  const rename = mk('button', 'ghost-btn', '改名');
+  rename.type = 'button';
+  // 行内改名：**不用原生 prompt 弹窗**（Electron 渲染进程里 prompt() 会抛 "prompt() is not supported."）
+  rename.addEventListener('click', () => {
+    if (row.querySelector('.cat-rename-input')) return;
+    const input = mk('input', 'cat-rename-input');
+    input.type = 'text';
+    input.value = item.label;
+    input.maxLength = 12;
+    name.replaceWith(input);
+    input.focus();
+    input.select();
+
+    let settled = false;
+    const restore = () => input.replaceWith(name);
+    const finish = async (save) => {
+      if (settled) return;
+      settled = true;
+      const next = input.value.trim();
+      if (!save || !next || next === item.label) {
+        restore();
+        return;
+      }
+      if (await saveCategory(item.kind, item.id, { label: next })) PC.toast(`已改名为「${next}」`);
+      else restore();
+    };
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        finish(true);
+      } else if (event.key === 'Escape') {
+        event.stopPropagation();
+        finish(false);
+      }
+    });
+    input.addEventListener('blur', () => finish(true));
+  });
+
+  const color = mk('input', 'cat-color');
+  color.type = 'color';
+  color.value = item.color;
+  color.title = '改颜色';
+  color.addEventListener('change', async () => {
+    if (await saveCategory(item.kind, item.id, { color: color.value })) PC.toast(`「${item.label}」的颜色已更新`);
+    else color.value = item.color;
+  });
+
+  row.append(rename, color);
+
+  if (!item.locked) {
+    const del = mk('button', 'ghost-btn danger', '删除');
+    del.type = 'button';
+    del.addEventListener('click', async () => {
+      const hint = item.inUse
+        ? `「${item.label}」下还有 ${item.inUse} 条记录，删除后这些记录会变成「其它」。确定删除？`
+        : `确定删除分类「${item.label}」？`;
+      if (!window.confirm(hint)) return;
+      try {
+        const result = await PC.api(`/categories/${item.id}?kind=${item.kind}`, { method: 'DELETE' });
+        await ensureCategories({ force: true });
+        PC.toast(`已删除${result.reassigned ? `，${result.reassigned} 条记录改为「其它」` : ''}`);
+        PC.refresh();
+      } catch (error) {
+        PC.toast(error.message);
+      }
+    });
+    row.appendChild(del);
+  }
+  return row;
+}
+
+function categoryCreateRow(kind) {
+  const row = mk('div', 'cat-create');
+  const input = mk('input', 'cat-input');
+  input.type = 'text';
+  input.placeholder = '新分类名称（≤12 字）';
+  input.maxLength = 12;
+
+  let color = CATEGORY_PALETTE[0];
+  const custom = mk('input', 'cat-color');
+  custom.type = 'color';
+  custom.value = color;
+  const swatches = mk('div', 'cat-swatches');
+  const buttons = [];
+  const mark = () => {
+    for (const button of buttons) button.classList.toggle('active', button.dataset.color === color);
+  };
+  for (const preset of CATEGORY_PALETTE) {
+    const swatch = mk('button', 'cat-swatch');
+    swatch.type = 'button';
+    swatch.dataset.color = preset;
+    swatch.style.background = preset;
+    swatch.title = preset;
+    swatch.addEventListener('click', () => {
+      color = preset;
+      custom.value = preset;
+      mark();
+    });
+    buttons.push(swatch);
+    swatches.appendChild(swatch);
+  }
+  custom.addEventListener('input', () => {
+    color = custom.value;
+    mark();
+  });
+  mark();
+
+  const add = mk('button', 'primary-btn', '添加');
+  add.type = 'button';
+  add.addEventListener('click', async () => {
+    const label = input.value.trim();
+    if (!label) {
+      input.focus();
+      return;
+    }
+    try {
+      await PC.api('/categories', { method: 'POST', body: { kind, label, color } });
+      await ensureCategories({ force: true });
+      PC.toast(`已添加分类「${label}」`);
+      PC.refresh();
+    } catch (error) {
+      PC.toast(error.message);
+    }
+  });
+
+  row.append(input, swatches, custom, add);
   return row;
 }
 
@@ -1179,8 +1457,7 @@ function scheduleForm(item, defaults) {
   timeRow.append(field('开始', start), field('结束', end));
   wrap.appendChild(timeRow);
 
-  const category = mk('select', 'f-category');
-  for (const key of SCHEDULE_CATEGORIES) category.appendChild(option(key, CATEGORY_LABEL[key], (data.category ?? 'other') === key));
+  const category = categoryPicker('schedule', data.category);
   const priority = mk('select', 'f-priority');
   for (const key of [0, 1, 2]) priority.appendChild(option(key, PRIORITY_LABEL[key], Number(data.priority ?? 1) === key));
   const inline1 = mk('div', 'inline-2');
@@ -1214,6 +1491,75 @@ function scheduleForm(item, defaults) {
   // 日程必须是时段：起止时刻是必填信息，没有「全天」这种形态（只有日期请用待办）
   start.required = true;
   return wrap;
+}
+
+/**
+ * 分类下拉（自绘，带色点）：像 iOS 日历那样一眼看出每个分类的颜色。
+ *
+ * 契约：根节点保持 `.f-category` 类，选中值放 `dataset.value`（= 写库用的分类值），
+ * 因此 `collectSchedule/collectEvent` 的 `body.querySelector('.f-category').dataset.value` 照常可用。
+ * 键盘：Esc 关闭；鼠标：点外面关闭。
+ */
+function categoryPicker(kind, current) {
+  const root = mk('div', 'f-category category-picker');
+  root.dataset.value = current ?? 'other';
+  const trigger = mk('button', 'cp-trigger');
+  trigger.type = 'button';
+  const list = mk('div', 'cp-list hidden');
+  let open = false;
+
+  const close = () => {
+    open = false;
+    list.classList.add('hidden');
+    document.removeEventListener('pointerdown', onOutside, true);
+  };
+  const onOutside = (event) => {
+    if (!root.contains(event.target)) close();
+  };
+  const toggle = () => {
+    open = !open;
+    list.classList.toggle('hidden', !open);
+    if (open) document.addEventListener('pointerdown', onOutside, true);
+    else document.removeEventListener('pointerdown', onOutside, true);
+  };
+
+  const paint = () => {
+    const cats = categoryGroups()[kind] ?? [];
+    const selected = root.dataset.value;
+    const hit = cats.find((item) => catValue(item) === selected);
+    const dot = mk('span', 'cp-dot');
+    if (hit) dot.style.background = hit.color;
+    trigger.replaceChildren(dot, mk('span', 'cp-label', hit?.label ?? CATEGORY_LABEL[selected] ?? selected), mk('span', 'cp-caret', '▾'));
+
+    list.replaceChildren();
+    for (const item of cats) {
+      const value = catValue(item);
+      const option_ = mk('button', `cp-option${value === selected ? ' active' : ''}`);
+      option_.type = 'button';
+      const optionDot = mk('span', 'cp-dot');
+      optionDot.style.background = item.color;
+      option_.append(optionDot, mk('span', 'cp-label', item.label), mk('span', 'cp-check', value === selected ? '✓' : ''));
+      option_.addEventListener('click', () => {
+        root.dataset.value = value;
+        close();
+        paint();
+      });
+      list.appendChild(option_);
+    }
+  };
+
+  trigger.addEventListener('click', toggle);
+  root.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && open) {
+      event.stopPropagation(); // 别把弹层一起关掉
+      close();
+    }
+  });
+  paint();
+  // 首次打开时分类可能还没拉到：拉完再画一遍（自己刷新自己，不需要整页重绘）
+  ensureCategories().then(paint).catch(() => {});
+  root.append(trigger, list);
+  return root;
 }
 
 /**
@@ -1292,9 +1638,7 @@ function eventForm(item, defaults) {
   inline.append(field('开始日期', startDate), field('结束日期', endDate));
   wrap.appendChild(inline);
 
-  const category = mk('select', 'f-category');
-  for (const key of EVENT_CATEGORIES) category.appendChild(option(key, CATEGORY_LABEL[key], (data.category ?? 'other') === key));
-  wrap.appendChild(field('分类', category));
+  wrap.appendChild(field('分类', categoryPicker('event', data.category)));
 
   wrap.appendChild(repeatBlock(data.repeat));
 
@@ -1388,7 +1732,7 @@ function collectSchedule(body) {
   const payload = {
     title: body.querySelector('.in-title').value.trim(),
     date: body.querySelector('.f-date').value,
-    category: body.querySelector('.f-category').value,
+    category: body.querySelector('.f-category')?.dataset.value,
     priority: Number(body.querySelector('.f-priority').value),
     estimatedMinutes: body.querySelector('.f-estimated').value
       ? Number(body.querySelector('.f-estimated').value)
@@ -1425,7 +1769,7 @@ function collectEvent(body) {
     title: body.querySelector('.in-title').value.trim(),
     startDate: body.querySelector('.f-start-date').value,
     endDate: body.querySelector('.f-end-date').value || undefined,
-    category: body.querySelector('.f-category').value,
+    category: body.querySelector('.f-category')?.dataset.value,
     allDay: true,
     description: body.querySelector('.f-desc').value,
     repeat: body.querySelector('.repeat-block')._read(),
@@ -1433,6 +1777,14 @@ function collectEvent(body) {
 }
 
 /* ------------------------------------------------------------------ 登记到外壳 */
+
+// 往「设置」页挂一块「日程分类」：外壳只按 order 摆位置，UI 完全由本模块提供。
+window.PCModules.registerSettingsSection({
+  id: 'calendar.categories',
+  title: '日程',
+  order: 20,
+  render: (mount) => renderCategorySettings(mount),
+});
 
 window.PCModules.register({
   id: 'calendar',

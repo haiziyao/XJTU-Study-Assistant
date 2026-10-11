@@ -11,6 +11,7 @@
  * 服务层照收照存，但对外路由一律严格（见 routes.js）。
  */
 
+import { CategoryService } from './category-service.js';
 import { EventService } from './event-service.js';
 import { ScheduleService } from './schedule-service.js';
 import { TodoService } from './todo-service.js';
@@ -26,6 +27,10 @@ export default {
   order: 10,
 
   collections: [
+    // 分类拆两张表：日程与事件各自一套，且共用 study/exam/other 这些内置 id，
+    // 合表会让「记录 id」不再等于「写进日程的 category 值」（见 category-service.js 的注释）
+    { name: 'scheduleCategories', file: 'schedule-categories.json' },
+    { name: 'eventCategories', file: 'event-categories.json' },
     { name: 'events', file: 'events.json' },
     { name: 'schedules', file: 'schedules.json' },
     { name: 'todos', file: 'todos.json' },
@@ -35,8 +40,10 @@ export default {
   aiTools: CALENDAR_TOOL_SPECS,
 
   createServices({ store, broadcast, services }) {
-    const events = new EventService({ store, broadcast });
-    const schedules = new ScheduleService({ store, broadcast });
+    // 分类注册表要先建：日程/事件服务写库时用它把 category 归一化
+    const categories = new CategoryService({ store, broadcast });
+    const events = new EventService({ store, broadcast, categories });
+    const schedules = new ScheduleService({ store, broadcast, categories });
     const todos = new TodoService({ store, broadcast });
     const reminders = new ReminderService({ store, scheduleService: schedules, broadcast });
 
@@ -49,7 +56,7 @@ export default {
     services.commands.registerHandler('schedule', calendarCommands);
     services.commands.registerHandler('todo', calendarCommands);
 
-    return { events, schedules, todos, reminders };
+    return { events, schedules, todos, categories, reminders };
   },
 
   /**
@@ -59,7 +66,10 @@ export default {
    *
    * 只动带 externalId 的导入行；手写的日程不受影响。迁移是幂等的（搬完就没有了）。
    */
-  async restore({ store, broadcast }) {
+  async restore({ store, broadcast, own }) {
+    // 分类：集合为空时才播种内置的 6+6 个（用户改过就不覆盖）
+    await own.categories.ensureDefaults();
+
     const legacy = store.schedules.all().filter((item) => item.allDay === true && item.source === 'import');
     if (!legacy.length) return;
     for (const item of legacy) {

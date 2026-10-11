@@ -18,7 +18,6 @@
 
 import { HttpError } from '../../core/http/router.js';
 import { clockToMinutes, todayKey } from '../../shared/time.js';
-import { SCHEDULE_CATEGORIES } from '../../shared/constants.js';
 import { expandDates } from './recurrence.js';
 import { enumValue, intValue, optionalText, pickDefined, requireTitle, stringArray } from '../../core/validate.js';
 import { complexityOf, normalizeReminders, normalizeRepeat, optionalClock, requireClock, requireDate } from './schema.js';
@@ -51,7 +50,7 @@ function isLegacyAnchor(item) {
   return item?.allDay === true;
 }
 
-function normalize(rawInput, { partial = false } = {}) {
+function normalize(rawInput, { partial = false, categories = null } = {}) {
   // 兼容 dschat 2 风格入参（snake_case、扁平 repeat、宽松日期/时刻）
   const input = normalizeAliases(rawInput);
   const data = {};
@@ -76,8 +75,10 @@ function normalize(rawInput, { partial = false } = {}) {
 
   if (input.description !== undefined) data.description = optionalText(input.description, 'description') ?? '';
   if (input.location !== undefined) data.location = optionalText(input.location, 'location', 120) ?? '';
+  // 分类来自可编辑的注册表：id 存在就用它，没传/不存在则静默兜底到 other
+  // （分类写错不该让用户的日程写不进去；dschat 兼容层的 category 是自由文本）
   if (input.category !== undefined) {
-    data.category = enumValue(input.category, SCHEDULE_CATEGORIES, 'category', { optional: true, fallback: 'other' });
+    data.category = categories ? categories.resolve('schedule', input.category) : 'other';
   } else if (!partial) data.category = 'other';
 
   if (input.priority !== undefined) {
@@ -108,9 +109,11 @@ function normalize(rawInput, { partial = false } = {}) {
 }
 
 export class ScheduleService {
-  constructor({ store, broadcast = () => {} }) {
+  constructor({ store, broadcast = () => {}, categories = null }) {
     this.store = store;
     this.broadcast = broadcast;
+    /** 分类注册表（可编辑）；缺省时一律落到 other。 */
+    this.categories = categories;
   }
 
   get collection() {
@@ -221,7 +224,7 @@ export class ScheduleService {
   }
 
   async create(input) {
-    const data = normalize(input);
+    const data = normalize(input, { categories: this.categories });
     const created = await this.collection.insert(data);
     this.broadcast({ type: 'data_changed', payload: { target: 'schedule', action: 'create', id: created.id } });
     return created;
@@ -230,7 +233,7 @@ export class ScheduleService {
   async update(id, patch) {
     const current = this.get(id);
     const merged = { ...pickDefined(current, EDITABLE), ...patch };
-    const data = normalize(merged, { partial: false });
+    const data = normalize(merged, { partial: false, categories: this.categories });
     const updated = await this.collection.update(id, data);
     this.broadcast({ type: 'data_changed', payload: { target: 'schedule', action: 'update', id } });
     return updated;

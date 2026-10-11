@@ -63,7 +63,26 @@ function assertSchedulePayload(body, { requireStartTime }) {
  */
 export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1' }) {
   const P = apiPrefix;
-  const { events, schedules, todos } = services;
+  const { events, schedules, todos, categories } = services;
+
+  // ---------------------------------------------------------------- 分类
+  // 分类是**数据**（不是枚举常量）：用户能改名/改色/新增，`other` 是兜底且不可删。
+  router.get(`${P}/categories`, ({ query }) => ({ items: categories.list({ kind: query.kind }) }));
+
+  router.post(`${P}/categories`, async ({ body }) => {
+    const item = await categories.create(body ?? {});
+    return { __status: 201, item };
+  });
+
+  // 分类 id 在两个 kind 里可能同名（study/exam/other），所以 id 路由接受可选的 `?kind=`
+  router.get(`${P}/categories/:id`, ({ params, query }) => ({ item: categories.get(params.id, query.kind) }));
+
+  router.patch(`${P}/categories/:id`, async ({ params, query, body }) => ({
+    item: await categories.update(params.id, body ?? {}, { kind: query.kind }),
+  }));
+
+  /** 删除不丢数据：在用记录改成同 kind 的 other，响应里给 reassigned 条数。 */
+  router.delete(`${P}/categories/:id`, async ({ params, query }) => categories.remove(params.id, { kind: query.kind }));
 
   // ---------------------------------------------------------------- 日历事件
   router.get(`${P}/events`, ({ query }) => ({

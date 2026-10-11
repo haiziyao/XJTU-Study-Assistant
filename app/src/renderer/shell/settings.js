@@ -61,6 +61,9 @@ const settingsView = {
     themeCard.appendChild(exportBtn);
     wrap.appendChild(themeCard);
 
+    // 追加：各模块登记的设置区块（目前只有日历模块的「日程分类」）
+    renderModuleSections(wrap);
+
     ctx.mount.appendChild(wrap);
   },
 };
@@ -80,6 +83,26 @@ async function exportIcs() {
     PC.toast('已导出 ICS');
   } catch (error) {
     PC.toast(`导出失败：${error.message}`);
+  }
+}
+
+/**
+ * 追加：渲染各模块登记的设置区块（见 kit/registry.js 的 registerSettingsSection）。
+ * 没有任何模块登记时，settingsSections() 为空数组，下方循环一次都不执行 —— 行为与以前完全一致。
+ */
+function renderModuleSections(host) {
+  const sections = window.PCModules.settingsSections?.() ?? [];
+  for (const section of sections) {
+    const card = mk('div', 'card');
+    card.appendChild(mk('div', 'card-title', section.title));
+    const body = mk('div', 'card-body');
+    card.appendChild(body);
+    host.appendChild(card);
+    try {
+      section.render(body);
+    } catch (error) {
+      body.appendChild(mk('div', 'eb-msg', `区块渲染失败：${error.message}`));
+    }
   }
 }
 

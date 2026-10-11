@@ -12,7 +12,6 @@ import { rangeOverlaps } from '../../shared/time.js';
 import { expandDates } from './recurrence.js';
 import { enumValue, optionalText, pickDefined, requireTitle, stringArray } from '../../core/validate.js';
 import { normalizeRepeat, optionalDate, requireDate } from './schema.js';
-import { EVENT_CATEGORIES } from '../../shared/constants.js';
 import { normalizeAliases } from './compat.js';
 
 const EDITABLE = [
@@ -29,7 +28,7 @@ const EDITABLE = [
   'externalId',
 ];
 
-function normalize(rawInput, { partial = false } = {}) {
+function normalize(rawInput, { partial = false, categories = null } = {}) {
   // 兼容 dschat 2 风格入参（snake_case、扁平 repeat、宽松日期）
   const input = normalizeAliases(rawInput);
   const data = {};
@@ -41,8 +40,9 @@ function normalize(rawInput, { partial = false } = {}) {
 
   if (input.endDate !== undefined) data.endDate = optionalDate(input.endDate, 'endDate');
   if (input.description !== undefined) data.description = optionalText(input.description, 'description') ?? '';
+  // 分类来自可编辑的注册表：id 存在就用它，没传/不存在则静默兜底到 other
   if (input.category !== undefined) {
-    data.category = enumValue(input.category, EVENT_CATEGORIES, 'category', { optional: true, fallback: 'other' });
+    data.category = categories ? categories.resolve('event', input.category) : 'other';
   } else if (!partial) data.category = 'other';
   if (input.allDay !== undefined) data.allDay = Boolean(input.allDay);
   else if (!partial) data.allDay = true;
@@ -64,9 +64,11 @@ function normalize(rawInput, { partial = false } = {}) {
 }
 
 export class EventService {
-  constructor({ store, broadcast = () => {} }) {
+  constructor({ store, broadcast = () => {}, categories = null }) {
     this.store = store;
     this.broadcast = broadcast;
+    /** 分类注册表（可编辑）；缺省时一律落到 other。 */
+    this.categories = categories;
   }
 
   get collection() {
@@ -138,7 +140,7 @@ export class EventService {
   }
 
   async create(input) {
-    const data = normalize(input);
+    const data = normalize(input, { categories: this.categories });
     if (!data.endDate) data.endDate = data.startDate;
     const created = await this.collection.insert(data);
     this.broadcast({ type: 'data_changed', payload: { target: 'event', action: 'create', id: created.id } });
@@ -147,7 +149,7 @@ export class EventService {
 
   async update(id, patch) {
     const current = this.get(id);
-    const data = normalize({ ...pickDefined(current, EDITABLE), ...patch }, { partial: false });
+    const data = normalize({ ...pickDefined(current, EDITABLE), ...patch }, { partial: false, categories: this.categories });
     if (!data.endDate) data.endDate = data.startDate;
     const updated = await this.collection.update(id, data);
     this.broadcast({ type: 'data_changed', payload: { target: 'event', action: 'update', id } });

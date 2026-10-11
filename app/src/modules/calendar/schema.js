@@ -108,6 +108,20 @@ export function complexityOfHours(estimatedHours) {
   return 'heavy';
 }
 
+/**
+ * 颜色归一化：接受 `#RRGGBB` 与 `#RGB` 短写（统一展开成小写 6 位）。
+ * 空值返回 undefined（由调用方决定「必填」还是「不改」）；非法格式抛 400。
+ */
+export function normalizeColor(value, field = 'color') {
+  if (value === undefined || value === null || value === '') return undefined;
+  const text = String(value).trim();
+  const full = text.match(/^#([0-9a-fA-F]{6})$/);
+  if (full) return `#${full[1].toLowerCase()}`;
+  const short = text.match(/^#([0-9a-fA-F]{3})$/);
+  if (short) return `#${[...short[1]].map((ch) => ch + ch).join('').toLowerCase()}`;
+  fail(field, '必须是 #RRGGBB 形式的颜色');
+}
+
 /** 非整数数值校验（工时可以是 1.5 小时，因此不能用 intValue）。 */
 export function numberValue(value, field, { min = 0, max = 100000, optional = true, fallback } = {}) {
   if (value === undefined || value === null || value === '') {
