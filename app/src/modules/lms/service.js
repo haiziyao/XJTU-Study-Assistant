@@ -23,6 +23,8 @@ import { parseLmsDate } from './time.js';
 
 /** 活动缓存的新鲜度：预览时若超过这个时间就顺手刷新一次。 */
 const ACTIVITY_TTL_MS = 10 * 60 * 1000;
+/** 拿不到账号信息时的重试间隔（展示信息，不值得每次都去撞上游）。 */
+const USER_RETRY_MS = 60 * 1000;
 /** 单次预览最多补拉多少条作业详情（详情接口一个活动一次请求）。 */
 const MAX_DETAIL_FETCH = 40;
 
@@ -61,6 +63,9 @@ export class LmsService {
     this.metaFile = new JsonFile(path.join(this.dataDir, 'lms-meta.json'), { mode: 0o644 });
     this.verified = false;
     this.restored = false;
+    /** 上次尝试拉账号信息的时间：失败后不立刻重试，免得每次业务请求都撞一次上游。 */
+    this.userFetchedAt = 0;
+    this.userFetching = false;
     this.state = {
       status: 'anonymous',
       user: null,
@@ -100,6 +105,10 @@ export class LmsService {
         this.state.mfa = null;
       }
       this.verified = true;
+      // 姓名是**模块本地**的展示信息（不像登录态那样由共享认证持有）：
+      // 从设置页登录不经过本模块的 #finishLogin()，而 status() 又不会走 #ensureReady()，
+      // 所以这里补一次。不 await（status() 是同步的），拿不到只是不显示名字。
+      if (!this.state.user?.name) void this.#ensureUser();
       return;
     }
     if (this.state.status === 'ready') {
@@ -620,18 +629,18 @@ export class LmsService {
    * 「学堂这个站点能用吗」——SSO 生效时它会静默用 TGC 换回学堂会话，用户无感。
    */
   async #ensureReady() {
-    if (this.verified) return;
+    if (this.verified) {
+      // 早返回也**必须**补这一步：`#syncAuthState()` 会直接把 verified 置为 true
+      // （从设置页登录时就是这条路径），而拉姓名原先是写在下面的成功分支里的，
+      // 于是姓名永远不会被拉到，界面显示「（未获取到姓名）」。
+      await this.#ensureUser();
+      return;
+    }
     const outcome = await this.sharedAuth.ensure('lms');
     if (outcome.ok) {
       this.verified = true;
       if (this.state.status !== 'ready') this.state.status = 'ready';
-      if (!this.state.user) {
-        try {
-          this.state.user = await this.api.userInfo({ refresh: true });
-        } catch {
-          this.state.user = this.state.user ?? { name: '', userNo: '' };
-        }
-      }
+      await this.#ensureUser();
       return;
     }
     // 站点不可用：只把自己打回待验证，**不动共享票据** ——
@@ -640,6 +649,33 @@ export class LmsService {
     this.sharedAuth.invalidate('lms', outcome.reason ?? null);
     this.state.status = 'anonymous';
     throw HttpError.unauthorized(`思源学堂登录态已失效，请重新登录（${outcome.reason ?? '需要登录'}）`);
+  }
+
+  /**
+   * 补一次账号信息（姓名 / 学号），只用于界面展示。
+   *
+   * 拿不到不算错误 —— 登录态是好的，只是名字没显示出来。
+   * 失败后隔一会儿才重试，免得每次业务请求都去撞一次上游。
+   */
+  async #ensureUser() {
+    if (this.state.user?.name) return;
+    if (this.userFetching) return;
+    if (Date.now() - (this.userFetchedAt || 0) < USER_RETRY_MS) return;
+    this.userFetching = true;
+    this.userFetchedAt = Date.now();
+    try {
+      const user = await this.api.userInfo({ refresh: true });
+      if (user?.name) {
+        this.state.user = user;
+        // 广播一次，让已经打开的学堂页把姓名显示出来。
+        // 不会自激：state.user.name 已存在，上面那两处就不会再触发 #ensureUser。
+        this.broadcast({ type: 'data_changed', module: 'lms', reason: 'user' });
+      }
+    } catch {
+      /* 展示信息，失败就静默跳过 */
+    } finally {
+      this.userFetching = false;
+    }
   }
 
   /**

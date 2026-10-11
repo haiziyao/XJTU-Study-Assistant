@@ -145,6 +145,53 @@ test('未登录时各模块的 status 不会被误报成 ready', async () => {
   }
 });
 
+test('★ 从设置页登录后，学堂的账号信息（姓名）也能显示出来', async () => {
+  const { app, call, mock } = await startFullApp();
+  try {
+    await call('POST', '/auth/login', { username: USER, password: PASS, siteId: 'lms' });
+
+    // 姓名是**模块本地**的展示信息（不像登录态那样由共享认证持有）。
+    // 它原先只在 lms 自己的登录流程里拉，而设置页登录不经过那条路径 ——
+    // 结果界面显示「（未获取到姓名）」。这里把它钉住。
+    //
+    // 拉取是异步的（status() 是同步接口，只能顺手起一次后台请求），所以要等一等。
+    const shown = await waitFor(async () => {
+      const now = await call('GET', '/lms/status');
+      return Boolean(now.body.user?.name);
+    });
+    const status = await call('GET', '/lms/status');
+    assert.equal(status.body.status, 'ready');
+    assert.ok(
+      shown,
+      `★ 从设置页登录后姓名也要能显示，实际 user=${JSON.stringify(status.body.user)}`,
+    );
+    assert.equal(status.body.user?.name, '张三');
+    assert.equal(status.body.user?.userNo, USER, '学号也应当带上');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('已有姓名时不会反复去拉账号信息', async () => {
+  const { app, call, mock } = await startFullApp();
+  try {
+    await call('POST', '/auth/login', { username: USER, password: PASS, siteId: 'lms' });
+    // 触发一次业务调用，确保姓名已经拿到
+    await call('GET', '/lms/courses');
+    const before = mock.state.requests.filter((entry) => entry.includes('/user/index')).length;
+
+    // 再触发几次业务调用
+    await call('GET', '/lms/courses');
+    await call('GET', '/lms/status');
+    const after = mock.state.requests.filter((entry) => entry.includes('/user/index')).length;
+    assert.equal(after, before, '拿到姓名之后不该再去拉账号信息');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
 /* ------------------------------------------------------------------ ★ 登录后自动同步 */
 
 /** 轮询直到条件成立（自动同步是后端起意的，没有可 await 的句柄）。 */

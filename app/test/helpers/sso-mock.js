@@ -73,6 +73,8 @@ export async function startMockSso(options = {}) {
     mfaVerified: false,
     username: options.username ?? '2024001',
     password: options.password ?? 'secret-pass',
+    /** 账号信息页里的姓名，用来断言"登录后姓名显示出来了"。 */
+    displayName: options.displayName ?? '张三',
   };
 
   const origin = { value: '' };
@@ -115,6 +117,26 @@ export async function startMockSso(options = {}) {
         res.writeHead(302, { Location: location, ...headers });
         res.end();
       };
+
+      // ------------------------------------------------------------ 学堂的账号信息页
+      // `LmsApi.userInfo()` 打的是 `${baseUrl}/user/index`，并从页面里解析 user/dept 的 JS 对象。
+      // 加上它是为了让「从设置页登录后，学堂页能不能显示姓名」这件事可测 ——
+      // 那是"模块本地状态没跟共享认证同步"的又一个表现（曾经显示成"未获取到姓名"）。
+      if (path === `${sites.a.path}user/index`) {
+        if (cookies[sites.a.cookie] !== 'ok') {
+          return redirect(`${origin.value}/cas/login?service=${encodeURIComponent(sites.a.path)}`);
+        }
+        return html(
+          200,
+          `<!doctype html><html><head><title>思源学堂</title></head><body><script>
+    window.globalData = {
+      user: { id: 9001, name: "${state.displayName}", userNo: "${state.username}", role: "Student", orgName: "思源学堂2.0", hasAiAbility: true },
+      dept: { id: 12, name: "测试学院", code: "DX" },
+      locale: "zh-CN"
+    };
+  </script></body></html>`,
+        );
+      }
 
       // ------------------------------------------------------------ 业务站点
       // 按路径匹配站点时**容忍尾斜杠**：真实配置里的 URL 常被去掉尾斜杠
