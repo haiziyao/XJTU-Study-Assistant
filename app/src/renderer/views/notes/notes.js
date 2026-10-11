@@ -6,9 +6,9 @@
   const CACHE_TTL = 7 * 86400000;
   const CACHE_LIMIT = 100;
   const IMPORT_ACCEPT = '.md,.markdown,.txt,.html,.htm,.pdf,.doc,.docx,.png,.jpg,.jpeg,.webp';
-  const MAX_IMPORT_FILES = 20;
-  const MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024;
-  const MAX_IMPORT_TOTAL_BYTES = 100 * 1024 * 1024;
+  const MAX_IMPORT_FILES = 8;
+  const MAX_IMPORT_FILE_BYTES = 512 * 1024;
+  const MAX_IMPORT_TOTAL_BYTES = 4 * 1024 * 1024;
   const STATUS = { draft: '草稿', processing: '整理中', ready: '已整理', failed: '处理失败' };
   const SOURCE = { manual: '手动', snapshot: '随手拍', import: '导入' };
   const EMPTY_CAPS = { connected: false, search: false, markdown: false, view: false, upload: false, aiRead: false, export: false, capture: false, subscriptions: false };
@@ -32,11 +32,71 @@
     query: '',
     tag: '',
     sort: 'updated',
+    autoConnecting: false,
   };
 
   const localStore = () => { try { return window.localStorage ?? null; } catch { return null; } };
   const today = () => window.PCUtil?.todayKey?.() ?? new Date().toISOString().slice(0, 10);
   const cacheKey = () => state.namespace ? `${CACHE_PREFIX}${encodeURIComponent(state.namespace)}` : null;
+
+  function readFile(file, mode) {
+    if (mode === 'text' && typeof file?.text === 'function') return file.text();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error(`无法读取文件：${file?.name ?? '未知文件'}`));
+      reader.onload = () => resolve(String(reader.result ?? ''));
+      if (mode === 'text') reader.readAsText(file); else reader.readAsDataURL(file);
+    });
+  }
+
+  function createLocalProvider(api) {
+    const request = (path, options) => api(path, options);
+    const queryString = (filters = {}) => {
+      const params = new URLSearchParams();
+      for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== null && value !== '') params.set(key, value);
+      const text = params.toString(); return text ? `?${text}` : '';
+    };
+    const listNotes = async (filters = {}) => (await request(`/notes${queryString(filters)}`)).items ?? [];
+    return {
+      cacheNamespace: 'builtin-main-program',
+      capabilities: () => ({ search: true, markdown: true, view: true, upload: true, aiRead: true }),
+      listNotes,
+      searchNotes: (query, filters = {}) => listNotes({ ...filters, query }),
+      async createDraft(input) {
+        return (await request('/notes', { method: 'POST', body: { ...input, source: 'manual', status: 'draft' } })).summary;
+      },
+      async uploadNotes(files, input) {
+        const out = [];
+        for (const file of files) {
+          const textFile = /^text\//.test(file.type ?? '') || /\.(md|markdown|txt|html?|csv|json|ya?ml|log|tex)$/i.test(file.name ?? '');
+          const body = textFile ? await readFile(file, 'text') : '';
+          const attachments = textFile ? [] : [{ name: file.name, type: file.type, size: file.size, dataUrl: await readFile(file, 'data') }];
+          const title = input.title && files.length === 1 ? input.title : input.title ? `${input.title} · ${file.name}` : file.name;
+          const result = await request('/notes', {
+            method: 'POST',
+            body: { ...input, title, body, attachments, source: 'import', status: 'ready', format: /\.txt$/i.test(file.name ?? '') ? 'text' : 'markdown' },
+          });
+          out.push(result.summary);
+        }
+        return out;
+      },
+      async readNote(id) {
+        const note = (await request(`/notes/${encodeURIComponent(id)}`)).note;
+        const attachments = (note.attachments ?? []).map((file) => `- 附件：${file.name}（${file.type || '未知类型'}，${file.size || 0} 字节）`).join('\n');
+        return { format: note.format === 'text' ? 'text' : 'markdown', text: [note.body, attachments].filter(Boolean).join('\n\n') || '（空白笔记）' };
+      },
+      async renderMarkdown(id) { return (await this.readNote(id)).text; },
+      async readNotesForAI(input) { return (await request('/notes/ai-context', { method: 'POST', body: input })).items ?? []; },
+    };
+  }
+
+  function ensureLocalProvider(api) {
+    if (state.provider || state.autoConnecting || typeof api !== 'function') return;
+    state.autoConnecting = true;
+    connectProvider(createLocalProvider(api))
+      .catch((error) => { state.error = error; render(); })
+      .finally(() => { state.autoConnecting = false; });
+  }
 
   function anchorOf(value) {
     if (!value || typeof value !== 'object') return null;
@@ -234,9 +294,9 @@
     let total = 0;
     for (const file of list) {
       const size = Math.max(0, Number(file?.size) || 0); total += size;
-      if (size > MAX_IMPORT_FILE_BYTES) throw new Error(`“${file?.name ?? '文件'}”超过 50 MB`);
+      if (size > MAX_IMPORT_FILE_BYTES) throw new Error(`“${file?.name ?? '文件'}”超过 512 KB`);
     }
-    if (total > MAX_IMPORT_TOTAL_BYTES) throw new Error('本次上传文件总大小超过 100 MB');
+    if (total > MAX_IMPORT_TOTAL_BYTES) throw new Error('本次上传文件总大小超过 4 MB');
     const result = await state.provider.uploadNotes(list, {
       title: String(input.title ?? '').trim(),
       tags: Array.isArray(input.tags) ? input.tags.map(String).map((value) => value.trim()).filter(Boolean) : [],
@@ -435,7 +495,7 @@
     const title = mk('input', 'notes-title-input'); title.placeholder = '未命名笔记';
     const tags = mk('input', 'notes-tags-input'); tags.placeholder = '标签用逗号分隔';
     const files = mk('input', 'notes-file-input'); files.type = 'file'; files.multiple = true; files.accept = IMPORT_ACCEPT;
-    const fileSummary = mk('div', 'notes-file-summary', '支持 Markdown、文本、HTML、PDF、Word 和常见图片；最多 20 个文件。');
+    const fileSummary = mk('div', 'notes-file-summary', '支持 Markdown、文本、HTML、PDF、Word 和常见图片；最多 8 个文件，单个 512 KB。');
     const mode = mk('select', 'notes-anchor-mode'); mode.append(option('none', '不关联日历', true), option('date', '关联某一天'), option('schedule', '关联某条日程'));
     const date = mk('input', 'notes-anchor-date'); date.type = 'date'; date.value = today(); date.disabled = true;
     const schedules = mk('select', 'notes-schedule-select'); schedules.disabled = true; schedules.appendChild(option('', '请先选择日期'));
@@ -503,6 +563,13 @@
   window.PCModules.registerSettingsSection({ id: 'notes.integration', title: '笔记接入', order: 50, render: renderSettings });
   window.PCModules.register({
     id: 'notes', label: '笔记系统', icon: '📝', order: 50, title: '笔记系统',
-    render(ctx) { state.mount = ctx.mount; state.ctx = ctx; render(); if (state.provider && !state.loading) refresh(); },
+    render(ctx) {
+      state.mount = ctx.mount; state.ctx = ctx; render();
+      if (!state.provider) ensureLocalProvider(ctx.api);
+      else if (!state.loading) refresh();
+    },
   });
+
+  // 即使用户直接打开“设置”，也主动连接内置主程序，避免笔记接入区长期显示“等待主程序”。
+  setTimeout(() => ensureLocalProvider(window.PC?.api), 0);
 })();

@@ -25,6 +25,14 @@ function api(url) {
   return Promise.resolve({});
 }
 
+test('内置主程序 Provider 自动连接，笔记页不再停留在等待状态', async () => {
+  const localApi = (url) => url.startsWith('/notes') ? Promise.resolve({ items: [] }) : api(url);
+  const app = bootRenderer({ api: localApi, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
+  const mount = await app.render('notes', { wait: 30 });
+  assert.match(mount.textContent, /主程序已连接/);
+  assert.doesNotMatch(mount.textContent, /等待主程序/);
+});
+
 test('笔记 Provider 与新富文本模块结合：摘要关联日程，正文只按需预览', async () => {
   const app = bootRenderer({ api, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
   const mount = await app.render('notes');
@@ -94,7 +102,7 @@ test('上传限制在调用 Provider 前生效，查看纯文本不会注入 HTM
     uploadNotes: () => { uploads += 1; return summary(); },
     readNote: () => ({ format: 'text', text: '<img src=x onerror=alert(1)>' }),
   });
-  await assert.rejects(() => notes.upload([{ name: 'too-large.pdf', size: 51 * 1024 * 1024 }]), /超过 50 MB/);
+  await assert.rejects(() => notes.upload([{ name: 'too-large.pdf', size: 513 * 1024 }]), /超过 512 KB/);
   assert.equal(uploads, 0);
   const result = await notes.read('note-1');
   assert.equal(result.format, 'text'); assert.equal(result.text, '<img src=x onerror=alert(1)>');
