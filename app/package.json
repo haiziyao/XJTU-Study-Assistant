@@ -1,8 +1,8 @@
 {
-  "name": "potato-calendar",
-  "version": "0.1.0",
+  "name": "xjtu-study-assistant",
+  "version": "0.2.0",
   "private": true,
-  "description": "AI 智学程序 · 日历与日程模块（Node.js 后端 + Electron 测试前端，支持指令添加）",
+  "description": "AI 智学程序：框架（src/core）+ 可插拔功能模块（src/modules）。Node.js 零依赖后端 + Electron/浏览器测试窗口",
   "type": "module",
   "main": "src/main/main.cjs",
   "engines": {
@@ -16,8 +16,10 @@
     "test": "node --test test/*.test.js"
   },
   "keywords": [
+    "study-assistant",
     "calendar",
     "schedule",
+    "lms",
     "electron",
     "ai-tutor"
   ],

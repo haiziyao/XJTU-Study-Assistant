@@ -1,7 +1,60 @@
 # Changelog
 
-本文件记录 Potato Calendar（AI 智学程序 · 日历与日程模块）的变更。
-格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+本文件记录 AI 智学程序后端的变更。
+格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
+
+## [0.2.0] - 重构：框架与功能模块分离
+
+> 目标：**新增一个功能 = 新建一个目录 + 新建一个文件**，不需要修改框架代码，也不会和别人的改动冲突。
+> 目录 `calendar/` 更名为 `app/`，其内容从「一个日历模块」升级为「应用框架 + 可插拔模块」。
+> 新增 [模块开发指南.md](docs/模块开发指南.md)。
+
+### 结构（破坏性变更：所有路径都变了）
+
+- `calendar/` → `app/`；`src/server/{http,store,ai}` → `src/core/{http,store,ai}`
+- 业务代码从「按层横切」改为「按功能纵切」：
+  - `src/modules/calendar/` —— 日历与待办（event/schedule/reminder/recurrence/ics/compat/parser/schema/commands/routes）
+  - `src/modules/lms/` —— 思源学堂（原 `src/server/lms/*` 与 `src/server/routes/lms.js`）
+  - `src/core/` —— 框架：HTTP/WS/静态服务、JSON 存储、指令系统、模块契约、通用校验、框架路由
+  - `src/server/index.js` —— 只剩装配，且**不再 import 任何具体模块**
+- 前端 `src/renderer/` 拆分为 `shell/`（外壳与自带视图）、`kit/`（公共积木与注册表）、`views/`（一人一个）
+- 文档移入 `docs/`；`styles.css`(1951 行)、`views.js`(2532 行) 拆散
+
+### 新增（框架能力）
+
+- **模块契约** `core/module/contract.js` + **目录扫描注册表** `core/module/registry.js`：
+  扫描 `src/modules/<id>/module.js`，按 `order` 装配；新增模块零公共改动。
+  钩子：`collections` / `createServices` / `restore` / `registerRoutes` / `start` / `stop` / `aiTools`。
+- **声明式数据集合**：模块在 `collections` 里声明，`JsonStore` 自动创建，不再硬编码集合清单。
+- **指令系统通用化**：`CommandService` 改为「解析器 + 处理器」双注册表
+  （`registerParser` / `registerHandler`），框架不再有 `switch(action)`，也不认识 `event/schedule`；
+  新增 `tryParse()` 作为不抛异常的解析入口，供 AI 降级路径使用。
+- **静态文件按目录前缀托管**（`core/http/static.js`）：带越界防护与 MIME 白名单，
+  新增前端文件不再需要改路由代码；顺带支持图片/字体等二进制资源。
+- **前端视图注册表** `kit/registry.js`（`PCModules`）：视图自我登记导航项、排序、插槽与渲染函数；
+  外壳不再持有 `NAV` / `views{}` 硬编码表。同名 id 后注册者覆盖，占位页与真实实现可共存。
+- 新增 `GET /api/v1/modules`（模块自描述）；`/health` 的 `counts` 改为按模块声明的集合自动汇总；
+  `/ai/capabilities` 的 `lmsTools` 改为通用的 **`aiTools`**（各模块声明后聚合，每项带 `module`）。
+
+### 新增（前端测试）
+
+- `test/renderer.test.js`（4 个用例）：资源可达性与 MIME、无浏览器环境下全部脚本求值
+  （捕获语法/顶层引用错误，避免整页白屏）、视图注册表顺序与插槽、静态资源越界防护。
+
+### 修复 / 加固
+
+- 模块 `restore()` 抛错不再炸掉整个后端启动，改为记录错误后降级继续。
+- `core/http/router.js` 支持 `*` 通配段（静态资源需要覆盖任意深度路径）。
+- 拆分 `validate.js` 为 `core/validate.js`（通用）与 `modules/calendar/schema.js`（日期/重复/提醒/复杂度），
+  消除「框架依赖模块」的反向依赖。
+
+### 兼容性
+
+- **HTTP 接口路径与响应结构全部保持不变**，前端与既有调用方无需改动，除以下两点：
+  - `GET /ai/capabilities` 的 `lmsTools` 更名为 `aiTools`（结构不变，每项多一个 `module` 字段）；
+  - `GET /health` 的 `counts` 现在包含**全部**集合（含 `lmsCourses` / `lmsActivities`）。
+- `createServer({ dataDir, [模块id]: 配置 })` 的注入方式不变（如 `{ lms: { config } }`）。
+- 测试从 49 个增至 **53 个**，全部通过。
 
 ## [Unreleased]
 

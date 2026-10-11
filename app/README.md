@@ -1,33 +1,30 @@
-# Potato Calendar · 日历与日程模块
+# AI 智学程序 · 后端与测试窗口
 
-> **AI 智学程序**的一个子模块：把**日历（日期粒度）**与**日程（时段粒度）**统一管理，支持**指令添加**。
-> 后端 Node.js，前端 Electron（**当前窗口仅用于联调测试，正式 UI 由主程序提供**）；AI 能力本阶段**只留接口**。
+> **框架（`src/core`）+ 可插拔功能模块（`src/modules`）** 的结构：内核提供 HTTP/WebSocket、
+> JSON 存储、指令系统、AI 接入契约与三栏测试界面；每个功能是一个自包含目录，**新增功能不需要改框架代码**。
+>
+> 后端 Node.js **零运行时依赖**；前端 Electron 或浏览器均可（**当前窗口仅用于联调测试，正式 UI 由主程序提供**）；
+> AI 能力本阶段**只留接口**。
 
-- 接口契约见 [接口文档.md](接口文档.md)
+- **要加功能？先看 [模块开发指南.md](docs/模块开发指南.md)**
+- 接口契约见 [docs/接口文档.md](docs/接口文档.md)
 - 变更记录见 [CHANGELOG.md](CHANGELOG.md)
-- 参考实现：同工作区 `../potatocalendar`（Python/PySide6 版）与 `../dschat 2`
 
-## 状态
+## 已装配的模块
 
-| 能力 | 状态 |
-| --- | --- |
-| 日历事件 CRUD + 区间/重复展开 | ✅ 已实现 |
-| 日程 CRUD + 状态流转 + 冲突提示 | ✅ 已实现 |
-| 提醒（WebSocket 推送 + 系统通知） | ✅ 已实现 |
-| 指令添加（中文规则解析 → 落库） | ✅ 已实现 |
-| 顺延未完成日程到本周 | ✅ 已实现 |
-| 聚合视图接口（日/周/月/年通用） | ✅ 已实现 |
-| ICS 导出（可订阅到系统日历） | ✅ 已实现 |
-| dschat 2 兼容（字段别名 / 标记行 / 兼容接口） | ✅ 已实现 |
-| 思源学堂接入（CAS 登录 / 课程 / 作业 / 直播 → 同步到日历） | ✅ 已实现（见下文，第 9 节接口见 [接口文档.md](接口文档.md)） |
-| 测试窗口（浏览器 `/app` 或 Electron） | ✅ 已实现（三栏界面：功能栏 / 对话 / 功能视图） |
-| AI 接入（NL → 指令对象） | 🚧 仅契约与占位（`/ai/*`） |
-| 农历 / 学习记录导入 | 🚧 仅契约 |
+| 模块 | order | 能力 | 状态 |
+| --- | --- | --- | --- |
+| `calendar` | 10 | 日历事件 + 日程（时段）+ 提醒 + 重复规则 + ICS 导出 + dschat 2 兼容 + 中文指令添加 + 顺延 | ✅ |
+| `lms` | 20 | 思源学堂：统一身份认证登录、课程/作业/直播拉取、预览后同步到日历、自动同步 | ✅ |
+| — | — | 框架级：指令记录、设置、AI 接入（NL → 指令对象） | 🚧 AI 仅契约与占位（`/ai/*`） |
+| 学情 / 拍题 / 网课 | — | 左栏已占位（`shell/planned.js`），实现同名视图即自动接管 | 🚧 规划中 |
+
+运行时可探测：`curl -s localhost:3210/api/v1/modules | jq`
 
 ## 快速开始
 
 ```bash
-cd calendar
+cd app
 
 # 1) 只跑后端（接口联调推荐，零运行时依赖）
 npm run start:server          # http://127.0.0.1:3210/api/v1
@@ -52,7 +49,8 @@ npm run start:server
 open http://127.0.0.1:3210/app        # 页面与接口同源，无需额外配置
 ```
 
-`/app`、`/app/app.js`、`/app/views.js`、`/app/styles.css` 由后端直接托管（白名单静态文件），页面会自动使用同源地址作为 API 基址。
+`/app/**` 整目录由后端按前缀托管（带越界防护，且只走白名单 MIME 类型），页面会自动使用同源地址作为 API 基址。
+因此**新增前端文件不需要改后端代码**，只要在 `index.html` 里加一行 `<script>` / `<link>`。
 访问 `/app`（无尾斜杠）会 302 到 `/app/`：页面内的资源都是相对路径，否则浏览器会以 `/` 为基准解析导致整页无样式无脚本。
 
 **方式 B：Electron 测试窗口**
@@ -65,7 +63,7 @@ npm run dev:app:macos      # 沙箱环境 / 需要 LaunchServices 启动时（�
 
 `npm run dev:app:macos` 会做三件事：把 Electron 运行时复制到工作区内的 `.electron-bundle/`（首次约 130MB）、
 把 `package.json + src` 同步进 `ElectronTest.app/Contents/Resources/app`、写入 `data-dir.txt` 让窗口与项目
-**共用同一份数据**（`calendar/data`），最后用 `open -n` 启动。日志与数据位置会在启动后打印出来。
+**共用同一份数据**（`app/data`），最后用 `open -n` 启动。日志与数据位置会在启动后打印出来。
 
 Electron 的 npm 包只含脚本，真正的二进制默认从 GitHub Releases 下载；若网络不可达会报 `fetch failed`，可指定镜像重试（本机验证可用）：
 
@@ -190,42 +188,77 @@ curl -s -X POST localhost:3210/api/v1/lms/sync/preview -H 'Content-Type: applica
 ## 目录结构
 
 ```
-calendar/
+app/
 ├── bin/server.js               # 独立启动后端（联调 / 自动化）
+├── docs/
+│   ├── 模块开发指南.md          # ★ 要加功能先读这个
+│   └── 接口文档.md              # 框架 + 各模块的接口契约
 ├── src/
 │   ├── main/                   # Electron 主进程（main.cjs + preload.cjs）
-│   ├── renderer/               # 测试窗口：index.html + styles.css + app.js（外壳/对话）+ views.js（视图）
 │   ├── shared/                 # 前后端共享：constants.js / time.js / theme.js
-│   └── server/
-│       ├── index.js            # 装配：store + services + router + ws + 提醒
-│       ├── http/               # 零依赖路由、WebSocket（RFC6455 文本帧子集）
-│       ├── store/              # JSON 集合存储（原子写 + 逐条容错）
-│       ├── services/           # 事件 / 日程 / 提醒 / 指令 / 重复规则 / 校验 / ICS / dschat2 兼容
-│       ├── parser/             # 中文指令解析 + dschat2 标记行解析
-│       ├── routes/             # 全部 REST 路由（含 lms.js 思源学堂路由）
-│       ├── lms/                # 思源学堂接入（CAS 登录 / API 归一化 / 同步映射 / 工具清单）
-│       └── ai/ai-bridge.js     # AI provider 注册与契约（占位）
-├── data/                       # 运行时数据（events / schedules / command-logs / lms-*）
-├── scripts/                    # run-electron-macos.sh（沙箱启动）+ seed-demo.js（演示数据）
-└── test/                       # node:test 用例（解析器 + 接口 + 兼容层 + 思源学堂，44 个）
+│   ├── core/                   # ★ 框架层（组员不改）
+│   │   ├── http/               #   零依赖路由 + WebSocket + 静态文件服务
+│   │   ├── store/json-store.js #   JSON 集合存储（原子写 + 逐条容错 + 模块集合注入）
+│   │   ├── commands/           #   指令分发（解析器/处理器双注册表）+ 中文解析原子函数
+│   │   ├── module/             #   模块契约 contract.js + 目录扫描 registry.js
+│   │   ├── ai/ai-bridge.js     #   AI provider 注册与契约（占位）
+│   │   ├── validate.js         #   通用入参校验
+│   │   └── routes.js           #   框架级路由（元信息/health/modules/指令/AI/静态资源）
+│   ├── modules/                # ★ 业务层：一人一个目录，互不越界
+│   │   ├── calendar/           #   日历与待办（module/service/routes/parser/commands…）
+│   │   └── lms/                #   思源学堂（CAS 登录 / API 归一化 / 同步映射 / 工具清单）
+│   ├── server/index.js         # 装配：注册表驱动，只做装配不含业务
+│   └── renderer/               # 测试窗口（classic script，无构建步骤）
+│       ├── index.html          #   入口 + 资源清单
+│       ├── shell/              #   外壳：app.js / planned.js / message.js / settings.js / shell.css
+│       ├── kit/                #   公共积木：registry.js / util.js / labels.js / dom.js
+│       └── views/              # ★ 一人一个 .js + .css
+├── data/                       # 运行时数据（集合文件由各模块声明）
+├── scripts/                    # run-electron-macos.sh + seed-demo.js + lms-probe.js + mock-lms-server.js
+└── test/                       # node:test 用例（接口 / 兼容层 / 思源学堂 / 渲染层，53 个）
 ```
 
 ## 架构
 
 ```
-Electron 渲染层（测试窗口：左功能栏 + 中对话 + 右功能视图）
+┌─ 渲染层（测试窗口：左功能栏 + 中对话 + 右功能视图）────────────────┐
+│  外壳 shell/app.js 只认识「视图注册表」PCModules，不认识任何具体功能 │
+│  各 views/<id>.js 自我登记：{ id, label, icon, order, render }      │
+└────────────────────────────────────────────────────────────────────┘
         │  HTTP + WebSocket（仅 127.0.0.1）
         ▼
-Node.js 后端 ── 路由层 ── 服务层 ── JSON 存储（原子写）
-                    │         ├── 提醒扫描（30s，到点 WS 推送 + 系统通知）
-                    │         └── 思源学堂客户端（CAS 登录 + 课程/活动缓存 + 同步计划）
-                    └── 指令解析器（规则版）／AI Bridge（待接入模型）
+┌─ 后端 ─────────────────────────────────────────────────────────────┐
+│  core/routes.js（框架级）+ 各模块 routes.js                         │
+│         │                                                          │
+│         ▼                                                          │
+│  全局 services  ← 由模块的 createServices 提供                      │
+│         │                                                          │
+│         ▼                                                          │
+│  JsonStore（集合清单由模块的 collections 声明自动注册）              │
+│                                                                    │
+│  指令系统：registerParser（中文→指令对象）+ registerHandler（→落库） │
+│  写操作 → broadcast(data_changed) → 前端防抖 150ms 自动刷新当前视图  │
+└────────────────────────────────────────────────────────────────────┘
 ```
+
+装配流程（`src/server/index.js`，**新增功能不用改这个文件**）：
+
+1. `loadModules()` 扫描 `src/modules/<id>/module.js`，按 `order` 排序
+2. 建 `JsonStore`（框架集合 + 各模块声明的集合）
+3. 逐模块 `createServices`（order 小的先建，后面的模块能拿到前面的服务）
+4. 逐模块 `restore`（listen 之前；单个失败降级继续，不拖垮启动）
+5. 注册框架路由 + 各模块 `registerRoutes`
+6. `listen` 成功后逐模块 `start`；`close` 时**逆序** `stop`
 
 主进程会在同进程内启动后端（端口被占用时自动递增），并通过 IPC 把实际地址与主题令牌交给渲染层；
 渲染层不接触 Node API（`contextIsolation: true`、`nodeIntegration: false`）。
 
 ## 设计要点
+
+> **框架与功能分离**（最重要的一条结构约定）：`src/core` 只认识「模块描述符」，功能全部在
+> `src/modules/<id>/`；后端装配靠目录扫描（新增模块零公共改动），跨模块依赖靠 `order` 表达；
+> 前端导航靠视图注册表 `PCModules`。因此**两个人各加一个功能时不会改到同一个文件**。
+> 详见 [模块开发指南.md](docs/模块开发指南.md)。
 
 1. **双粒度建模**：`Event` 管日期/区间（假期、考试周、截止日），`Schedule` 管时段（上课、会议、自习）；`Schedule.allDay` 退化为日期锚点，等价于待办。
 2. **指令与 AI 同构**：本地规则解析器与未来的大模型产出**同一种指令对象**（`action / target / fields / filters / confidence / warnings`），落库逻辑只写一遍。
@@ -243,6 +276,9 @@ Node.js 后端 ── 路由层 ── 服务层 ── JSON 存储（原子写�
 本模块是更完整的日历 + 日程引擎，并**兼容**它的字段与标记行，因此可作为其日历后端的替代或补充。
 
 ## 待办 / 扩展点
+
+> 下面这些「加一个功能」的活，都按 [模块开发指南.md](docs/模块开发指南.md) 的方式做：
+> 新建 `src/modules/<id>/` + `src/renderer/views/<id>.js`，不用修改 `src/core` 与外壳。
 
 - 接入 AI provider（`aiBridge.registerProvider`）实现自然语言理解；
 - 农历能力（建议接 `lunar-javascript`，不要移植旧查表实现）；
