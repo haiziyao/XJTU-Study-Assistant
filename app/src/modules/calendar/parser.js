@@ -185,11 +185,33 @@ function parseQueryRange(text, now) {
   return { from: undefined, to: undefined, label: '全部', matched: undefined };
 }
 
-function detectTarget(text, { hasTime, action }) {
+/**
+ * 「待办」类措辞。命中这些词时即使没给具体时刻也要判到 schedule：
+ * 待办 = 全天日程（`date` + `allDay` + `status`），而待办视图只读 schedules 集合，
+ * 判成 event 会让用户说了「加待办」却在待办列表里看不到东西。
+ */
+const TODO_HINT_RE = /(待办|任务|清单|todo|作业|提交|截止|deadline|报名|打卡)/i;
+
+/**
+ * 判断指令作用在哪个集合（`event` = 日历事件，`schedule` = 日程/待办）。
+ *
+ * 优先级：明确措辞 > 待办类措辞 > 动作语义 > 有没有时刻。
+ *
+ * 默认分支的取向（2026-10 修订）：**没给具体时刻的单日项一律算待办**（schedule + allDay），
+ * 因为用户嘴里的「明天交实验报告」就是待办，而待办视图只读 schedules 集合。
+ * 只有跨天的日期区间（`10月20日到10月22日 期中考试`）才当日期粒度的事件 ——
+ * 那类东西的语义是「这段时间」，不适合塞进某一天的待办列表。
+ */
+function detectTarget(text, { hasTime, action, hasDateRange = false }) {
   if (/(日历事件|日历|纪念日|假期|节日|节假日|生日)/.test(text)) return 'event';
   if (/(日程|安排|课程|上课|自习|会议|例会|周会|站会|面试|活动)/.test(text)) return 'schedule';
+  if (TODO_HINT_RE.test(text)) return 'schedule';
+  // 「完成」只对日程有意义：日历事件没有完成态，handler 会直接报错。所以动作是完成时
+  // 默认按日程定位（上面已排除「日历事件 / 日历 / 假期 …」这类明确措辞）。
+  if (action === 'complete') return 'schedule';
   if (action === 'query' && /(日历|月历)/.test(text)) return 'event';
-  return hasTime ? 'schedule' : 'event';
+  if (hasTime) return 'schedule';
+  return hasDateRange ? 'event' : 'schedule';
 }
 
 export class CommandParser {
@@ -233,7 +255,13 @@ export class CommandParser {
 
     const timeRange = parseTimeRangeExpr(text);
     if (timeRange?.matched) spans.push(timeRange.matched);
-    const target = detectTarget(text, { hasTime: hasExplicitTime(text), action });
+    // 日期区间只解析一次：既用于判断「跨天 → 日历事件」，也用于 event 分支的字段填充
+    const dateRange = parseDateRange(text, now);
+    const target = detectTarget(text, {
+      hasTime: hasExplicitTime(text),
+      action,
+      hasDateRange: Boolean(dateRange),
+    });
 
     // ---- 查询 / 删除 / 完成：产出条件对象 ----
     if (action === 'query' || action === 'delete' || action === 'complete' || action === 'update') {
@@ -279,7 +307,6 @@ export class CommandParser {
     const fields = { source: 'command' };
 
     if (target === 'event') {
-      const dateRange = parseDateRange(text, now);
       const single = parseDateExpr(text, now);
       if (dateRange) {
         fields.startDate = dateRange.startDate;
@@ -422,8 +449,8 @@ export const COMMAND_GRAMMAR = {
     complete: '完成 / 做完 / 打卡 / 勾选',
   },
   targets: {
-    schedule: '日程 / 安排 / 课程 / 会议（有具体时刻，默认按时刻推断）',
-    event: '日历事件 / 日历 / 纪念日 / 假期 / 生日（按日期或日期区间）',
+    schedule: '日程与待办：有具体时刻 → 时段日程；单日且无时刻 → 全天待办（待办列表只读这个集合）｜「待办 / 任务 / 作业 / 截止」等措辞一律归到这里',
+    event: '日历事件 / 假期 / 生日 / 纪念日，以及跨天的日期区间（如「10月20日到10月22日 期中考试」）',
   },
   dates: ['今天', '明天', '后天', '大后天', '下周三', '周五', '周末', '10月20日', '2025-10-20', '10月20日到10月22日'],
   times: ['15:00', '15:00-16:00', '下午3点', '下午3点半', '晚上7点到8点', '全天', '15:00 起 1 小时'],
