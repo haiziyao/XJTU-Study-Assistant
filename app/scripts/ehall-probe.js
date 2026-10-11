@@ -91,20 +91,34 @@ const APPS = {
 /**
  * 成绩相关动作名。
  *
- * `xscjcx.do` 与 `cxxtcs.do` 是**浏览器 DevTools 实测**拿到的真实动作名（见
- * docs/教务成绩接口调研.md 5.1），不是猜的；其余是历史候选，留着以便上游改版时兜底。
+ * `xscjcx.do` / `cxxtcs.do` 是浏览器 DevTools 实测的真实动作名；
+ * `xscjcx.do` 已用本脚本跑通（19 行真实数据），是成绩查询的**唯一正解**。
  */
 const GRADES_ACTIONS = [
-  'xscjcx.do', // ★ 成绩查询（真实）
-  'cxxtcs.do', // ★ 系统参数 / 字段模型（真实，可用来确定字段名与中文表头）
-  'cxXscj.do',
-  'cxXscjList.do',
-  'cxAllXscj.do',
-  'cxXscjByXnXq.do',
-  'queryXscj.do',
-  'getXscj.do',
-  'cxCj.do',
+  'xscjcx.do', // ★ 成绩查询（真实，已验证）
+  'cxxtcs.do', // 系统参数 / 字段模型
 ];
+
+/**
+ * ★ 应用授权握手 —— 这是**能不能拿到数据的关键**，缺了必然 403。
+ *
+ * 只用 cookie + Referer 直接打 `xscjcx.do` 会稳定 403（应用内的访问过滤器判定），
+ * 必须先把 `_WEU` 这个防伪 token 刷新一遍：
+ *
+ *   1. `GET  /jwapp/sys/<app>/*default/index.do`      建 jwapp 子系统会话，并从页面里取 appId
+ *   2. `GET  /jwapp/sys/funauthapp/api/getAppConfig/<app>-<appId>.do`   ← 授权握手
+ *   3. `POST /jwapp/sys/jwpubapp/modules/bb/cxjwggbbdqx.do`  body `{ SFQY: '1', APP: <appId> }`
+ *      ← 这一步会把 `_WEU` cookie 换掉（实测确认变化）
+ *   4. 之后打模块接口才返回 200
+ *
+ * 这条链路由本地参考实现 `个人教务系统/app.py` 的 `fetch_grades()` 给出（其注释即
+ * 「支撑接口：刷新 _WEU（防伪 token），缺少会 403」），本脚本已逐跳复现。
+ */
+const APP_CONFIG_URL = (app, appId) => `${EHALL}/jwapp/sys/funauthapp/api/getAppConfig/${app}-${appId}.do`;
+const APP_INIT_URL = `${EHALL}/jwapp/sys/jwpubapp/modules/bb/cxjwggbbdqx.do`;
+
+/** 成绩查询的请求体：`XNXQDM: '*'` 表示全部学期。 */
+const GRADES_BODY = { XNXQDM: '*' };
 
 const SESSION_FILE = path.join(os.tmpdir(), 'pc-ehall-probe-session.json');
 const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -330,22 +344,18 @@ rule('2. 应用授权预检（403 还是 200）');
 const preflight = [
   ['homeapp', 'appcenter', 'getAppList.do', EHALL],
   ['kcbcx', 'kcbcx', 'query.do', EHALL],
-  ['cjcx', 'cjcx', 'cxXscj.do', EHALL],
+  ['cjcx', 'cjcx', 'xscjcx.do', EHALL],
 ];
 const verdict = {};
 for (const [appKey, moduleId, action, host] of preflight) {
   const out = await probeJwapp(http, host, appKey, moduleId, action);
   verdict[appKey] = out.state;
   const mark = out.state === 'denied' ? '✗' : out.state === 'ok' ? '★' : '·';
-  console.log(`  ${mark} ${appKey.padEnd(10)} ${String(out.state).padEnd(9)} ${out.text.slice(0, 80)}`);
+  console.log(`  ${mark} ${appKey.padEnd(10)} ${String(out.state).padEnd(9)} ${out.text.slice(0, 76)}`);
 }
-const cjcxDenied = verdict.cjcx === 'denied';
-if (cjcxDenied) {
-  console.log('\n  ⚠ 结论：本账号对 cjcx（成绩查询）返回 403，而 homeapp / kcbcx 正常。');
-  console.log('    这说明**登录与路径都没问题，是该账号没有 cjcx 的数据接口权限**。');
-  console.log('    门户给出的申请入口形如：');
-  console.log(`      ${EHALL}/sys/funauthapp/qxgl.do?min=1&appName=cjcx&appId=${APPS.cjcx.appId}&needFlow=true`);
-  console.log('    处理方式：用这个账号登录门户 → 打开「成绩查询」→ 按提示申请/开通，然后重跑本脚本。');
+if (verdict.cjcx === 'denied') {
+  console.log('\n  注：未做握手的裸请求若对 cjcx 返回 403 属**预期**（见第 4 步的授权握手）。');
+  console.log('  务必看第 4 步的结果 —— 握手之后应当变成 200。');
 }
 
 rule('3. 账号可用的应用（门户 myAppService.json）');
@@ -364,10 +374,23 @@ try {
   line('读取失败', error.message);
 }
 
-rule('4. 逐个尝试成绩接口动作');
+rule('4. 授权握手 + 成绩查询');
+console.log('  步骤：应用页 → getAppConfig（授权握手）→ cxjwggbbdqx（刷新 _WEU）→ xscjcx.do');
+const page = await http.get(`${EHALL}/jwapp/sys/cjcx/*default/index.do`, { follow: true });
+const appId = (/"appId"\s*:\s*"(\d+)"/.exec(page.text) ?? [])[1] ?? APPS.cjcx.appId;
+line('  应用页', `status=${page.status} appId=${appId}`);
+
+const weuOf = () => http.jar.toJSON().find((c) => c.name === '_WEU')?.value ?? '';
+const before = weuOf();
+const cfgRes = await http.get(APP_CONFIG_URL('cjcx', appId), { follow: true });
+line('  getAppConfig', `status=${cfgRes.status} ${cfgRes.text.replace(/\s+/g, ' ').slice(0, 90)}`);
+const initRes = await http.postForm(APP_INIT_URL, { SFQY: '1', APP: appId }, { follow: true });
+line('  cxjwggbbdqx', `status=${initRes.status} ${initRes.text.replace(/\s+/g, ' ').slice(0, 90)}`);
+line('  _WEU 是否刷新', before !== weuOf() ? '是 ✓（这正是之前 403 的原因）' : '否（可能已是最新）');
+
 let hits = 0;
 for (const action of GRADES_ACTIONS) {
-  const out = await probeJwapp(http, EHALL, 'cjcx', 'cjcx', action);
+  const out = await probeJwapp(http, EHALL, 'cjcx', 'cjcx', action, action === 'xscjcx.do' ? GRADES_BODY : {});
   const mark = out.state === 'ok' ? '★' : out.state === 'denied' ? '✗' : '·';
   console.log(`  ${mark} ${action.padEnd(20)} ${out.text.slice(0, 90)}`);
   if (out.state !== 'ok') continue;
@@ -383,10 +406,11 @@ for (const action of GRADES_ACTIONS) {
 
 rule('5. 结论');
 if (hits) {
-  console.log(`命中 ${hits} 个可用动作。下一步：把动作名与字段名填进 modules/academic/config.js 的 EHALL_PATHS / FIELD_ALIASES。`);
-} else if (cjcxDenied) {
-  console.log('未命中，且已确认原因是 cjcx 应用未授权（见第 2 步）—— 不是路径问题，先把权限开通再重跑。');
+  console.log(`命中 ${hits} 个可用动作 —— 授权握手有效，成绩接口已打通。`);
+  console.log('字段映射见 docs/教务成绩接口调研.md 第 6 节（含真实字段名与含义）。');
 } else {
-  console.log('未命中。cjcx 未被拒绝，说明是动作名不对：');
-  console.log('  在浏览器登录教务 → 打开成绩查询 → F12 Network 里找 .do 请求，把动作名加进 GRADES_ACTIONS。');
+  console.log('未命中。请依次检查：');
+  console.log('  1) 第 4 步的 getAppConfig / cxjwggbbdqx 是否 200（握手失败必然 403）；');
+  console.log('  2) _WEU 是否被刷新（没变就说明握手没生效）；');
+  console.log('  3) 账号是否在本机能用浏览器看到成绩（用于区分账号问题与客户端问题）。');
 }
