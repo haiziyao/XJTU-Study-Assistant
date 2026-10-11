@@ -13,6 +13,7 @@ import { AcademicService } from './service.js';
 import { AcademicParser } from './parser.js';
 import { createAcademicCommands } from './commands.js';
 import { registerAcademicRoutes } from './routes.js';
+import { resolveAcademicConfig } from './config.js';
 
 /**
  * 给对话模型看的领域说明。
@@ -62,12 +63,30 @@ export default defineModule({
   ],
 
   createServices({ store, broadcast, services, dataDir, options }) {
+    const auth = services.auth;
+    if (!auth) {
+      throw new Error('academic 需要 auth 模块（order=5）先装配，请检查 src/modules/auth/module.js 是否存在');
+    }
+    const config = resolveAcademicConfig(options ?? {});
+    // 登记教务为一个需要认证的站点：之后 auth 会用共享罐里的 CAS 票据替它完成
+    // OAuth2 四跳认证 —— 只要用户在设置页登录过一次（哪怕是从学堂那个入口登的）。
+    auth.registerSite({
+      id: 'academic',
+      label: '学业情况',
+      loginUrl: config.loginUrl,
+      casOrigin: config.casOrigin,
+      timeoutMs: config.timeoutMs,
+    });
+    // 认领旧版会话文件：本模块已切到共享认证，下次启动把 academic-session.json 并进共享罐后删除。
+    auth.adoptLegacySession('academic-session.json');
+
     const academic = new AcademicService({
       store,
       broadcast,
       services,
       config: options ?? {},
       dataDir,
+      auth,
     });
 
     // 登记对话能力：登记之后 /commands/parse|execute|run 就能操作 grade，

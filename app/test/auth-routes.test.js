@@ -254,7 +254,7 @@ test('auth HTTP：没有注册任何站点时，验证码端点给出明确失�
 
 /* ------------------------------------------------------------------ 与真实装配的集成 */
 
-test('auth HTTP：★ 全量装配时 lms 会把自己的站点注册进来，且 auth 排在最前', async () => {
+test('auth HTTP：★ 全量装配时 lms 与 academic 都注册了自己的站点，且 auth 排在最前', async () => {
   const mock = await startMockSso();
   const dataDir = await mkdtemp(path.join(tmpdir(), 'potato-auth-full-'));
   const app = await createServer({ dataDir, auth: { casOrigin: mock.origin } });
@@ -264,8 +264,16 @@ test('auth HTTP：★ 全量装配时 lms 会把自己的站点注册进来，�
     assert.equal(listed.items[0].id, 'auth', 'auth 必须排在所有业务模块之前');
     assert.equal(listed.items[0].order, 5);
 
-    const sites = app.services.auth.status().sites.map((site) => site.id);
-    assert.ok(sites.includes('lms'), `lms 应当注册了自己的站点，实际：${sites.join(', ')}`);
+    const status = app.services.auth.status();
+    const ids = status.sites.map((site) => site.id);
+    assert.ok(ids.includes('lms'), `lms 应当注册了自己的站点，实际：${ids.join(', ')}`);
+    assert.ok(ids.includes('academic'), `academic 应当注册了自己的站点，实际：${ids.join(', ')}`);
+
+    // 两个站点都带可读标签与各自的登录入口 —— 设置卡要逐站点显示
+    for (const site of status.sites) {
+      assert.ok(site.label, `站点 ${site.id} 应有标签`);
+      assert.equal(site.ready, false, '尚未登录时都不该是就绪');
+    }
   } finally {
     await app.close();
     await mock.close();

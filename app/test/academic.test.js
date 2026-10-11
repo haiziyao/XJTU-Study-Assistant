@@ -424,17 +424,26 @@ test('academic：未登录时同步直接抛 401，不发请求', async () => {
 test('academic：会话落盘后重启，restore 不会崩（会话失配时安静降级）', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'potato-academic-session-'));
   const first = await loggedIn({ dataDir: dir });
-  // 票据文件确实写下来了，且是 0600（Windows 只认只读位，跳过权限断言）
-  const sessionPath = path.join(dir, 'academic-session.json');
-  const session = JSON.parse(await readFile(sessionPath, 'utf8'));
-  assert.ok(session.cookies.length > 0, '会话票据应落盘');
-  assert.ok(session.cookies.every((cookie) => typeof cookie.name === 'string'));
-  if (process.platform !== 'win32') {
-    const info = await stat(sessionPath);
-    assert.equal(info.mode & 0o777, 0o600, '会话票据必须是 0600');
+  // 注意 finally：断言失败也必须把 app 与 mock 关掉。
+  // 之前这里在 close 之前断言，一旦失败就漏掉一个仍在监听的 mock，
+  // 整个测试进程因为句柄没释放而**永远不退出**（表现为"卡住"，很难查）。
+  try {
+    // 票据现在由全局认证统一落盘（auth-session.json），不再有 academic-session.json ——
+    // 这正是"登录收敛到一处"的直接体现。
+    const sessionPath = path.join(dir, 'auth-session.json');
+    const session = JSON.parse(await readFile(sessionPath, 'utf8'));
+    assert.ok(session.cookies.length > 0, '会话票据应落盘');
+    assert.ok(session.cookies.every((cookie) => typeof cookie.name === 'string'));
+    assert.ok(session.sites?.academic?.lastOkAt, '应记录教务站点的就绪时间');
+    if (process.platform !== 'win32') {
+      const info = await stat(sessionPath);
+      assert.equal(info.mode & 0o777, 0o600, '会话票据必须是 0600');
+    }
+    await assert.rejects(() => stat(path.join(dir, 'academic-session.json')), '旧会话文件不该再产生');
+  } finally {
+    await first.app.close();
+    await first.mock.close();
   }
-  await first.app.close();
-  await first.mock.close();
 
   // 换一个 mock（端口不同 → 旧票据对它无效）重建服务，restore 应安静降级而不是抛
   const mock2 = await startMockEhall();

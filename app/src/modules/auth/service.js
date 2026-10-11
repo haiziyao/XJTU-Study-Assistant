@@ -390,8 +390,16 @@ export class AuthService {
   /**
    * 密码登录成功之后：记住用户名、落盘、广播，并**尽力为其余站点做 SSO**。
    *
-   * 「尽力」是刻意的：某个站点连不上不该让已经成功的登录变成失败 ——
-   * 它是独立部署时就可能连不通，用户至少有一个站点可用。
+   * 两条刻意的约束：
+   *
+   * 1. **只对同一个 CAS 源下的站点做 SSO。** 这不是省事，而是 SSO 的前提：
+   *    免密之所以成立，就是因为两个站点共用 `login.xjtu.edu.cn` 上的那个 TGC。
+   *    站点如果配了别的 CAS 源（测试里的 mock 就是各自一个），本来就不可能免密，
+   *    试它只会白等一次网络超时 —— 曾经因此在测试里打到真实的 lms.xjtu.edu.cn 上，
+   *    整个用例集卡住不动。
+   *
+   * 2. **并行且不致命**：某个站点连不上不该让已经成功的登录变成失败，
+   *    也不该让另一个慢站点把登录响应拖住。
    */
   async #afterPasswordLogin(site, username) {
     this.state.status = 'ready';
@@ -401,16 +409,19 @@ export class AuthService {
     this.state.pendingSite = null;
     if (username) this.state.username = username;
 
-    const others = [];
-    for (const candidate of this.sites.values()) {
-      if (candidate.id === site.id) continue;
-      try {
-        const outcome = await this.ensure(candidate.id, { revalidate: true });
-        others.push({ id: candidate.id, ok: outcome.ok, reason: outcome.reason ?? null });
-      } catch (error) {
-        others.push({ id: candidate.id, ok: false, reason: error.message });
-      }
-    }
+    const sameCas = (candidate) =>
+      candidate.id !== site.id && candidate.config.casOrigin === site.config.casOrigin;
+
+    const others = await Promise.all(
+      [...this.sites.values()].filter(sameCas).map(async (candidate) => {
+        try {
+          const outcome = await this.ensure(candidate.id, { revalidate: true });
+          return { id: candidate.id, ok: outcome.ok, reason: outcome.reason ?? null };
+        } catch (error) {
+          return { id: candidate.id, ok: false, reason: error.message };
+        }
+      }),
+    );
 
     await this.#persist();
     this.#emit({ type: 'login', siteId: site.id });
