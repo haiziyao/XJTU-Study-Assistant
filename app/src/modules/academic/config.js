@@ -9,8 +9,19 @@
  * 参考实现 `个人教务系统/app.py` 的握手序列）。
  */
 
+import { LMS_DEFAULTS } from '../lms/config.js';
+
 /** 教务系统基址。 */
 export const EHALL_BASE = 'https://ehall.xjtu.edu.cn';
+
+/**
+ * 统一身份认证的两项参数**直接复用思源学堂模块的默认值**。
+ *
+ * 教务与学堂用的是同一个 CAS（`login.xjtu.edu.cn`），而且服务端对默认 User-Agent
+ * 会直接拒绝，所以这里不另立一套 —— 两边保持一致，将来要改也只改一处。
+ */
+export const CAS_ORIGIN = LMS_DEFAULTS.casOrigin;
+export const USER_AGENT = LMS_DEFAULTS.userAgent;
 
 /**
  * 登录入口。
@@ -162,6 +173,8 @@ export function resolveAcademicConfig(options = {}) {
   return {
     baseUrl: source.baseUrl ?? EHALL_BASE,
     loginUrl: source.loginUrl ?? LOGIN_URL,
+    casOrigin: source.casOrigin ?? CAS_ORIGIN,
+    userAgent: source.userAgent ?? USER_AGENT,
     app: { ...APP, ...(isPlainObject(source.app) ? source.app : {}) },
     gradeBody: { ...GRADE_BODY, ...(isPlainObject(source.gradeBody) ? source.gradeBody : {}) },
     gradeRowsPath: source.gradeRowsPath ?? GRADE_ROWS_PATH,
