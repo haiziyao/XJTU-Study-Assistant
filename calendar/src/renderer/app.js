@@ -15,16 +15,18 @@
   const U = window.PCUtil;
   const V = window.PCViews;
 
+  // 打磨点：左栏图标由彩色 emoji 换为内联 SVG（名称见 views.js 的 PCUtil.icons）
   const NAV = [
-    { view: 'calendar', label: '日历', icon: '🗓' },
-    { view: 'todo', label: '待办', icon: '☑' },
-    { view: 'lms', label: '思源学堂', icon: '🎓' },
-    { view: 'study', label: '学情', icon: '📈' },
-    { view: 'photo', label: '拍题', icon: '📷' },
-    { view: 'course', label: '网课', icon: '▶' },
-    { view: 'message', label: '消息', icon: '✉' },
+    { view: 'calendar', label: '日历', icon: 'calendar' },
+    { view: 'todo', label: '待办', icon: 'checkSquare' },
+    { view: 'lms', label: '思源学堂', icon: 'cap' },
+    { view: 'timetable', label: '课表', icon: 'grid' },
+    { view: 'study', label: '学情', icon: 'chart' },
+    { view: 'photo', label: '拍题', icon: 'camera' },
+    { view: 'course', label: '网课', icon: 'play' },
+    { view: 'message', label: '消息', icon: 'mail' },
   ];
-  const NAV_BOTTOM = [{ view: 'settings', label: '设置', icon: '⚙' }];
+  const NAV_BOTTOM = [{ view: 'settings', label: '设置', icon: 'gear' }];
 
   const EXAMPLES = [
     '添加日程 明天 15:00-16:00 项目周会 提前10分钟提醒',
@@ -82,6 +84,7 @@
     calendar: V.calendar,
     todo: V.todo,
     lms: V.lms,
+    timetable: V.timetable,
     message: V.message,
     settings: V.settings,
     study: V.placeholder('学情', '学情分析由 AI 智学主程序汇总，本模块只提供日历与日程的原始数据。', [
@@ -148,7 +151,11 @@
     const button = mk('button', `nav-item${state.view === item.view ? ' active' : ''}`);
     button.type = 'button';
     button.dataset.view = item.view;
-    button.append(mk('span', 'nav-icon', item.icon), mk('span', 'nav-label', item.label));
+    // 打磨点：常量图标名 -> 内联 SVG（innerHTML 只渲染图标字符串，不含用户数据）
+    const icon = mk('span', 'nav-icon');
+    icon.setAttribute('aria-hidden', 'true');
+    icon.innerHTML = U.icon(item.icon, 20);
+    button.append(icon, mk('span', 'nav-label', item.label));
     button.addEventListener('click', () => selectView(item.view));
     return button;
   }
@@ -175,7 +182,7 @@
   function togglePanel() {
     state.panelCollapsed = !state.panelCollapsed;
     document.body.classList.toggle('panel-collapsed', state.panelCollapsed);
-    dom.panelToggle.textContent = state.panelCollapsed ? '⟨' : '⟩';
+    // 打磨点：按钮内是 SVG，方向由 CSS（body.panel-collapsed 旋转 180°）表达
     dom.panelToggle.title = state.panelCollapsed ? '展开右侧视图' : '收起右侧视图';
     if (state.panelCollapsed && state.view === 'calendar' && state.calendar.mode === 'week') {
       state.calendar.mode = 'month';

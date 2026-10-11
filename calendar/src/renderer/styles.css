@@ -6,13 +6,14 @@
  */
 
 :root {
-  --bg-base: #1b1b1f;
-  --bg-surface: #232327;
-  --bg-elevated: #282828;
-  --bg-hover: #2f2f34;
-  --fg: #f2f2f5;
-  --fg-2: #b6b6bf;
-  --fg-3: #7a7a85;
+  /* 颜色令牌：与 src/shared/theme.js 保持同步（无后端时的兜底；运行时会被 /meta/theme 覆盖） */
+  --bg-base: #151519;
+  --bg-surface: #1e1e24;
+  --bg-elevated: #26262d;
+  --bg-hover: #2c2c35;
+  --fg: #f4f4f7;
+  --fg-2: #b9b9c4;
+  --fg-3: #83838f;
   --line: rgba(255, 255, 255, 0.08);
   --blue: #6c8cff;
   --red: #ff6b7a;
@@ -21,11 +22,30 @@
   --purple: #c792ea;
   --sidebar-w: clamp(80px, 10%, 128px);
   --panel-w: min(56%, 780px);
-  --radius: 10px;
+  /* 打磨点：新增设计令牌（仅样式层使用，不进 theme.js） */
+  --radius-sm: 8px; /* 小控件：按钮、输入框、tag */
+  --radius: 12px; /* 卡片（原 10px，统一到 12px） */
+  --radius-lg: 16px; /* 弹层、大卡片 */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 1px 1px rgba(0, 0, 0, 0.2); /* 卡片 */
+  --shadow-2: 0 10px 30px rgba(0, 0, 0, 0.5); /* 弹层/浮起 */
+  --ring: rgba(108, 140, 255, 0.55); /* 焦点环 */
+  --t: 0.16s ease; /* 统一过渡时长 */
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* 打磨点：键盘焦点可见（鼠标点击不触发，不影响观感） */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: inherit;
+}
+
+/* 打磨点：选中文字统一强调色 */
+::selection {
+  background: rgba(108, 140, 255, 0.32);
 }
 
 html,
@@ -55,18 +75,27 @@ select,
 textarea {
   font: inherit;
   color: var(--fg);
-  background: var(--bg-base);
+  /* 打磨点：输入控件统一圆角/内边距/底色，并保留键盘焦点 */
+  background: rgba(0, 0, 0, 0.22);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 6px 8px;
-  outline: none;
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
   min-width: 0;
+  transition: background var(--t), border-color var(--t), box-shadow var(--t);
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.16);
 }
 
 input:focus,
 select:focus,
 textarea:focus {
   border-color: var(--blue);
+  /* 打磨点：用软焦点环替代被抹掉的 outline，键盘可达性由 :focus-visible 兜底 */
+  box-shadow: 0 0 0 3px rgba(108, 140, 255, 0.16);
 }
 
 input:disabled,
@@ -76,14 +105,22 @@ textarea:disabled {
   cursor: not-allowed;
 }
 
+/* 打磨点：滚动条改为「悬浮细条」，轨道保持透明 */
 ::-webkit-scrollbar {
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
-  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.16);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.26);
+  background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-track {
@@ -131,14 +168,8 @@ body.panel-collapsed .panel {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  padding: 6px 0 12px;
+  padding: 12px 0;
   color: var(--fg-2);
-}
-
-.brand-logo {
-  font-size: 20px;
-  line-height: 1;
 }
 
 .brand-name {
@@ -165,13 +196,14 @@ body.panel-collapsed .panel {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
-  padding: 9px 4px;
+  /* 打磨点：内边距/间距微调（9+3 -> 8+4），总高度不变 */
+  gap: 4px;
+  padding: 8px 4px;
   border: 1px solid transparent;
   border-radius: var(--radius);
   background: transparent;
   color: var(--fg-2);
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--t), color var(--t), border-color var(--t);
 }
 
 .nav-item:hover {
@@ -180,19 +212,35 @@ body.panel-collapsed .panel {
 }
 
 .nav-item.active {
-  background: var(--bg-elevated);
+  /* 打磨点：左侧高亮条改为 2px，底色加一层淡蓝渐变（仍保留高程底色） */
+  background: linear-gradient(90deg, rgba(108, 140, 255, 0.14), transparent 70%), var(--bg-elevated);
   border-color: var(--line);
   color: var(--fg);
-  box-shadow: inset 3px 0 0 var(--blue);
+  box-shadow: inset 2px 0 0 var(--blue);
 }
 
+/* 打磨点：emoji 换成内联 SVG 后的统一尺寸与对齐 */
 .nav-icon {
-  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
   line-height: 1;
+}
+
+.nav-icon svg {
+  display: block;
 }
 
 .nav-label {
   font-size: 11px;
+  /* 打磨点：正文标签用次要色，active 时提到主色 */
+  color: var(--fg-2);
+}
+
+.nav-item.active .nav-label {
+  color: var(--fg);
 }
 
 /* ------------------------------------------------------------- 中：对话 */
@@ -266,16 +314,32 @@ body.panel-collapsed .panel {
 .panel-toggle {
   width: 26px;
   height: 26px;
-  border-radius: 7px;
+  /* 打磨点：保持方形尺寸，只统一圆角/配色/线性过渡 */
+  border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: var(--bg-elevated);
   color: var(--fg-2);
   line-height: 1;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--t), color var(--t), border-color var(--t);
 }
 
 .panel-toggle:hover {
   background: var(--bg-hover);
   color: var(--fg);
+}
+
+/* 打磨点：收起/展开方向由整体旋转表达，不再切换字符 */
+.panel-toggle svg {
+  display: block;
+  transition: transform var(--t);
+}
+
+body.panel-collapsed .panel-toggle svg {
+  transform: rotate(180deg);
 }
 
 .chat-log {
@@ -293,7 +357,8 @@ body.panel-collapsed .panel {
   flex-direction: column;
   gap: 6px;
   max-width: 92%;
-  padding: 9px 12px;
+  /* 打磨点：气泡内边距微调，行内更紧凑 */
+  padding: 10px 13px;
   border-radius: 12px;
   background: var(--bg-surface);
   border: 1px solid var(--line);
@@ -302,7 +367,8 @@ body.panel-collapsed .panel {
 
 .bubble.user {
   align-self: flex-end;
-  background: rgba(108, 140, 255, 0.16);
+  /* 打磨点：蓝底透明度 .16 -> .14，降低对比噪音 */
+  background: rgba(108, 140, 255, 0.14);
   border-color: rgba(108, 140, 255, 0.35);
 }
 
@@ -348,6 +414,7 @@ body.panel-collapsed .panel {
   background: var(--bg-base);
   color: var(--fg-2);
   text-align: left;
+  transition: background var(--t), border-color var(--t), color var(--t);
 }
 
 .chip-btn:hover {
@@ -362,6 +429,8 @@ body.panel-collapsed .panel {
   border-radius: var(--radius);
   background: var(--bg-surface);
   border: 1px solid var(--line);
+  /* 打磨点：卡片层级阴影 */
+  box-shadow: var(--shadow-1);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -409,6 +478,7 @@ body.panel-collapsed .panel {
   color: var(--fg-3);
 }
 
+/* 打磨点：键值列语义确认（键弱、值强） */
 .cc-val {
   color: var(--fg);
 }
@@ -460,6 +530,13 @@ body.panel-collapsed .panel {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+/* 打磨点：确认/取消两个按钮统一到 28px 高，视觉成对 */
+.cc-actions .primary-btn,
+.cc-actions .ghost-btn,
+.cc-actions .danger-btn {
+  min-height: 28px;
 }
 
 .cc-note {
@@ -575,10 +652,11 @@ body.panel-collapsed .panel {
 
 .seg {
   display: flex;
-  padding: 2px;
+  /* 打磨点：分段控件改为胶囊底槽 */
+  padding: 3px;
   gap: 2px;
-  border-radius: 9px;
-  background: var(--bg-elevated);
+  border-radius: 999px;
+  background: var(--bg-base);
   border: 1px solid var(--line);
   flex: none;
 }
@@ -588,8 +666,9 @@ body.panel-collapsed .panel {
   background: transparent;
   color: var(--fg-2);
   padding: 4px 11px;
-  border-radius: 7px;
+  border-radius: 999px;
   font-size: 12px;
+  transition: background var(--t), color var(--t), box-shadow var(--t);
 }
 
 .seg-btn:hover:not(:disabled) {
@@ -597,9 +676,16 @@ body.panel-collapsed .panel {
   color: var(--fg);
 }
 
+/* 打磨点：选中态用高程底色 + 阴影，替代原来的实心蓝 */
 .seg-btn.active {
-  background: var(--blue);
-  color: #fff;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  box-shadow: var(--shadow-1);
+}
+
+.seg-btn.active:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
 }
 
 .seg-btn:disabled {
@@ -614,15 +700,19 @@ body.panel-collapsed .panel {
   flex: none;
 }
 
+/* 打磨点：按钮体系统一（尺寸/圆角/字号/过渡） */
 .primary-btn,
 .ghost-btn,
 .danger-btn {
-  padding: 6px 12px;
-  border-radius: 8px;
+  min-height: 28px;
+  padding: 5px 11px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: var(--bg-elevated);
   color: var(--fg);
+  font-size: 12px;
   white-space: nowrap;
+  transition: background var(--t), border-color var(--t), color var(--t), filter var(--t);
 }
 
 .primary-btn {
@@ -640,8 +730,22 @@ body.panel-collapsed .panel {
   cursor: default;
 }
 
+/* 打磨点：补上 ghost-btn 缺失的基础样式（透明底 + 细边框 + 次要色文字） */
+.ghost-btn {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--fg-2);
+}
+
 .ghost-btn:hover {
   background: var(--bg-hover);
+  color: var(--fg);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.ghost-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .danger-btn {
@@ -654,14 +758,24 @@ body.panel-collapsed .panel {
 }
 
 .icon-btn {
+  /* 打磨点：方形尺寸不变，只统一圆角与过渡 */
   width: 26px;
   height: 26px;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: transparent;
   color: var(--fg-3);
   line-height: 1;
   flex: none;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--t), color var(--t), border-color var(--t);
+}
+
+.icon-btn svg {
+  display: block;
 }
 
 .icon-btn:hover {
@@ -675,14 +789,16 @@ body.panel-collapsed .panel {
 
 .loading,
 .empty-box {
-  padding: 24px 12px;
+  /* 打磨点：空态统一内边距 */
+  padding: 18px;
   text-align: center;
   color: var(--fg-3);
 }
 
 .error-box {
   margin: 12px 0;
-  padding: 12px;
+  /* 打磨点：错误态对齐空态（实线边框 + 统一圆角/内边距） */
+  padding: 18px;
   border-radius: var(--radius);
   border: 1px solid rgba(255, 107, 122, 0.4);
   background: rgba(255, 107, 122, 0.08);
@@ -705,8 +821,10 @@ body.panel-collapsed .panel {
 
 .section-title {
   margin-top: 4px;
-  font-size: 11px;
-  letter-spacing: 1px;
+  /* 打磨点：区块标题与 .card-title 统一字重/字号/字距 */
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.2px;
   color: var(--fg-3);
 }
 
@@ -778,12 +896,16 @@ body.panel-collapsed .panel {
   min-height: 0;
   padding: 5px 6px;
   background: var(--bg-surface);
+  border: 1px solid transparent; /* 打磨点：悬停描边占位，不改变布局 */
   overflow: hidden;
   cursor: pointer;
+  transition: background var(--t), border-color var(--t);
 }
 
 .cell:hover {
   background: var(--bg-hover);
+  /* 打磨点：悬停给一条细描边，格子边界更清楚 */
+  border-color: rgba(255, 255, 255, 0.14);
 }
 
 .cell.outside {
@@ -808,18 +930,22 @@ body.panel-collapsed .panel {
   height: 20px;
   line-height: 20px;
   text-align: center;
-  border-radius: 6px;
+  border-radius: 999px; /* 打磨点：与今日胶囊一致 */
+  font-variant-numeric: tabular-nums; /* 打磨点：等宽数字，换月不跳动 */
 }
 
+/* 打磨点：今天改为实心圆角胶囊（蓝底白字） */
 .cell.today .dnum {
   background: var(--blue);
   color: #fff;
   font-weight: 600;
+  padding: 1px 7px;
 }
 
 .dstat {
   font-size: 10px;
   color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
 }
 
 .cell-list {
@@ -834,8 +960,9 @@ body.panel-collapsed .panel {
   align-items: center;
   gap: 4px;
   font-size: 11px;
-  padding: 1px 5px;
-  border-radius: 5px;
+  /* 打磨点：条目高度/圆角/左侧色条统一 */
+  padding: 2px 6px;
+  border-radius: 6px;
   border-left: 3px solid var(--cat, var(--fg-3));
   background: rgba(255, 255, 255, 0.05);
   white-space: nowrap;
@@ -846,8 +973,10 @@ body.panel-collapsed .panel {
   background: rgba(255, 255, 255, 0.1);
 }
 
+/* 打磨点：已完成用降饱和度绿，和「待办」状态区分更明确 */
 .chip.done {
-  opacity: 0.5;
+  opacity: 0.55;
+  color: var(--green);
   text-decoration: line-through;
 }
 
@@ -859,6 +988,7 @@ body.panel-collapsed .panel {
 .c-time {
   color: var(--fg-3);
   flex: none;
+  font-variant-numeric: tabular-nums; /* 打磨点：等宽数字 */
 }
 
 .c-title {
@@ -866,10 +996,16 @@ body.panel-collapsed .panel {
   text-overflow: ellipsis;
 }
 
+/* 打磨点：+N 悬停变亮，暗示可展开 */
 .more {
   font-size: 10px;
   color: var(--fg-3);
   padding-left: 4px;
+  transition: color var(--t);
+}
+
+.more:hover {
+  color: var(--fg);
 }
 
 .cell-add {
@@ -883,7 +1019,7 @@ body.panel-collapsed .panel {
   background: var(--bg-elevated);
   color: var(--fg-2);
   opacity: 0;
-  transition: opacity 0.15s;
+  transition: opacity var(--t), background var(--t), color var(--t), border-color var(--t);
   line-height: 1;
 }
 
@@ -1014,18 +1150,22 @@ body.panel-collapsed .panel {
   right: 2px;
   top: 0;
   padding: 3px 5px;
-  border-radius: 6px;
+  /* 打磨点：时段块圆角 8px + 层级阴影，hover 用 brightness 提亮 */
+  border-radius: 8px;
   border-left: 3px solid var(--cat, var(--fg-3));
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04));
+  box-shadow: var(--shadow-1);
   overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 1px;
   cursor: pointer;
+  transition: filter var(--t), box-shadow var(--t);
 }
 
 .block:hover {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.08));
+  filter: brightness(1.06);
 }
 
 .block.done {
@@ -1038,6 +1178,8 @@ body.panel-collapsed .panel {
 }
 
 .b-title {
+  /* 打磨点：块标题加重，扫读更快 */
+  font-weight: 600;
   font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
@@ -1047,6 +1189,7 @@ body.panel-collapsed .panel {
 .b-time {
   font-size: 10px;
   color: var(--fg-3);
+  font-variant-numeric: tabular-nums; /* 打磨点：等宽数字 */
 }
 
 /* ------------------------------------------------------------- 日视图 */
@@ -1073,11 +1216,13 @@ body.panel-collapsed .panel {
   display: flex;
   align-items: baseline;
   gap: 4px;
-  padding: 3px 9px;
+  /* 打磨点：徽标体系统一（11px / 2px 8px / 全圆角） */
+  padding: 2px 8px;
   border-radius: 999px;
   background: var(--bg-elevated);
   border: 1px solid var(--line);
   font-size: 11px;
+  line-height: 1.6;
   color: var(--fg-3);
 }
 
@@ -1085,6 +1230,7 @@ body.panel-collapsed .panel {
   font-size: 13px;
   font-weight: 600;
   color: var(--fg);
+  font-variant-numeric: tabular-nums; /* 打磨点：等宽数字 */
 }
 
 .rows {
@@ -1119,11 +1265,13 @@ body.panel-collapsed .panel {
   flex-direction: column;
   font-size: 11px;
   color: var(--fg-3);
+  font-variant-numeric: tabular-nums; /* 打磨点：等宽数字 */
 }
 
 .ri-time b {
   font-size: 12px;
   color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
 }
 
 .ri-main {
@@ -1136,9 +1284,11 @@ body.panel-collapsed .panel {
   white-space: nowrap;
 }
 
+/* 打磨点：正文小字从 --fg-3 提到 --fg-2，避免发灰看不清 */
 .ri-meta {
   font-size: 11px;
-  color: var(--fg-3);
+  color: var(--fg-2);
+  opacity: 0.85;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1195,6 +1345,7 @@ body.panel-collapsed .panel {
 .gh-date {
   font-weight: 600;
   font-size: 12px;
+  font-variant-numeric: tabular-nums; /* 打磨点：等宽数字 */
 }
 
 .gh-rel {
@@ -1221,18 +1372,27 @@ body.panel-collapsed .panel {
   border-radius: var(--radius);
   background: var(--bg-surface);
   border: 1px solid var(--line);
+  /* 打磨点：优先级色只在此处按语义赋值，避免整条左边框拉满噪音 */
+  --dot: var(--fg-3);
+  transition: background var(--t), border-color var(--t);
+}
+
+.todo-row:hover {
+  border-color: rgba(255, 255, 255, 0.14);
 }
 
 .todo-row.priority-2 {
-  border-left: 4px solid var(--red);
+  --dot: var(--red);
+  /* 打磨点：只有紧急项保留左边框，且降透明度 */
+  border-left: 3px solid rgba(255, 107, 122, 0.75);
 }
 
 .todo-row.priority-1 {
-  border-left: 4px solid var(--orange);
+  --dot: var(--orange);
 }
 
 .todo-row.priority-0 {
-  border-left: 4px solid var(--fg-3);
+  --dot: var(--fg-3);
 }
 
 .todo-row.done {
@@ -1257,15 +1417,22 @@ body.panel-collapsed .panel {
   font-size: 12px;
   line-height: 1;
   padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--t), border-color var(--t), color var(--t);
 }
 
 .check:hover {
   border-color: var(--green);
 }
 
+/* 打磨点：勾选态改为 --green 实心 + 白色对勾 */
 .todo-row.done .check {
-  background: rgba(92, 219, 139, 0.16);
-  border-color: rgba(92, 219, 139, 0.5);
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+  font-weight: 700;
 }
 
 .tr-main {
@@ -1279,21 +1446,36 @@ body.panel-collapsed .panel {
   overflow: hidden;
 }
 
+/* 打磨点：优先级用小圆点表达（DOM 不变，用伪元素画点） */
+.tr-title::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dot);
+}
+
 .tr-title > span:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* 打磨点：正文小字从 --fg-3 提到 --fg-2 */
 .tr-meta {
   font-size: 11px;
-  color: var(--fg-3);
+  color: var(--fg-2);
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
 }
 
 .tag {
-  font-size: 10px;
-  padding: 0 5px;
+  /* 打磨点：标签/徽标统一 11px / 2px 8px / 全圆角 */
+  font-size: 11px;
+  padding: 2px 8px;
   border-radius: 999px;
+  line-height: 1.6;
   border: 1px solid var(--line);
   flex: none;
 }
@@ -1381,16 +1563,19 @@ body.panel-collapsed .panel {
 
 .lr-time {
   margin-left: auto;
+  font-variant-numeric: tabular-nums; /* 打磨点：等宽数字 */
 }
 
 .lr-text {
   margin-top: 3px;
 }
 
+/* 打磨点：正文小字从 --fg-3 提到 --fg-2 */
 .lr-meta {
   margin-top: 2px;
   font-size: 11px;
-  color: var(--fg-3);
+  color: var(--fg-2);
+  opacity: 0.85;
 }
 
 .settings {
@@ -1400,15 +1585,20 @@ body.panel-collapsed .panel {
 }
 
 .card {
-  padding: 12px;
+  /* 打磨点：卡片内边距统一 14px 16px + 层级阴影 */
+  padding: 14px 16px;
   border-radius: var(--radius);
   background: var(--bg-surface);
   border: 1px solid var(--line);
+  box-shadow: var(--shadow-1);
 }
 
 .card-title {
+  /* 打磨点：卡片标题统一字重/字号/字距，与卡体留 10px 呼吸 */
   font-weight: 600;
-  margin-bottom: 8px;
+  font-size: 13px;
+  letter-spacing: 0.2px;
+  margin-bottom: 10px;
 }
 
 .card-body {
@@ -1429,6 +1619,7 @@ body.panel-collapsed .panel {
 
 .kv-val {
   word-break: break-all;
+  font-variant-numeric: tabular-nums; /* 打磨点：等宽数字 */
 }
 
 .swatches {
@@ -1464,15 +1655,26 @@ body.panel-collapsed .panel {
 .placeholder {
   margin: 24px auto;
   max-width: 520px;
-  padding: 24px;
+  /* 打磨点：空态/占位统一内边距与阴影 */
+  padding: 18px;
   text-align: center;
   border-radius: var(--radius);
   background: var(--bg-surface);
   border: 1px dashed var(--line);
+  box-shadow: var(--shadow-1);
 }
 
 .ph-icon {
+  /* 打磨点：图标收到 28px 并降透明度，避免抢占标题 */
   font-size: 28px;
+  color: var(--fg-2);
+  opacity: 0.7;
+  line-height: 1;
+}
+
+.ph-icon svg {
+  display: block;
+  margin: 0 auto;
 }
 
 .placeholder h3 {
@@ -1582,6 +1784,24 @@ body.panel-collapsed .panel {
   max-width: 220px;
 }
 
+/* 学期筛选：工具条行内，窄栏下换行不产生横向滚动（下拉框本身沿用 .lms-filters select 的观感） */
+.lms-semester-bar {
+  margin-bottom: 0;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.lms-semester-label {
+  font-size: 12px;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+
+.lms-semester-bar select.lms-semester-select {
+  max-width: 260px;
+  min-width: 0;
+}
+
 .lms-list {
   display: grid;
   gap: 6px;
@@ -1593,6 +1813,8 @@ body.panel-collapsed .panel {
   border-radius: var(--radius);
   background: var(--bg-base);
   border: 1px solid var(--line);
+  /* 打磨点：思源学堂列表卡片同样加层级阴影 */
+  box-shadow: var(--shadow-1);
 }
 
 .lms-result {
@@ -1614,19 +1836,24 @@ body.panel-collapsed .panel {
   white-space: nowrap;
 }
 
+/* 打磨点：正文小字从 --fg-3 提到 --fg-2，避免发灰 */
 .lms-row-meta {
   font-size: 11px;
-  color: var(--fg-3);
+  color: var(--fg-2);
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
   word-break: break-word;
   overflow-wrap: anywhere;
 }
 
 .lms-pill {
+  /* 打磨点：标签/徽标统一 11px / 2px 8px / 全圆角 */
   font-size: 11px;
-  padding: 1px 7px;
+  padding: 2px 8px;
   border-radius: 999px;
+  line-height: 1.6;
   border: 1px solid var(--line);
-  color: var(--fg-3);
+  color: var(--fg-2);
   flex: none;
 }
 
@@ -1646,9 +1873,11 @@ body.panel-collapsed .panel {
 }
 
 .lms-badge {
-  font-size: 10px;
-  padding: 0 6px;
+  /* 打磨点：与 .tag / .lms-pill 统一 */
+  font-size: 11px;
+  padding: 2px 8px;
   border-radius: 999px;
+  line-height: 1.6;
   border: 1px solid var(--line);
   flex: none;
 }
@@ -1719,7 +1948,13 @@ body.panel-collapsed .panel {
   border-radius: var(--radius);
   background: var(--bg-base);
   border: 1px solid var(--line);
+  box-shadow: var(--shadow-1);
   cursor: pointer;
+  transition: background var(--t), border-color var(--t);
+}
+
+.lms-sync-row:hover {
+  border-color: rgba(255, 255, 255, 0.14);
 }
 
 .lms-sync-row input {
@@ -1729,6 +1964,376 @@ body.panel-collapsed .panel {
 
 .lms-sync-main {
   min-width: 0;
+}
+
+/* --------------------------------------------------- 课表（教务）周网格 */
+
+.tt-term-start {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.tt-term-start input[type='date'] {
+  width: 150px;
+  flex: none;
+}
+
+.tt-color-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.tt-grid-wrap {
+  margin-top: 10px;
+  min-width: 0;
+}
+
+/* 宽栏：周一~周日 × 1~11 节；列用 minmax(0,1fr) 压住最小宽度，永不出横向滚动 */
+.tt-grid {
+  display: grid;
+  grid-template-columns: 30px repeat(7, minmax(0, 1fr));
+  grid-template-rows: auto repeat(11, minmax(30px, 1fr));
+  gap: 2px;
+}
+
+.tt-grid-corner {
+  min-width: 0;
+}
+
+.tt-grid-head,
+.tt-grid-day-head {
+  text-align: center;
+  font-size: 11px;
+  color: var(--fg-2);
+  padding-bottom: 4px;
+}
+
+.tt-grid-period {
+  font-size: 10px;
+  color: var(--fg-3);
+  text-align: center;
+  line-height: 1.7;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 单元格：左侧色条用课程配色（--tt-color 由 JS 用 CSSOM 写入） */
+.tt-cell {
+  min-width: 0;
+  overflow: hidden;
+  padding: 3px 5px;
+  border-radius: 6px;
+  border-left: 3px solid var(--tt-color, var(--fg-3));
+  background: rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tt-cell-name {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.tt-cell-meta {
+  font-size: 10px;
+  color: var(--fg-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 窄栏：退化成按星期分组的列表，无横向滚动 */
+.tt-grid-list {
+  display: grid;
+  gap: 6px;
+}
+
+.tt-grid-day {
+  display: grid;
+  gap: 4px;
+}
+
+.tt-grid-day-head {
+  text-align: left;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+/* ------------------------------------------------- 思源学堂：课程网格 / 详情 */
+
+/* 工具条里的状态 strip：pill + 按需展开的一行详情（不再占整张卡） */
+.lms-status-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.lms-status-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+  border-radius: 999px;
+  transition: background var(--t);
+}
+
+.lms-status-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.lms-status-detail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1 1 100%;
+  padding-top: 6px;
+  min-width: 0;
+}
+
+/* 抽屉里的同步体：details 已经给了内边距，这里只负责纵向排布 */
+.lms-sync-body {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.lms-course-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.lms-course-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--bg-base);
+  color: var(--fg);
+  text-align: left;
+  box-shadow: var(--shadow-1);
+  transition: background var(--t), border-color var(--t);
+}
+
+.lms-course-card:hover {
+  background: var(--bg-hover);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.lms-course-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.lms-course-title > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lms-course-meta {
+  font-size: 11px;
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lms-course-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.lms-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.lms-detail-name {
+  font-weight: 600;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.lms-activity-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.lms-activity {
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--bg-base);
+  overflow: hidden;
+}
+
+.lms-activity-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--t);
+}
+
+.lms-activity-head:hover {
+  background: var(--bg-hover);
+}
+
+.lms-activity-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.lms-activity-time {
+  font-size: 11px;
+  color: var(--fg-3);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.lms-activity-body {
+  padding: 0 10px 10px;
+  display: grid;
+  gap: 6px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.lms-desc {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg-2);
+}
+
+.lms-uploads {
+  display: grid;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--fg-2);
+}
+
+.lms-score {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 同步抽屉：默认收起，避免把列表页撑长 */
+details.lms-drawer {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-1);
+}
+
+details.lms-drawer > summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--fg);
+  list-style: none;
+}
+
+details.lms-drawer > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.lms-drawer > summary::after {
+  content: '▾';
+  float: right;
+  color: var(--fg-3);
+}
+
+details.lms-drawer[open] > summary::after {
+  content: '▴';
+}
+
+details.lms-drawer > .lms-drawer-body {
+  padding: 0 12px 12px;
+  display: grid;
+  gap: 8px;
+}
+
+details.lms-drawer > summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+/* 状态卡里的自动同步设置：收进 details 后不再占用列表页高度 */
+details.lms-settings {
+  margin-top: 8px;
+}
+
+details.lms-settings > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--fg-2);
+  list-style: none;
+}
+
+details.lms-settings > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.lms-settings > summary::after {
+  content: ' ▾';
+  color: var(--fg-3);
+}
+
+details.lms-settings[open] > summary::after {
+  content: ' ▴';
+}
+
+details.lms-settings .lms-autosync-block {
+  margin-top: 8px;
 }
 
 /* 自动同步设置行（状态卡片内） */
@@ -1776,7 +2381,9 @@ body.panel-collapsed .panel {
   position: fixed;
   inset: 0;
   z-index: 50;
-  background: rgba(0, 0, 0, 0.55);
+  /* 打磨点：遮罩加深 + 背景模糊，弹层更聚焦 */
+  background: rgba(8, 8, 10, 0.6);
+  backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1788,17 +2395,19 @@ body.panel-collapsed .panel {
   max-height: 88vh;
   display: flex;
   flex-direction: column;
-  border-radius: 14px;
+  /* 打磨点：大圆角 + 高一层阴影 + 描边 */
+  border-radius: var(--radius-lg);
   background: var(--bg-surface);
-  border: 1px solid var(--line);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: var(--shadow-2);
   overflow: hidden;
 }
 
 .modal-head {
   display: flex;
   align-items: center;
-  padding: 10px 12px;
+  /* 打磨点：头/脚内边距与分隔线统一 */
+  padding: 12px 14px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -1808,17 +2417,36 @@ body.panel-collapsed .panel {
 }
 
 .tab {
+  position: relative;
   padding: 5px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: transparent;
   color: var(--fg-2);
+  transition: background var(--t), color var(--t), border-color var(--t);
 }
 
+.tab:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* 打磨点：选中页签加一条 2px 蓝色底部指示条 */
 .tab.active {
   background: var(--bg-elevated);
   border-color: var(--line);
   color: var(--fg);
+}
+
+.tab.active::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--blue);
 }
 
 .tab:disabled {
@@ -1931,15 +2559,17 @@ body.panel-collapsed .panel {
   position: fixed;
   left: 50%;
   bottom: 26px;
-  transform: translate(-50%, 12px);
+  /* 打磨点：浮起更柔和（位移 12px -> 6px） */
+  transform: translate(-50%, 6px);
   padding: 8px 16px;
-  border-radius: 999px;
+  /* 打磨点：圆角收到 10px，改用第二层阴影 */
+  border-radius: 10px;
   background: var(--bg-elevated);
   border: 1px solid var(--line);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-2);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.2s, transform 0.2s;
+  transition: opacity var(--t), transform var(--t);
   z-index: 80;
   max-width: 70vw;
   text-align: center;

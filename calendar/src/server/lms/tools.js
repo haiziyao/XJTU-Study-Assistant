@@ -40,13 +40,22 @@ export const LMS_TOOL_SPECS = [
     params: { code: 'string' },
   },
   {
+    name: 'lms_semesters',
+    description: '列出思源学堂的学期（含课程数、起止日期与当前学期），供按学期筛选',
+    method: 'GET',
+    path: '/lms/semesters',
+    requiresAuth: true,
+    mutates: false,
+    params: {},
+  },
+  {
     name: 'lms_courses',
     description: '列出思源学堂课程（可按需刷新）',
     method: 'GET',
     path: '/lms/courses',
     requiresAuth: true,
     mutates: false,
-    params: { refresh: 'boolean?' },
+    params: { refresh: 'boolean?', semesterId: 'number|none?' },
   },
   {
     name: 'lms_activities',
@@ -55,7 +64,7 @@ export const LMS_TOOL_SPECS = [
     path: '/lms/activities',
     requiresAuth: true,
     mutates: false,
-    params: { courseId: 'number?', type: 'homework|material|lesson|lecture_live?', refresh: 'boolean?' },
+    params: { courseId: 'number?', semesterId: 'number|none?', type: 'homework|material|lesson|lecture_live?', refresh: 'boolean?' },
   },
   {
     name: 'lms_sync_preview',
@@ -66,6 +75,7 @@ export const LMS_TOOL_SPECS = [
     mutates: false,
     params: {
       courseIds: 'number[]?',
+      semesterId: 'number|none?',
       types: 'string[]?',
       includePast: 'boolean?',
       includeCourseRange: 'boolean?',

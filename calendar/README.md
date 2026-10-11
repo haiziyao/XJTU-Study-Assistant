@@ -20,6 +20,7 @@
 | ICS 导出（可订阅到系统日历） | ✅ 已实现 |
 | dschat 2 兼容（字段别名 / 标记行 / 兼容接口） | ✅ 已实现 |
 | 思源学堂接入（CAS 登录 / 课程 / 作业 / 直播 → 同步到日历） | ✅ 已实现（见下文，第 9 节接口见 [接口文档.md](接口文档.md)） |
+| 教务课表导入（ehall jwapp 课表 → 逐周展开成日程） | ✅ 已实现（见下文，第 10 节接口见 [接口文档.md](接口文档.md)） |
 | 测试窗口（浏览器 `/app` 或 Electron） | ✅ 已实现（三栏界面：功能栏 / 对话 / 功能视图） |
 | AI 接入（NL → 指令对象） | 🚧 仅契约与占位（`/ai/*`） |
 | 农历 / 学习记录导入 | 🚧 仅契约 |
@@ -37,7 +38,7 @@ npm run dev:server            # 带 --watch 自动重启
 npm install                   # electron 为 devDependency
 npm run dev:app
 
-# 3) 测试（零依赖，44 个用例；含思源学堂的本地 mock 端到端测试）
+# 3) 测试（零依赖，72 个用例；含思源学堂与教务课表的本地 mock 端到端测试）
 npm test
 ```
 
@@ -125,6 +126,8 @@ node scripts/seed-demo.js --clear  # 只删除演示记录，不影响手动添�
 
 1. **登录**：学号 + 密码。密码用 `/cas/jwt/publicKey` 的 RSA 公钥加密后才发出，**明文密码不出本机**；若学校要求两步验证，界面会让你发短信验证码并输入；连续失败 3 次会出现图形验证码。
 2. **课程 / 活动**：登录后自动拉取「我的课程」与每门课的作业、直播、回放、资料，并缓存到本地（断网也能看上次结果）。
+   顶部有**学期下拉框**，默认选中「当前学期」（`/lms/semesters` 判定），只显示该学期的课程与活动 —— 实测一个账号会跨 6 个学期，
+   不筛选会把好几年的内容混在一起；同步时也只作用于所选学期。
 3. **同步到日历**：点「预览同步」先看清单（新建 / 更新 / 跳过 / 失效），勾选后再点「同步选中」。
    - 作业 → **日程**（截止日；同一天有明确起止时刻则做成时段块）；
    - 直播 → **日程**（真实起止时刻，分类「上课」）；
@@ -157,8 +160,47 @@ GUI 由 LaunchServices 启动，**不会继承终端环境变量**，所以用�
 node scripts/lms-probe.js
 ```
 
-> 思源学堂**不提供上课时间/地点**，所以「自动生成课表」还需要另接移动教务（jwapp）的课表接口，本阶段没做。
+> 思源学堂**不提供上课时间/地点**；真正的课表由上面的「教务课表导入」模块负责（同一套 CAS 登录）。
 > 全部 14 项相关用例都用本地 mock 服务器跑（`test/helpers/lms-mock.js` 复刻了 CAS 登录、RSA 加密、Cookie、两步验证与失败提示），
+> 因此**不需要真实账号**也能验证整条链路。
+
+### 教务课表导入（xjtu timetable）
+
+把「教务系统里的课表」变成日历里**逐周的具体日程**（哪一天、第几节、哪个教室）。
+
+> 数据源：一站式服务大厅的移动教务 `https://ehall.xjtu.edu.cn/jwapp/sys/wdkb/modules/xskcb/xskcb.do`。
+> 接口清单、节次时刻表、周次位图与映射方案见 [docs/课表接入调研.md](docs/课表接入调研.md)（本模块严格按该文档第 2/3/5/6 节实现）。
+
+用法（测试窗口左栏点「课表」，或直接调接口）：
+
+1. **登录**：与思源学堂**共用同一套统一身份认证状态机**（RSA 加密密码、两步验证、图形验证码都一样），
+   只是入口换成教务的业务地址：未登录时它 302 到 `amp-auth-adapter/login?service=…` 再跳 CAS，跟跳转的事交给同一个 HTTP 客户端。
+2. **选学期**：学校**没有**「列出所有学期」的接口，所以先取当前学期（`dqxnxq.do`），再围绕它前后各取 3 个学期，
+   逐个尝试 `cxjcs.do` 拿第一周周一。拿不到的用本地规则兜底（学期 1 → 9 月第一个周一；学期 2 → 离 3/1 最近的周一；学期 3 → 离 7/1 最近的周一），
+   返回值里会明确标 `source: ehall | guess | manual`。
+3. **起始日是用户资产**：落盘在 `data/timetable-terms.json`。取不到时可以手工指定（`POST /tt/terms/:term`，必须是周一），
+   手改过的值**永不被自动结果覆盖**。
+4. **同步到日历**：`预览` → `同步选中`。课表会**逐周展开成独立日程**（不用 `repeat`），因为
+   - 我们的 `repeat` 没有 EXDATE，调课/停课/放假改不了某一天；
+   - `interval:2` 表达不了 `{3,5,7,11,13}` 这种不连续周；
+   - **冬夏作息不同**（5-9 月夏季），一条重复记录只能有一个固定 `startTime`。
+
+   每条日程：`title=课程名`、`location=教室`、`category=class`、`tags=['课表','xjtu','term:<学期>','teacher:<老师>']`、
+   提前 15 分钟提醒、`source=import`，并且带一个稳定的
+   `externalId = tt:<学期>:<hash8(课程名|教师|星期|节次|教室)>:<周次>` —— 重复同步只更新不新增。
+
+   默认**不导入已经过去的周次**（可勾选「包含已过去」）；`compact: true` 时才尝试把「每周时刻完全一致」的连续周折叠成一条 `repeat`（默认关闭）。
+
+同步只会动 `externalId` 以 `tt:` 开头的日程，**绝不会删除你自己手动加的日程**；
+学校那边删掉的课会以 `stale` 列出来，只有显式 `pruneStale: true` 才会清理。
+
+会话票据在 `data/timetable-session.json`（权限 `0600`，7 天失效），**不保存密码**；
+学期起始日与课表原始行分别缓存在 `data/timetable-terms.json` / `data/timetable-cache.json`。
+
+> ⚠️ 本模块的接口契约来自**已验证的真实抓包与调研文档**，但**没有用真实学生账号跑过完整同步**
+> （需要真实学号，且可能要过两步验证短信）。`test/helpers/timetable-mock.js` 复刻了
+> 「未登录 302 → amp-auth-adapter → CAS → RSA 加密 → 种票」整条链路与 `{code:"0",datas}` 外壳、位图周次、起始日接口；
+> 21 项用例覆盖登录、两步验证、学期兜底、周次解析、冬夏作息、逐周展开、幂等、改教室、失效清理等场景，
 > 因此**不需要真实账号**也能验证整条链路。
 
 ### 冒烟示例
@@ -185,6 +227,15 @@ curl -s localhost:3210/api/v1/commands/grammar | jq
 # 思源学堂：状态 / 课程 / 同步预览（未登录时前两个返回 401）
 curl -s localhost:3210/api/v1/lms/status | jq
 curl -s -X POST localhost:3210/api/v1/lms/sync/preview -H 'Content-Type: application/json' -d '{}' | jq
+
+# 教务课表：状态 / 学期（含起始日与来源）/ 课表预览（未登录返回 401）
+curl -s localhost:3210/api/v1/tt/status | jq
+curl -s localhost:3210/api/v1/tt/terms | jq
+curl -s -X POST localhost:3210/api/v1/tt/preview -H 'Content-Type: application/json' \
+  -d '{"term":"2026-2027-1","includePast":false}' | jq '.summary'
+# 手工改学期起始日（必须是周一，改过之后不会被自动值覆盖）
+curl -s -X POST localhost:3210/api/v1/tt/terms/2026-2027-1 -H 'Content-Type: application/json' \
+  -d '{"startDate":"2026-09-14"}' | jq
 ```
 
 ## 目录结构

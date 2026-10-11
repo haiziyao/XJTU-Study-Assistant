@@ -6,18 +6,18 @@
  */
 
 export const THEME = {
-  /** 背景层级：越靠上层越亮。 */
+  /** 背景层级：越靠上层越亮。（打磨点：整体加深，拉开层级差） */
   background: {
-    base: '#1b1b1f',
-    surface: '#232327',
-    elevated: '#282828',
-    hover: '#2f2f34',
+    base: '#151519',
+    surface: '#1e1e24',
+    elevated: '#26262d',
+    hover: '#2c2c35',
   },
-  /** 文字层级。 */
+  /** 文字层级。（打磨点：小幅提亮，保证加深底色后仍可读） */
   text: {
-    primary: '#f2f2f5',
-    secondary: '#b6b6bf',
-    muted: '#7a7a85',
+    primary: '#f4f4f7',
+    secondary: '#b9b9c4',
+    muted: '#83838f',
   },
   /** 语义色：与 PotatoCalendar 的配色保持一致。 */
   accent: {
