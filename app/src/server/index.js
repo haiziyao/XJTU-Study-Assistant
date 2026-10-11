@@ -65,6 +65,9 @@ export async function createServer(options = {}) {
       dataDir,
       options: options[mod.id] ?? {},
       module: mod,
+      // 全部模块描述符（含尚未 createServices 的）。给「聚合型」模块用：
+      // 例如 ai 模块要收集各模块声明的 aiPrompt / aiQueryFields，本身 order 又排在最后。
+      modules,
     };
     const own = (await mod.createServices?.(base)) ?? {};
     Object.assign(services, own);

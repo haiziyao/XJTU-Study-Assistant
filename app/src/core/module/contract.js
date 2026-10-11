@@ -24,6 +24,12 @@
  *   registerRoutes(router, ctx)  注册本模块的路由，约定前缀 `${API_PREFIX}/<id>`。
  *   commands                 对话指令扩展点（见 core/commands/command-service.js）。
  *   aiTools                  暴露给 AI Agent 的工具清单，会被聚合进 GET /ai/capabilities。
+ *                            每项建议带 `implemented: true|false`（契约先行时标 false）
+ *                            与 `returns`（返回形状）；写法参考 modules/lms/tools.js。
+ *   aiPrompt                 **给对话模型看的领域说明**（一段文本）。由 `ai` 模块聚合进系统
+ *                            提示词 —— 这样新增一个可查询的 target 不必去改 ai 模块。
+ *   aiQueryFields            `{ [target]: string[] }`：只读查询结果回灌给模型时保留哪些字段。
+ *                            ai 模块内置了 todo/schedule/event 三张表，此处声明的覆盖它们。
  *
  * 数据边界（重要）
  * ----------------
@@ -99,6 +105,18 @@ export function defineModule(descriptor, { sourceDir } = {}) {
   }
 
   assert(descriptor.aiTools === undefined || Array.isArray(descriptor.aiTools), `模块 ${id} 的 aiTools 必须是数组`);
+  assert(
+    descriptor.aiPrompt === undefined || typeof descriptor.aiPrompt === 'string',
+    `模块 ${id} 的 aiPrompt 必须是字符串（一段给模型看的领域说明）`,
+  );
+  assert(
+    descriptor.aiQueryFields === undefined ||
+      (descriptor.aiQueryFields && typeof descriptor.aiQueryFields === 'object' && !Array.isArray(descriptor.aiQueryFields)),
+    `模块 ${id} 的 aiQueryFields 必须是 { [target]: string[] } 形式的对象`,
+  );
+  for (const [target, fields] of Object.entries(descriptor.aiQueryFields ?? {})) {
+    assert(Array.isArray(fields), `模块 ${id} 的 aiQueryFields.${target} 必须是字符串数组`);
+  }
 
   const specs = descriptor.collections ?? [];
   assert(Array.isArray(specs), `模块 ${id} 的 collections 必须是数组`);

@@ -84,7 +84,7 @@ const EMPTY_MEMORY = (maxItems = DEFAULT_MEMORY_BUDGET.maxItems, maxChars = DEFA
 });
 
 export class AiChatService {
-  constructor({ store, broadcast, services, config, provider, commands, files, onConfigChange }) {
+  constructor({ store, broadcast, services, config, provider, commands, files, onConfigChange, domainBlocks = [], queryFields = {} }) {
     this.store = store;
     this.broadcast = broadcast;
     this.services = services;
@@ -95,6 +95,16 @@ export class AiChatService {
     this.files = files;
     /** 配置变化后的回调（模块层用它决定是否把 provider 注册给 aiBridge）。 */
     this.onConfigChange = onConfigChange;
+    /**
+     * 各业务模块自己声明的领域说明（模块描述符的 `aiPrompt`），拼进系统提示词。
+     * 这样新增一个可查询的 target 不必回来改本模块。
+     */
+    this.domainBlocks = domainBlocks;
+    /**
+     * 只读查询结果回灌给模型时保留哪些字段：`{ [target]: string[] }`。
+     * 来自各模块的 `aiQueryFields`，**覆盖**下面 #compactQueryResult 里的内置表。
+     */
+    this.queryFields = queryFields;
   }
 
   // ---------------------------------------------------------------- 状态 / 配置
@@ -333,7 +343,7 @@ export class AiChatService {
     const enriched = await this.buildContext(context ?? {});
     const result = await this.provider.chat({
       messages: [
-        { role: 'system', content: buildCommandSystemPrompt({ ...enriched, ...context }) },
+        { role: 'system', content: buildCommandSystemPrompt({ ...enriched, ...context, domainBlocks: this.domainBlocks }) },
         { role: 'user', content: trimmed },
       ],
       temperature: 0,
@@ -345,6 +355,49 @@ export class AiChatService {
       return { ok: false, raw: trimmed, warnings: ['模型没有给出可用的指令对象'], explain: result.text.trim().slice(0, 200) };
     }
     return { ...drafts[0], raw: trimmed };
+  }
+
+  /**
+   * 一次性补全：**不建会话、不落消息、不广播**。
+   *
+   * 用途：给那些"要一段模型点评，但不该污染对话历史"的场景用 —— 例如学业模块在同步成绩后
+   * 生成的「学情分析」小卡片。如果要的是可追溯的多轮对话，用 `send()`。
+   *
+   * 设计取舍：这里不注入 DOMAIN_RULES / 草稿协议 / 记忆。调用方要的是"就着给定材料写一段话"，
+   * 把整套业务规则塞进去既费 token 又容易让模型跑题；需要时由调用方自己在 system 里写清楚。
+   *
+   * @param {object} input
+   * @param {string} input.system 系统提示词（必填）
+   * @param {string} input.user   用户消息（必填）
+   * @param {number} [input.temperature]
+   * @param {string} [input.thinking] `none|low|high|max` 思考档位
+   * @returns {Promise<{ ok: boolean, text: string, usage: object|null, model: string, provider: string }>}
+   */
+  async complete({ system, user, temperature, thinking = 'none' } = {}) {
+    const sys = String(system ?? '').trim();
+    const ask = String(user ?? '').trim();
+    if (!sys) throw HttpError.badRequest('system 不能为空');
+    if (!ask) throw HttpError.badRequest('user 不能为空');
+    if (!this.provider.configured()) {
+      throw new HttpError(501, ERROR_CODES.AI_UNAVAILABLE, 'AI 尚未配置密钥', {
+        hint: '配置后本接口即用；未配置时调用方应自行降级到本地统计。',
+      });
+    }
+    const result = await this.provider.chat({
+      messages: [
+        { role: 'system', content: sys },
+        { role: 'user', content: ask },
+      ],
+      temperature: temperature === undefined ? this.config.get().temperature : temperature,
+      reasoningEffort: THINKING_LEVELS[thinking] ?? THINKING_LEVELS.none,
+    });
+    return {
+      ok: true,
+      text: String(result.text ?? '').trim(),
+      usage: result.usage ?? null,
+      model: this.config.get().model,
+      provider: this.config.get().provider,
+    };
   }
 
   /**
@@ -408,7 +461,7 @@ export class AiChatService {
     const history = this.#history(conversation.id);
     // #history 里最后一条就是刚存的用户正文，这里换成"正文 + 附件"的多模态版本
     const messages = [
-      { role: 'system', content: buildChatSystemPrompt({ ...enriched, ...context, draw }) },
+      { role: 'system', content: buildChatSystemPrompt({ ...enriched, ...context, draw, domainBlocks: this.domainBlocks }) },
       ...history.slice(0, -1),
       { role: 'user', content: buildUserContent(trimmed, files) },
     ];
@@ -643,7 +696,8 @@ export class AiChatService {
       schedule: ['id', 'title', 'date', 'startTime', 'endTime', 'location', 'category'],
       event: ['id', 'title', 'startDate', 'endDate', 'category'],
     };
-    const fields = FIELDS[target] ?? ['id', 'title'];
+    // 模块声明的投影表覆盖内置表（内置三张表保持原样，行为不变）
+    const fields = this.queryFields?.[target] ?? FIELDS[target] ?? ['id', 'title'];
     const items = (result.items ?? []).slice(0, MAX_QUERY_ITEMS).map((item) => {
       const picked = {};
       for (const key of fields) if (item[key] !== undefined && item[key] !== null) picked[key] = item[key];

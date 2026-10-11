@@ -71,6 +71,18 @@ function memoryBlock(context = {}) {
 }
 
 /**
+ * 各业务模块**自己声明**的领域说明（模块描述符的 `aiPrompt` 字段，由 ai 模块聚合后传进来）。
+ *
+ * 为什么要有这个口子：模型只能从提示词里知道"有哪些 target 可以查"。原先这张表写死在本文件里，
+ * 于是每新增一个可查询的领域就得回来改 ai 模块。现在模块自己声明，ai 模块只负责拼接。
+ */
+function domainBlocks(context = {}) {
+  const blocks = (context.domainBlocks ?? []).map((item) => String(item ?? '').trim()).filter(Boolean);
+  if (!blocks.length) return '';
+  return `\n${blocks.join('\n\n')}\n`;
+}
+
+/**
  * 公式输出规范。
  *
  * 客户端的公式渲染器是自己写的 LaTeX 子集（CSP 不许引 MathJax/KaTeX），支持范围有限，
@@ -128,6 +140,7 @@ export function buildChatSystemPrompt(context = {}) {
     memoryBlock(context),
     '',
     DOMAIN_RULES,
+    domainBlocks(context),
     '',
     DRAFT_PROTOCOL,
     '',
@@ -148,6 +161,7 @@ export function buildCommandSystemPrompt(context = {}) {
     memoryBlock(context),
     '',
     DOMAIN_RULES,
+    domainBlocks(context),
     '',
     '【输出格式（严格）】',
     '只输出一个 JSON 对象，不要 Markdown 代码块、不要解释、不要前后缀。字段：',

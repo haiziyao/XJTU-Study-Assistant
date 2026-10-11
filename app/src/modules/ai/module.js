@@ -39,11 +39,17 @@ export default {
 
   aiTools: AI_TOOL_SPECS,
 
-  async createServices({ store, broadcast, services, dataDir, options }) {
+  async createServices({ store, broadcast, services, dataDir, options, modules = [] }) {
     const config = new AiConfigStore({ dataDir, options });
     await config.load();
 
     const provider = createOpenAiCompatProvider({ getConfig: () => config.get() });
+
+    // 聚合各业务模块自己声明的 AI 扩展点（ai 模块 order=90，排在最后，所以能一次收齐）：
+    //   aiPrompt       -> 拼进系统提示词，模型由此知道有哪些 target 可查
+    //   aiQueryFields  -> 只读查询结果回灌时的字段投影（覆盖内置的 todo/schedule/event 三张表）
+    const domainBlocks = modules.map((mod) => mod.aiPrompt).filter(Boolean);
+    const queryFields = Object.assign({}, ...modules.map((mod) => mod.aiQueryFields ?? {}));
 
     // 只在**配了密钥**时把 provider 注册给框架（`name` 用 getter，换 provider 不用重注册）：
     // - 已配置：/ai/capabilities 显示 available: true，/ai/nl2command 走模型；
@@ -74,6 +80,8 @@ export default {
       files,
       commands: services.commands,
       onConfigChange: () => bridge.sync(),
+      domainBlocks,
+      queryFields,
     });
     bridge.sync();
 
