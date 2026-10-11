@@ -86,6 +86,38 @@ ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ node node_modules/electr
 > 4. 应用包**不能放在 `~/Library/Application Support` 等沙箱外路径**（写入会被拒绝），脚本默认放
 >    工作区内的 `.electron-bundle/`。
 
+> ⚠️ **Windows + 受限会话的注意事项**（已实测）：
+>
+> 如果宿主环境限制了 GUI/子进程创建，Electron 会**窗口一闪即逝、进程干净退出**。
+> 诊断入口是主进程日志（GUI 启动看不到 stdout，所以刻意落盘）：
+>
+> ```powershell
+> Get-Content data\electron-main.log -Encoding UTF8 -Tail 30
+> ```
+>
+> 典型日志与含义：
+>
+> | 日志 | 含义 |
+> | --- | --- |
+> | `!! 子进程退出: type=GPU reason=launch-failed` | Chromium 起不了 GPU 子进程 → 用下面的 `dev:app:safe` |
+> | `Cannot read properties of undefined (reading 'handle')` | 宿主设了 `ELECTRON_RUN_AS_NODE=1`，Electron 退化成普通 Node |
+> | 停在「测试窗口已创建」之后再无输出 | 窗口被外部关闭；`window-all-closed` 会记一条「窗口已关闭」 |
+> | `!! 未捕获异常` / `!! 渲染进程退出` | 真正的崩溃，堆栈会跟在后面 |
+>
+> 规避 GPU 子进程失败（禁用 GPU 与渲染进程沙箱，仅适用于本机联调窗口）：
+>
+> ```powershell
+> npm run dev:app:safe
+> ```
+>
+> **若仍无法启动**：该环境大概率禁止创建 GUI 子进程（`notepad` 同样起不来，事件日志里没有崩溃记录）。
+> 这种情况别再折腾 Electron —— 用**浏览器方式**，UI 与功能完全一致，只是没有系统通知：
+>
+> ```powershell
+> npm run start:server
+> # 浏览器打开 http://127.0.0.1:3210/app
+> ```
+
 主进程刻意使用 CommonJS（`src/main/main.cjs`）：在 ESM 下 `import ... from 'electron'` 会被 Node 解析到
 node_modules 里的 npm 包（导出二进制路径字符串），拿不到 `app`/`BrowserWindow`；需要 ESM 模块时用动态 `import()`。
 

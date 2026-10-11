@@ -12,6 +12,7 @@
     "dev:server": "node --watch bin/server.js",
     "start:server": "node bin/server.js",
     "dev:app": "electron .",
+    "dev:app:safe": "electron . --no-sandbox --disable-gpu --in-process-gpu --disable-gpu-compositing",
     "dev:app:macos": "bash scripts/run-electron-macos.sh",
     "test": "node --test test/*.test.js"
   },
