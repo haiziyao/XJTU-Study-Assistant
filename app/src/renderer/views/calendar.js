@@ -353,6 +353,26 @@ function blockEl(block) {
 
 /* ------------------------------------------------------------------ 日视图 */
 
+/**
+ * 日视图：顶部大日期 + 全天行 + 按小时的时间轴（苹果日历那种版式）。
+ *
+ * 结构见 calendar.css 的「日视图」段落：
+ *   .day-view > .day-hero / .day-allday / .day-timeline(.day-hours + .day-canvas > .day-block｜.day-now)
+ *
+ * 滚动归属：外壳里真正滚动的是 .view-content（.panel-body 是 overflow:hidden），
+ * 所以这里不自己开滚动条，只把时间轴按内容高度撑开，靠 position: sticky 让
+ * .day-hero / .day-allday 吸顶——避免出现双滚动条。
+ */
+
+/** 时间轴小时高度的兜底值（正常从 CSS 的 --day-hour-height 读，见 readHourHeight）。 */
+const DAY_HOUR_HEIGHT = 56;
+/** 没有日程时，自动滚动到的时间（分钟）：07:00。 */
+const DAY_FIRST_MINUTE = 7 * 60;
+
+/** 农历能力探测：null = 未知，false = 本机没有（不再请求），true = 可用（文案按日期缓存）。 */
+let lunarSupported = null;
+const lunarText = new Map();
+
 function renderDay(host, anchor) {
   const loading = mk('div', 'loading', '加载中…');
   host.appendChild(loading);
@@ -361,103 +381,199 @@ function renderDay(host, anchor) {
     .then((byDate) => {
       loading.remove();
       const day = byDate.get(anchor) ?? { events: [], schedules: [], stats: {} };
-      const wrap = mk('div', 'day-view');
-
-      const strip = mk('div', 'day-strip');
-      strip.append(
-        mk('div', 'day-title', PCUtil.fmtCN(anchor)),
-        statPill(day.schedules.length, '日程'),
-        statPill(day.stats?.done ?? 0, '已完成'),
-        statPill(day.events.length, '事件'),
-      );
-      const addBtn = mk('button', 'primary-btn', '+ 新建');
-      addBtn.type = 'button';
-      addBtn.addEventListener('click', () => openEditor({ target: 'schedule', defaults: { date: anchor } }));
-      strip.appendChild(addBtn);
-      wrap.appendChild(strip);
-
+      const timed = day.schedules.filter((item) => !item.allDay && item.startTime);
       const allDayItems = [
         ...day.events.map((item) => ({ kind: 'event', ...item })),
         ...day.schedules.filter((item) => item.allDay).map((item) => ({ kind: 'schedule', ...item })),
       ];
-      if (allDayItems.length) {
-        wrap.appendChild(mk('div', 'section-title', '全天'));
-        const list = mk('div', 'rows');
-        for (const item of allDayItems) {
-          list.appendChild(
-            item.kind === 'event'
-              ? eventRow(item)
-              : scheduleRow({ ...item, allDay: true }),
-          );
-        }
-        wrap.appendChild(list);
-      }
 
-      wrap.appendChild(mk('div', 'section-title', '时间安排'));
-      const timed = day.schedules.filter((item) => !item.allDay).sort((a, b) =>
-        String(a.startTime ?? '').localeCompare(String(b.startTime ?? '')),
-      );
-      const rows = mk('div', 'rows');
-      if (!timed.length) rows.appendChild(emptyBox('这一天还没有时段安排，点右上角「新建」试试。'));
-      for (const item of timed) rows.appendChild(scheduleRow(item));
-      wrap.appendChild(rows);
+      const wrap = mk('div', 'day-view');
+      const hero = dayHero(anchor);
+      const allDay = dayAllDay(allDayItems);
+      const timeline = mk('div', 'day-timeline');
+      wrap.append(hero, allDay, timeline);
 
+      // 先入文档：这样才读得到 CSS 变量、量得出吸顶高度（detached 元素量不到）
       host.appendChild(wrap);
+      loadLunar(anchor, hero);
+
+      const hourHeight = readHourHeight(timeline);
+      timeline.appendChild(dayHours());
+      const canvas = mk('div', 'day-canvas');
+      // 重叠分列复用周视图的贪心分配（不改它的对外行为）
+      for (const block of layoutBlocks(timed)) canvas.appendChild(dayBlock(block, hourHeight));
+      if (anchor === PCUtil.todayKey()) canvas.appendChild(dayNowMark(hourHeight));
+      timeline.appendChild(canvas);
+
+      const sticky = hero.offsetHeight + allDay.offsetHeight;
+      if (hero.offsetHeight) wrap.style.setProperty('--day-hero-h', `${hero.offsetHeight}px`);
+      // 让「最早日程前一小时」落在可视区顶部；没有日程就回到 07:00（不强制滚到最顶）
+      const rect = timeline.getBoundingClientRect();
+      const viewport = host.getBoundingClientRect();
+      const timelineTop = rect.top - viewport.top + host.scrollTop;
+      const target = timed.length
+        ? Math.max(0, Math.min(...timed.map((item) => PCUtil.minutes(item.startTime))) - 60)
+        : DAY_FIRST_MINUTE;
+      host.scrollTop = Math.max(0, timelineTop + (target / 60) * hourHeight - sticky);
     })
     .catch((error) => loading.replaceWith(errorBox(error)));
 }
 
-function scheduleRow(item) {
-  const row = mk('div', `row-item cat-${item.category ?? 'other'}`);
-  if (item.status === 'done') row.classList.add('done');
-  if (item.status === 'cancelled') row.classList.add('cancelled');
+/** 时间轴小时高度：优先取 CSS 变量，取不到时回退（浏览器外/桩环境也不会炸）。 */
+function readHourHeight(timeline) {
+  if (typeof getComputedStyle !== 'function') return DAY_HOUR_HEIGHT;
+  const value = parseFloat(getComputedStyle(timeline).getPropertyValue('--day-hour-height'));
+  return Number.isFinite(value) && value > 0 ? value : DAY_HOUR_HEIGHT;
+}
 
-  const time = mk('div', 'ri-time');
-  time.append(mk('b', null, item.allDay ? '全天' : item.startTime ?? ''), mk('span', null, item.endTime ?? ''));
+/* ---------------------------------------------------------------- 日视图：顶部 */
 
-  const main = mk('div', 'ri-main');
-  main.appendChild(mk('div', 'ri-title', item.title));
-  const meta = [
-    CATEGORY_LABEL[item.category] ?? item.category,
-    item.location,
-    item.isRepeatInstance ? '重复' : null,
-    item.estimatedMinutes ? `预计 ${item.estimatedMinutes} 分钟` : null,
-    item.status !== 'pending' ? STATUS_LABEL[item.status] : null,
-  ]
-    .filter(Boolean)
-    .join(' · ');
-  if (meta) main.appendChild(mk('div', 'ri-meta', meta));
-
-  const actions = mk('div', 'ri-actions');
-  if (item.status !== 'done') {
-    actions.appendChild(iconBtn('标记完成', '✓', () => setScheduleStatus(item.scheduleId, 'done', '已完成')));
-  } else {
-    actions.appendChild(iconBtn('恢复待办', '↺', () => setScheduleStatus(item.scheduleId, 'pending', '已恢复')));
-  }
-  if (item.status === 'pending') {
-    actions.appendChild(iconBtn('取消', '⊘', () => setScheduleStatus(item.scheduleId, 'cancelled', '已取消')));
-  }
-  actions.appendChild(iconBtn('编辑', '✎', () => openEditor({ target: 'schedule', id: item.scheduleId })));
-  actions.appendChild(
-    iconBtn('删除', '🗑', () => removeRecord('schedule', item.scheduleId, item.title), 'danger'),
+function dayHero(anchor) {
+  const date = PCUtil.toDate(anchor);
+  const hero = mk('div', 'day-hero');
+  hero.appendChild(
+    mk('div', 'day-hero-date', `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`),
   );
 
-  row.append(time, main, actions);
+  const sub = mk('div', 'day-hero-sub');
+  sub.appendChild(mk('span', null, `星期${PCUtil.WEEK_CN[PCUtil.isoWeekday(anchor) - 1]}`));
+  hero.appendChild(sub);
+  return hero;
+}
+
+/** 农历：有才显示，501/失败静默隐藏并记住本机没有这个能力（不再重复请求）。 */
+function loadLunar(anchor, hero) {
+  const sub = hero.querySelector('.day-hero-sub');
+  if (!sub || lunarSupported === false) return;
+  const show = (text) => {
+    if (!text || sub.querySelector('.day-hero-lunar')) return;
+    sub.appendChild(mk('span', 'day-hero-lunar', text));
+    // 农历文字可能把顶栏撑高几像素，重新量一次吸顶偏移，避免全天行被压住
+    const wrap = hero.parentNode;
+    if (wrap?.style?.setProperty && hero.offsetHeight) {
+      wrap.style.setProperty('--day-hero-h', `${hero.offsetHeight}px`);
+    }
+  };
+  if (lunarText.has(anchor)) {
+    show(lunarText.get(anchor));
+    return;
+  }
+  PC.api(`/meta/lunar?date=${anchor}`)
+    .then((payload) => {
+      lunarSupported = true;
+      const text = lunarLabel(payload);
+      lunarText.set(anchor, text);
+      show(text);
+    })
+    .catch(() => {
+      lunarSupported = false;
+    });
+}
+
+/** 从 /meta/lunar 的契约响应里取一行可读文案（契约见 core/routes.js）。 */
+function lunarLabel(payload) {
+  const lunar = payload?.lunar ?? payload?.data?.lunar;
+  if (typeof lunar === 'string') return lunar;
+  if (lunar && typeof lunar === 'object') {
+    const text = `${lunar.year ? `${lunar.year}年` : ''}${lunar.month ?? ''}${lunar.day ?? ''}`;
+    if (text) return text;
+  }
+  return typeof payload?.text === 'string' ? payload.text : '';
+}
+
+/* ---------------------------------------------------------------- 日视图：全天 */
+
+function dayAllDay(items) {
+  const row = mk('div', 'day-allday');
+  row.appendChild(mk('div', 'day-allday-label', '全天'));
+  const list = mk('div', 'day-allday-items');
+  for (const item of items) {
+    const chip = mk('div', `day-allday-item cat-${item.category ?? 'other'}`, item.title);
+    if (item.status === 'done') chip.classList.add('done');
+    if (item.status === 'cancelled') chip.classList.add('cancelled');
+    chip.title = item.title;
+    chip.addEventListener('click', () => {
+      if (item.kind === 'event') openEditor({ target: 'event', id: item.eventId });
+      else openEditor({ target: 'schedule', id: item.scheduleId });
+    });
+    list.appendChild(chip);
+  }
+  // 即使一条都没有也保留这一行，和苹果日历一样固定有「全天」
+  row.appendChild(list);
   return row;
 }
 
-function eventRow(item) {
-  const row = mk('div', `row-item cat-${item.category ?? 'other'} is-event`);
-  const time = mk('div', 'ri-time');
-  time.append(mk('b', null, '事件'), mk('span', null, ''));
-  const main = mk('div', 'ri-main');
-  main.appendChild(mk('div', 'ri-title', item.title));
-  main.appendChild(mk('div', 'ri-meta', CATEGORY_LABEL[item.category] ?? item.category));
-  const actions = mk('div', 'ri-actions');
-  actions.appendChild(iconBtn('编辑', '✎', () => openEditor({ target: 'event', id: item.eventId })));
-  actions.appendChild(iconBtn('删除', '🗑', () => removeRecord('event', item.eventId, item.title), 'danger'));
-  row.append(time, main, actions);
-  return row;
+/* ------------------------------------------------------------ 日视图：时间轴 */
+
+function dayHours() {
+  const hours = mk('div', 'day-hours');
+  for (let hour = 0; hour < 24; hour += 1) {
+    const line = mk('div', 'day-hour');
+    line.appendChild(mk('span', 'day-hour-label', `${PCUtil.pad2(hour)}:00`));
+    hours.appendChild(line);
+  }
+  return hours;
+}
+
+function dayBlock(block, hourHeight) {
+  const node = mk('div', `day-block cat-${block.category ?? 'other'}`);
+  if (block.status === 'done') node.classList.add('done');
+  if (block.status === 'cancelled') node.classList.add('cancelled');
+
+  node.style.top = `${(block.start / 60) * hourHeight}px`;
+  node.style.height = `${Math.max(28, ((block.end - block.start) / 60) * hourHeight)}px`;
+  if (block.cols > 1) {
+    node.style.left = `calc(${(block.col / block.cols) * 100}% + 2px)`;
+    node.style.width = `calc(${100 / block.cols}% - 4px)`;
+  } else {
+    node.style.left = '2px';
+    node.style.right = '2px';
+  }
+
+  node.appendChild(mk('div', 'day-block-bar'));
+  node.appendChild(mk('div', 'day-block-title', block.title));
+
+  if (block.location) {
+    const loc = mk('div', 'day-block-loc');
+    appendMiniIcon(loc, 'pin');
+    loc.appendChild(mk('span', null, block.location));
+    node.appendChild(loc);
+  }
+
+  const time = mk('div', 'day-block-time');
+  appendMiniIcon(time, 'clock');
+  time.appendChild(mk('span', null, `${block.startTime}–${block.endTime ?? ''}`));
+  node.appendChild(time);
+
+  if (block.isRepeatInstance || (block.repeat?.type && block.repeat.type !== 'none')) {
+    const repeat = mk('div', 'day-block-repeat');
+    repeat.title = '重复日程';
+    appendMiniIcon(repeat, 'repeat');
+    node.appendChild(repeat);
+  }
+
+  node.title = `${block.startTime}–${block.endTime ?? ''}${block.location ? ` · ${block.location}` : ''} ${block.title}`;
+  node.addEventListener('click', () => openEditor({ target: 'schedule', id: block.scheduleId }));
+  return node;
+}
+
+/** 今天才画的红线：按当前真实时刻定位。 */
+function dayNowMark(hourHeight) {
+  const now = new Date();
+  const mark = mk('div', 'day-now');
+  mark.style.top = `${((now.getHours() * 60 + now.getMinutes()) / 60) * hourHeight}px`;
+  mark.title = `现在 ${PCUtil.pad2(now.getHours())}:${PCUtil.pad2(now.getMinutes())}`;
+  return mark;
+}
+
+/** 块内小图标：复用外壳的图标表（内联 SVG），没有图标表时就不放图标。 */
+function appendMiniIcon(container, name, size = 12) {
+  const svg = window.PCIcons?.svg?.(name, size);
+  if (!svg) return null;
+  const icon = mk('span', 'day-icon');
+  icon.innerHTML = svg;
+  container.appendChild(icon);
+  return icon;
 }
 
 /* ================================================================== 待办视图 */
