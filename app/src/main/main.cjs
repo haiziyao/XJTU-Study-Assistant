@@ -35,6 +35,28 @@ function log(...args) {
   console.log(line.trim());
 }
 
+/**
+ * 崩溃与退出诊断。
+ *
+ * 背景：GUI 方式启动看不到 stdout，主进程一旦「静默退出」就完全无从查起
+ * （现象是窗口一闪即逝、日志停在最后一条里程碑）。这里把所有非正常退出路径都记进日志，
+ * 让下一次启动能直接指出是谁结束了进程。
+ */
+process.on('uncaughtException', (error) => {
+  log('[main] !! 未捕获异常:', error);
+});
+process.on('unhandledRejection', (reason) => {
+  log('[main] !! 未处理的 Promise 拒绝:', reason instanceof Error ? reason : new Error(String(reason)));
+});
+
+/** 渲染进程 / 子进程异常退出（崩溃时为 reason='crashed'，被系统杀死为 'killed'）。 */
+app.on('render-process-gone', (_event, _contents, details) => {
+  log(`[main] !! 渲染进程退出: reason=${details?.reason} exitCode=${details?.exitCode}`);
+});
+app.on('child-process-gone', (_event, details) => {
+  log(`[main] !! 子进程退出: type=${details?.type} reason=${details?.reason} exitCode=${details?.exitCode}`);
+});
+
 /** ESM 模块缓存（后端与共享常量）。 */
 let esm;
 let backend;
@@ -152,6 +174,14 @@ function createWindow() {
 
   mainWindow.loadFile(RENDERER_ENTRY);
 
+  // 窗口生命周期全部留痕：窗口「一闪即逝」时，这几条能直接指出是加载失败、渲染崩溃还是被关闭
+  mainWindow.webContents.on('did-finish-load', () => log('[main] 页面加载完成'));
+  mainWindow.webContents.on('preload-error', (_event, file, error) => log(`[main] !! preload 出错 ${file}:`, error));
+  mainWindow.on('unresponsive', () => log('[main] !! 窗口无响应'));
+  mainWindow.on('closed', () => {
+    log(`[main] 窗口已关闭（剩余窗口 ${BrowserWindow.getAllWindows().length} 个）`);
+  });
+
   // 测试窗口里的外链一律交给系统浏览器
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
@@ -192,10 +222,16 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', async () => {
+  log(`[main] window-all-closed：窗口数=0，即将退出（窗口是否已销毁: ${mainWindow?.isDestroyed?.() ?? 'n/a'}）`);
   await backend?.close().catch(() => {});
   app.quit();
 });
 
 app.on('before-quit', async () => {
+  log('[main] before-quit');
   await backend?.close().catch(() => {});
+});
+
+app.on('will-quit', () => {
+  log('[main] will-quit，进程即将结束');
 });
