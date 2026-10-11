@@ -301,9 +301,10 @@ export class ScheduleService {
   }
 
   /** 区间统计（周/月进度条）。 */
-  stats({ from, to } = {}) {
-    const items = this.list({ from, to, includeRolled: true });
-    const occurrences = this.range({ from: from ?? todayKey(), to: to ?? todayKey() });
+  stats({ from, to, allDay } = {}) {
+    // allDay 必须跟着透传：待办页脚统计的是「本周待办」，不能把上课、开会这些时段日程算进去
+    const items = this.list({ from, to, allDay, includeRolled: true });
+    const occurrences = this.range({ from: from ?? todayKey(), to: to ?? todayKey(), allDay });
     const base = items.length ? items : occurrences;
     const done = base.filter((item) => item.status === 'done').length;
     const rolled = base.filter((item) => item.status === 'rolled').length;

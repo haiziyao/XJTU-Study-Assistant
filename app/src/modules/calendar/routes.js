@@ -75,7 +75,8 @@ export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1'
       keyword: query.keyword,
       limit: query.limit,
     });
-    return { items, stats: schedules.stats({ from: query.from, to: query.to }) };
+    // 统计同样按 allDay 收窄，否则待办页脚会把时段日程算进去（列表 2 条、统计 4 项那个 bug）
+    return { items, stats: schedules.stats({ from: query.from, to: query.to, allDay: query.allDay }) };
   });
 
   router.get(`${P}/schedules/range`, ({ query }) => ({

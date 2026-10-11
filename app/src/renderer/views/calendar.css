@@ -359,6 +359,10 @@
   z-index: 3;
   padding: 6px 0 8px;
   background: var(--bg-base);
+  /* sticky 的定位基准是滚动容器的内容框，.view-content 的 padding-top(12px) 不在吸顶范围内，
+     于是吸顶条上方会留一条能看见时间轴滚过去的缝；用一块零模糊投影把它盖住。
+     投影超出滚动区的部分会被 .view-content 的 overflow 裁掉，不会盖到工具条上。 */
+  box-shadow: 0 -20px 0 var(--bg-base);
 }
 
 .day-hero-date {
@@ -394,7 +398,8 @@
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 5px 0 7px;
+  /* 空行也要紧凑：标签一行(≈12px) + 上下 5/6px + 1px 描边 ≈ 24px */
+  padding: 5px 0 6px;
   background: var(--bg-base);
   border-bottom: 1px solid var(--line);
 }
@@ -402,9 +407,10 @@
 .day-allday-label {
   flex: none;
   width: var(--day-gutter-w);
-  padding: 2px 10px 0 0;
+  padding: 0 10px 0 0;
   text-align: right;
   font-size: 10px;
+  line-height: 1.2;
   color: var(--fg-3);
 }
 

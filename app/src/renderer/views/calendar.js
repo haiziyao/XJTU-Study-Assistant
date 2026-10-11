@@ -368,6 +368,8 @@ function blockEl(block) {
 const DAY_HOUR_HEIGHT = 56;
 /** 没有日程时，自动滚动到的时间（分钟）：07:00。 */
 const DAY_FIRST_MINUTE = 7 * 60;
+/** 自动滚动后，目标小时的标签与吸顶条下沿之间留的间距（px）。 */
+const DAY_SCROLL_GAP = 8;
 
 /** 农历能力探测：null = 未知，false = 本机没有（不再请求），true = 可用（文案按日期缓存）。 */
 let lunarSupported = null;
@@ -398,23 +400,36 @@ function renderDay(host, anchor) {
       loadLunar(anchor, hero);
 
       const hourHeight = readHourHeight(timeline);
-      timeline.appendChild(dayHours());
+      const hours = dayHours();
+      timeline.appendChild(hours);
       const canvas = mk('div', 'day-canvas');
       // 重叠分列复用周视图的贪心分配（不改它的对外行为）
       for (const block of layoutBlocks(timed)) canvas.appendChild(dayBlock(block, hourHeight));
       if (anchor === PCUtil.todayKey()) canvas.appendChild(dayNowMark(hourHeight));
       timeline.appendChild(canvas);
 
-      const sticky = hero.offsetHeight + allDay.offsetHeight;
-      if (hero.offsetHeight) wrap.style.setProperty('--day-hero-h', `${hero.offsetHeight}px`);
-      // 让「最早日程前一小时」落在可视区顶部；没有日程就回到 07:00（不强制滚到最顶）
-      const rect = timeline.getBoundingClientRect();
-      const viewport = host.getBoundingClientRect();
-      const timelineTop = rect.top - viewport.top + host.scrollTop;
+      // 吸顶叠层：先把量到的顶栏高度写回 CSS（--day-hero-h 决定 .day-allday 的 sticky 位置），
+      // 再量叠层的视觉下沿。**只按两个元素的高度求和是不够的**：sticky 的定位基准是滚动容器的
+      // 内容框（.view-content 的 padding-top 不参与吸顶），叠加后真实遮住的高度会更大，
+      // 直接量 .day-allday 的 rect.bottom 才是可靠基准。
+      const heroHeight = hero.getBoundingClientRect().height;
+      if (heroHeight) wrap.style.setProperty('--day-hero-h', `${heroHeight}px`);
+      const occlusionBottom = allDay.getBoundingClientRect().bottom;
+
+      // 目标小时：有日程就取「最早日程开始前一小时」，没有就 07:00（不强制滚到最顶）。
+      // 让它的**标签**完整露在吸顶条下沿之下 8px——标签是居中画在整点线上的，
+      // 若把整点线对齐到吸顶条下沿，标签就会被吞掉一半。
+      // 两个 rect 都在视口坐标里：滚动 Δ 让内容上移 Δ、吸顶条不动，
+      // 所以「还要再滚多少」= 标签当前相对吸顶条下沿的位置 − 目标间距。
       const target = timed.length
         ? Math.max(0, Math.min(...timed.map((item) => PCUtil.minutes(item.startTime))) - 60)
         : DAY_FIRST_MINUTE;
-      host.scrollTop = Math.max(0, timelineTop + (target / 60) * hourHeight - sticky);
+      const hourIndex = Math.max(0, Math.min(23, Math.floor(target / 60)));
+      const labelNode = hours.children[hourIndex]?.querySelector('.day-hour-label');
+      if (labelNode) {
+        const delta = labelNode.getBoundingClientRect().top - occlusionBottom - DAY_SCROLL_GAP;
+        host.scrollTop = Math.max(0, host.scrollTop + delta);
+      }
     })
     .catch((error) => loading.replaceWith(errorBox(error)));
 }
@@ -449,9 +464,11 @@ function loadLunar(anchor, hero) {
     if (!text || sub.querySelector('.day-hero-lunar')) return;
     sub.appendChild(mk('span', 'day-hero-lunar', text));
     // 农历文字可能把顶栏撑高几像素，重新量一次吸顶偏移，避免全天行被压住
+    // （与 renderDay 用同一个量法：rect 高度而不是取整的 offsetHeight）
     const wrap = hero.parentNode;
-    if (wrap?.style?.setProperty && hero.offsetHeight) {
-      wrap.style.setProperty('--day-hero-h', `${hero.offsetHeight}px`);
+    const height = hero.getBoundingClientRect().height;
+    if (wrap?.style?.setProperty && height) {
+      wrap.style.setProperty('--day-hero-h', `${height}px`);
     }
   };
   if (lunarText.has(anchor)) {
