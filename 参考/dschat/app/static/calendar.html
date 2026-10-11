@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>日历 — DeepSeek Chat</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="calendar-wrap">
+  <header class="calendar-header">
+    <div class="calendar-heading">
+      <h1>📅 日历</h1>
+    </div>
+    <div class="calendar-nav">
+      <a href="/">💬 聊天</a>
+      <a href="/todos">📋 待办</a>
+      <a href="/settings">⚙️ 设置</a>
+      <a href="#" id="logout">登出</a>
+    </div>
+  </header>
+
+  <!-- 月份切换 -->
+  <div class="calendar-toolbar">
+    <button id="prev-month" class="icon">‹</button>
+    <span id="month-label" class="month-label"></span>
+    <button id="next-month" class="icon">›</button>
+    <button id="today-btn" class="filter active">今天</button>
+    <div class="view-switch">
+      <button class="view-btn active" data-view="month">月</button>
+      <button class="view-btn" data-view="week">周</button>
+      <button class="view-btn" data-view="day">日</button>
+    </div>
+  </div>
+
+  <!-- 日历网格 -->
+  <div class="calendar-grid">
+    <div id="calendar-header-row" class="calendar-weekdays"></div>
+    <div id="calendar-days" class="calendar-days"></div>
+  </div>
+
+  <!-- 选中日期详情 -->
+  <div id="day-panel" class="day-panel">
+    <div class="day-panel-header">
+      <span id="day-panel-title"></span>
+      <button id="add-event-btn" class="primary">＋ 添加日程</button>
+    </div>
+    <div id="day-events" class="day-events"></div>
+  </div>
+
+  <!-- ICS 订阅 -->
+  <div class="ics-panel">
+    <div class="ics-panel-header">📲 同步到苹果日历</div>
+    <div class="ics-panel-body">
+      <p class="ics-desc">复制下方链接，在 iPhone 上打开「设置 → 日历 → 账户 → 添加账户 → 其他 → 添加订阅日历」，粘贴即可。苹果日历会自动同步更新。</p>
+      <div class="ics-row">
+        <input type="text" id="ics-url" readonly>
+        <button id="ics-copy" class="primary">复制链接</button>
+      </div>
+      <div id="ics-status" class="hint"></div>
+    </div>
+  </div>
+
+  <!-- 学期规则 -->
+  <div class="ics-panel">
+    <div class="ics-panel-header">🎓 学期规则</div>
+    <div class="ics-panel-body">
+      <p class="ics-desc">添加学期规则后，日历的日格会显示「第几周·周几」，周视图标题会显示「第几周」。输入第一周的任意日期（所在那一周即第 1 周）。</p>
+      <div class="semester-add-row">
+        <input type="text" id="semester-name" placeholder="名称（如 2026秋）" maxlength="30">
+        <input type="date" id="semester-start" title="第一周任意日期">
+        <input type="number" id="semester-weeks" value="18" min="1" max="60" title="持续周数" style="max-width:80px;">
+        <button id="semester-add" class="primary">添加</button>
+      </div>
+      <div id="semester-list" class="semester-list"></div>
+      <div id="semester-status" class="hint"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 日程编辑弹窗 -->
+<div id="event-modal" class="modal-mask" style="display:none;">
+  <div class="modal">
+    <div class="modal-header">
+      <span id="event-modal-title">新建日程</span>
+      <button id="event-modal-close" class="icon">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>标题</label>
+        <input type="text" id="event-title" maxlength="200" placeholder="例如：数学考试、会议…">
+      </div>
+      <div class="field">
+        <label>日期</label>
+        <input type="date" id="event-date">
+      </div>
+      <div class="field">
+        <label class="checkbox-label">
+          <input type="checkbox" id="event-all-day">
+          全天
+        </label>
+      </div>
+      <div class="field event-time-row">
+        <div>
+          <label>开始时间</label>
+          <input type="time" id="event-start">
+        </div>
+        <div>
+          <label>结束时间</label>
+          <input type="time" id="event-end">
+        </div>
+      </div>
+      <div class="field">
+        <label>位置</label>
+        <input type="text" id="event-location" maxlength="100" placeholder="地点（可选）">
+      </div>
+      <div class="field">
+        <label>重复</label>
+        <select id="event-repeat">
+          <option value="none">不重复</option>
+          <option value="daily">每天</option>
+          <option value="weekly">每周</option>
+          <option value="monthly">每月</option>
+          <option value="yearly">每年</option>
+        </select>
+      </div>
+      <div class="field event-time-row">
+        <div>
+          <label>间隔（每 N 个周期）</label>
+          <input type="number" id="event-repeat-interval" min="1" value="1">
+        </div>
+        <div>
+          <label>重复截止（可选）</label>
+          <input type="date" id="event-repeat-end">
+        </div>
+      </div>
+      <div class="field">
+        <label>备注</label>
+        <textarea id="event-notes" rows="3" placeholder="补充说明…"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="event-save" class="primary">保存</button>
+      <button id="event-cancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/calendar.js"></script>
+</body>
+</html>

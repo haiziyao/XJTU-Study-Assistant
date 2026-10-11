@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>待办事项 — DeepSeek Chat</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="todos-wrap">
+  <header class="todos-header">
+    <div class="todos-heading">
+      <h1>📋 待办事项</h1>
+      <div id="stats" class="todos-stats"></div>
+    </div>
+    <div class="todos-nav">
+      <a href="/">💬 聊天</a>
+      <a href="/settings">⚙️ 设置</a>
+      <a href="#" id="logout">登出</a>
+    </div>
+  </header>
+
+  <!-- 新建待办 -->
+  <div class="todo-add">
+    <input type="text" id="new-title" placeholder="添加待办事项，按 Enter 快速添加…" maxlength="200">
+    <select id="new-priority" title="优先级">
+      <option value="medium">中优先级</option>
+      <option value="high">高优先级</option>
+      <option value="low">低优先级</option>
+    </select>
+    <input type="date" id="new-due" title="截止时间 (可选)">
+    <button id="add-todo" class="primary">添加</button>
+  </div>
+
+  <!-- 筛选与排序 -->
+  <div class="todo-toolbar">
+    <div class="todo-filters">
+      <button class="filter active" data-filter="all">全部</button>
+      <button class="filter" data-filter="active">未完成</button>
+      <button class="filter" data-filter="completed">已完成</button>
+    </div>
+    <div class="todo-sort">
+      <label>排序</label>
+      <select id="sort">
+        <option value="default">默认</option>
+        <option value="priority">优先级</option>
+        <option value="due">截止时间</option>
+        <option value="created">创建时间</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- 列表 -->
+  <div id="todo-list" class="todo-list"></div>
+</div>
+
+<!-- 编辑弹窗 -->
+<div id="todo-modal" class="modal-mask" style="display:none;">
+  <div class="modal">
+    <div class="modal-header">
+      <span>编辑待办</span>
+      <button id="todo-modal-close" class="icon">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>标题</label>
+        <input type="text" id="edit-title" maxlength="200">
+      </div>
+      <div class="field">
+        <label>备注</label>
+        <textarea id="edit-notes" rows="4" placeholder="补充说明…"></textarea>
+      </div>
+      <div class="field">
+        <label>优先级</label>
+        <select id="edit-priority">
+          <option value="high">高</option>
+          <option value="medium">中</option>
+          <option value="low">低</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>截止时间</label>
+        <input type="date" id="edit-due">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="edit-save" class="primary">保存</button>
+      <button id="edit-cancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/todos.js"></script>
+</body>
+</html>

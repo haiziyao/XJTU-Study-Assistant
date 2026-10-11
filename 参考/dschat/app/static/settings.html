@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>设置 — DeepSeek Chat</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="settings-wrap">
+  <h1>⚙️ 设置</h1>
+  <div class="sub">配置将保存到本地，供所有对话使用。</div>
+
+  <div class="field">
+    <label>API Key</label>
+    <input type="password" id="api_key" placeholder="sk-...">
+    <div class="help">在 platform.deepseek.com 申请。建议通过环境变量 DEEPSEEK_API_KEY 设置。</div>
+  </div>
+
+  <div class="field">
+    <label>Base URL</label>
+    <input type="text" id="base_url" placeholder="https://api.deepseek.com">
+  </div>
+
+  <div class="field">
+    <label>模型</label>
+    <select id="model"></select>
+  </div>
+
+  <div class="field">
+    <label>思考模式</label>
+    <select id="thinking">
+      <option value="enabled">开启</option>
+      <option value="disabled">关闭</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label>思考强度 (reasoning_effort)</label>
+    <select id="effort">
+      <option value="low">low</option>
+      <option value="high">high</option>
+      <option value="max">max</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label>温度 (temperature，仅关闭思考时生效)</label>
+    <input type="text" id="temperature" inputmode="decimal">
+  </div>
+
+  <div class="field">
+    <label>最大输出 tokens</label>
+    <input type="text" id="max_tokens" inputmode="numeric">
+  </div>
+
+  <div class="field">
+    <label>最大上下文长度 (tokens)</label>
+    <input type="text" id="max_context" inputmode="numeric">
+  </div>
+
+  <div class="field">
+    <label>聊天文本字号 (px，默认 14)</label>
+    <input type="text" id="font_size" inputmode="numeric">
+    <div class="help">范围建议 12–24，影响对话内容文字大小。</div>
+  </div>
+
+  <div class="field">
+    <label>公式缩放 (%，默认 100)</label>
+    <input type="text" id="math_scale" inputmode="numeric">
+    <div class="help">相对聊天文本的比例，范围建议 80–160，控制 LaTeX 公式大小。</div>
+  </div>
+
+  <div class="field">
+    <label class="checkbox-label">
+      <input type="checkbox" id="show_mood">
+      显示智能体情绪指示器
+    </label>
+    <div class="help">关闭后，顶栏不再显示智能体的当前情绪标签（情绪系统仍会在后台运行）。</div>
+  </div>
+
+  <div class="field">
+    <label class="checkbox-label">
+      <input type="checkbox" id="draw_mode">
+      作图模式（AI 可输出几何图形/图表）
+    </label>
+    <div class="help">开启后，AI 在需要画图时会输出 SVG 图形；关闭可减少提示词 token 消耗。</div>
+  </div>
+
+  <div class="field">
+    <label>余额显示模式</label>
+    <select id="balance_mode">
+      <option value="floating">悬浮球</option>
+      <option value="fixed">固定（侧边栏）</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label>固定模式角色</label>
+    <select id="balance_character"></select>
+    <div class="help">选择固定模式下显示在侧边栏的角色装饰图。</div>
+  </div>
+
+  <div class="field">
+    <label>余额警告阈值 (元，低于此变黄)</label>
+    <input type="text" id="balance_warn_threshold" inputmode="decimal">
+  </div>
+
+  <div class="field">
+    <label>余额危险阈值 (元，低于此变红)</label>
+    <input type="text" id="balance_danger_threshold" inputmode="decimal">
+  </div>
+
+  <div class="actions">
+    <button id="save" class="primary">保存</button>
+    <button id="back">返回聊天</button>
+  </div>
+  <div id="status" class="hint" style="margin-top:10px;"></div>
+
+  <!-- 账户 -->
+  <div class="user-admin">
+    <h2>🔒 修改密码</h2>
+    <div class="field">
+      <label>原密码</label>
+      <input type="password" id="old_password" autocomplete="current-password">
+    </div>
+    <div class="field">
+      <label>新密码 (至少 6 位)</label>
+      <input type="password" id="new_password" autocomplete="new-password">
+    </div>
+    <button id="change-pwd" class="primary">修改密码</button>
+    <div id="pwd-status" class="hint" style="margin-top:6px;"></div>
+  </div>
+
+  <!-- 管理员用户管理 -->
+  <div class="user-admin" id="user-admin" style="display:none;">
+    <h2>👥 用户管理</h2>
+    <div class="row">
+      <input type="text" id="new-user-name" placeholder="用户名">
+      <input type="password" id="new-user-pwd" placeholder="密码 (至少 6 位)">
+      <select id="new-user-role">
+        <option value="user">普通用户</option>
+        <option value="admin">管理员</option>
+      </select>
+      <button id="add-user" class="primary">创建</button>
+    </div>
+    <div id="admin-status" class="hint" style="margin-top:6px;"></div>
+    <table id="user-table"></table>
+  </div>
+
+  <!-- 管理员邀请码管理 -->
+  <div class="user-admin" id="invite-admin" style="display:none;">
+    <h2>🎟️ 邀请码管理</h2>
+    <div class="row">
+      <input type="number" id="invite-count" value="1" min="1" max="100" style="max-width:90px;" title="生成数量">
+      <input type="text" id="invite-note" placeholder="备注 (可选)">
+      <button id="gen-invites" class="primary">生成邀请码</button>
+    </div>
+    <div class="help">生成后把邀请码发给他人，对方即可在登录页自助注册。</div>
+    <div id="invite-status" class="hint" style="margin-top:6px;"></div>
+    <table id="invite-table"></table>
+  </div>
+</div>
+
+<script src="/static/settings.js"></script>
+</body>
+</html>

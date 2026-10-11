@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeek Chat 接口文档</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --border: #e2e5ea;
+    --accent: #1a6fb5; --text: #2c3e50; --muted: #8a94a3;
+    --code-bg: #f6f8fa; --danger: #c0392b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI",
+      Roboto, "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); margin: 0; line-height: 1.7;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin-bottom: 28px; font-size: 14px; }
+  h2 {
+    font-size: 20px; margin: 32px 0 12px; padding-bottom: 8px;
+    border-bottom: 2px solid var(--border);
+  }
+  h3 { font-size: 16px; margin: 20px 0 8px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 20px; margin-bottom: 16px;
+  }
+  code {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 6px; font-size: 13px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 14px; overflow-x: auto;
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px;
+    line-height: 1.6;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  th { background: #f7f8fa; font-weight: 600; }
+  .tag {
+    display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 8px;
+    border-radius: 4px; color: #fff; margin-right: 6px; vertical-align: middle;
+  }
+  .tag.get { background: #27ae60; }
+  .tag.post { background: #1a6fb5; }
+  .tag.patch { background: #b7791f; }
+  .tag.delete { background: #c0392b; }
+  .note {
+    background: #fef6e7; border: 1px solid #f0c36a; border-radius: 8px;
+    padding: 10px 14px; font-size: 13px; margin: 12px 0;
+  }
+  .toc { font-size: 14px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  @media (max-width: 768px) { .wrap { padding: 20px 12px 48px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>DeepSeek Chat 接口文档</h1>
+  <div class="sub">内部 AI 命令格式与 REST API 规范 · 为未来外部集成预留</div>
+
+  <div class="toc">
+    <strong>目录</strong><br>
+    <a href="#ai-commands">一、AI 内部命令格式</a> ·
+    <a href="#auth">二、认证接口</a> ·
+    <a href="#conversations">三、会话接口</a> ·
+    <a href="#todos">四、待办接口</a> ·
+    <a href="#events">五、日程接口</a> ·
+    <a href="#semesters">六、学期接口</a> ·
+    <a href="#misc">七、其他接口</a>
+  </div>
+
+  <h2 id="ai-commands">一、AI 内部命令格式</h2>
+  <div class="card">
+    <p>这些是聊天时 AI 回复正文中输出的「标记行」，由前端自动识别并执行对应的数据操作。标记行必须<strong>单独成行</strong>、以方括号命令开头、字段用 <code>|</code> 分隔。每条标记行对应一条操作。</p>
+  </div>
+
+  <h3>1.1 待办事项</h3>
+  <pre>[新增待办] 标题 | 优先级 | 截止日期 | 科目
+[删除待办] 标题</pre>
+  <table>
+    <tr><th>字段</th><th>取值</th></tr>
+    <tr><td>优先级</td><td><code>高</code> / <code>中</code> / <code>低</code></td></tr>
+    <tr><td>截止日期</td><td><code>YYYY-MM-DD</code>，无则 <code>无</code></td></tr>
+    <tr><td>科目</td><td>学科/分类名，无则 <code>无</code></td></tr>
+  </table>
+  <p>示例：<code>[新增待办] 化学作业 | 高 | 2026-09-30 | 化学</code></p>
+
+  <h3>1.2 日程（含循环）</h3>
+  <pre>[新增日程] 标题 | 日期 | 开始时间 | 结束时间 | 地点 | 重复 | 间隔 | 重复截止
+[删除日程] 标题</pre>
+  <table>
+    <tr><th>字段</th><th>取值</th></tr>
+    <tr><td>日期</td><td><code>YYYY-MM-DD</code></td></tr>
+    <tr><td>开始/结束时间</td><td><code>HH:MM</code>；全天填 <code>全天</code>；未知填 <code>无</code></td></tr>
+    <tr><td>地点</td><td>具体地点，无则 <code>无</code></td></tr>
+    <tr><td>重复</td><td><code>无</code> / <code>每天</code> / <code>每周</code> / <code>每月</code> / <code>每年</code></td></tr>
+    <tr><td>间隔</td><td>数字（如每 2 周填 <code>2</code>，默认 <code>1</code>）</td></tr>
+    <tr><td>重复截止</td><td><code>YYYY-MM-DD</code>，无则 <code>无</code></td></tr>
+  </table>
+  <p>示例：<code>[新增日程] 每周例会 | 2026-09-20 | 10:00 | 11:00 | 三教101 | 每周 | 2 | 2026-12-31</code></p>
+
+  <h3>1.3 学期规则</h3>
+  <pre>[新增学期] 名称 | 起始日期 | 周数
+[删除学期] 名称</pre>
+  <table>
+    <tr><th>字段</th><th>取值</th></tr>
+    <tr><td>起始日期</td><td>第一周任意一天的 <code>YYYY-MM-DD</code>（所在那周即第 1 周）</td></tr>
+    <tr><td>周数</td><td>数字（默认 <code>18</code>）</td></tr>
+  </table>
+  <p>示例：<code>[新增学期] 2026秋 | 2026-09-01 | 18</code></p>
+
+  <h2 id="auth">二、认证接口</h2>
+  <table>
+    <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/auth/login</code></td><td>登录（body: username, password）</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/auth/logout</code></td><td>登出</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/auth/register</code></td><td>邀请码注册（body: username, password, invite_code）</td></tr>
+    <tr><td><span class="tag get">GET</span></td><td><code>/api/auth/me</code></td><td>当前用户信息</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/auth/password</code></td><td>修改密码（body: old_password, new_password）</td></tr>
+  </table>
+  <div class="note">除公开端点（login/logout/register/me）外，其余接口均需登录后携带 Session Cookie（<code>dschat_session</code>）。管理员额外接口：<code>/api/auth/users</code>、<code>/api/auth/invites</code>。</div>
+
+  <h2 id="conversations">三、会话接口</h2>
+  <table>
+    <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+    <tr><td><span class="tag get">GET</span></td><td><code>/api/conversations</code></td><td>列出会话（query: agent_id 可选）</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/conversations</code></td><td>新建会话（body: agent_id）</td></tr>
+    <tr><td><span class="tag get">GET</span></td><td><code>/api/conversations/:id</code></td><td>会话详情（含消息）</td></tr>
+    <tr><td><span class="tag patch">PATCH</span></td><td><code>/api/conversations/:id</code></td><td>重命名（body: title）</td></tr>
+    <tr><td><span class="tag delete">DELETE</span></td><td><code>/api/conversations/:id</code></td><td>删除会话</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/chat</code></td><td>发送消息（SSE 流式）</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/retry</code></td><td>重新生成最后一条回答</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/edit</code></td><td>编辑用户消息并重新生成</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/stop</code></td><td>停止生成</td></tr>
+  </table>
+
+  <h2 id="todos">四、待办接口</h2>
+  <table>
+    <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+    <tr><td><span class="tag get">GET</span></td><td><code>/api/todos</code></td><td>列出待办</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/todos</code></td><td>新建待办</td></tr>
+    <tr><td><span class="tag patch">PATCH</span></td><td><code>/api/todos/:id</code></td><td>更新待办</td></tr>
+    <tr><td><span class="tag delete">DELETE</span></td><td><code>/api/todos/:id</code></td><td>删除待办</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/todos/delete</code></td><td>按标题删除（body: title）</td></tr>
+  </table>
+  <p>待办字段：<code>title</code>, <code>notes</code>, <code>priority</code>(high/medium/low), <code>due_date</code>(YYYY-MM-DD), <code>category</code>, <code>completed</code>。</p>
+
+  <h2 id="events">五、日程接口</h2>
+  <table>
+    <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+    <tr><td><span class="tag get">GET</span></td><td><code>/api/events</code></td><td>列出日程（query: start, end 可选）</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/events</code></td><td>新建日程</td></tr>
+    <tr><td><span class="tag patch">PATCH</span></td><td><code>/api/events/:id</code></td><td>更新日程</td></tr>
+    <tr><td><span class="tag delete">DELETE</span></td><td><code>/api/events/:id</code></td><td>删除日程</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/events/delete</code></td><td>按标题删除（body: title）</td></tr>
+  </table>
+  <p>日程字段：<code>title</code>, <code>notes</code>, <code>location</code>, <code>date</code>(YYYY-MM-DD), <code>start_time</code>, <code>end_time</code>, <code>all_day</code>, <code>repeat</code>(none/daily/weekly/monthly/yearly), <code>repeat_interval</code>, <code>repeat_end</code>。</p>
+
+  <h2 id="semesters">六、学期接口</h2>
+  <table>
+    <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+    <tr><td><span class="tag get">GET</span></td><td><code>/api/semesters</code></td><td>列出学期规则</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/semesters</code></td><td>新建学期规则</td></tr>
+    <tr><td><span class="tag patch">PATCH</span></td><td><code>/api/semesters/:id</code></td><td>更新学期规则</td></tr>
+    <tr><td><span class="tag delete">DELETE</span></td><td><code>/api/semesters/:id</code></td><td>删除学期规则</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/semesters/delete</code></td><td>按名称删除（body: name）</td></tr>
+  </table>
+  <p>学期字段：<code>name</code>, <code>start_date</code>(YYYY-MM-DD), <code>total_weeks</code>。</p>
+
+  <h2 id="misc">七、其他接口</h2>
+  <table>
+    <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+    <tr><td><span class="tag get">GET</span></td><td><code>/api/config</code></td><td>读取用户配置</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/config</code></td><td>保存用户配置</td></tr>
+    <tr><td><span class="tag get">GET</span></td><td><code>/api/models</code></td><td>可用模型列表</td></tr>
+    <tr><td><span class="tag get">GET</span></td><td><code>/api/balance</code></td><td>DeepSeek 账户余额</td></tr>
+    <tr><td><span class="tag get">GET</span></td><td><code>/api/ics-token</code></td><td>获取苹果日历订阅链接</td></tr>
+    <tr><td><span class="tag get">GET</span></td><td><code>/ics/:token.ics</code></td><td>ICS 订阅（公开，凭 token）</td></tr>
+    <tr><td><span class="tag get">GET</span></td><td><code>/api/agents</code></td><td>列出智能体</td></tr>
+    <tr><td><span class="tag post">POST</span></td><td><code>/api/agents</code></td><td>新建智能体</td></tr>
+  </table>
+
+  <div class="note">
+    <strong>说明</strong>：本文档为内部接口与 AI 命令的规范汇总，供未来外部集成参考。所有数据均按 <code>user_id</code> 隔离，接口需登录后调用。AI 命令标记行仅在前端解析执行，属于「应用层约定」，而非独立 API 端点。
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,19 @@
+# 本模块的忽略规则
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.lnk
+
+# 运行数据（聊天记录、上传图片、SQLite 库）：首次启动会自动创建
+data/
+dschatmac/data/
+
+# 真实部署配置（含服务器地址与凭据），请从 *.example 复制后本地填写
+deploy/frpc.toml
+deploy/frps.toml
+deploy/cloudflared.yml
+cloudflared.yml
+frpc.toml
+frps.toml
+*.log

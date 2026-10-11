@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeek Chat</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css">
+</head>
+<body>
+<div class="app">
+  <!-- 侧边栏 -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h1>🤖 DeepSeek Chat</h1>
+      <div class="agent-bar">
+        <div id="agent-selector" class="agent-selector" title="切换智能体">
+          <span id="agent-avatar" class="agent-avatar">🤖</span>
+          <span id="agent-name" class="agent-name">通用助手</span>
+          <span class="agent-caret">▾</span>
+        </div>
+        <div id="agent-dropdown" class="agent-dropdown" style="display:none;"></div>
+      </div>
+      <button id="new-conv" class="primary new-btn">＋ 新对话</button>
+    </div>
+    <div id="conv-list" class="conv-list"></div>
+    <!-- 固定余额装饰区 (fixed 模式下显示) -->
+    <div id="balance-fixed" class="balance-fixed" style="display:none;">
+      <div class="balance-deco">
+        <img id="balance-deco-img" src="" alt="角色装饰" draggable="false">
+      </div>
+      <div class="balance-fixed-footer">
+        <span id="balance-fixed-emoji" class="balance-emoji">😊</span>
+        <span id="balance-fixed-text" class="balance-text">¥--</span>
+      </div>
+    </div>
+  </aside>
+  <div id="sidebar-mask" class="sidebar-mask"></div>
+
+  <!-- 主区域 -->
+  <div class="main">
+    <div class="topbar">
+      <button id="toggle-sidebar" class="toggle-sidebar" title="收起/展开侧边栏">☰</button>
+      <span id="model-tag" class="model-tag">deepseek-flash</span>
+      <span id="mood-tag" class="mood-tag" style="display:none;"></span>
+      <span class="spacer"></span>
+      <span id="user-tag" class="user-tag"></span>
+      <a href="/calendar">📅 日历</a>
+      <a href="/todos">📋 待办</a>
+      <a href="/settings">⚙️ 设置</a>
+      <a href="#" id="logout">登出</a>
+    </div>
+    <div id="chat" class="chat">
+      <div class="chat-inner" id="chat-inner"></div>
+    </div>
+    <div class="composer">
+      <div class="composer-inner">
+        <div id="preview-imgs" class="preview-imgs"></div>
+        <div class="input-row">
+          <button id="attach" title="添加图片/文件">🖼️</button>
+          <button id="web-search" title="联网搜索">🌐</button>
+          <textarea id="input" placeholder="输入消息，Shift+Enter 发送，Enter 换行…"></textarea>
+          <button id="send" class="primary">发送</button>
+          <button id="stop" style="display:none;">停止</button>
+        </div>
+        <input type="file" id="file-input" accept="image/*,.txt,.md,.json,.csv,.py,.js,.ts,.html,.css,.xml,.yml,.yaml,.log,.sql,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip" multiple style="display:none;">
+        <div class="hint">Shift+Enter 发送 · Enter 换行 · 支持图片/文件/粘贴图片</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11/lib/common.min.js"></script>
+<script>
+window.MathJax = {
+  tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
+  options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<script src="/static/chat.js"></script>
+
+<!-- 余额悬浮球 -->
+<div id="balance-fab" class="balance-fab" title="API 余额">
+  <span id="balance-fab-value" class="balance-fab-value">--</span>
+</div>
+
+<!-- 智能体编辑弹窗 -->
+<div id="agent-modal" class="modal-mask" style="display:none;">
+  <div class="modal">
+    <div class="modal-header">
+      <span id="agent-modal-title">新建智能体</span>
+      <button id="agent-modal-close" class="icon">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>名称</label>
+        <input type="text" id="agent-form-name" placeholder="例如：苏格拉底、猫娘、翻译官…">
+      </div>
+      <div class="field">
+        <label>头像 (emoji)</label>
+        <input type="text" id="agent-form-avatar" placeholder="🤖" maxlength="4">
+      </div>
+      <div class="field">
+        <label>人格设定 (System Prompt)</label>
+        <textarea id="agent-form-persona" rows="7" placeholder="描述这个 AI 的性格、身份、说话方式、专长…例如：&#10;你是一位睿智的哲学老师，喜欢用苏格拉底式提问引导学生思考。"></textarea>
+      </div>
+      <div class="field">
+        <label>专属上下文长度 (tokens，留空用全局设置)</label>
+        <input type="text" id="agent-form-context" inputmode="numeric" placeholder="32768">
+        <div class="help">值越大，AI 能记住的对话越长。</div>
+      </div>
+      <div class="field">
+        <label>情绪化系数 (0~1，默认 0.5)</label>
+        <input type="text" id="agent-form-intensity" inputmode="decimal" placeholder="0.5">
+        <div class="help">情绪不平静时，回答受情绪影响的程度。越高越容易被情绪左右。</div>
+      </div>
+      <div class="field">
+        <label>情绪变化系数 (0~1，默认 0.5)</label>
+        <input type="text" id="agent-form-reactivity" inputmode="decimal" placeholder="0.5">
+        <div class="help">情绪变化的速度。越高情绪波动越快。</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="agent-form-save" class="primary">保存</button>
+      <button id="agent-form-cancel">取消</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

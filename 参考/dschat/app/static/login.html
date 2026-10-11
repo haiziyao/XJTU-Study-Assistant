@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>登录 — DeepSeek Chat</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card">
+    <h1>🤖 DeepSeek Chat</h1>
+    <div class="sub">请登录以继续</div>
+
+    <div class="tabs">
+      <button id="tab-login" class="tab active" type="button">登录</button>
+      <button id="tab-register" class="tab" type="button">注册</button>
+    </div>
+
+    <!-- 登录表单 -->
+    <div id="form-login">
+      <div class="field">
+        <label>用户名</label>
+        <input type="text" id="username" autocomplete="username" placeholder="用户名">
+      </div>
+      <div class="field">
+        <label>密码</label>
+        <input type="password" id="password" autocomplete="current-password" placeholder="密码">
+      </div>
+      <div id="error" class="hint" style="color: var(--danger); min-height: 18px;"></div>
+      <button id="login" class="primary" style="width:100%;">登录</button>
+    </div>
+
+    <!-- 注册表单 -->
+    <div id="form-register" style="display:none;">
+      <div class="field">
+        <label>用户名 (2~32 字符)</label>
+        <input type="text" id="reg-username" autocomplete="username" placeholder="设置用户名">
+      </div>
+      <div class="field">
+        <label>密码 (至少 6 位)</label>
+        <input type="password" id="reg-password" autocomplete="new-password" placeholder="设置密码">
+      </div>
+      <div class="field">
+        <label>邀请码</label>
+        <input type="text" id="reg-invite" placeholder="请输入邀请码">
+      </div>
+      <div id="reg-error" class="hint" style="color: var(--danger); min-height: 18px;"></div>
+      <button id="register" class="primary" style="width:100%;">注册</button>
+    </div>
+  </div>
+</div>
+<script src="/static/login.js"></script>
+</body>
+</html>
