@@ -169,10 +169,67 @@ export class LmsService {
 
   // ---------------------------------------------------------------- 课程 / 活动
 
-  listCourses() {
+  /**
+   * 学期列表：由本地课程缓存聚合而来。
+   *
+   * 真实数据里一个账号会有多个学期的课（实测同一账号跨了 2025-2026 与 2026-2027），
+   * 界面需要一个「选学期 → 只看这个学期的课与作业」的下拉框，所以这里先给出可选学期：
+   * - `id` 是学校侧的学期 ID；`label` 是可读名字（见 api.js 的 semester.label 兜底）；
+   * - `currentId` 是「今天落在其起止区间内」的那个学期，没有就取最新的一个。
+   */
+  listSemesters() {
+    const courses = this.store.lmsCourses.all().map(courseView);
+    const groups = new Map();
+    for (const course of courses) {
+      const id = course.semester?.id ?? null;
+      const key = id === null ? 'none' : String(id);
+      if (!groups.has(key)) {
+        groups.set(key, {
+          id,
+          code: course.semester?.code ?? null,
+          label: course.semester?.label ?? course.semester?.name ?? course.semester?.code ?? '未标注学期',
+          academicYear: course.academicYear?.name ?? null,
+          courseCount: 0,
+          startDate: null,
+          endDate: null,
+        });
+      }
+      const group = groups.get(key);
+      group.courseCount += 1;
+      if (course.startDate && (!group.startDate || course.startDate < group.startDate)) group.startDate = course.startDate;
+      if (course.endDate && (!group.endDate || course.endDate > group.endDate)) group.endDate = course.endDate;
+    }
+    const today = todayKey();
+    const items = [...groups.values()].map((group) => {
+      const started = Boolean(group.startDate && group.startDate <= today);
+      // 实测：学校几乎不给 endDate（54 门课里绝大多数只有 start_date），
+      // 所以「今天是否落在区间内」必须要求两端都有，否则会把 2024 年的学期也算成当前学期。
+      const containsToday = Boolean(started && group.endDate && group.endDate >= today);
+      return { ...group, started, containsToday };
+    });
+    items.sort((a, b) => String(b.code ?? '').localeCompare(String(a.code ?? '')));
+    // 当前学期：优先「今天确实在区间内」的；其次「已经开学但没给结束日」里最新的一个
+    const current = items.find((item) => item.containsToday) ?? items.find((item) => item.started) ?? items[0] ?? null;
+    return { items, count: items.length, currentId: current?.id ?? null, fetchedAt: this.state.lastCoursesAt };
+  }
+
+  /** 某个学期下的课程 ID 列表（`'none'` 表示没有学期信息的课）。 */
+  courseIdsOfSemester(semesterId) {
+    const wanted = semesterId === null || semesterId === undefined ? null : String(semesterId);
+    if (wanted === null) return null;
+    return this.store.lmsCourses
+      .all()
+      .map(courseView)
+      .filter((course) => (wanted === 'none' ? !course.semester?.id : String(course.semester?.id ?? 'none') === wanted))
+      .map((course) => Number(course.id));
+  }
+
+  listCourses({ semesterId } = {}) {
+    const scoped = semesterId === undefined ? null : this.courseIdsOfSemester(semesterId) ?? [];
     const items = this.store.lmsCourses
       .all()
       .map((record) => courseView(record))
+      .filter((course) => (scoped === null ? true : scoped.includes(Number(course.id))))
       .sort((a, b) => {
         const semester = String(b.semester?.name ?? '').localeCompare(String(a.semester?.name ?? ''));
         if (semester !== 0) return semester;
@@ -181,19 +238,23 @@ export class LmsService {
     return { items, count: items.length, fetchedAt: this.state.lastCoursesAt, loggedIn: this.state.status === 'ready' };
   }
 
-  async refreshCourses() {
+  async refreshCourses({ semesterId } = {}) {
     await this.#ensureReady();
     const courses = await this.#guard(() => this.api.myCourses(), '拉取课程列表失败');
     const now = new Date().toISOString();
     const keep = new Set();
     for (const course of courses) {
       keep.add(courseRecordId(course.id));
+      const previous = this.store.lmsCourses.get(courseRecordId(course.id));
       await this.store.lmsCourses.insert({
         // 注意：id 必须放在展开之后，否则会被 course.id（学校返回的数字 ID）覆盖
+        ...(previous ?? {}),
         ...course,
         id: courseRecordId(course.id),
         courseId: course.id,
         fetchedAt: now,
+        // 刷新课程不能把「活动拉取时间」抹掉，否则每次刷新课程都会重拉一遍活动
+        activitiesFetchedAt: previous?.activitiesFetchedAt ?? null,
       });
     }
     // 学校里已经退掉的课，本地也不再保留（相关的活动缓存一并清掉）
@@ -205,27 +266,29 @@ export class LmsService {
     }
     this.state.lastCoursesAt = now;
     await this.#persistMeta();
-    return { ...this.listCourses(), fetchedAt: now };
+    return { ...this.listCourses({ semesterId }), fetchedAt: now };
   }
 
-  listActivities({ courseIds, type } = {}) {
+  listActivities({ courseIds, type, semesterId } = {}) {
+    const scoped = courseIds?.length ? courseIds.map(Number) : semesterId === undefined ? null : this.courseIdsOfSemester(semesterId) ?? [];
     let items = this.store.lmsActivities
       .all()
       .map((record) => activityView(record))
-      .filter((item) => (courseIds?.length ? courseIds.map(Number).includes(Number(item.courseId)) : true))
+      .filter((item) => (scoped === null ? true : scoped.includes(Number(item.courseId))))
       .filter((item) => (type ? item.type === type : true));
     items.sort((a, b) => String(a.endTime ?? a.startTime ?? '').localeCompare(String(b.endTime ?? b.startTime ?? '')));
     return { items, count: items.length, fetchedAt: this.state.lastActivitiesAt, loggedIn: this.state.status === 'ready' };
   }
 
   /** 拉取指定课程（默认全部）的活动列表并落缓存。 */
-  async refreshActivities({ courseIds, force = false } = {}) {
+  async refreshActivities({ courseIds, semesterId, force = false } = {}) {
     await this.#ensureReady();
     const all = this.store.lmsCourses.all();
     if (!all.length) await this.refreshCourses();
+    const scoped = courseIds?.length ? courseIds.map(Number) : semesterId === undefined ? null : this.courseIdsOfSemester(semesterId) ?? [];
     const courses = this.store.lmsCourses
       .all()
-      .filter((course) => (courseIds?.length ? courseIds.map(Number).includes(Number(course.courseId)) : true));
+      .filter((course) => (scoped === null ? true : scoped.includes(Number(course.courseId))));
     if (!courses.length) return { items: [], count: 0, fetchedAt: this.state.lastActivitiesAt, errors: [] };
 
     const { activities, errors } = await this.#guard(
@@ -239,7 +302,7 @@ export class LmsService {
     }
     this.state.lastActivitiesAt = now;
     await this.#persistMeta();
-    return { ...this.listActivities({ courseIds }), errors };
+    return { ...this.listActivities({ courseIds, semesterId }), errors };
   }
 
   async activityDetail(activityId) {
@@ -274,7 +337,7 @@ export class LmsService {
       activities: data.activities,
       existingSchedules: this.store.schedules.all(),
       existingEvents: this.store.events.all(),
-      options: resolved,
+      options: { ...resolved, courseIds: data.scopedIds ?? resolved.courseIds },
     });
     this.lastPlan = plan;
     return {
@@ -295,7 +358,7 @@ export class LmsService {
       activities: data.activities,
       existingSchedules: this.store.schedules.all(),
       existingEvents: this.store.events.all(),
-      options: resolved,
+      options: { ...resolved, courseIds: data.scopedIds ?? resolved.courseIds },
     });
     const result = await applySyncPlan({
       services: this.services,
@@ -376,6 +439,7 @@ export class LmsService {
       markSubmittedDone: options.markSubmittedDone === undefined ? true : Boolean(options.markSubmittedDone),
       pruneStale: Boolean(options.pruneStale),
       courseIds: options.courseIds?.length ? options.courseIds.map(Number) : null,
+      semesterId: options.semesterId ?? null,
       keys: options.keys?.length ? options.keys : null,
       today: options.today ?? todayKey(),
       maxAgeMs: options.maxAgeMs ?? ACTIVITY_TTL_MS,
@@ -390,23 +454,30 @@ export class LmsService {
       await this.refreshCourses();
       courses = this.store.lmsCourses.all();
     }
-    if (options.courseIds?.length) courses = courses.filter((course) => options.courseIds.includes(Number(course.courseId)));
+    // 范围优先级：显式 courseIds > 学期 > 全部
+    let scopedIds = options.courseIds?.length ? options.courseIds : null;
+    if (!scopedIds && options.semesterId !== null && options.semesterId !== undefined) {
+      scopedIds = this.courseIdsOfSemester(options.semesterId) ?? [];
+    }
+    if (scopedIds) courses = courses.filter((course) => scopedIds.includes(Number(course.courseId)));
 
     const age = this.state.lastActivitiesAt ? Date.now() - Date.parse(this.state.lastActivitiesAt) : Infinity;
     if (!this.store.lmsActivities.all().length || options.refresh || age > options.maxAgeMs) {
-      await this.refreshActivities({ courseIds: options.courseIds ?? undefined });
+      await this.refreshActivities({ courseIds: scopedIds ?? undefined, semesterId: options.semesterId ?? undefined });
     }
 
-    const activities = this.store.lmsActivities.all().map(activityView);
+    // 活动也必须按同一个范围过滤：缓存里可能有别的学期的活动
+    const inScope = (item) => (scopedIds === null ? true : scopedIds.includes(Number(item.courseId)));
+    const activities = this.store.lmsActivities.all().map(activityView).filter(inScope);
     await this.#enrichHomeworkDetails(activities, options);
 
-    const refreshed = this.store.lmsActivities.all().map(activityView);
+    const refreshed = this.store.lmsActivities.all().map(activityView).filter(inScope);
     const countByCourse = new Map();
     for (const activity of refreshed) {
       countByCourse.set(activity.courseId, (countByCourse.get(activity.courseId) ?? 0) + 1);
     }
     const courseList = courses.map(courseView);
-    return { courses: courseList, activities: refreshed, countByCourse };
+    return { courses: courseList, activities: refreshed, countByCourse, scopedIds };
   }
 
   /** 作业是否已提交，只有详情接口才知道；按需补拉并写回缓存。 */
@@ -440,6 +511,13 @@ export class LmsService {
     }
   }
 
+  /** 这些课程的活动是否还没拉过（用于决定要不要自动打学校服务器，而不是看列表长度）。 */
+  needsActivityRefresh({ courseIds, semesterId } = {}) {
+    const scoped = courseIds?.length ? courseIds.map(Number) : semesterId === undefined ? null : this.courseIdsOfSemester(semesterId) ?? [];
+    const courses = this.store.lmsCourses.all().filter((course) => (scoped === null ? true : scoped.includes(Number(course.courseId))));
+    return courses.some((course) => !course.activitiesFetchedAt);
+  }
+
   async #saveActivities(courseId, list, courseName, now, { force = false } = {}) {
     const existing = this.store.lmsActivities.all().filter((item) => Number(item.courseId) === Number(courseId));
     const existingById = new Map(existing.map((item) => [item.activityId ?? item.id, item]));
@@ -463,6 +541,7 @@ export class LmsService {
     for (const item of existing) {
       if (!keep.has(item.activityId ?? item.id)) await this.store.lmsActivities.remove(item.id);
     }
+    await this.store.lmsCourses.update(courseRecordId(courseId), { activitiesFetchedAt: now });
   }
 
   async #removeActivitiesOfCourse(courseId) {

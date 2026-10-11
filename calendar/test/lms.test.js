@@ -17,7 +17,7 @@ import { normalizeCourse } from '../src/server/lms/api.js';
 import { ACTIVITY_TYPE_LABEL } from '../src/server/lms/config.js';
 import { buildSyncPlan, refineActivityTitle } from '../src/server/lms/sync.js';
 import { parseLmsTime } from '../src/server/lms/time.js';
-import { startMockLms } from './helpers/lms-mock.js';
+import { defaultDataset, startMockLms } from './helpers/lms-mock.js';
 
 const TODAY = '2026-10-11';
 
@@ -509,6 +509,130 @@ test('思源学堂：自动同步设置与执行', async () => {
   } finally {
     if (first) await first.app.close();
     if (second) await second.app.close();
+    await mock.close();
+  }
+});
+
+test('思源学堂：按学期筛选课程、活动与同步范围', async () => {
+  // 真实账号会跨多个学期，所以单独造一份「两个学期」的数据集
+  const dataset = defaultDataset();
+  dataset.courses.push({
+    id: 1003,
+    name: '线性代数',
+    course_code: 'MATH1002',
+    credit: '3.0',
+    start_date: '2025-09-01',
+    end_date: '2026-01-15',
+    instructors: [{ id: 12, name: '赵老师' }],
+    academic_year: { id: 7, code: '2025', name: '2025-2026' },
+    semester: { id: 2, code: '2025-1', name: null, real_name: null },
+    department: { id: 12, name: '电子与信息学部', code: 'DX' },
+    course_attributes: { published: true, student_count: 50, teaching_class_name: '线代-02班' },
+  });
+  dataset.activities[1003] = [
+    { id: 5008, course_id: 1003, type: 'homework', title: '线代作业一', start_time: '2026-11-10T08:00:00+08:00', end_time: '2026-11-20T23:59:00+08:00', published: true },
+  ];
+  dataset.details[5008] = { description: '<p>矩阵</p>', user_submit_count: 0 };
+
+  const mock = await startMockLms({ dataset });
+  const { call, app } = await startApp(mock);
+  try {
+    await login(call);
+    await call('GET', '/lms/courses?refresh=1');
+
+    const semesters = await call('GET', '/lms/semesters');
+    assert.equal(semesters.body.count, 2);
+    const older = semesters.body.items.find((item) => item.id === 2);
+    assert.equal(older.courseCount, 1);
+    assert.equal(older.academicYear, '2025-2026');
+    assert.equal(older.label, '2025-2026 学年 · 第 1 学期', 'name/real_name 为空时用学年 + code 兜底');
+    assert.equal(older.startDate, '2025-09-01');
+    const current = semesters.body.items.find((item) => item.id === 1);
+    assert.equal(current.courseCount, 2);
+    assert.equal(current.label, '2026-2027学年秋季学期');
+    assert.equal(semesters.body.currentId, 1, '今天落在 2026-2027 秋季学期区间内');
+
+    const onlyOlder = await call('GET', '/lms/courses?semesterId=2');
+    assert.equal(onlyOlder.body.count, 1);
+    assert.equal(onlyOlder.body.items[0].name, '线性代数');
+    const onlyCurrent = await call('GET', '/lms/courses?semesterId=1');
+    assert.equal(onlyCurrent.body.count, 2);
+    assert.ok(onlyCurrent.body.items.every((item) => item.id !== 1003));
+
+    // 活动同样按学期过滤；且切学期时会自动补拉该学期课程的活动
+    const activitiesOlder = await call('GET', '/lms/activities?semesterId=2');
+    assert.equal(activitiesOlder.body.count, 1);
+    assert.equal(activitiesOlder.body.items[0].id, 5008);
+    const activitiesCurrent = await call('GET', '/lms/activities?semesterId=1');
+    assert.equal(activitiesCurrent.body.count, 7, '当前学期的 7 条活动会被自动补拉');
+
+    // 同步也只作用于所选学期
+    const preview = await call('POST', '/lms/sync/preview', { semesterId: 2, today: TODAY });
+    assert.equal(preview.body.items.length, 1);
+    assert.equal(preview.body.items[0].key, 'lms:activity:5008');
+    assert.equal(preview.body.items[0].action, 'create');
+
+    const applied = await call('POST', '/lms/sync/apply', { semesterId: 2, today: TODAY });
+    assert.equal(applied.body.created, 1);
+    const schedules = await call('GET', '/schedules');
+    assert.equal(schedules.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 1);
+    assert.equal(schedules.body.items[0].title, '[线性代数] 线代作业一');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('思源学堂：学期没有结束日期时也能判定当前学期', async () => {
+  // 实测真实数据：54 门课里 end_date 绝大多数是空的，只有 start_date
+  const dataset = defaultDataset();
+  dataset.courses = [
+    {
+      id: 2001,
+      name: '旧课',
+      start_date: '2024-09-09',
+      end_date: '2025-02-16',
+      semester: { id: 5, code: '2024-1', name: null, real_name: null },
+      academic_year: { id: 5, code: '2024', name: '2024-2025' },
+      instructors: [],
+      course_attributes: { published: true },
+    },
+    {
+      id: 2002,
+      name: '当前课',
+      start_date: '2026-09-14',
+      semester: { id: 23, code: '2026-1', name: null, real_name: null },
+      academic_year: { id: 8, code: '2026', name: '2026-2027' },
+      instructors: [],
+      course_attributes: { published: true },
+    },
+    {
+      id: 2003,
+      name: '更早的课',
+      start_date: '2025-09-08',
+      semester: { id: 6, code: '2025-1', name: null, real_name: null },
+      academic_year: { id: 6, code: '2025', name: '2025-2026' },
+      instructors: [],
+      course_attributes: { published: true },
+    },
+  ];
+  dataset.activities = {};
+
+  const mock = await startMockLms({ dataset });
+  const { call, app } = await startApp(mock);
+  try {
+    await login(call);
+    await call('GET', '/lms/courses?refresh=1');
+    const semesters = await call('GET', '/lms/semesters');
+    const byId = new Map(semesters.body.items.map((item) => [item.id, item]));
+    assert.equal(byId.get(5).containsToday, false, '有明确结束日期的旧学期不算当前');
+    assert.equal(byId.get(6).started, true, '已经开学（无结束日期）');
+    assert.equal(byId.get(6).containsToday, false, '没有结束日期时不能断言「今天在区间内」');
+    assert.equal(byId.get(23).started, true);
+    assert.equal(semesters.body.currentId, 23, '当前学期取「已开学且最新」的那个，而不是 2024 年那个');
+    assert.equal(semesters.body.items[0].id, 23, '按学期 code 倒序，最新的排最前');
+  } finally {
+    await app.close();
     await mock.close();
   }
 });

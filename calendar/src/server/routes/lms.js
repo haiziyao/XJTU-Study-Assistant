@@ -30,6 +30,18 @@ function normalizeKeys(value) {
   return value.map((item) => String(item));
 }
 
+/**
+ * 学期参数：数字（学校侧学期 ID）、`none`（没有学期信息的课）、或空（不筛选）。
+ */
+function normalizeSemesterId(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const text = String(value).trim();
+  if (!text) return undefined;
+  if (text === 'none') return 'none';
+  const num = Number(text);
+  return Number.isFinite(num) ? num : undefined;
+}
+
 function normalizeCourseIds(value) {
   if (value === undefined || value === null || value === '') return null;
   const list = Array.isArray(value) ? value : String(value).split(',');
@@ -45,6 +57,7 @@ function syncOptionsFrom(body = {}) {
   return {
     types,
     courseIds: normalizeCourseIds(body.courseIds),
+    semesterId: normalizeSemesterId(body.semesterId),
     includePast: asBool(body.includePast),
     includeCourseRange: asBool(body.includeCourseRange),
     skipSubmitted: body.skipSubmitted === undefined ? true : asBool(body.skipSubmitted),
@@ -85,33 +98,42 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
 
   router.post(`${P}/settings`, ({ body }) => lms.updateSettings({ autoSync: body?.autoSync, autoSyncIntervalHours: body?.autoSyncIntervalHours }));
 
+  // 学期列表（界面上的「选学期」下拉框）
+  router.get(`${P}/semesters`, () => lms.listSemesters());
+
   router.get(`${P}/courses`, async ({ query }) => {
-    if (asBool(query.refresh)) return lms.refreshCourses();
-    const cached = lms.listCourses();
+    const semesterId = normalizeSemesterId(query.semesterId);
+    if (asBool(query.refresh)) return lms.refreshCourses({ semesterId });
+    const cached = lms.listCourses({ semesterId });
     // 第一次访问且没有缓存时自动拉一次，避免前端要多点一下
-    if (!cached.count) return lms.refreshCourses();
+    if (!cached.count) return lms.refreshCourses({ semesterId });
     return cached;
   });
 
-  router.post(`${P}/courses/refresh`, () => lms.refreshCourses());
+  router.post(`${P}/courses/refresh`, ({ body }) => lms.refreshCourses({ semesterId: normalizeSemesterId(body?.semesterId) }));
 
   router.get(`${P}/activities`, async ({ query }) => {
     const courseIds = normalizeCourseIds(query.courseId ?? query.courseIds);
+    const semesterId = normalizeSemesterId(query.semesterId);
     const typeFilter = (items) => (query.type ? items.filter((item) => item.type === query.type) : items);
     if (asBool(query.refresh)) {
-      const refreshed = await lms.refreshActivities({ courseIds, force: true });
-      return { ...refreshed, items: typeFilter(refreshed.items), count: typeFilter(refreshed.items).length };
+      const refreshed = await lms.refreshActivities({ courseIds, semesterId, force: true });
+      const items = typeFilter(refreshed.items);
+      return { ...refreshed, items, count: items.length };
     }
-    const cached = lms.listActivities({ courseIds, type: query.type });
-    if (!cached.count) {
-      const refreshed = await lms.refreshActivities({ courseIds });
+    const cached = lms.listActivities({ courseIds, semesterId, type: query.type });
+    // 注意判断依据不是「列表为空」：某个学期可能还没拉过活动，也可能是真的没有作业
+    if (!cached.count || lms.needsActivityRefresh({ courseIds, semesterId })) {
+      const refreshed = await lms.refreshActivities({ courseIds, semesterId });
       const items = typeFilter(refreshed.items);
       return { ...refreshed, items, count: items.length };
     }
     return cached;
   });
 
-  router.post(`${P}/activities/refresh`, ({ body }) => lms.refreshActivities({ courseIds: normalizeCourseIds(body?.courseIds), force: true }));
+  router.post(`${P}/activities/refresh`, ({ body }) =>
+    lms.refreshActivities({ courseIds: normalizeCourseIds(body?.courseIds), semesterId: normalizeSemesterId(body?.semesterId), force: true }),
+  );
 
   router.get(`${P}/activities/:id`, ({ params }) => lms.activityDetail(params.id));
 
