@@ -88,8 +88,15 @@ const APPS = {
   homeapp: { label: '（公共应用，对照组）', appId: '', module: 'appcenter' },
 };
 
-/** 成绩接口的候选动作名（Wisedu jwapp 常见命名，逐个试）。 */
+/**
+ * 成绩相关动作名。
+ *
+ * `xscjcx.do` 与 `cxxtcs.do` 是**浏览器 DevTools 实测**拿到的真实动作名（见
+ * docs/教务成绩接口调研.md 5.1），不是猜的；其余是历史候选，留着以便上游改版时兜底。
+ */
 const GRADES_ACTIONS = [
+  'xscjcx.do', // ★ 成绩查询（真实）
+  'cxxtcs.do', // ★ 系统参数 / 字段模型（真实，可用来确定字段名与中文表头）
   'cxXscj.do',
   'cxXscjList.do',
   'cxAllXscj.do',
@@ -97,7 +104,6 @@ const GRADES_ACTIONS = [
   'queryXscj.do',
   'getXscj.do',
   'cxCj.do',
-  'cxXsxxcj.do',
 ];
 
 const SESSION_FILE = path.join(os.tmpdir(), 'pc-ehall-probe-session.json');
