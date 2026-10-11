@@ -7,7 +7,7 @@
  * - 未知字段直接忽略，保证向前兼容（后续版本新增可选字段不会打断旧前端）。
  */
 
-import { HttpError } from '../http/router.js';
+import { HttpError } from '../../core/http/router.js';
 import {
   EVENT_CATEGORIES,
   REMINDER_PRESETS,

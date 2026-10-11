@@ -7,7 +7,7 @@
  * 3. id 统一为 UUID，写入原子化，不再按时间戳前缀区分类型。
  */
 
-import { HttpError } from '../http/router.js';
+import { HttpError } from '../../core/http/router.js';
 import { rangeOverlaps } from '../../shared/time.js';
 import { expandDates } from './recurrence.js';
 import {

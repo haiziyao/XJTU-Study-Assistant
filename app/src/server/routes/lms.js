@@ -8,7 +8,7 @@
  * - 未登录时统一返回 401 UNAUTHORIZED，前端据此弹登录框。
  */
 
-import { HttpError } from '../http/router.js';
+import { HttpError } from '../../core/http/router.js';
 
 const MAX_BODY_KEYS = 2000;
 

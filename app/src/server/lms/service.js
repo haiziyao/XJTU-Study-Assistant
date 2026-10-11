@@ -10,7 +10,7 @@
 
 import path from 'node:path';
 
-import { HttpError } from '../http/router.js';
+import { HttpError } from '../../core/http/router.js';
 import { todayKey } from '../../shared/time.js';
 import { AUTH_STATUS, CasAuth, generateVisitorId } from './cas-auth.js';
 import { DEFAULT_SYNC_TYPES, resolveLmsConfig } from './config.js';

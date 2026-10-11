@@ -6,7 +6,7 @@
  * - allDay=true 时退化为「日期锚点」，等价于原来的待办（deadline）。
  */
 
-import { HttpError } from '../http/router.js';
+import { HttpError } from '../../core/http/router.js';
 import { addDays, clockToMinutes, todayKey, weekRange } from '../../shared/time.js';
 import { SCHEDULE_CATEGORIES, SCHEDULE_STATUS } from '../../shared/constants.js';
 import { expandDates, isoWeekday } from './recurrence.js';

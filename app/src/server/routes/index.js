@@ -4,8 +4,8 @@
  * 路由表同时被 `GET /api/v1` 自描述接口引用，便于前端与主程序探测能力。
  */
 
-import { AI_CONTRACT_VERSION } from '../ai/ai-bridge.js';
-import { HttpError } from '../http/router.js';
+import { AI_CONTRACT_VERSION } from '../../core/ai/ai-bridge.js';
+import { HttpError } from '../../core/http/router.js';
 import { COMMAND_GRAMMAR } from '../parser/command-parser.js';
 import { MARKUP_GRAMMAR } from '../parser/markup-parser.js';
 import { buildIcs } from '../services/ics-service.js';

@@ -10,15 +10,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { API_PREFIX, DATA_DIR, DEFAULT_HOST, DEFAULT_PORT, WS_PATH } from '../shared/constants.js';
-import { JsonStore } from './store/json-store.js';
-import { createRouter } from './http/router.js';
-import { WebSocketHub } from './http/websocket.js';
+import { JsonStore } from '../core/store/json-store.js';
+import { createRouter } from '../core/http/router.js';
+import { WebSocketHub } from '../core/http/websocket.js';
 import { EventService } from './services/event-service.js';
 import { ScheduleService } from './services/schedule-service.js';
 import { ReminderService } from './services/reminder-service.js';
 import { CommandService } from './services/command-service.js';
 import { CommandParser } from './parser/command-parser.js';
-import { AiBridge } from './ai/ai-bridge.js';
+import { AiBridge } from '../core/ai/ai-bridge.js';
 import { LmsService } from './lms/service.js';
 import { registerRoutes } from './routes/index.js';
 

@@ -5,7 +5,7 @@
  * 两者结构一致，因此这里不需要关心来源。
  */
 
-import { HttpError } from '../http/router.js';
+import { HttpError } from '../../core/http/router.js';
 import { describeRepeat } from './recurrence.js';
 import { parseMarkup } from '../parser/markup-parser.js';
 
