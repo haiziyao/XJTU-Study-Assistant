@@ -1222,3 +1222,112 @@
   padding: 3px 6px;
   font-size: 12px;
 }
+
+/* ================================================================== 年视图 */
+
+.year-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--year-cols, 4), minmax(0, 1fr));
+  gap: 14px;
+  padding: 4px 2px 12px;
+}
+
+.mini-month {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mini-title {
+  align-self: flex-start;
+  padding: 2px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.mini-title:hover {
+  background: var(--bg-hover);
+  color: var(--blue);
+}
+
+.mini-head,
+.mini-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.mini-weekday {
+  font-size: 10px;
+  color: var(--fg-3);
+  text-align: center;
+}
+
+.mini-grid {
+  gap: 1px 0;
+}
+
+.mini-day {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 20px;
+  padding: 1px 0 3px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  line-height: 1.1;
+  cursor: pointer;
+}
+
+.mini-day:hover {
+  background: var(--bg-hover);
+}
+
+.mini-day.outside {
+  opacity: 0.35;
+}
+
+.mini-day.today {
+  background: color-mix(in srgb, var(--blue) 22%, transparent);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.mini-day.selected {
+  outline: 1px solid var(--blue);
+}
+
+.mini-dot {
+  width: 3px;
+  height: 3px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--blue);
+}
+
+/* ============================================== 月视图 / 日视图里的农历文字 */
+
+.cell-lunar {
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cell-lunar.festival {
+  color: var(--blue);
+}
+
+.day-festival {
+  color: var(--blue);
+}

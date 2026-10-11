@@ -16,6 +16,39 @@ async function fetchCalendar(from, to) {
   return new Map((data.days ?? []).map((day) => [day.date, day]));
 }
 
+/** 农历按天缓存（日视图单日、月视图 42 天、年视图都不用重复请求）。 */
+const lunarDays = new Map();
+/** 农历按区间缓存：同一个区间只请求一次。 */
+const lunarRanges = new Map();
+
+/**
+ * 批量拉农历（月视图 42 天 / 年视图 365 天一次拿完，不能逐日请求）。
+ * 失败时静默返回空 —— 没有农历也要能看日历。
+ */
+function fetchLunar(from, to) {
+  const key = `${from}|${to}`;
+  if (lunarRanges.has(key)) return lunarRanges.get(key);
+  const promise = PC.api(`/meta/lunar?from=${from}&to=${to}`)
+    .then((payload) => {
+      const days = payload?.days ?? {};
+      for (const [date, item] of Object.entries(days)) lunarDays.set(date, item);
+      return days;
+    })
+    .catch(() => ({}));
+  lunarRanges.set(key, promise);
+  return promise;
+}
+
+/** 年视图换年：保留月日，月末溢出（2/29 -> 次年）夹到当月最后一天，别崩。 */
+function addYearsKey(key, delta) {
+  const date = PCUtil.toDate(key);
+  const day = date.getDate();
+  const target = new Date(date.getFullYear() + delta, date.getMonth(), 1);
+  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+  target.setDate(Math.min(day, lastDay));
+  return PCUtil.dateKey(target);
+}
+
 /**
  * 勾选 / 取消勾选待办。
  *
@@ -149,7 +182,8 @@ const calendarView = {
     const content = mk('div', 'view-content');
     ctx.mount.appendChild(content);
     const mode = state.calendar.mode;
-    if (mode === 'week') renderWeek(content, state.calendar.anchor);
+    if (mode === 'year') renderYear(content, state.calendar.anchor);
+    else if (mode === 'week') renderWeek(content, state.calendar.anchor);
     else if (mode === 'day') renderDay(content, state.calendar.anchor);
     else renderMonth(content, state.calendar.anchor);
   },
@@ -160,7 +194,7 @@ function calendarToolbar() {
   const bar = mk('div', 'toolbar');
 
   const seg = mk('div', 'seg');
-  for (const [mode, label] of [['month', '月'], ['week', '周'], ['day', '日']]) {
+  for (const [mode, label] of [['month', '月'], ['week', '周'], ['day', '日'], ['year', '年']]) {
     const button = mk('button', `seg-btn${state.calendar.mode === mode ? ' active' : ''}`, label);
     button.type = 'button';
     button.dataset.mode = mode;
@@ -180,19 +214,16 @@ function calendarToolbar() {
   }
 
   const nav = mk('div', 'nav-group');
-  const step = state.calendar.mode === 'day' ? 1 : state.calendar.mode === 'week' ? 7 : 0;
-  const prev = iconBtn('上一页', '‹', () => {
-    state.calendar.anchor = step
-      ? PCUtil.addDays(state.calendar.anchor, -step)
-      : PCUtil.addMonths(state.calendar.anchor, -1);
+  const mode = state.calendar.mode;
+  const step = mode === 'day' ? 1 : mode === 'week' ? 7 : 0;
+  const shift = (delta) => {
+    if (mode === 'year') state.calendar.anchor = addYearsKey(state.calendar.anchor, delta);
+    else if (step) state.calendar.anchor = PCUtil.addDays(state.calendar.anchor, delta * step);
+    else state.calendar.anchor = PCUtil.addMonths(state.calendar.anchor, delta);
     PC.refresh();
-  });
-  const next = iconBtn('下一页', '›', () => {
-    state.calendar.anchor = step
-      ? PCUtil.addDays(state.calendar.anchor, step)
-      : PCUtil.addMonths(state.calendar.anchor, 1);
-    PC.refresh();
-  });
+  };
+  const prev = iconBtn('上一页', '‹', () => shift(-1));
+  const next = iconBtn('下一页', '›', () => shift(1));
   const today = mk('button', 'ghost-btn', '今天');
   today.type = 'button';
   today.addEventListener('click', () => {
@@ -202,7 +233,8 @@ function calendarToolbar() {
   nav.append(prev, today, next);
 
   const title = mk('div', 'toolbar-title');
-  if (state.calendar.mode === 'month') title.textContent = PCUtil.fmtYM(state.calendar.anchor);
+  if (state.calendar.mode === 'year') title.textContent = `${PCUtil.toDate(state.calendar.anchor).getFullYear()} 年`;
+  else if (state.calendar.mode === 'month') title.textContent = PCUtil.fmtYM(state.calendar.anchor);
   else if (state.calendar.mode === 'week') {
     const start = PCUtil.startOfWeek(state.calendar.anchor);
     title.textContent = `${PCUtil.fmtMD(start)} – ${PCUtil.fmtMD(PCUtil.addDays(start, 6))}`;
@@ -219,6 +251,103 @@ function calendarToolbar() {
   return bar;
 }
 
+/**
+ * 月视图格子里的农历小字：
+ * 节日当天显示节日名（优先于日名）；初一显示月名（闰月带「闰」）；其余显示日名。
+ */
+function lunarLineText(info) {
+  if (info?.festivals?.length) return info.festivals[0];
+  const lunar = info?.lunar;
+  if (!lunar) return '';
+  if (lunar.dayNumber === 1) return `${lunar.isLeapMonth ? '闰' : ''}${lunar.month ?? ''}`;
+  return lunar.day ?? '';
+}
+
+/* ------------------------------------------------------------------ 年视图 */
+
+/**
+ * 年视图：4 列 × 3 行的迷你月（窄栏时 2 列）。
+ * 有内容的日期在数字下加一个小圆点；点月份标题进月视图、点某天进日视图。
+ * `/calendar` 失败时仍然把 12 个月骨架画出来（只是没有圆点）。
+ */
+function renderYear(host, anchor) {
+  const year = PCUtil.toDate(anchor).getFullYear();
+  const from = `${year}-01-01`;
+  const to = `${year}-12-31`;
+  const loading = mk('div', 'loading', '加载中…');
+  host.appendChild(loading);
+
+  fetchCalendar(from, to)
+    .then((byDate) => {
+      loading.remove();
+      const grid = mk('div', 'year-grid');
+      grid.style.setProperty('--year-cols', PC.state.panelCollapsed ? '2' : '4');
+      for (let month = 0; month < 12; month += 1) grid.appendChild(miniMonth(year, month, byDate));
+      grid.addEventListener('click', (event) => {
+        const title = event.target.closest('.mini-title');
+        if (title) {
+          PC.state.calendar.anchor = title.dataset.month;
+          PC.state.calendar.mode = 'month';
+          PC.refresh();
+          return;
+        }
+        const day = event.target.closest('.mini-day');
+        if (!day) return;
+        PC.state.calendar.anchor = day.dataset.date;
+        PC.state.calendar.mode = 'day';
+        PC.refresh();
+      });
+      host.appendChild(grid);
+    })
+    .catch(() => {
+      loading.remove();
+      // 拉不到数据也要能看：画出没有圆点的 12 个月
+      const grid = mk('div', 'year-grid');
+      grid.style.setProperty('--year-cols', PC.state.panelCollapsed ? '2' : '4');
+      for (let month = 0; month < 12; month += 1) grid.appendChild(miniMonth(year, month, new Map()));
+      host.appendChild(grid);
+      host.appendChild(mk('div', 'eb-msg', '日历数据加载失败（只显示日期）'));
+    });
+}
+
+/** 一个迷你月：标题（可点）+ 周标题行 + 6×7 的日数字。 */
+function miniMonth(year, month, byDate) {
+  const pad = (n) => String(n).padStart(2, '0');
+  const box = mk('div', 'mini-month');
+  const first = `${year}-${pad(month + 1)}-01`;
+  const title = mk('button', 'mini-title', `${month + 1} 月`);
+  title.type = 'button';
+  title.dataset.month = first;
+  title.title = `查看 ${year} 年 ${month + 1} 月`;
+  box.appendChild(title);
+
+  const head = mk('div', 'mini-head');
+  for (const name of PCUtil.WEEK_CN) head.appendChild(mk('span', 'mini-weekday', name));
+  box.appendChild(head);
+
+  const grid = mk('div', 'mini-grid');
+  const today = PCUtil.todayKey();
+  const lastDay = new Date(year, month + 1, 0).getDate();
+  const last = `${year}-${pad(month + 1)}-${pad(lastDay)}`;
+  // 固定 6 行 × 7 列：12 个迷你月高度一致，4×3 网格才不会参差
+  const start = PCUtil.startOfWeek(first);
+  const end = PCUtil.addDays(start, 41);
+  for (const date of PCUtil.eachDay(start, end)) {
+    const cell = mk('div', 'mini-day');
+    cell.dataset.date = date;
+    if (date === today) cell.classList.add('today');
+    if (date.slice(0, 7) !== first.slice(0, 7)) cell.classList.add('outside');
+    if (date === PC.state.calendar.anchor) cell.classList.add('selected');
+    cell.appendChild(mk('span', 'mini-num', PCUtil.toDate(date).getDate()));
+    const day = byDate.get(date);
+    const total = day ? (day.events?.length ?? 0) + (day.schedules?.length ?? 0) + (day.todos?.length ?? 0) : 0;
+    if (total) cell.appendChild(mk('span', 'mini-dot'));
+    grid.appendChild(cell);
+  }
+  box.appendChild(grid);
+  return box;
+}
+
 /* ------------------------------------------------------------------ 月视图 */
 
 function renderMonth(host, anchor) {
@@ -227,8 +356,8 @@ function renderMonth(host, anchor) {
   const loading = mk('div', 'loading', '加载中…');
   host.appendChild(loading);
 
-  fetchCalendar(gridStart, gridEnd)
-    .then((byDate) => {
+  Promise.all([fetchCalendar(gridStart, gridEnd), fetchLunar(gridStart, gridEnd)])
+    .then(([byDate]) => {
       loading.remove();
       const head = mk('div', 'month-head');
       for (const name of PCUtil.WEEK_CN) head.appendChild(mk('div', 'weekday', `周${name}`));
@@ -242,6 +371,17 @@ function renderMonth(host, anchor) {
         if (date === today) cell.classList.add('today');
         if (date.slice(0, 7) !== String(anchor).slice(0, 7)) cell.classList.add('outside');
         if (date === PC.state.calendar.anchor) cell.classList.add('selected');
+
+        // 农历小字：节日优先（accent 色），初一显示月名（闰月带「闰」），其余显示日名
+        const lunar = lunarDays.get(date);
+        const line = lunar ? mk('div', `cell-lunar${lunar.festivals?.length ? ' festival' : ''}`) : null;
+        if (lunar) {
+          const text = lunarLineText(lunar);
+          if (text) {
+            line.textContent = text;
+            line.title = lunar.text ?? '';
+          }
+        }
 
         const dayTodos = day.todos ?? [];
         const headEl = mk('div', 'cell-head');
@@ -272,6 +412,7 @@ function renderMonth(host, anchor) {
         add.dataset.add = date;
 
         cell.append(headEl, list, dots, add);
+        if (lunar && line) cell.appendChild(line);
         grid.appendChild(cell);
       }
 
@@ -573,9 +714,11 @@ function dayHero(anchor) {
 function loadLunar(anchor, hero) {
   const sub = hero.querySelector('.day-hero-sub');
   if (!sub || lunarSupported === false) return;
-  const show = (text) => {
-    if (!text || sub.querySelector('.day-hero-lunar')) return;
-    sub.appendChild(mk('span', 'day-hero-lunar', text));
+  const show = (info) => {
+    if (!info?.text || sub.querySelector('.day-hero-lunar')) return;
+    const node = mk('span', 'day-hero-lunar', info.text);
+    if (info.festivals?.length) node.appendChild(mk('span', 'day-festival', ` · ${info.festivals.join(' · ')}`));
+    sub.appendChild(node);
     // 农历文字可能把顶栏撑高几像素，重新量一次吸顶偏移，避免全天行被压住
     // （与 renderDay 用同一个量法：rect 高度而不是取整的 offsetHeight）
     const wrap = hero.parentNode;
@@ -591,24 +734,30 @@ function loadLunar(anchor, hero) {
   PC.api(`/meta/lunar?date=${anchor}`)
     .then((payload) => {
       lunarSupported = true;
-      const text = lunarLabel(payload);
-      lunarText.set(anchor, text);
-      show(text);
+      const info = lunarLabel(payload);
+      lunarText.set(anchor, info);
+      // 顺手填进按天缓存，月视图/年视图不会为同一天再请求一次
+      lunarDays.set(anchor, { lunar: payload?.lunar, festivals: payload?.festivals ?? [], text: info.text });
+      show(info);
     })
     .catch(() => {
       lunarSupported = false;
     });
 }
 
-/** 从 /meta/lunar 的契约响应里取一行可读文案（契约见 core/routes.js）。 */
+/**
+ * 从 /meta/lunar 的契约响应里取出可读文案与节日（契约见 core/routes.js）。
+ * 闰月加「闰」前缀（`month` 字段本身不带闰字，闰由 `isLeapMonth` 表达）。
+ */
 function lunarLabel(payload) {
   const lunar = payload?.lunar ?? payload?.data?.lunar;
-  if (typeof lunar === 'string') return lunar;
-  if (lunar && typeof lunar === 'object') {
-    const text = `${lunar.year ? `${lunar.year}年` : ''}${lunar.month ?? ''}${lunar.day ?? ''}`;
-    if (text) return text;
+  let text = '';
+  if (typeof lunar === 'string') text = lunar;
+  else if (lunar && typeof lunar === 'object') {
+    text = `${lunar.year ? `${lunar.year}年` : ''}${lunar.isLeapMonth ? '闰' : ''}${lunar.month ?? ''}${lunar.day ?? ''}`;
   }
-  return typeof payload?.text === 'string' ? payload.text : '';
+  if (!text && typeof payload?.text === 'string') text = payload.text;
+  return { text, festivals: payload?.festivals ?? payload?.data?.festivals ?? [] };
 }
 
 /* ---------------------------------------------------------------- 日视图：全天 */

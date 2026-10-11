@@ -12,6 +12,7 @@ import { AI_CONTRACT_VERSION } from './ai/ai-bridge.js';
 import { HttpError } from './http/router.js';
 import { registerStaticRoutes } from './http/static.js';
 import { API_PREFIX, WS_PATH } from '../shared/constants.js';
+import { MAX_LUNAR_SPAN_DAYS, lunarDay, lunarRange, spanDays } from '../shared/lunar.js';
 import { THEME } from '../shared/theme.js';
 
 /**
@@ -67,21 +68,37 @@ export function registerCoreRoutes(router, ctx) {
 
   router.get(`${apiPrefix}/meta/theme`, () => ({ theme: THEME }));
 
+  /**
+   * 农历（框架级：与业务无关，日期换算能力）。
+   *
+   * 契约与当年预留的一致（`date` -> `{ date, lunar, festivals, text }`），并补了一个
+   * **批量模式**：月视图要一次拿 42 天、年视图 365 天，逐日请求不现实。
+   *
+   * 实现见 `shared/lunar.js`：数据表沿用旧表（表是对的），但闰月的读法按标准编码修正
+   * （闰月月份取低 4 位、闰月天数取 bit 16），旧的读法有约 99.7% 偏差。
+   */
+  const isValidDateKey = (value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Boolean(lunarDay(value));
+
   router.get(`${apiPrefix}/meta/lunar`, ({ query }) => {
-    if (!query.date) throw HttpError.badRequest('date 为必填（YYYY-MM-DD）');
-    // 契约先定，实现待接：PotatoCalendar 的农历实现经校验有 99.7% 偏差，不可移植。
-    throw new HttpError(501, 'NOT_IMPLEMENTED', '农历能力尚未实现', {
-      contract: {
-        endpoint: `GET ${apiPrefix}/meta/lunar?date=YYYY-MM-DD`,
-        expectedResponse: {
-          date: '2025-01-29',
-          lunar: { year: '乙巳', zodiac: '蛇', month: '正月', day: '初一', isLeapMonth: false },
-          festivals: ['春节'],
-        },
-        note: '建议接入成熟农历库（如 lunar-javascript），不要沿用旧的查表实现。',
-      },
-      date: query.date,
-    });
+    if (query.from || query.to) {
+      if (!query.from || !query.to) {
+        throw HttpError.badRequest('批量查询需要同时提供 from 与 to（YYYY-MM-DD）', { field: query.from ? 'to' : 'from' });
+      }
+      if (!isValidDateKey(query.from) || !isValidDateKey(query.to)) {
+        throw HttpError.badRequest('from / to 必须是合法的 YYYY-MM-DD（农历数据覆盖 1900-01-31 起）');
+      }
+      const span = spanDays(query.from, query.to);
+      if (span < 0) throw HttpError.badRequest('to 不能早于 from', { field: 'to' });
+      if (span > MAX_LUNAR_SPAN_DAYS) {
+        throw HttpError.badRequest(`区间跨度过大：最多 ${MAX_LUNAR_SPAN_DAYS} 天（收到 ${span} 天）`, { field: 'to' });
+      }
+      return { from: query.from, to: query.to, days: lunarRange(query.from, query.to) };
+    }
+
+    if (!query.date) throw HttpError.badRequest('date 为必填（YYYY-MM-DD），或改用 from+to 批量查询');
+    if (!isValidDateKey(query.date)) throw HttpError.badRequest('date 必须是合法的 YYYY-MM-DD（农历数据覆盖 1900-01-31 起）');
+    const item = lunarDay(query.date);
+    return { date: item.date, lunar: item.lunar, festivals: item.festivals, text: item.text };
   });
 
   // ---------------------------------------------------------------- 指令（通用入口）
