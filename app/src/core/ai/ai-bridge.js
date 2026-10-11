@@ -33,8 +33,14 @@ export const AI_CONTRACT_VERSION = '1.0.0';
  */
 
 export class AiBridge {
-  constructor({ parser }) {
-    this.parser = parser;
+  /**
+   * @param {object} deps
+   * @param {(text: string, options?: object) => object} deps.parse
+   *   本地规则解析入口（通常接 CommandService.tryParse）。**不得抛异常**：
+   *   解析失败要返回 `{ ok: false, warnings }`，因为它是 AI 不可用时的降级路径。
+   */
+  constructor({ parse }) {
+    this.parse = parse;
     /** @type {{name: string, nlToCommand: Function}|undefined} */
     this.provider = undefined;
   }
@@ -87,7 +93,7 @@ export class AiBridge {
       return { ...draft, provider: this.provider.name };
     }
     if (fallback === 'rules') {
-      const parsed = this.parser.parse(text, { context });
+      const parsed = this.parse(text, { context });
       return { ...parsed, provider: 'rules', degraded: true };
     }
     throw new HttpError(501, ERROR_CODES.AI_UNAVAILABLE, 'AI 能力尚未接入', {

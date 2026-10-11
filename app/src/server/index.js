@@ -27,7 +27,6 @@ import { AiBridge } from '../core/ai/ai-bridge.js';
 import { describeModules, loadModules } from '../core/module/registry.js';
 import { CommandService } from '../core/commands/command-service.js';
 import { registerCoreRoutes } from '../core/routes.js';
-import { CommandParser } from '../modules/calendar/parser.js';
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -47,9 +46,14 @@ export async function createServer(options = {}) {
   const broadcast = (message) => hub.broadcast(message);
 
   // ---------------------------------------------------------------- 3) 框架服务
-  const parser = new CommandParser();
-  const aiBridge = new AiBridge({ parser });
-  const services = { store, aiBridge, hub, broadcast };
+  // 指令服务必须**先于模块**创建：各模块会在自己的 createServices 里向它登记
+  // 自然语言解析器（registerParser）与指令处理器（registerHandler）。
+  const commands = new CommandService({ store });
+  const aiBridge = new AiBridge({
+    // AI 未接入时的降级路径：走各模块注册的本地规则解析器（失败返回 ok:false，不抛异常）
+    parse: (text, options) => commands.tryParse(text, options),
+  });
+  const services = { store, commands, aiBridge, hub, broadcast };
 
   // ---------------------------------------------------------------- 3') 模块服务
   const booted = [];
@@ -66,15 +70,6 @@ export async function createServer(options = {}) {
     Object.assign(services, own);
     booted.push({ mod, own, ctx: { ...base, own } });
   }
-
-  // 指令服务需要日历服务。P5 把 CommandService 改成 handler 注册表后，这两个直接依赖即可删除。
-  services.commands = new CommandService({
-    parser,
-    eventService: services.events,
-    scheduleService: services.schedules,
-    store,
-    aiBridge,
-  });
 
   // ---------------------------------------------------------------- 4) 恢复（listen 之前）
   for (const { mod, ctx } of booted) {
