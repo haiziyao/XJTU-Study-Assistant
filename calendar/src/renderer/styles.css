@@ -1,0 +1,129 @@
+/* 沿用 PotatoCalendar 的深色配色令牌（见 src/shared/theme.js），去掉 Qt QSS。 */
+:root {
+  --bg-base: #1b1b1f;
+  --bg-surface: #232327;
+  --bg-elevated: #282828;
+  --bg-hover: #2f2f34;
+  --text-primary: #f2f2f5;
+  --text-secondary: #b6b6bf;
+  --text-muted: #7a7a85;
+  --blue: #6c8cff;
+  --red: #ff6b7a;
+  --green: #5cdb8b;
+  --orange: #ffb86c;
+  --purple: #c792ea;
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 16px 20px 32px;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+h1 { font-size: 18px; margin: 0 0 12px; font-weight: 600; }
+h1 small { margin-left: 10px; font-size: 11px; font-weight: 400; color: var(--text-muted); }
+h2 { font-size: 13px; margin: 0 0 10px; color: var(--text-secondary); font-weight: 600; }
+
+.status { font-size: 11px; color: var(--text-muted); }
+.status.ok { color: var(--green); }
+.status.error { color: var(--red); }
+
+main { display: grid; gap: 14px; grid-template-columns: 1fr; }
+
+.card {
+  background: var(--bg-surface);
+  border: 1px solid #2e2e33;
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+input[type="text"] {
+  flex: 1 1 320px;
+  min-width: 220px;
+  padding: 8px 10px;
+  background: var(--bg-base);
+  border: 1px solid #333338;
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+input[type="text"]:focus { outline: none; border-color: var(--blue); }
+
+button {
+  padding: 8px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid #35353b;
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+button:hover { background: var(--bg-hover); }
+button.primary { background: var(--blue); border-color: var(--blue); color: #101014; font-weight: 600; }
+button.primary:hover { background: #7d99ff; }
+
+.examples { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.examples button { padding: 4px 9px; font-size: 11px; color: var(--text-secondary); }
+
+.output {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--bg-base);
+  border: 1px solid #2e2e33;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.list { display: grid; gap: 6px; margin-bottom: 10px; min-height: 40px; }
+.item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  background: var(--bg-elevated);
+  border-left: 3px solid var(--blue);
+  border-radius: 6px;
+}
+.item.done { border-left-color: var(--green); color: var(--text-muted); text-decoration: line-through; }
+.item.all-day { border-left-color: var(--purple); }
+.item .time { font-variant-numeric: tabular-nums; color: var(--text-secondary); min-width: 96px; }
+.item .title { flex: 1; }
+.item .meta { font-size: 11px; color: var(--text-muted); }
+.priority-2 .title::after { content: " ●"; color: var(--red); }
+.priority-1 .title::after { content: " ●"; color: var(--orange); }
+.muted { color: var(--text-muted); font-weight: 400; }
+.empty { color: var(--text-muted); padding: 6px 2px; }
+
+.toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  max-width: 320px;
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  border-left: 3px solid var(--orange);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  pointer-events: none;
+}
+.toast.show { opacity: 1; transform: translateY(0); }

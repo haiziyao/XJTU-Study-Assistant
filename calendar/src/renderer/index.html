@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src http://127.0.0.1:* ws://127.0.0.1:*; style-src 'self'" />
+    <title>Potato Calendar · 测试窗口</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Potato Calendar<small>测试窗口（正式 UI 由 AI 智学主程序提供）</small></h1>
+      <div class="status" id="status">正在连接后端…</div>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>指令添加</h2>
+        <div class="row">
+          <input id="command" type="text" placeholder="例如：添加日程 明天 15:00-16:00 项目周会 提前10分钟提醒" autocomplete="off" />
+          <button id="parse">解析</button>
+          <button id="run" class="primary">执行</button>
+        </div>
+        <div class="examples" id="examples"></div>
+        <pre id="output" class="output">等待指令…</pre>
+      </section>
+
+      <section class="card">
+        <h2>今日日程 <span id="today-label" class="muted"></span></h2>
+        <div id="agenda" class="list">加载中…</div>
+        <div class="row">
+          <button id="refresh">刷新</button>
+          <button id="rollover">顺延未完成到本周</button>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

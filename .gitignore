@@ -1,0 +1,20 @@
+# 仓库级忽略规则（各子模块还有自己的 .gitignore）
+node_modules/
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# 各模块的运行时数据与本地构建产物
+data/*.json
+data/*.corrupt-*
+data/*.tmp
+.electron-bundle/
+dist/
+out/
+
+# 打包快照（生成物，体积大；GitHub 单文件上限 100MB）
+*.zip
+
+# 本机推送用的 SSH 私钥（不入库）
+.ssh/
