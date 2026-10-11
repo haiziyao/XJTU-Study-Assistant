@@ -307,9 +307,18 @@
     const title = mk('div', 'toolbar-title', '学业');
     bar.appendChild(title);
 
-    const sync = mk('button', 'primary-btn', ui.busy === 'sync' ? '同步中…' : '同步成绩');
+    /**
+     * 同步按钮。
+     *
+     * 注意 `ui.status.syncing`：登录成功后后端会**自动补一次同步**（见
+     * academic/service.js 的 #autoSyncIfEmpty）。那一次不是用户点的，
+     * `ui.busy` 不会变 —— 不看这个标志的话，用户登录完切过来只看到一片空白，
+     * 会以为登录没生效，然后又点一次同步（撞上 409）。
+     */
+    const autoSyncing = Boolean(ui.status?.syncing) && ui.busy !== 'sync';
+    const sync = mk('button', 'primary-btn', ui.busy === 'sync' || autoSyncing ? '同步中…' : '同步成绩');
     sync.type = 'button';
-    sync.disabled = Boolean(ui.busy);
+    sync.disabled = Boolean(ui.busy) || autoSyncing;
     sync.addEventListener('click', () => void doSync());
     bar.appendChild(sync);
 

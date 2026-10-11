@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { createServer } from '../src/server/index.js';
+import { startMockEhall } from './helpers/ehall-mock.js';
 import { startMockSso } from './helpers/sso-mock.js';
 
 const USER = '2024001';
@@ -138,6 +139,98 @@ test('未登录时各模块的 status 不会被误报成 ready', async () => {
     const academic = await call('GET', '/academic/status');
     assert.notEqual(lms.body.status, 'ready');
     assert.equal(academic.body.loggedIn, false);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+/* ------------------------------------------------------------------ ★ 登录后自动同步 */
+
+/** 轮询直到条件成立（自动同步是后端起意的，没有可 await 的句柄）。 */
+async function waitFor(predicate, { timeoutMs = 8000, intervalMs = 50 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await predicate()) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+test('★ 登录成功后学业会自动同步，不需要用户手点「同步成绩」', async () => {
+  // 用 ehall-mock：它同时提供 CAS 与教务的 jwapp（含四步授权握手），
+  // 所以能完整走一遍"登录 → 自动拉成绩"。
+  const mock = await startMockEhall();
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'potato-auto-sync-'));
+  const app = await createServer({ dataDir, auth: { casOrigin: mock.origin }, academic: mock.config() });
+  const info = await app.listen({ port: 0 });
+  const call = async (method, route, body) => {
+    const response = await fetch(`${info.baseUrl}${route}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() };
+  };
+
+  try {
+    // 登录前：一条成绩都没有
+    const before = await call('GET', '/academic/status');
+    assert.equal(before.body.grades.total, 0, '登录前不该有成绩');
+
+    // 走设置页那条路径登录（同一个端点）
+    const login = await call('POST', '/auth/login', { username: '2024001', password: 'secret-pass', siteId: 'academic' });
+    assert.equal(login.body.status, 'ready');
+
+    // ★ 全程**没有**调用 /academic/sync/preview 或 /apply —— 成绩应当自己出现。
+    // 条件里带上 `!syncing`：成绩是先落库、后清标志的，只看条数会撞上"还没收尾"的瞬间。
+    const synced = await waitFor(async () => {
+      const now = await call('GET', '/academic/status');
+      return (now.body.grades?.total ?? 0) > 0 && now.body.syncing === false;
+    });
+    const after = await call('GET', '/academic/status');
+    assert.ok(
+      synced,
+      `★ 登录后应当自动同步出成绩，实际 ${after.body.grades?.total ?? 0} 条 / syncing=${after.body.syncing}`,
+    );
+    assert.ok(after.body.grades.active > 0, '应当有有效成绩');
+    assert.equal(after.body.loggedIn, true);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('已经有成绩时不会重复自动同步（不白打扰学校服务器）', async () => {
+  const mock = await startMockEhall();
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'potato-auto-sync-2-'));
+  const app = await createServer({ dataDir, auth: { casOrigin: mock.origin }, academic: mock.config() });
+  const info = await app.listen({ port: 0 });
+  const call = async (method, route, body) => {
+    const response = await fetch(`${info.baseUrl}${route}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() };
+  };
+
+  try {
+    await call('POST', '/auth/login', { username: '2024001', password: 'secret-pass', siteId: 'academic' });
+    await waitFor(async () => ((await call('GET', '/academic/status')).body.grades?.total ?? 0) > 0);
+
+    // 记下成绩接口被访问的次数，然后**退出再登录**
+    const before = mock.state.gradeCalls;
+    await call('POST', '/auth/logout', {});
+    await call('POST', '/auth/login', { username: '2024001', password: 'secret-pass', siteId: 'academic' });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const status = await call('GET', '/academic/status');
+    assert.ok((status.body.grades?.total ?? 0) > 0, '原有成绩应当还在');
+    // 本地已有数据 → 不该再自动去拉。允许 +1 的余量以容忍实现细节差异，
+    // 但绝不该像第一次那样真的重新拉一遍。
+    const after = mock.state.gradeCalls;
+    assert.ok(after - before <= 1, `本地已有成绩时不该重复自动同步（拉取次数 +${after - before}）`);
   } finally {
     await app.close();
     await mock.close();

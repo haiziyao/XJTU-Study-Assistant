@@ -62,6 +62,54 @@ export class AcademicService {
     };
     this.syncing = false;
     this.restored = false;
+    /**
+     * 本模块自己的 `login()` 正在执行。
+     *
+     * 为什么需要这个标志：`/academic/login` 在登录成功后会**显式**同步一次
+     * （它要把成绩直接放进登录响应里，让界面一次请求就能显示，见 routes.js）。
+     * 而登录成功会让共享认证发出 `site-ready`，订阅者也会顺手起一次同步 ——
+     * 两者撞在一起时，显式那一次会拿到 409「同步正在进行中」。
+     *
+     * 规则：**知道自己要同步的那一方先声明，另一方让路。**
+     * 走共享认证登录（设置页）时不经过这个标志，订阅者就会接手。
+     */
+    this.ownLoginInFlight = false;
+
+    /**
+     * 订阅共享认证：教务这个站点**刚变成可用**时就自动补一次同步。
+     *
+     * 为什么需要：用户在设置页登录完，切到学业页看到的是一片空白 ——
+     * 那很像"登录没生效"，还得自己找到同步按钮点一下才知道其实成功了。
+     * 登录成功 → 数据就该在。
+     *
+     * 只听 `site-ready`（它只在 false→true 那一次触发），所以不会反复触发；
+     * 而且只在**本地一条成绩都没有**时才真的去请求学校（见 #autoSyncIfEmpty）。
+     */
+    this.sharedAuth.onChange((event) => {
+      if (event.type !== 'site-ready' || event.siteId !== 'academic') return;
+      void this.#autoSyncIfEmpty('登录后本地还没有成绩');
+    });
+  }
+
+  /**
+   * 本地一条成绩都没有时，自动同步一次。
+   *
+   * **只在为空时触发**：已经有数据就不去打扰学校服务器，
+   * 刷新是用户的显式动作（界面上那个「同步」按钮）。
+   * 失败也不抛给调用方 —— 自动同步是锦上添花，不该让登录看起来失败；
+   * 原因会留在 `lastError` 里，界面照常显示。
+   */
+  async #autoSyncIfEmpty(reason) {
+    if (this.syncing) return;
+    // 本模块自己的登录流程会显式同步（并要把结果放进响应里），别跟它抢
+    if (this.ownLoginInFlight) return;
+    if (this.store.academicGrades.all().length > 0) return;
+    try {
+      await this.sync({});
+      console.log(`[academic] ${reason}，已自动同步一次`);
+    } catch (error) {
+      console.warn(`[academic] ${reason}，但自动同步失败：${error.message}`);
+    }
   }
 
   // ---------------------------------------------------------------- 状态
@@ -108,6 +156,8 @@ export class AcademicService {
     return {
       status: this.state.status,
       loggedIn: this.state.status === 'ready',
+      /** 是否有同步正在进行（可能是登录后自动触发的，界面据此显示"正在同步"）。 */
+      syncing: this.syncing,
       mfa: this.state.mfa,
       captchaRequired: Boolean(this.sharedAuth.status().captchaRequired || this.state.captchaRequired),
       error: this.state.error,
@@ -149,6 +199,9 @@ export class AcademicService {
     if (site?.ready) {
       // 会话可能是过期的，先乐观认定：真正发请求时若失效再打回（走 invalidate 重验）
       this.state.status = 'ready';
+      // 已登录但本地一条成绩都没有（上次登录后还没同步过、或数据被清过）→ 补一次。
+      // **不 await**：装配层是 await restore() 的，一次网络请求不该把整个启动拖住。
+      void this.#autoSyncIfEmpty('启动时本地没有成绩');
       return true;
     }
     return false;
@@ -158,10 +211,17 @@ export class AcademicService {
     if (!username || !password) {
       throw new AcademicError('需要学号与密码', { code: ACADEMIC_ERROR.NOT_LOGGED_IN, status: 400 });
     }
-    // 委托给共享认证：同一个 CAS 状态机（OAuth2 四跳、RSA 密码、MFA 与验证码都支持），
-    // 并且票据进的是**共享罐**，所以登录一次学堂那边也能用。
-    const result = await this.sharedAuth.login({ username, password, captcha, trustAgent, siteId: 'academic' });
-    return this.#handleAuthResult(result);
+    // 声明"这次的同步由调用方负责"：路由会在 login 返回后自己同步一次，
+    // 把成绩直接放进登录响应里（见上面的 ownLoginInFlight 说明）。
+    this.ownLoginInFlight = true;
+    try {
+      // 委托给共享认证：同一个 CAS 状态机（OAuth2 四跳、RSA 密码、MFA 与验证码都支持），
+      // 并且票据进的是**共享罐**，所以登录一次学堂那边也能用。
+      const result = await this.sharedAuth.login({ username, password, captcha, trustAgent, siteId: 'academic' });
+      return this.#handleAuthResult(result);
+    } finally {
+      this.ownLoginInFlight = false;
+    }
   }
 
   async sendMfaCode() {
@@ -272,8 +332,16 @@ export class AcademicService {
     if (this.syncing) {
       throw new AcademicError('同步正在进行中，请稍候', { code: ACADEMIC_ERROR.BUSINESS_ERROR, status: 409 });
     }
-    await this.#ensureReady();
+    // 标志要在 await 之前置位：`#ensureReady()` 里有网络往返，
+    // 放在它后面的话，两个并发的 sync 会双双通过上面的检查（登录后的自动同步
+    // 与用户手点同步很容易撞在一起）。
     this.syncing = true;
+    try {
+      await this.#ensureReady();
+    } catch (error) {
+      this.syncing = false;
+      throw error;
+    }
     try {
       const { rows, handshake } = await this.api.fetchGrades();
       const counts = dryRun ? this.#previewCounts(rows) : await this.#upsert(rows);
