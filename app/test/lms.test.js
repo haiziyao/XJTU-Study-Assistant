@@ -8,7 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -630,4 +630,57 @@ test('思源学堂：真实数据里学期只有 code 时也能给出可读标�
 
 test('思源学堂：同步计划在缺少 today 时直接报错', () => {
   assert.throws(() => buildSyncPlan({ courses: [], activities: [] }), /today/);
+});
+
+test('LMS：预置接口返回 501 而不是 404（让 AI 能区分"没实现"和"路径写错"）', async () => {
+  const { LMS_TOOL_SPECS } = await import('../src/modules/lms/tools.js');
+  const planned = LMS_TOOL_SPECS.filter((tool) => tool.implemented === false);
+  assert.ok(planned.length >= 5, '至少要有几个预置契约');
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'potato-lms-planned-'));
+  const app = await createServer({ dataDir: dir });
+  const info = await app.listen({ port: 0 });
+  try {
+    for (const tool of planned) {
+      // 把 {id} 之类的占位符换成具体值，直接按工具清单拼调用
+      const url = `${info.baseUrl}${tool.path.replace('{id}', '1')}`;
+      const response = await fetch(url);
+      const body = await response.json();
+      assert.equal(response.status, 501, `${tool.name} 应返回 501`);
+      assert.equal(body.error.code, 'NOT_IMPLEMENTED');
+      assert.equal(body.error.details.planned, true, `${tool.name} 的 details.planned 应为 true`);
+      assert.ok(body.error.details.contract, `${tool.name} 应带上契约本身`);
+      // 契约要和工具清单对得上（否则 Agent 拿到的"承诺"和清单是两套）
+      assert.deepEqual(body.error.details.contract.params ?? {}, tool.params, `${tool.name} 的 params 与工具清单不一致`);
+      assert.ok(tool.requiresAuth, `${tool.name} 属于学堂内容，应标 requiresAuth`);
+    }
+
+    // 聚合到 /ai/capabilities 时，已实现/未实现要能分辨
+    const capabilities = await (await fetch(`${info.baseUrl}/ai/capabilities`)).json();
+    const mine = capabilities.aiTools.filter((tool) => tool.module === 'lms');
+    assert.equal(mine.filter((tool) => tool.implemented === false).length, planned.length);
+    assert.equal(mine.filter((tool) => tool.implemented !== false).length, 8, '已实现的 8 个不该变成"未实现"');
+    // 每个已实现工具都必须真的存在（不能出现"清单说有、调用 404"）
+    for (const tool of mine.filter((item) => item.implemented !== false)) {
+      assert.ok(tool.path.startsWith('/lms/'), `${tool.name} 路径应在 /lms 下`);
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test('接口文档与 LMS 工具清单一致（含"预置未实现"必须标明）', async () => {
+  const doc = await readFile(new URL('../docs/接口文档.md', import.meta.url), 'utf8');
+  const { LMS_TOOL_SPECS } = await import('../src/modules/lms/tools.js');
+
+  for (const tool of LMS_TOOL_SPECS) {
+    assert.ok(doc.includes(tool.path), `接口文档缺少 ${tool.name} 的路径 ${tool.path}`);
+    assert.ok(doc.includes(tool.name), `接口文档缺少工具名 ${tool.name}`);
+  }
+  // 未实现的必须写清楚"未实现"，不能只列个路径让人以为能用
+  for (const tool of LMS_TOOL_SPECS.filter((item) => item.implemented === false)) {
+    const index = doc.indexOf(tool.path);
+    const around = doc.slice(Math.max(0, index - 400), index + 400);
+    assert.ok(/尚未实现|预置|未实现/.test(around), `${tool.name} 附近必须写明"尚未实现"`);
+  }
 });

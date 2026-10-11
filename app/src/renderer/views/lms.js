@@ -29,6 +29,13 @@ const lmsUi = {
   activitiesError: null,
   activityType: '',
   activityCourseId: '',
+  /**
+   * 按课程分组时，用户显式点开/点收过哪些课程（key → true/false）。
+   * 没记录过的走"自适应默认"（见 lmsGroupsDefaultExpanded）。
+   */
+  groupToggle: new Map(),
+  /** 「展开全部 / 收起全部」的整体覆盖：null 表示没点过 */
+  groupsAll: null,
   /** 只记住学号（方便切走再切回来），明文密码不留在内存里。 */
   username: '',
   loginError: null,
@@ -935,7 +942,31 @@ function lmsCourseRow(course) {
   const meta2 = [klass ? `教学班：${klass}` : null, range].filter(Boolean).join(' · ');
   if (meta2) row.appendChild(mk('div', 'lms-row-meta', meta2));
 
+  // 这门课缓存里有多少活动（按类型分）—— "按课程分类"的另一半：
+  // 课程列表也能一眼看出哪门课有东西待办
+  const counts = lmsCourseActivityCounts(course.id);
+  if (counts) row.appendChild(mk('div', 'lms-row-meta lms-course-counts', counts));
+
   return row;
+}
+
+/** 某门课在活动缓存里的分布，形如「作业 3（未提交 2） · 网课 12 · 资料 5」。 */
+function lmsCourseActivityCounts(courseId) {
+  const items = (lmsUi.activities?.items ?? []).filter((item) => String(item.courseId) === String(courseId));
+  if (!items.length) return '';
+  const homework = items.filter((item) => item.type === 'homework');
+  const online = items.filter((item) => (LMS_TYPE_MATCH.online ?? []).includes(item.type));
+  const others = items.filter((item) => item.type !== 'homework' && !(LMS_TYPE_MATCH.online ?? []).includes(item.type));
+  const pending = homework.filter(lmsSubmitPending).length;
+  const unknown = homework.filter((item) => !lmsSubmitKnown(item)).length;
+  const detail = [pending ? `未提交 ${pending}` : null, unknown ? `未查 ${unknown}` : null].filter(Boolean).join(' · ');
+  return [
+    homework.length ? `作业 ${homework.length}${detail ? `（${detail}）` : ''}` : null,
+    online.length ? `网课 ${online.length}` : null,
+    others.length ? `其它 ${others.length}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
 }
 
 /** 活动列表：类型与课程都在前端过滤（后端 refresh 时不做类型过滤）。 */
@@ -952,13 +983,121 @@ function lmsVisibleActivities() {
   return items;
 }
 
+/** 筛选结果少于这么多条时，分组默认全部展开（小列表没必要再点一次）。 */
+const LMS_GROUP_AUTO_EXPAND = 12;
+
+/** 某条活动的排序用时间戳（取结束时间，没结束就用开始时间）。 */
+function lmsActivityStamp(item) {
+  const raw = String(item?.endTime || item?.startTime || '').trim();
+  return raw || '';
+}
+
+/**
+ * 作业的提交状态是不是"已知"。
+ *
+ * 活动列表接口**不返回**提交状态（`userSubmitCount`），它是补拉活动详情才有的字段，
+ * 而且一次预览最多补拉 40 条。所以"没有这个字段"≠"没提交" —— 是**还没查**。
+ * 这里必须分开：把它们混成"未提交"就是在骗用户。
+ */
+function lmsSubmitKnown(item) {
+  return item?.userSubmitCount !== undefined && item?.userSubmitCount !== null;
+}
+
+/** 明确未提交（查过了，确实是 0）。 */
+function lmsSubmitPending(item) {
+  return lmsSubmitKnown(item) && Number(item.userSubmitCount) === 0;
+}
+
+/**
+ * 把当前筛选结果**按课程分组**。
+ *
+ * 分组顺序按"最近有活动"排前面 —— 正在上的课自然浮上来，而不是按课程名的字母序。
+ * 顺带算出每门课的作业状态：明确未提交数 + 还没查过的条数（两者都不藏）。
+ */
+function lmsActivityGroups() {
+  const groups = new Map();
+  for (const item of lmsVisibleActivities()) {
+    const key = item.courseId != null && item.courseId !== '' ? String(item.courseId) : `name:${item.courseName ?? ''}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        name: item.courseName || '（未标注课程）',
+        items: [],
+        pending: 0,
+        unknown: 0,
+        latest: '',
+      });
+    }
+    const group = groups.get(key);
+    group.items.push(item);
+    if (item.type === 'homework') {
+      if (lmsSubmitPending(item)) group.pending += 1;
+      else if (!lmsSubmitKnown(item)) group.unknown += 1;
+    }
+    const stamp = lmsActivityStamp(item);
+    if (stamp > group.latest) group.latest = stamp;
+  }
+  return [...groups.values()].sort(
+    (a, b) => b.latest.localeCompare(a.latest) || a.name.localeCompare(b.name, 'zh'),
+  );
+}
+
+/** 某个分组是否展开：用户点过就听用户的，没点过走自适应默认。 */
+function lmsGroupExpanded(key) {
+  const explicit = lmsUi.groupToggle.get(key);
+  if (explicit !== undefined) return explicit;
+  return lmsGroupAllExpanded();
+}
+
+/** 自适应默认：条数少就全展开（直接看内容），多了就全收起（先看课程概览）。 */
+function lmsGroupAllExpanded() {
+  if (lmsUi.groupsAll !== null) return lmsUi.groupsAll;
+  return lmsVisibleActivities().length <= LMS_GROUP_AUTO_EXPAND;
+}
+
+/** 一个课程分组：可折叠的表头 + 组内活动。 */
+function lmsCourseGroup(group) {
+  const box = mk('div', 'lms-group');
+  const expanded = lmsGroupExpanded(group.key);
+
+  const head = mk('button', 'lms-group-head');
+  head.type = 'button';
+  head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  head.appendChild(mk('span', 'lms-group-caret', expanded ? '▾' : '▸'));
+  head.appendChild(mk('span', 'lms-group-name', group.name));
+  head.appendChild(mk('span', 'lms-hint', `${group.items.length} 条`));
+  if (group.pending) head.appendChild(mk('span', 'tag late', `未提交 ${group.pending}`));
+  if (group.unknown) {
+    const unknownTag = mk('span', 'lms-hint', `未查 ${group.unknown}`);
+    unknownTag.title = '活动列表不含作业提交状态；「预览同步」时会补拉详情，那时才知道交没交';
+    head.appendChild(unknownTag);
+  }
+  if (group.latest) head.appendChild(mk('span', 'lms-hint lms-group-latest', `最近 ${lmsFormatTime(group.latest)}`));
+  head.addEventListener('click', () => {
+    lmsUi.groupToggle.set(group.key, !lmsGroupExpanded(group.key));
+    // 手动逐个点过之后，"全部展开/收起"这个整体开关就不再代表实际状态了
+    lmsUi.groupsAll = null;
+    lmsPaint();
+  });
+  box.appendChild(head);
+
+  if (expanded) {
+    const list = mk('div', 'lms-list lms-group-body');
+    // 组内不再重复显示课程名（表头已经写了）
+    for (const item of group.items) list.appendChild(lmsActivityRow(item, { showCourse: false }));
+    box.appendChild(list);
+  }
+  return box;
+}
+
 function lmsActivitiesCard() {
   const card = mk('div', 'card');
   const visible = lmsVisibleActivities();
+  const groups = lmsActivityGroups();
 
   const head = mk('div', 'lms-head');
   head.appendChild(mk('div', 'card-title', '活动'));
-  head.appendChild(mk('span', 'lms-hint', `${visible.length} 条`));
+  head.appendChild(mk('span', 'lms-hint', `${visible.length} 条 · ${groups.length} 门课`));
   head.appendChild(mk('div', 'spacer'));
   head.appendChild(lmsActionButton('刷新活动', '刷新中…', lmsUi.activitiesBusy, () => void lmsLoadActivities(true)));
   card.appendChild(head);
@@ -971,6 +1110,9 @@ function lmsActivitiesCard() {
     button.addEventListener('click', () => {
       if (lmsUi.activityType === value) return;
       lmsUi.activityType = value;
+      // 换了页签就是换了一批内容，分组展开状态跟着重来（不然会继承上一批的折叠）
+      lmsUi.groupToggle = new Map();
+      lmsUi.groupsAll = null;
       lmsPaint();
     });
     seg.appendChild(button);
@@ -978,7 +1120,7 @@ function lmsActivitiesCard() {
   filters.appendChild(seg);
 
   const select = mk('select');
-  select.appendChild(option('', '全部课程', !lmsUi.activityCourseId));
+  select.appendChild(option('', '只看课程：全部', !lmsUi.activityCourseId));
   for (const course of lmsUi.courses?.items ?? []) {
     select.appendChild(
       option(String(course.id), course.name ?? String(course.id), String(course.id) === String(lmsUi.activityCourseId)),
@@ -986,9 +1128,22 @@ function lmsActivitiesCard() {
   }
   select.addEventListener('change', () => {
     lmsUi.activityCourseId = select.value;
+    lmsUi.groupToggle = new Map();
+    lmsUi.groupsAll = null;
     lmsPaint();
   });
   filters.appendChild(select);
+
+  if (groups.length > 1) {
+    const all = mk('button', 'ghost-btn lms-group-all', lmsGroupAllExpanded() ? '全部收起' : '全部展开');
+    all.type = 'button';
+    all.addEventListener('click', () => {
+      lmsUi.groupsAll = !lmsGroupAllExpanded();
+      lmsUi.groupToggle = new Map();
+      lmsPaint();
+    });
+    filters.appendChild(all);
+  }
   card.appendChild(filters);
 
   if (lmsUi.activitiesError) card.appendChild(mk('div', 'lms-error', `活动加载失败：${lmsUi.activitiesError}`));
@@ -1003,25 +1158,24 @@ function lmsActivitiesCard() {
     return card;
   }
 
-  const list = mk('div', 'lms-list');
-  for (const item of visible) list.appendChild(lmsActivityRow(item));
-  card.appendChild(list);
+  for (const group of groups) card.appendChild(lmsCourseGroup(group));
   if (lmsUi.activities?.fetchedAt) {
     card.appendChild(mk('div', 'lms-hint', `更新于 ${lmsFormatStamp(lmsUi.activities.fetchedAt)}`));
   }
   return card;
 }
 
-function lmsActivityRow(item) {
+function lmsActivityRow(item, { showCourse = true } = {}) {
   const row = mk('div', 'lms-row');
   const title = mk('div', 'lms-row-title');
   title.appendChild(mk('span', null, item.title ?? '（无标题）'));
   title.appendChild(mk('span', 'tag', LMS_ACTIVITY_LABEL[item.type] ?? item.type ?? '活动'));
-  if ((item.userSubmitCount ?? 0) > 0) title.appendChild(mk('span', 'tag submitted', '已提交'));
+  // 只在"确实查到已提交"时打标；没查到就什么都不说（别把未知标成未提交，也别标成已提交）
+  if (lmsSubmitKnown(item) && Number(item.userSubmitCount) > 0) title.appendChild(mk('span', 'tag submitted', '已提交'));
   if (item.published === false) title.appendChild(mk('span', 'tag late', '未发布'));
   row.appendChild(title);
 
-  if (item.courseName) row.appendChild(mk('div', 'lms-row-meta', item.courseName));
+  if (showCourse && item.courseName) row.appendChild(mk('div', 'lms-row-meta', item.courseName));
   const start = lmsFormatTime(item.startTime);
   const end = lmsFormatTime(item.endTime);
   row.appendChild(

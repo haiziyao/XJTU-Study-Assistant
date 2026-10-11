@@ -118,6 +118,53 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
 
   router.get(`${P}/activities/:id`, ({ params }) => lms.activityDetail(params.id));
 
+  /* ------------------------------------------------------------ 预置接口（尚未实现）
+   *
+   * 契约先定下来，实现留到后面。这里刻意返回 **501 而不是 404**：
+   * 让调用方（尤其是 AI Agent）能区分「这个能力我认识，只是还没做」和「路径写错了」。
+   * 对应的工具清单见 tools.js 里 `implemented: false` 的那几个。
+   */
+  const planned = (summary, contract) => () => {
+    throw HttpError.notImplemented(`${summary}：接口已预置、尚未实现`, { planned: true, contract });
+  };
+
+  /** 某门课的详情（教师、学分、学期、教学班、起止、课件数）。 */
+  router.get(
+    `${P}/courses/:id`,
+    planned('课程详情', { params: { id: 'string' }, returns: { id: 'string', name: 'string', instructors: 'array', credit: 'number', semester: 'object', startDate: 'string', endDate: 'string', materialCount: 'number' } }),
+  );
+
+  /** 某门课的课件/资料清单。 */
+  router.get(
+    `${P}/courses/:id/materials`,
+    planned('课程资料清单', { params: { id: 'string' }, returns: { items: '[{ id, title, kind, bytes, uploadedAt, downloadable }]' } }),
+  );
+
+  /** 某门课的讨论区主题。 */
+  router.get(
+    `${P}/courses/:id/discussions`,
+    planned('课程讨论区', { params: { id: 'string' }, returns: { items: '[{ id, title, author, replies, lastReplyAt }]' } }),
+  );
+
+  /** 某次作业的提交情况（是否提交、时间、得分、评语、附件）。 */
+  router.get(
+    `${P}/activities/:id/submission`,
+    planned('作业提交情况', { params: { id: 'string' }, returns: { submitted: 'boolean', submittedAt: 'string?', score: 'number?', comment: 'string?', files: 'array' } }),
+  );
+
+  /** 课程通知/公告（可按课程过滤）。 */
+  router.get(
+    `${P}/notices`,
+    planned('课程通知与公告', { params: { courseId: 'string?' }, returns: { items: '[{ id, courseId, courseName, title, publishedAt, body }]' } }),
+  );
+
+  /** 成绩（课程总分与各项得分）。 */
+  router.get(
+    `${P}/grades`,
+    planned('成绩', { params: {}, returns: { items: '[{ courseId, courseName, score, fullScore, items }]' } }),
+  );
+
+
   router.post(`${P}/sync/preview`, ({ body }) => lms.preview(syncOptionsFrom(body)));
 
   router.post(`${P}/sync/apply`, async ({ body }) => {

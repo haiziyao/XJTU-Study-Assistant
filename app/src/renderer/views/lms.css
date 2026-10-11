@@ -276,3 +276,72 @@
 .lms-autosync-toggle:disabled {
   cursor: not-allowed;
 }
+
+/* ---------------------------------------------------------- 活动按课程分组 */
+
+.lms-group {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+/* 表头是个按钮：整行可点，折叠/展开 */
+.lms-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lms-group-head:hover {
+  border-color: var(--blue);
+}
+
+.lms-group-caret {
+  flex: none;
+  width: 12px;
+  color: var(--fg-3);
+}
+
+.lms-group-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.lms-group-head .lms-hint {
+  flex: none;
+}
+
+.lms-group-latest {
+  color: var(--fg-3);
+}
+
+/* 组内列表：左侧一条细线，视觉上从属于上面那门课 */
+.lms-group-body {
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+  margin-left: 6px;
+}
+
+.lms-course-counts {
+  color: var(--blue);
+}
+
+/* 窄窗口下"最近 …"这种次要信息先让位 */
+@media (max-width: 900px) {
+  .lms-group-latest {
+    display: none;
+  }
+}
