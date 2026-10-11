@@ -222,4 +222,20 @@ export function registerAcademicRoutes(router, { academic, apiPrefix }) {
     const items = [...seen.values()].sort((a, b) => String(b.term).localeCompare(String(a.term)));
     return { items, count: items.length };
   });
+
+  // ---------------------------------------------------------------- 学情分析
+
+  /** 读取已存的分析。`stale` 表示成绩/勾选已经变了、这段结论不再代表现状。 */
+  router.get(`${P}/analysis`, guard(() => academic.analysisState()));
+
+  /**
+   * 生成分析。
+   *
+   * 同步完成或用户改了纳入开关后，界面调它拿一段新的点评；
+   * 数据没变时会直接命中缓存（除非带 `force: true`）。
+   */
+  router.post(
+    `${P}/analysis`,
+    guard(async ({ body }) => academic.analyze({ force: asBool(body?.force) })),
+  );
 }

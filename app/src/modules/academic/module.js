@@ -33,6 +33,11 @@ const AI_PROMPT = `【学业成绩（教务系统）】
 - 纳入/排除某门课：{"action":"include"|"exclude","target":"grade","filters":{...}}
   这是**写操作**，必须先 dryRun 预览并让用户确认。
 
+学情分析：接口 /academic/analysis（GET 读已存的、POST 生成一段新的）。
+  用户问「分析一下我的学习情况」「我该怎么提升学分绩」时，可以直接读这段分析作为依据；
+  但要注意它可能是**过期的**（返回里的 stale 为 true 就说明成绩或勾选已经变了），
+  过期时应当以 grade 查询的实时数据为准，或提示用户重新生成。
+
 三条口径，答问时要按它说，不要自己另立算法：
 - **学分绩（GPA）**只统计**被纳入**的课程，按学分加权：Σ(学分×绩点)/Σ(学分)；
 - 每门课的**绩点由教务直接给出**（字段 XFJD），不要自己按分数换算；
@@ -202,6 +207,28 @@ export default defineModule({
       implemented: true,
       params: {},
       returns: { counts: 'object', stats: 'object' },
+    },
+    {
+      name: 'academic_analysis',
+      description: '读取已有的学情分析（含 stale 标记：成绩或勾选变了以后旧结论就不代表现状）',
+      method: 'GET',
+      path: '/academic/analysis',
+      requiresAuth: true,
+      mutates: false,
+      implemented: true,
+      params: {},
+      returns: { available: 'boolean', stale: 'boolean', text: 'string?', source: 'string?', basis: 'object?' },
+    },
+    {
+      name: 'academic_analyze',
+      description: '生成一段学情分析；未配置 AI 时退化为本地统计摘要（source 为 local）',
+      method: 'POST',
+      path: '/academic/analysis',
+      requiresAuth: true,
+      mutates: false,
+      implemented: true,
+      params: { force: 'boolean?' },
+      returns: { ok: 'boolean', text: 'string', source: 'string', basis: 'object' },
     },
   ],
 

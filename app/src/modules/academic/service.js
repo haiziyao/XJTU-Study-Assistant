@@ -19,6 +19,7 @@ import { CookieJar, HttpClient } from '../lms/http-client.js';
 import { AUTH_STATUS, CasAuth, generateVisitorId } from '../lms/cas-auth.js';
 import { JsonFile } from '../lms/secret-store.js';
 import { AcademicApi, AcademicError, ACADEMIC_ERROR } from './api.js';
+import { analysisRequest, fingerprintOf, localAnalysis } from './analysis.js';
 import { resolveAcademicConfig } from './config.js';
 import { computeStats, gradePointOf } from './gpa.js';
 
@@ -46,6 +47,8 @@ export class AcademicService {
     this.sessionFile = new JsonFile(path.join(this.dataDir, 'academic-session.json'));
     /** 同步元信息是普通业务数据 → 0644。 */
     this.metaFile = new JsonFile(path.join(this.dataDir, 'academic-meta.json'), { mode: 0o644 });
+    /** 学情分析结果 → 普通业务数据，0644（不是凭据）。 */
+    this.analysisFile = new JsonFile(path.join(this.dataDir, 'academic-analysis.json'), { mode: 0o644 });
 
     this.state = {
       status: 'anonymous',
@@ -478,6 +481,106 @@ export class AcademicService {
     }
     if (changed) this.broadcast({ type: 'data_changed', module: 'academic', reason: 'reset' });
     return { changed };
+  }
+
+  // ---------------------------------------------------------------- 学情分析
+
+  /** 当前数据对应的指纹 —— 用它判断已存的分析是否还能代表现在的成绩。 */
+  #currentFingerprint() {
+    const stats = this.stats();
+    return { fingerprint: fingerprintOf(this.listGrades(), stats), stats };
+  }
+
+  /**
+   * 读取已存的分析（不生成）。
+   *
+   * `stale` 用**数据指纹**判断，而不是时间：改了纳入开关或重新同步后，旧结论就不再成立，
+   * 哪怕它是 10 秒前生成的。
+   */
+  async analysisState() {
+    const stored = await this.analysisFile.read();
+    const { fingerprint, stats } = this.#currentFingerprint();
+    if (!stored?.text) {
+      return { available: false, stale: false, hasData: stats.includedCount > 0, stats };
+    }
+    return { available: true, stale: stored.fingerprint !== fingerprint, stats, ...stored };
+  }
+
+  /**
+   * 生成学情分析。
+   *
+   * 拿不到 AI 时**不会失败** —— 退化成 `localAnalysis` 的本地统计摘要，并标 `source: 'local'`，
+   * 让界面能如实说明这段文字是怎么来的。
+   *
+   * @param {object} [options]
+   * @param {boolean} [options.force] 忽略缓存重新生成
+   */
+  async analyze({ force = false } = {}) {
+    const grades = this.listGrades();
+    const { fingerprint, stats } = this.#currentFingerprint();
+
+    if (!stats.includedCount) {
+      return {
+        ok: false,
+        reason: 'NO_DATA',
+        message: '还没有可用于分析的成绩，请先同步教务成绩。',
+        stats,
+      };
+    }
+
+    if (!force) {
+      const stored = await this.analysisFile.read();
+      if (stored?.text && stored.fingerprint === fingerprint) {
+        return { ok: true, cached: true, stale: false, ...stored };
+      }
+    }
+
+    const terms = [...new Set(grades.map((item) => item.term).filter(Boolean))].sort();
+    const request = analysisRequest({ stats, grades, terms });
+
+    let text = null;
+    let source = 'ai';
+    let model = null;
+    let error = null;
+    const ai = this.services?.ai;
+    if (typeof ai?.complete === 'function') {
+      try {
+        const result = await ai.complete({ system: request.system, user: request.user, thinking: request.thinking });
+        text = result?.text?.trim() || null;
+        model = result?.model ?? null;
+        if (!text) error = '模型返回了空内容';
+      } catch (failure) {
+        // 未配置密钥是 501，上游故障是 502 —— 两种都走同一条降级路径
+        error = failure?.message ?? String(failure);
+      }
+    } else {
+      error = 'AI 模块未装配';
+    }
+
+    if (!text) {
+      text = localAnalysis({ stats, grades });
+      source = 'local';
+    }
+
+    const record = {
+      text,
+      source,
+      model,
+      error,
+      createdAt: new Date().toISOString(),
+      fingerprint,
+      /** 把生成时的关键口径一起存下来，界面不必再算一遍、也不会与正文对不上。 */
+      basis: {
+        gpa: stats.gpa,
+        weightedAverage: stats.weightedAverage,
+        totalCredits: stats.totalCredits,
+        earnedCredits: stats.earnedCredits,
+        includedCount: stats.includedCount,
+      },
+    };
+    await this.analysisFile.write(record);
+    this.broadcast({ type: 'data_changed', module: 'academic', reason: 'analysis' });
+    return { ok: true, cached: false, stale: false, ...record };
   }
 }
 

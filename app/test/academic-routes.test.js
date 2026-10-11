@@ -478,7 +478,7 @@ test('academic：aiTools 聚合进 /ai/capabilities 且都标了 implemented', a
     assert.equal(result.status, 200);
     const tools = result.body.aiTools ?? [];
     const mine = tools.filter((tool) => tool.module === 'academic' || String(tool.name).startsWith('academic_'));
-    assert.equal(mine.length, 9, `应有 9 个学业工具，实际 ${mine.length}`);
+    assert.equal(mine.length, 11, `应有 11 个学业工具，实际 ${mine.length}`);
     assert.ok(
       mine.every((tool) => tool.implemented === true),
       '这些接口都真写完了，标成 false 会让 Agent 以为不能用',
