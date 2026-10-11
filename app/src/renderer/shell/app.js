@@ -378,8 +378,13 @@
 
     const toggle = (open) => {
       const next = open ?? !box.classList.contains('open');
+      // 展开/收起会改变高度：如果展开前视图正贴着底（也就是正在看最新的正文），
+      // 展开后要继续贴着底 —— 否则一点"看明细"，结论就被顶到屏幕外面去了。
+      const log = dom.chatLog;
+      const pinned = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
       box.classList.toggle('open', next);
       head.setAttribute('aria-expanded', next ? 'true' : 'false');
+      if (pinned) log.scrollTop = log.scrollHeight;
     };
     head.addEventListener('click', () => toggle());
     if (defaultOpen) box.classList.add('open');
@@ -554,11 +559,11 @@
         else if (entry.error) systemNote(`查询没成功：${entry.error.message}`, 'fail');
       }
       const drafts = result.drafts ?? [];
-      if (!drafts.length) {
-        if (!queried.length) systemNote(`${state.ai.provider ?? 'AI'} · 只是聊天，没有产生任何写入`, 'meta');
-        return;
-      }
       for (const entry of drafts) renderAiDraft(entry);
+      if (!drafts.length && !queried.length) {
+        systemNote(`${state.ai.provider ?? 'AI'} · 只是聊天，没有产生任何写入`, 'meta');
+      }
+      keepBodyLast(card);
     } catch (error) {
       streaming.done = true;
       textEl.classList.remove('streaming');
@@ -568,9 +573,23 @@
       const details = error?.payload?.error?.details ?? {};
       if (details.conversationId) state.conversationId = details.conversationId;
       errorCard(error, { retry: content });
+      keepBodyLast(card);
     } finally {
       if (state.streaming === streaming) state.streaming = null;
     }
+  }
+
+  /**
+   * 把正文气泡挪到这一轮的最后。
+   *
+   * 一轮回复里会先冒出操作卡（查看日程 / 新建待办的确认卡），如果正文停在最上面，
+   * 卡片一多、一展开就把**结论挤到屏幕外**去了 —— 而人最想第一眼看到的是结论。
+   * 所以顺序固定为「操作卡在上，正文在下」：结论永远在最后，且滚到底就能看见。
+   */
+  function keepBodyLast(card) {
+    if (!card || !card.parentNode) return;
+    dom.chatLog.appendChild(card);
+    dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
   }
 
   /**
