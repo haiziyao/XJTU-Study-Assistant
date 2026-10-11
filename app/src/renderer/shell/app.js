@@ -2,29 +2,19 @@
  * 应用外壳（classic script，无框架、无构建步骤）。
  *
  * 布局：左侧功能栏（约 10% 宽） / 中间对话面板 / 右侧功能视图。
- *  - 左侧选择功能 -> 右侧渲染对应视图（视图实现见 views.js）；
+ *  - 左侧功能栏**由视图注册表生成**（各 views/<id>.js 自行登记，见 kit/registry.js），
+ *    本文件不认识任何具体功能，新增功能不需要改这里；
  *  - 中间对话面板调用 /commands/* 的本地规则解析（AI 未接入，接口已预留）；
  *  - 右侧可收起：收起后中间面板变宽，周视图不可用（宽度不足）。
  *
- * 全局约定：window.PC = { state, api, refresh, toast, openEditor } 供 views.js 使用。
+ * 全局约定：window.PC = { state, api, refresh, toast, openEditor } 供各视图使用。
  */
 
 (function () {
   'use strict';
 
   const U = window.PCUtil;
-  const V = window.PCViews;
-
-  const NAV = [
-    { view: 'calendar', label: '日历', icon: '🗓' },
-    { view: 'todo', label: '待办', icon: '☑' },
-    { view: 'lms', label: '思源学堂', icon: '🎓' },
-    { view: 'study', label: '学情', icon: '📈' },
-    { view: 'photo', label: '拍题', icon: '📷' },
-    { view: 'course', label: '网课', icon: '▶' },
-    { view: 'message', label: '消息', icon: '✉' },
-  ];
-  const NAV_BOTTOM = [{ view: 'settings', label: '设置', icon: '⚙' }];
+  const Modules = window.PCModules;
 
   const EXAMPLES = [
     '添加日程 明天 15:00-16:00 项目周会 提前10分钟提醒',
@@ -78,29 +68,6 @@
     todo: { filter: 'all' },
   };
 
-  const views = {
-    calendar: V.calendar,
-    todo: V.todo,
-    lms: V.lms,
-    message: V.message,
-    settings: V.settings,
-    study: V.placeholder('学情', '学情分析由 AI 智学主程序汇总，本模块只提供日历与日程的原始数据。', [
-      '统计口径：/api/v1/schedules/stats（完成率、计划时长）',
-      '已就绪：日程与事件的区间聚合 /api/v1/calendar',
-      '待主程序接入：错题、笔记、听课记录等学习行为数据',
-    ]),
-    photo: V.placeholder('拍题', '拍题与题目识别属于主程序能力，本模块预留入口与数据挂载点。', [
-      '建议由主程序做 OCR，识别后通过 /api/v1/commands/parse 生成日程草稿',
-      '或直接 POST /api/v1/events 写入「做题计划」类日历事件',
-      '本模块不处理图片，避免引入额外依赖',
-    ]),
-    course: V.placeholder('网课', '网课播放与进度记录属于主程序能力，本模块提供时间轴对齐。', [
-      '课程表：以「日程」形式写入，分类选 class',
-      '直播/回放时间可复用提醒能力（reminders.offsetMinutes）',
-      '学习时长统计见 /api/v1/schedules/stats',
-    ]),
-  };
-
   /** DOM 引用缓存：在 boot() 里一次性填充（因此必须是 let，不能是 const）。 */
   let dom = {};
 
@@ -143,19 +110,22 @@
   }
 
   /* ------------------------------------------------------------ 左侧功能栏 */
+  // 功能栏完全由视图注册表生成：各 views/<id>.js 自行登记，外壳不认识任何具体功能。
 
   function navButton(item) {
-    const button = mk('button', `nav-item${state.view === item.view ? ' active' : ''}`);
+    const button = mk('button', `nav-item${state.view === item.id ? ' active' : ''}`);
     button.type = 'button';
-    button.dataset.view = item.view;
+    button.dataset.view = item.id;
     button.append(mk('span', 'nav-icon', item.icon), mk('span', 'nav-label', item.label));
-    button.addEventListener('click', () => selectView(item.view));
+    button.addEventListener('click', () => selectView(item.id));
     return button;
   }
 
   function buildNav() {
-    for (const item of NAV) dom.nav.appendChild(navButton(item));
-    for (const item of NAV_BOTTOM) dom.navBottom.appendChild(navButton(item));
+    for (const item of Modules.list()) {
+      const host = item.slot === 'bottom' ? dom.navBottom : dom.nav;
+      host.appendChild(navButton(item));
+    }
   }
 
   function selectView(view) {
@@ -167,9 +137,15 @@
   }
 
   function renderPanel() {
-    const view = views[state.view] ?? views.calendar;
+    const view = Modules.get(state.view) ?? Modules.list()[0];
+    if (!view) {
+      dom.panelTitle.textContent = '无可用视图';
+      dom.panelBody.innerHTML = '';
+      return;
+    }
+    state.view = view.id;
     dom.panelTitle.textContent = view.title;
-    view.render({ mount: dom.panelBody });
+    view.render({ mount: dom.panelBody, api, state, toast, refresh });
   }
 
   function togglePanel() {
@@ -223,8 +199,8 @@
   }
 
   function actionText(draft) {
-    const target = V.TARGET_LABEL[draft.target] ?? draft.target ?? '';
-    const action = V.ACTION_LABEL[draft.action] ?? draft.action ?? '';
+    const target = TARGET_LABEL[draft.target] ?? draft.target ?? '';
+    const action = ACTION_LABEL[draft.action] ?? draft.action ?? '';
     return `${action}${target}`;
   }
 
@@ -557,7 +533,9 @@
       toast: document.getElementById('toast'),
     };
 
-    window.PC = { state, api, refresh, toast, openEditor: V.openEditor };
+    // openEditor 由日历模块通过 PCModules.service('editor', ...) 提供；其它视图经 PC.openEditor 复用，
+    // 不需要互相 import。
+    window.PC = { state, api, refresh, toast, openEditor: Modules.getService('editor') };
 
     buildNav();
     wireChat();

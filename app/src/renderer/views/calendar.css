@@ -1,0 +1,756 @@
+/**
+ * 日历模块样式：月视图、周视图、日视图、待办视图，以及新建/编辑弹层。
+ * 由 modules/calendar 的前端（views/calendar.js）使用。
+ */
+
+/* ------------------------------------------------------------- 月视图 */
+
+.month-head {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 1px;
+  flex: none;
+}
+
+.weekday {
+  text-align: center;
+  font-size: 11px;
+  color: var(--fg-3);
+  padding-bottom: 4px;
+}
+
+.month-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-auto-rows: minmax(86px, 1fr);
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  flex: 1;
+  min-height: 420px;
+}
+
+.cell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  min-height: 0;
+  padding: 5px 6px;
+  background: var(--bg-surface);
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.cell:hover {
+  background: var(--bg-hover);
+}
+
+.cell.outside {
+  opacity: 0.42;
+}
+
+.cell.selected {
+  box-shadow: inset 0 0 0 2px rgba(108, 140, 255, 0.7);
+}
+
+.cell-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+}
+
+.dnum {
+  font-size: 12px;
+  color: var(--fg-2);
+  min-width: 20px;
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+  border-radius: 6px;
+}
+
+.cell.today .dnum {
+  background: var(--blue);
+  color: #fff;
+  font-weight: 600;
+}
+
+.dstat {
+  font-size: 10px;
+  color: var(--fg-3);
+}
+
+.cell-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  border-left: 3px solid var(--cat, var(--fg-3));
+  background: rgba(255, 255, 255, 0.05);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.chip.is-event {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.chip.done {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.chip.cancelled {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
+.c-time {
+  color: var(--fg-3);
+  flex: none;
+}
+
+.c-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.more {
+  font-size: 10px;
+  color: var(--fg-3);
+  padding-left: 4px;
+}
+
+.cell-add {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+  color: var(--fg-2);
+  opacity: 0;
+  transition: opacity 0.15s;
+  line-height: 1;
+}
+
+.cell:hover .cell-add {
+  opacity: 1;
+}
+
+.cell-add:hover {
+  background: var(--blue);
+  color: #fff;
+  border-color: var(--blue);
+}
+
+/* ------------------------------------------------------------- 周视图 */
+
+.week {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.week-head,
+.week-allday {
+  display: grid;
+  grid-template-columns: 56px repeat(7, minmax(0, 1fr));
+  flex: none;
+}
+
+.week-head {
+  border-bottom: 1px solid var(--line);
+}
+
+.week-day-head {
+  text-align: center;
+  padding: 4px 0 6px;
+  border-left: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.week-day-head:hover {
+  background: var(--bg-hover);
+}
+
+.week-day-head.today .wd-date {
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.wd-name {
+  display: block;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.wd-date {
+  display: block;
+  font-size: 12px;
+}
+
+.week-allday {
+  border-bottom: 1px solid var(--line);
+  min-height: 26px;
+}
+
+.week-allday .gutter {
+  font-size: 10px;
+  color: var(--fg-3);
+  text-align: right;
+  padding: 4px 6px 0 0;
+}
+
+.allday-col {
+  border-left: 1px solid var(--line);
+  padding: 2px 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ad-chip {
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  border-left: 3px solid var(--cat, var(--fg-3));
+  background: rgba(255, 255, 255, 0.07);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.week-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.week-canvas {
+  display: grid;
+  grid-template-columns: 56px repeat(7, minmax(0, 1fr));
+  height: 1152px;
+}
+
+.hour-gutter {
+  position: relative;
+}
+
+.hour-label {
+  position: absolute;
+  right: 6px;
+  transform: translateY(-50%);
+  font-size: 10px;
+  color: var(--fg-3);
+}
+
+.day-col {
+  position: relative;
+  border-left: 1px solid var(--line);
+  background-image: repeating-linear-gradient(to bottom, transparent 0 47px, var(--line) 47px 48px);
+  cursor: crosshair;
+}
+
+.block {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  top: 0;
+  padding: 3px 5px;
+  border-radius: 6px;
+  border-left: 3px solid var(--cat, var(--fg-3));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04));
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  cursor: pointer;
+}
+
+.block:hover {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.08));
+}
+
+.block.done {
+  opacity: 0.55;
+}
+
+.block.cancelled {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
+.b-title {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.b-time {
+  font-size: 10px;
+  color: var(--fg-3);
+}
+
+/* ------------------------------------------------------------- 日视图 */
+
+.day-view {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.day-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.day-title {
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.stat-pill {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.sp-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.row-item {
+  display: grid;
+  grid-template-columns: 74px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--cat, var(--fg-3));
+}
+
+.row-item.done {
+  opacity: 0.6;
+}
+
+.row-item.cancelled {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.ri-time {
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.ri-time b {
+  font-size: 12px;
+  color: var(--fg-2);
+}
+
+.ri-main {
+  min-width: 0;
+}
+
+.ri-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ri-meta {
+  font-size: 11px;
+  color: var(--fg-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ri-actions {
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+
+/* ------------------------------------------------------------- 待办视图 */
+
+.quick-add {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex: 1 1 380px;
+  min-width: 0;
+}
+
+.qa-title {
+  flex: 1;
+  min-width: 120px;
+}
+
+.qa-date {
+  flex: none;
+  width: 132px;
+}
+
+.qa-time {
+  flex: none;
+  width: 104px;
+}
+
+.todo-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 2px 4px;
+}
+
+.gh-date {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.gh-rel {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.gh-rel.overdue {
+  color: var(--red);
+}
+
+.gh-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.todo-row {
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+}
+
+.todo-row.priority-2 {
+  border-left: 4px solid var(--red);
+}
+
+.todo-row.priority-1 {
+  border-left: 4px solid var(--orange);
+}
+
+.todo-row.priority-0 {
+  border-left: 4px solid var(--fg-3);
+}
+
+.todo-row.done {
+  opacity: 0.55;
+}
+
+.todo-row.done .tr-title {
+  text-decoration: line-through;
+}
+
+.todo-row.cancelled {
+  opacity: 0.4;
+}
+
+.check {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg-base);
+  color: var(--green);
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+}
+
+.check:hover {
+  border-color: var(--green);
+}
+
+.todo-row.done .check {
+  background: rgba(92, 219, 139, 0.16);
+  border-color: rgba(92, 219, 139, 0.5);
+}
+
+.tr-main {
+  min-width: 0;
+}
+
+.tr-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.tr-title > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tr-meta {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.tag {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  flex: none;
+}
+
+.tag.urgent {
+  color: var(--red);
+  border-color: rgba(255, 107, 122, 0.5);
+}
+
+.tag.late {
+  color: var(--orange);
+  border-color: rgba(255, 184, 108, 0.5);
+}
+
+.todo-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 6px;
+  padding: 10px;
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+}
+
+.ts-text {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.progress {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--bg-base);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--blue), var(--green));
+}
+
+
+/* --------------------------------------------------------------- 弹层 */
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.modal {
+  width: min(560px, 100%);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.tab {
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fg-2);
+}
+
+.tab.active {
+  background: var(--bg-elevated);
+  border-color: var(--line);
+  color: var(--fg);
+}
+
+.tab:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.modal-head .icon-btn {
+  margin-left: auto;
+}
+
+.modal-body {
+  padding: 14px;
+  overflow-y: auto;
+}
+
+.form-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.field-label {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.field-hint {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.inline-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+
+.repeat-block {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-radius: var(--radius);
+  background: var(--bg-base);
+  border: 1px solid var(--line);
+}
+
+.weekday-picker {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.wd-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+  font-size: 11px;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+
+.wd-chip input {
+  margin: 0;
+}
+
+.modal-error {
+  padding: 0 14px;
+  font-size: 12px;
+  color: var(--red);
+}
+
+.modal-error:not(:empty) {
+  padding-bottom: 6px;
+}
+
+.modal-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.modal-foot .spacer {
+  flex: 1;
+}

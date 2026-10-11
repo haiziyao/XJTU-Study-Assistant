@@ -6,12 +6,16 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; connect-src http://127.0.0.1:* ws://127.0.0.1:*; style-src 'self'; img-src 'self' data: http://127.0.0.1:*"
     />
-    <title>AI 智学 · 日历与待办（测试窗口）</title>
-    <link rel="stylesheet" href="styles.css" />
+    <title>AI 智学 · 测试窗口</title>
+
+    <!-- 样式：外壳 → 各视图自带的样式（新增功能在这里加一行 link） -->
+    <link rel="stylesheet" href="shell/shell.css" />
+    <link rel="stylesheet" href="views/calendar.css" />
+    <link rel="stylesheet" href="views/lms.css" />
   </head>
   <body>
     <div class="app">
-      <!-- 左侧功能栏（约 10% 宽） -->
+      <!-- 左侧功能栏（约 10% 宽）：内容由视图注册表生成 -->
       <aside class="sidebar">
         <div class="brand">
           <span class="brand-logo">🥔</span>
@@ -56,7 +60,26 @@
     </div>
 
     <div id="toast" class="toast"></div>
-    <script src="views.js"></script>
-    <script src="app.js"></script>
+
+    <!--
+      脚本加载顺序（classic script，无构建步骤）：
+        1) kit/        注册表与公共积木（纯工具，不依赖别的文件）
+        2) shell/planned.js  规划中的占位页（真实实现登记同名 id 后会自动接管）
+        3) views/      各业务模块的视图 —— **新增功能在这里加一行**
+        4) shell/      外壳自带视图与外壳本体（外壳必须最后加载：启动时要读注册表）
+    -->
+    <script src="kit/registry.js"></script>
+    <script src="kit/util.js"></script>
+    <script src="kit/labels.js"></script>
+    <script src="kit/dom.js"></script>
+
+    <script src="shell/planned.js"></script>
+
+    <script src="views/calendar.js"></script>
+    <script src="views/lms.js"></script>
+
+    <script src="shell/message.js"></script>
+    <script src="shell/settings.js"></script>
+    <script src="shell/app.js"></script>
   </body>
 </html>

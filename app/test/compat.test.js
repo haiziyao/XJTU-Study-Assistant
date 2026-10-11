@@ -275,20 +275,26 @@ test('测试页面由后端托管（/app），无需 Electron 也能联调', asy
     const page = await getRaw('/app/');
     assert.equal(page.status, 200);
     assert.match(page.contentType, /text\/html/);
-    assert.match(page.text, /日历与待办/);
+    assert.match(page.text, /AI 智学/);
     assert.match(page.text, /id="chat-log"/);
     assert.match(page.text, /id="panel-body"/);
 
-    const script = await getRaw('/app/app.js');
+    const script = await getRaw('/app/shell/app.js');
     assert.match(script.contentType, /javascript/);
     assert.match(script.text, /resolveInfo/);
 
-    // 视图层与外壳分离：views.js 也必须可被托管，否则界面只有骨架
-    const views = await getRaw('/app/views.js');
-    assert.match(views.contentType, /javascript/);
-    assert.match(views.text, /PCViews/);
+    // 外壳与视图分离：注册表与各视图文件都必须可被托管，否则界面只有骨架
+    const registry = await getRaw('/app/kit/registry.js');
+    assert.match(registry.contentType, /javascript/);
+    assert.match(registry.text, /PCModules/);
 
-    const style = await getRaw('/app/styles.css');
+    const calendar = await getRaw('/app/views/calendar.js');
+    assert.match(calendar.text, /PCModules\.register/);
+
+    const lms = await getRaw('/app/views/lms.js');
+    assert.match(lms.contentType, /javascript/);
+
+    const style = await getRaw('/app/shell/shell.css');
     assert.match(style.contentType, /text\/css/);
 
     const notAllowed = await getRaw('/app/../package.json');
