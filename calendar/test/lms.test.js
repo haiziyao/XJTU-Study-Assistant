@@ -14,6 +14,7 @@ import path from 'node:path';
 
 import { createServer } from '../src/server/index.js';
 import { normalizeCourse } from '../src/server/lms/api.js';
+import { ACTIVITY_TYPE_LABEL } from '../src/server/lms/config.js';
 import { buildSyncPlan, refineActivityTitle } from '../src/server/lms/sync.js';
 import { parseLmsTime } from '../src/server/lms/time.js';
 import { startMockLms } from './helpers/lms-mock.js';
@@ -535,6 +536,27 @@ test('思源学堂：清洗真实活动标题并提取教室', () => {
   assert.equal(live.payload.title, '材料力学', '直播标题的日期前缀要去掉');
   assert.equal(live.payload.location, null ?? live.payload.location, '没有教室信息时不写 location');
   assert.equal(live.payload.location, undefined);
+});
+
+test('思源学堂：真实账号出现过的活动类型都有中文标签', () => {
+  // 实测 54 门课的 1894 条活动里除四种主类型外还有这些（不参与同步，但列表要显示得像样）
+  for (const [type, label] of [
+    ['page', '课程页面'],
+    ['forum', '讨论'],
+    ['web_link', '外部链接'],
+    ['online_video', '在线视频'],
+    ['questionnaire', '问卷'],
+  ]) {
+    assert.equal(ACTIVITY_TYPE_LABEL[type], label);
+  }
+  // 没见过的类型回退到原始英文，而不是 undefined
+  const plan = buildSyncPlan({
+    courses: [{ id: 1, name: 'X' }],
+    activities: [{ id: 1, courseId: 1, type: 'brand_new_type', title: 'T', endTime: '2026-10-20T23:59:00+08:00' }],
+    options: { today: '2026-10-11', types: ['brand_new_type'] },
+  });
+  assert.equal(plan.items[0].action, 'skip');
+  assert.match(plan.items[0].reason, /brand_new_type不参与同步/);
 });
 
 test('思源学堂：时间解析按北京时间处理两种格式', () => {

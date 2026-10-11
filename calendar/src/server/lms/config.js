@@ -52,4 +52,13 @@ export const ACTIVITY_TYPE_LABEL = Object.freeze({
   material: '资料',
   lesson: '课程回放',
   lecture_live: '直播',
+  // 下面这些是实测真实账号里出现、但本模块不参与同步的类型，
+  // 只是为了让「全部」列表里的中文标签好看一点（未知类型一律回退到原始值）
+  page: '课程页面',
+  forum: '讨论',
+  web_link: '外部链接',
+  online_video: '在线视频',
+  questionnaire: '问卷',
+  exam: '考试',
+  unknown: '其它',
 });
