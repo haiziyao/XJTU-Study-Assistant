@@ -127,41 +127,51 @@ export class Collection {
   }
 }
 
-/** 数据层门面：集中暴露本项目用到的所有集合。 */
+/**
+ * 数据层门面。
+ *
+ * 集合分两类：
+ * - **框架集合**：`commandLogs`（指令日志，跨模块共用），固定由本文件创建；
+ * - **模块集合**：由模块描述符的 `collections` 声明，装配时注入（见 core/module/contract.js）。
+ *   这样新增功能不必修改本文件，只需在自己的 module.js 里声明。
+ *
+ * 集合实例按名字挂在 store 上（`store.events`、`store.lmsCourses` …），`collection(name)`
+ * 是等价的显式取用方式。
+ */
 export class JsonStore {
-  constructor({ dataDir }) {
+  constructor({ dataDir, collections = [] }) {
     this.dataDir = dataDir;
-    this.events = new Collection({ filePath: path.join(dataDir, 'events.json') });
-    this.schedules = new Collection({ filePath: path.join(dataDir, 'schedules.json') });
-    /** 指令历史，供前端「最近指令」与后续 AI 训练/回放使用。 */
-    this.commandLogs = new Collection({ filePath: path.join(dataDir, 'command-logs.json') });
-    /** 思源学堂课程缓存（离线也能看课程/作业，避免每次打开都打学校服务器）。 */
-    this.lmsCourses = new Collection({ filePath: path.join(dataDir, 'lms-courses.json') });
-    /** 思源学堂活动缓存（作业 / 直播 / 回放）。 */
-    this.lmsActivities = new Collection({ filePath: path.join(dataDir, 'lms-activities.json') });
+    /** @type {string[]} 已注册的集合名（含框架集合），init() 按它逐个加载。 */
+    this.collectionNames = [];
+
+    /** 指令历史，供前端「最近指令」与后续 AI 训练/回放使用（框架级，不属于任何模块）。 */
+    this.#register({ name: 'commandLogs', file: 'command-logs.json' });
+
+    for (const spec of collections) this.#register(spec);
+  }
+
+  #register({ name, file, indexes = [] }) {
+    if (typeof name !== 'string' || !/^[a-z][A-Za-z0-9]*$/.test(name)) {
+      throw new Error(`集合名不合法: ${JSON.stringify(name)}`);
+    }
+    if (this.collectionNames.includes(name)) {
+      throw new Error(`集合名冲突: ${name}（同名集合只能由一个模块声明）`);
+    }
+    if (!file) throw new Error(`集合 ${name} 缺少 file`);
+    this[name] = new Collection({ filePath: path.join(this.dataDir, file), indexes });
+    this.collectionNames.push(name);
+    return this[name];
   }
 
   async init() {
-    await Promise.all([
-      this.events.load(),
-      this.schedules.load(),
-      this.commandLogs.load(),
-      this.lmsCourses.load(),
-      this.lmsActivities.load(),
-    ]);
+    await Promise.all(this.collectionNames.map((name) => this[name].load()));
     return this;
   }
 
   collection(name) {
-    const map = {
-      events: this.events,
-      schedules: this.schedules,
-      commandLogs: this.commandLogs,
-      lmsCourses: this.lmsCourses,
-      lmsActivities: this.lmsActivities,
-    };
-    const target = map[name];
-    if (!target) throw new Error(`未知集合: ${name}`);
+    const target = this[name];
+    if (!(target instanceof Collection)) throw new Error(`未知集合: ${name}`);
     return target;
   }
 }
+
