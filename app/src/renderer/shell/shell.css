@@ -139,14 +139,8 @@ body.panel-collapsed .panel {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  padding: 6px 0 12px;
+  padding: 12px 0;
   color: var(--fg-2);
-}
-
-.brand-logo {
-  font-size: 20px;
-  line-height: 1;
 }
 
 .brand-name {
