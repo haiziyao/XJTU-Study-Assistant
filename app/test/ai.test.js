@@ -755,9 +755,9 @@ test('AI：看图能力按官方文档把关（只有 flash 支持，格式只�
     });
     assert.equal(chat.status, 200);
     const content = flash.state.bodies[0].messages.at(-1).content;
-    const urls = content.filter((part) => part.type === 'image_url');
-    assert.equal(urls.length, 1, '只把官方支持的格式当图片送');
-    assert.match(urls[0].image_url.url, /^data:image\/png/);
+    const carriers = content.filter((part) => part.type === 'file' || part.type === 'image_url');
+    assert.equal(carriers.length, 1, '只把官方支持的格式当图片送');
+    assert.equal(carriers[0].type, 'file', '上传成功后用 file 块');
     assert.match(content.find((part) => part.type === 'text').text, /b\.bmp/);
     assert.match(content.find((part) => part.type === 'text').text, /读不了/);
   } finally {
@@ -834,8 +834,10 @@ test('AI：附件 —— 文本内联进提示词、图片转多模态、读不�
     assert.match(text, /牛顿定律/, '文本附件内容应内联');
     assert.match(text, /讲义\.pdf/);
     assert.match(text, /读不了/, '读不了的文件要如实说明，别让模型假装看过');
-    const image = sent.content.find((part) => part.type === 'image_url');
-    assert.equal(image.image_url.url, 'data:image/png;base64,AAAA');
+    // 图片优先走官方 Files API 的 file 块（假上游支持 /files）
+    const image = sent.content.find((part) => part.type === 'file');
+    assert.match(image.file_id, /^file-api-/, '应使用官方 file 内容块引用已上传的图片');
+    assert.equal(sent.content.some((part) => part.type === 'image_url'), false);
 
     // 只落元信息：base64 不进 JSON 集合
     const [message] = chat.body.conversation ? [chat.body.user] : [];
@@ -880,5 +882,132 @@ test('AI：模型列表 —— 上游给就用上游的，给不了回落内置�
     assert.ok(fallback.body.models.some((item) => item.id === 'deepseek-v4-pro'));
   } finally {
     await bare.app.close();
+  }
+});
+
+test('AI：图片走官方 Files API —— 用 file_id 引用，同内容只上传一次', async () => {
+  const mock = await startMockAi({ apiKey: KEY, replies: ['看到了', '又看到了'] });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl, model: 'deepseek-flash' } });
+  const image = { name: 'photo.png', type: 'image/png', size: 20, dataUrl: 'data:image/png;base64,iVBORw0KGgo=' };
+  try {
+    const first = await call('POST', '/ai/chat', { text: '看看这张图', attachments: [image] });
+    assert.equal(first.status, 200);
+    assert.equal(mock.state.fileUploads.length, 1, '第一次应上传');
+
+    const content = mock.state.bodies[0].messages.at(-1).content;
+    const block = content.find((part) => part.type === 'file');
+    assert.ok(block, '上传成功后应使用官方 file 内容块');
+    assert.match(block.file_id, /^file-api-/);
+    assert.equal(content.some((part) => part.type === 'image_url'), false, '有 file_id 就不再用内联 base64');
+
+    // 附件元信息里记下 fileId（历史里能看出当时用的是哪个文件）
+    assert.match(first.body.user.attachments[0].fileId, /^file-api-/);
+
+    // 同一张图再来一次：内容指纹命中，不再打上游
+    await call('POST', '/ai/chat', { text: '再看', attachments: [image] });
+    assert.equal(mock.state.fileUploads.length, 1, '同内容应复用，不重复上传');
+    const second = mock.state.bodies[1].messages.at(-1).content.find((part) => part.type === 'file');
+    assert.equal(second.file_id, block.file_id);
+
+    // 本地账本
+    const listed = await call('GET', '/ai/files');
+    assert.equal(listed.body.count, 1);
+    assert.equal(listed.body.bytes, 8, '账本记的是真实字节数（base64 解出来的，含 = 补位）');
+    const upstream = await call('GET', '/ai/files/upstream');
+    assert.equal(upstream.body.files.length, 1);
+
+    // 删除：本地 + 上游都动
+    const removed = await call('DELETE', `/ai/files/${listed.body.items[0].id}`);
+    assert.equal(removed.body.deleted, true);
+    assert.equal(mock.state.fileDeletes.length, 1);
+    assert.equal((await call('GET', '/ai/files')).body.count, 0);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('AI：上传失败不阻断对话 —— 退回内联图片，并在响应里说明', async () => {
+  const mock = await startMockAi({ apiKey: KEY, reply: '看到了', filesFail: true });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl, model: 'deepseek-flash' } });
+  try {
+    const chat = await call('POST', '/ai/chat', {
+      text: '看图',
+      attachments: [{ name: 'a.png', type: 'image/png', size: 20, dataUrl: 'data:image/png;base64,iVBORw0KGgo=' }],
+    });
+    assert.equal(chat.status, 200, 'Files API 挂了不该让对话失败');
+    assert.equal(chat.body.warnings.length, 1);
+    assert.match(chat.body.warnings[0], /上传失败.*已改用内联/);
+    const content = mock.state.bodies[0].messages.at(-1).content;
+    assert.ok(content.find((part) => part.type === 'image_url'), '应退回内联 base64');
+    assert.equal(content.find((part) => part.type === 'image_url').image_url.url.startsWith('data:image/png'), true);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('AI：Token 用量与缓存命中率按输入侧算（官方 prompt_cache_hit/miss_tokens）', async () => {
+  const mock = await startMockAi({ apiKey: KEY, replies: ['一', '二'] });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+  try {
+    // 一条靠后的属性：让假上游返回官方形状的 usage（含缓存细分与思考 token）
+    // 同一个会话里聊两轮，"对话累计"才有意义（不传 conversationId 会各开一个新会话）
+    const first = await call('POST', '/ai/chat', { text: '你好' });
+    const id = first.body.conversation.id;
+    await call('POST', '/ai/chat', { conversationId: id, text: '再问一次' });
+
+    // 用真实消息目录改 usage：3 条回复，命中 300 / 未命中 100 / 输出 50
+    const store = app.store;
+    const messages = store.aiMessages.all().filter((m) => m.role === 'assistant');
+    assert.ok(messages.length >= 2);
+    for (const [index, message] of messages.entries()) {
+      const usage = index === 0
+        ? { prompt_tokens: 200, completion_tokens: 20, total_tokens: 220, prompt_cache_hit_tokens: 150, prompt_cache_miss_tokens: 50, completion_tokens_details: { reasoning_tokens: 8 } }
+        : { prompt_tokens: 200, completion_tokens: 30, total_tokens: 230, prompt_cache_hit_tokens: 150, prompt_cache_miss_tokens: 50 };
+      await store.aiMessages.update(message.id, { usage });
+    }
+
+    const usage = await call('GET', `/ai/usage?conversationId=${id}`);
+    assert.equal(usage.status, 200);
+    assert.equal(usage.body.tokens.cached, 300);
+    assert.equal(usage.body.tokens.uncached, 100);
+    assert.equal(usage.body.tokens.output, 50);
+    assert.equal(usage.body.tokens.input, 400, '输入 = 命中 + 未命中');
+    assert.equal(usage.body.tokens.reasoning, 8);
+    assert.equal(Math.round(usage.body.cacheHitRate * 1000) / 1000, 0.75, '命中率 = 300/400');
+    assert.equal(usage.body.calls, 2, '两条回复 = 两次调用');
+    assert.equal(usage.body.replies, 2);
+
+
+    // 只给 prompt_tokens（没有缓存细分）的端点：按"全未命中"算，不该显示成 100% 命中
+    await store.aiMessages.update(messages[0].id, { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
+    const mixed = await call('GET', '/ai/usage');
+    assert.equal(mixed.body.tokens.input, 210);
+    assert.equal(mixed.body.tokens.cached, 150);
+    assert.equal(mixed.body.replies, messages.length);
+
+    // 只读查询会带来第二次上游调用（回灌），那一次的用量也要算进去。
+    // 放在最后做：这一步会改变累计值（messages[0] 的 usage 刚被换成"无缓存细分"那条）
+    await store.aiMessages.update(messages[1].id, {
+      usageFollowup: { prompt_tokens: 200, completion_tokens: 10, total_tokens: 210, prompt_cache_hit_tokens: 200, prompt_cache_miss_tokens: 0 },
+    });
+    const withFollowup = await call('GET', `/ai/usage?conversationId=${id}`);
+    assert.equal(withFollowup.body.calls, 3, '回灌那次也要计入');
+    assert.equal(withFollowup.body.tokens.cached, 350, '150（第二条命中）+ 200（回灌命中）');
+    assert.equal(withFollowup.body.tokens.uncached, 60);
+
+    // 完全没有用量时：命中率给 null（而不是 0）
+    const bare = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+    try {
+      const empty = await bare.call('GET', '/ai/usage');
+      assert.equal(empty.body.cacheHitRate, null);
+      assert.equal(empty.body.tokens.total, 0);
+    } finally {
+      await bare.app.close();
+    }
+  } finally {
+    await app.close();
+    await mock.close();
   }
 });

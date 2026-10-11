@@ -197,6 +197,69 @@ export function createOpenAiCompatProvider({ getConfig, fetchImpl = globalThis.f
     }
   }
 
+  /* ---------------------------------------------------------------- Files API */
+
+  const authHeaders = (config) => ({ Authorization: `Bearer ${config.apiKey}` });
+
+  /** 统一的“要密钥/要能连上”的包装，避免每个文件接口各写一遍错误映射。 */
+  async function filesFetch(config, path, init = {}) {
+    if (!config.apiKey) throw unavailableError(config);
+    let response;
+    try {
+      response = await withTimeout((signal) => fetchImpl(`${config.baseUrl}${path}`, { ...init, signal }));
+    } catch (error) {
+      throw HttpError.upstream(`连不上上游：${redactSecret(error?.message ?? error, config.apiKey)}`, {
+        baseUrl: config.baseUrl,
+      });
+    }
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => '');
+      throw HttpError.upstream(`上游返回 ${response.status}`, {
+        upstreamStatus: response.status,
+        body: truncate(redactSecret(bodyText, config.apiKey)),
+      });
+    }
+    return response;
+  }
+
+  /**
+   * 上传一个文件到官方 Files API。
+   * `POST /files`，multipart/form-data，必填字段：`file` + `purpose=user_data`。
+   * 注意**不要**手写 Content-Type —— multipart 的 boundary 由 FormData 自己带。
+   */
+  async function uploadFile({ filename, contentType, bytes }) {
+    const config = getConfig();
+    const form = new FormData();
+    form.append('file', new Blob([bytes], { type: contentType || 'application/octet-stream' }), filename || 'file');
+    form.append('purpose', 'user_data'); // 官方要求必须是这个值
+    const response = await filesFetch(config, '/files', {
+      method: 'POST',
+      headers: authHeaders(config),
+      body: form,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!data?.id) throw HttpError.upstream('上游没有返回 file_id', { body: truncate(JSON.stringify(data)) });
+    return data;
+  }
+
+  async function listFiles({ limit = 100 } = {}) {
+    const config = getConfig();
+    const response = await filesFetch(config, `/files?limit=${Math.min(Math.max(Number(limit) || 100, 1), 1000)}`, {
+      headers: authHeaders(config),
+    });
+    const data = await response.json().catch(() => ({}));
+    return { files: data?.data ?? [], hasMore: Boolean(data?.has_more) };
+  }
+
+  async function deleteFile(fileId) {
+    const config = getConfig();
+    const response = await filesFetch(config, `/files/${encodeURIComponent(fileId)}`, {
+      method: 'DELETE',
+      headers: authHeaders(config),
+    });
+    return response.json().catch(() => ({}));
+  }
+
   /**
    * 列上游可用模型（OpenAI 兼容的 `GET /models`）。
    * 上游不提供或调用失败时返回**内置候选**，并标明来源 —— 设置页的模型选择器据此渲染。
@@ -257,5 +320,8 @@ export function createOpenAiCompatProvider({ getConfig, fetchImpl = globalThis.f
     },
     chat,
     listModels,
+    uploadFile,
+    listFiles,
+    deleteFile,
   };
 }

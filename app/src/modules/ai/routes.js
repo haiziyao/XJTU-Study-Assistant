@@ -17,7 +17,7 @@ import { HttpError } from '../../core/http/router.js';
 
 const asBool = (value) => value === true || value === 'true' || value === '1' || value === 1;
 
-export function registerAiRoutes(router, { ai, apiPrefix }) {
+export function registerAiRoutes(router, { ai, files, apiPrefix }) {
   const P = `${apiPrefix}/ai`;
   if (!ai) return;
 
@@ -36,6 +36,23 @@ export function registerAiRoutes(router, { ai, apiPrefix }) {
 
   /** 可选模型列表（顶栏「AI：<模型名>」点开后的选择器）。 */
   router.get(`${P}/models`, () => ai.listModels());
+
+  /**
+   * Token 用量与缓存命中率（「用量」气泡）。
+   * `?conversationId=` 只看一个会话；不传统计全部。
+   */
+  router.get(`${P}/usage`, ({ query }) => ai.usage({ conversationId: query.conversationId || undefined }));
+
+  // ---------------------------------------------------------------- 文件（Files API）
+  if (files) {
+    /** 本地账本（谁被上传过、对应的 file_id）。 */
+    router.get(`${P}/files`, () => files.list());
+
+    /** 上游真源的文件列表；`?upstream=1` 时去打上游。 */
+    router.get(`${P}/files/upstream`, () => files.listUpstream());
+
+    router.delete(`${P}/files/:id`, ({ params }) => files.remove(params.id));
+  }
 
   // ---------------------------------------------------------------- 上下文
   router.get(`${P}/context`, async ({ query }) =>

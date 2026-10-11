@@ -615,6 +615,7 @@
         state.reasoningNode = null;
       }
       // 只读查询由后端自动执行了：把数据原样列出来（模型的话可能概括得太粗，用户要看的是具体条目）
+      for (const text of result.warnings ?? []) systemNote(text, 'fail');
       const queried = result.queried ?? [];
       for (const entry of queried) {
         if (entry.result) queryCard(entry.result);
@@ -627,6 +628,7 @@
       }
       const drafts = result.drafts ?? [];
       for (const entry of drafts) renderAiDraft(entry);
+      void refreshUsageBadge();
       if (!drafts.length && !queried.length && !(result.executed ?? []).length) {
         systemNote(`${state.ai.provider ?? 'AI'} · 只是聊天，没有产生任何写入`, 'meta');
       }
@@ -845,7 +847,96 @@
           state.permission = value;
         },
       }),
+      usageSelect(),
     );
+  }
+
+  /** 千分位（数字很长时可读性差别很大）。 */
+  const groupDigits = (value) => Number(value || 0).toLocaleString('en-US');
+
+  /**
+   * 「用量」：累计 token 与**缓存命中率**。
+   *
+   * 命中率按输入侧算：`prompt_cache_hit_tokens / (hit + miss)` —— 与官方 usage 字段一致。
+   * 数字来自 `/ai/usage?conversationId=`（服务端对已落库的 usage 求和），点开时才去取。
+   */
+  function usageSelect() {
+    const wrap = mk('div', 'compose-select');
+    const button = mk('button');
+    button.type = 'button';
+    button.append(mk('span', 'cs-label', '用量'), mk('span', 'cs-value', '—'), mk('span', 'cs-caret', '▴'));
+
+    const menu = mk('div', 'compose-menu usage-menu');
+    wrap.append(button, menu);
+    menu.addEventListener('click', (event) => event.stopPropagation());
+
+    const row = (label, value, cls = '') => {
+      const line = mk('div', `usage-row ${cls}`.trim());
+      line.append(mk('span', 'usage-key', label), mk('span', 'usage-val', value));
+      return line;
+    };
+
+    const paint = (data) => {
+      menu.replaceChildren();
+      const tokens = data?.tokens ?? {};
+      const rate = data?.cacheHitRate;
+      menu.appendChild(row('Token 用量', `${groupDigits(tokens.total)} tok`, 'usage-total'));
+      menu.appendChild(row('缓存命中', rate === null || rate === undefined ? '—' : `${(rate * 100).toFixed(1)}%`));
+      menu.appendChild(row('未缓存输入', `${groupDigits(tokens.uncached)} tok`));
+      menu.appendChild(row('缓存读取', `${groupDigits(tokens.cached)} tok`));
+      menu.appendChild(row('输出', `${groupDigits(tokens.output)} tok`));
+      if (tokens.reasoning) menu.appendChild(row('　其中思考', `${groupDigits(tokens.reasoning)} tok`));
+      menu.appendChild(row('本轮会话回复数', `${data?.replies ?? 0}`));
+      menu.appendChild(
+        mk('div', 'cm-hint', tokens.total ? '命中率 = 缓存读取 ÷（缓存读取 + 未缓存输入）' : '还没有产生用量：聊一句就有数据了'),
+      );
+    };
+
+    const load = async () => {
+      menu.replaceChildren(mk('div', 'cm-hint', '读取中…'));
+      try {
+        const query = state.conversationId ? `?conversationId=${encodeURIComponent(state.conversationId)}` : '';
+        const data = await api(`/ai/usage${query}`);
+        state.usage = data;
+        button.querySelector('.cs-value').textContent = formatUsageValue(data);
+        paint(data);
+      } catch (error) {
+        menu.replaceChildren(mk('div', 'cm-hint', `拿不到用量：${error.message}`));
+      }
+    };
+
+    button.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const open = wrap.classList.contains('open');
+      for (const other of document.querySelectorAll('.compose-select.open')) other.classList.remove('open');
+      if (open) return;
+      wrap.classList.add('open');
+      await load();
+    });
+    return wrap;
+  }
+
+  /** 按钮上显示什么：有命中率就显示命中率，否则显示总 token。 */
+  function formatUsageValue(data) {
+    if (!data) return '—';
+    const rate = data.cacheHitRate;
+    if (rate !== null && rate !== undefined) return `${(rate * 100).toFixed(1)}%`;
+    return `${groupDigits(data.tokens?.total)} tok`;
+  }
+
+  /** 静默刷新「用量」上的数字（不展开菜单）；失败就算了，点开时会重新取。 */
+  async function refreshUsageBadge() {
+    const wrap = document.querySelector('.chat-controls .usage-menu')?.parentNode;
+    const value = wrap?.querySelector('.cs-value');
+    if (!value) return;
+    try {
+      const query = state.conversationId ? `?conversationId=${encodeURIComponent(state.conversationId)}` : '';
+      const data = await api(`/ai/usage${query}`);
+      state.usage = data;
+      value.textContent = formatUsageValue(data);
+    } catch {
+      /* 忽略 */
+    }
   }
 
   /** 顶栏徽标：显示具体模型名，点开选模型（列表来自 GET /ai/models）。 */

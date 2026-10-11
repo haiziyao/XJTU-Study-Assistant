@@ -31,6 +31,9 @@ export async function startMockAi(options = {}) {
   const state = {
     requests: [],
     calls: 0,
+    /** Files API：上传记录与删除记录。 */
+    fileUploads: [],
+    fileDeletes: [],
     /** 每次请求的 body（断言历史、模型参数）。 */
     bodies: [],
   };
@@ -41,6 +44,39 @@ export async function startMockAi(options = {}) {
     req.on('end', async () => {
       const raw = Buffer.concat(chunks).toString('utf8');
       state.requests.push(`${req.method} ${req.url}`);
+      // Files API：POST /files（multipart，只校验有 purpose=user_data 与文件字节）
+      if (req.url?.includes('/files')) {
+        const auth = String(req.headers.authorization ?? '');
+        if (auth !== `Bearer ${options.apiKey ?? 'test-key'}`) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: { message: 'bad key' } }));
+        }
+        if (options.filesFail) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: { message: 'files api down' } }));
+        }
+        if (req.method === 'DELETE') {
+          state.fileDeletes.push(req.url);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ id: 'file-api-deleted', object: 'file', deleted: true }));
+        }
+        if (req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ object: 'list', data: state.fileUploads.map((f) => ({ id: f.id, filename: f.filename })), has_more: false }));
+        }
+        state.fileUploads.push({ id: `file-api-${state.fileUploads.length + 1}`, filename: 'uploaded', raw: raw.length });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(
+          JSON.stringify({
+            id: `file-api-${state.fileUploads.length}`,
+            object: 'file',
+            bytes: raw.length,
+            created_at: 1_700_000_000,
+            filename: 'uploaded',
+            purpose: 'user_data',
+          }),
+        );
+      }
       if (req.url?.endsWith('/models')) {
         const auth = String(req.headers.authorization ?? '');
         if (auth !== `Bearer ${options.apiKey ?? 'test-key'}`) {

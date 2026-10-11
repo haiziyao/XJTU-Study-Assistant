@@ -363,6 +363,8 @@ app/
 | **公式与富文本** | `kit/richtext.js`（零依赖，纯字符串→HTML） | ✅ Markdown 子集 + LaTeX 子集（分数/根号/上下标/求和/希腊字母/函数/向量/文本）；识别不了的命令**原样显示**不静默吞；流式半截公式不崩。刻意**不引** MathJax/KaTeX —— CSP 是 `default-src 'self'` 且零依赖 |
 | **AI 绘图** | `prompt.js` 的 `DRAW_NOTE` + `chat-service.js` 的 `DRAW_KEYWORDS` + `richtext.js` 的 sanitize | ✅ 按 dschat2 的 ```svg 约定；比 dschat2 多两条本地约束：**禁用 `style` 属性**（CSP 会拦）与深色背景配色。设置页可开关；关掉后说「画个图」仍临时触发 |
 | **附件 / 思考强度 / 权限** | `app.js` 的 `readFile` / `composeSelect` + `chat-service.js` 的 `normalizeAttachments` / `buildUserContent` / `#autoExecuteWrites` | ✅ 附件：图片走多模态、文本内联（单文件 2 万字、合计 6 万字上限）、其它只登记文件名；**base64 不落库**。思考强度映射官方 `reasoning_effort`（none/low/high/max；默认 high = 官方默认，关闭思考必须显式传 `none`）。思维链 `reasoning_content` 收成默认折叠的「思考过程」卡。**看图只有 `deepseek-flash` 支持**，格式只认 JPEG/PNG/GIF/WebP。权限三档决定查询是否自动执行、写操作是否要确认（`auto` 会替你点确认，风险自负） |
+| **Files API** | `modules/ai/files.js` + `provider.js` 的 `uploadFile/listFiles/deleteFile` | ✅ 图片先上传再引用（`{type:"file", file_id}`），**按内容 sha256 去重**（同图多轮复用不重传）、本地只记元信息不存字节、上传失败退回内联 base64 并在 `warnings` 里说明；不受 48MiB 请求体 / 32MiB 单图内联限制 |
+| **用量与缓存命中率** | `GET /ai/usage` + `app.js` 的 `usageSelect()` | ✅ 对官方 `usage` 求和：总量 / 缓存命中率 / 未缓存输入 / 缓存读取 / 输出 / 思考 token；命中率按输入侧 `hit ÷ (hit + miss)` 算；**查询回灌那一次的用量也计入**（`calls` 会大于回复条数） |
 | **模型选择器** | `GET /ai/models` + `app.js` 的 `wireModelPicker()` | ✅ 顶栏显示**具体模型名**（不是 provider 名），点开选模型并即时 `POST /ai/config`；上游列不出模型时给内置候选并标明 |
 | **操作卡折叠** | `app.js` 的 `opCard()` | ✅ 查询/写入结果默认折叠成一行（「查看日程 · 2026-10-12 · 点开看明细」），点击展开；按 target 配色：日程橙 / 待办紫 / 事件蓝 / 写入绿 |
 | provider 注册位 | `src/server/index.js` 的 `services = { store, commands, aiBridge, hub, broadcast }` | ✅ 模块在自己的 `createServices({ services })` 里就能注册 provider |

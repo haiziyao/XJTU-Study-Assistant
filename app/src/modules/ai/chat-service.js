@@ -84,13 +84,15 @@ const EMPTY_MEMORY = (maxItems = DEFAULT_MEMORY_BUDGET.maxItems, maxChars = DEFA
 });
 
 export class AiChatService {
-  constructor({ store, broadcast, services, config, provider, commands, onConfigChange }) {
+  constructor({ store, broadcast, services, config, provider, commands, files, onConfigChange }) {
     this.store = store;
     this.broadcast = broadcast;
     this.services = services;
     this.config = config;
     this.provider = provider;
     this.commands = commands;
+    /** Files API 的本地账本（可为空：没有它就不上传，退回内联）。 */
+    this.files = files;
     /** 配置变化后的回调（模块层用它决定是否把 provider 注册给 aiBridge）。 */
     this.onConfigChange = onConfigChange;
   }
@@ -113,6 +115,62 @@ export class AiChatService {
 
   maskConfig() {
     return maskAiConfig(this.config.get());
+  }
+
+  /**
+   * Token 用量统计（含缓存命中率）。
+   *
+   * 官方 usage 形状：`prompt_tokens` = 命中 + 未命中，另有 `prompt_cache_hit_tokens` /
+   * `prompt_cache_miss_tokens`，以及 `completion_tokens_details.reasoning_tokens`（思考链）。
+   * 命中率按**输入侧**算：命中 / (命中 + 未命中) —— 和"这次请求读了多少缓存"是同一件事。
+   *
+   * @param {object} [options]
+   * @param {string} [options.conversationId] 只统计这个会话；不传就统计全部
+   */
+  usage({ conversationId } = {}) {
+    const messages = (this.store.aiMessages?.all?.() ?? []).filter(
+      (item) => item.role === 'assistant' && item.usage && (!conversationId || item.conversationId === conversationId),
+    );
+
+    const sum = { prompt: 0, completion: 0, total: 0, cached: 0, uncached: 0, reasoning: 0 };
+    let calls = 0;
+    // 一条回复可能对应**两次**上游调用（只读查询回灌那一次），两次都是真花钱的，都要算
+    for (const message of messages) {
+      for (const raw of [message.usage, message.usageFollowup]) {
+        if (!raw) continue;
+        calls += 1;
+        const completion = Number(raw.completion_tokens) || 0;
+        const prompt = Number(raw.prompt_tokens) || 0;
+        const cached = Number(raw.prompt_cache_hit_tokens ?? raw.prompt_tokens_details?.cached_tokens) || 0;
+        // 有些 OpenAI 兼容端点只给 prompt_tokens，不给缓存细分，那就按"全未命中"算
+        const uncached = Number(raw.prompt_cache_miss_tokens) || Math.max(prompt - cached, 0);
+        sum.prompt += prompt;
+        sum.completion += completion;
+        sum.total += Number(raw.total_tokens) || prompt + completion;
+        sum.cached += cached;
+        sum.uncached += uncached;
+        sum.reasoning += Number(raw.completion_tokens_details?.reasoning_tokens) || 0;
+      }
+    }
+
+    const inputDenominator = sum.cached + sum.uncached;
+    return {
+      ok: true,
+      conversationId: conversationId ?? null,
+      replies: messages.length,
+      /** 计入口径：一条回复可能是 1 次调用，也可能是 2 次（查询回灌） */
+      calls,
+      tokens: {
+        total: sum.total,
+        input: inputDenominator,
+        cached: sum.cached,
+        uncached: sum.uncached,
+        output: sum.completion,
+        reasoning: sum.reasoning,
+      },
+      /** 0~1；没有任何输入 token 时为 null（而不是 0，免得显示成"命中率 0%"误导人）。 */
+      cacheHitRate: inputDenominator > 0 ? sum.cached / inputDenominator : null,
+    };
   }
 
   /** 上游可用的模型列表（给顶栏的模型选择器用）。 */
@@ -306,6 +364,18 @@ export class AiChatService {
         hint: '官方「图像理解」文档：目前只有 deepseek-flash 支持看图',
       });
     }
+    // 图片先走官方 Files API 上传（同内容复用本地记录，不重复上传）；
+    // 上传失败不阻断对话：退回内联 base64，并在响应里说明。
+    const uploadWarnings = [];
+    for (const file of images) {
+      if (!this.files) break;
+      try {
+        const uploaded = await this.files.ensureUploaded(file);
+        if (uploaded?.fileId) file.fileId = uploaded.fileId;
+      } catch (error) {
+        uploadWarnings.push(`${file.name} 上传失败（${error.message}），已改用内联图片`);
+      }
+    }
     // 允许"只发附件不写字"，但两者都空就没意义
     if (!trimmed && !files.length) throw HttpError.badRequest('text 不能为空');
     const effort = THINKING_LEVELS[thinking] ?? 'high';
@@ -324,8 +394,8 @@ export class AiChatService {
       conversationId: conversation.id,
       role: 'user',
       content: trimmed,
-      // 只落**元信息**：base64 动辄几 MB，塞进 JSON 集合会把业务数据文件撑爆
-      attachments: files.map((file) => ({ name: file.name, type: file.type, size: file.size })),
+      // 只落**元信息**（含 Files API 的 file_id）：base64 动辄几 MB，塞进 JSON 集合会把业务数据文件撑爆
+      attachments: files.map((file) => ({ name: file.name, type: file.type, size: file.size, fileId: file.fileId ?? null })),
       thinking,
       permission: mode,
     });
@@ -462,6 +532,7 @@ export class AiChatService {
         // 把这一轮的选择回显给调用方：前端据此在气泡上标注"自动执行/思考强度"
         thinking,
         permission: mode,
+        warnings: uploadWarnings,
       };
     } catch (error) {
       const failure = {
@@ -680,6 +751,12 @@ export function buildUserContent(text, files) {
   if (!images.length) return prompt;
   return [
     { type: 'text', text: prompt },
-    ...images.map((file) => ({ type: 'image_url', image_url: { url: file.dataUrl } })),
+    // 有 file_id 就用官方 Files API 的引用块（不受 48MiB 请求体 / 32MiB 单图内联限制，
+    // 同一张图多轮复用也不用重传）；没上传成功才退回内联 base64。
+    ...images.map((file) =>
+      file.fileId
+        ? { type: 'file', file_id: file.fileId }
+        : { type: 'image_url', image_url: { url: file.dataUrl } },
+    ),
   ];
 }

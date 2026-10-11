@@ -21,6 +21,7 @@
 import { AiConfigStore } from './config.js';
 import { AiChatService } from './chat-service.js';
 import { createOpenAiCompatProvider } from './provider.js';
+import { AiFiles } from './files.js';
 import { registerAiRoutes } from './routes.js';
 import { AI_TOOL_SPECS } from './tools.js';
 
@@ -32,6 +33,8 @@ export default {
   collections: [
     { name: 'aiConversations', file: 'ai-conversations.json' },
     { name: 'aiMessages', file: 'ai-messages.json', indexes: ['conversationId'] },
+    // 上传到上游 Files API 的本地账本（只存元信息 + file_id，不存字节）
+    { name: 'aiFiles', file: 'ai-files.json', indexes: ['hash'] },
   ],
 
   aiTools: AI_TOOL_SPECS,
@@ -61,21 +64,23 @@ export default {
       },
     };
 
+    const files = new AiFiles({ store, provider });
     const ai = new AiChatService({
       store,
       broadcast,
       services,
       config,
       provider,
+      files,
       commands: services.commands,
       onConfigChange: () => bridge.sync(),
     });
     bridge.sync();
 
-    return { ai };
+    return { ai, files };
   },
 
   registerRoutes(router, ctx) {
-    registerAiRoutes(router, { ai: ctx.own.ai, apiPrefix: ctx.apiPrefix });
+    registerAiRoutes(router, { ai: ctx.own.ai, files: ctx.own.files, apiPrefix: ctx.apiPrefix });
   },
 };
