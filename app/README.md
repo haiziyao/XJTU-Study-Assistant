@@ -16,7 +16,8 @@
 | --- | --- | --- | --- |
 | `calendar` | 10 | 日历事件 + 日程（时段）+ 提醒 + 重复规则 + ICS 导出 + dschat 2 兼容 + 中文指令添加 + 顺延 | ✅ |
 | `lms` | 20 | 思源学堂：统一身份认证登录、课程/作业/网课（直播 + 回放）拉取、预览后同步到日历、自动同步 | ✅ |
-| — | — | 框架级：指令记录、设置、AI 接入（NL → 指令对象） | 🚧 AI 仅契约与占位（`/ai/*`） |
+| `ai` | 90 | AI 接入：OpenAI 兼容 provider、多轮对话与流式、会话落库、上下文注入、模型草稿预校验（**模型不许直接写库**） | ✅ 未配密钥时自动降级到本地规则 |
+| — | — | 框架级：指令记录、设置、AI 契约（`aiBridge` / `aiTools` 聚合） | ✅ |
 | 学情 / 笔记系统 / 随手拍 | — | 左栏已占位（`shell/planned.js`），实现同名视图即自动接管 | 🚧 规划中 |
 
 运行时可探测：`curl -s localhost:3210/api/v1/modules | jq`
@@ -34,11 +35,27 @@ npm run dev:server            # 带 --watch 自动重启
 npm install                   # electron 为 devDependency
 npm run dev:app
 
-# 3) 测试（零依赖，100 个用例；含思源学堂的本地 mock、农历权威向量、分类注册表与日历/待办端到端测试）
+# 3) 测试（零依赖，116 个用例；含思源学堂与 AI 上游的本地 mock、农历权威向量、分类注册表与日历/待办端到端测试）
 npm test
 ```
 
 后端零运行时依赖（只用 Node 内置模块），因此**不装 Electron 也能完整联调接口**。
+
+### 想用 AI 对话？（可选，不配也能跑）
+
+AI 模块（`src/modules/ai/`）兼容任何 OpenAI 协议的端点，默认指向 DeepSeek。**不配密钥时一切照旧**：
+`/ai/nl2command` 返回 501，传 `fallback: "rules"` 仍然走本地规则，`/ai/capabilities` 的 `available` 为 `false`。
+
+```bash
+export PC_AI_API_KEY=sk-…      # 或 POST /api/v1/ai/config {"apiKey":"sk-…"}（落 data/ai-config.json，0600）
+npm run start:server
+
+curl -s -X POST localhost:3210/api/v1/ai/chat -H 'Content-Type: application/json' \
+  -d '{"text":"明天交实验报告，预计两小时"}'
+```
+
+接口清单与「模型只能提议、用户确认才落库」的约定见 [接口文档.md 6.4](docs/接口文档.md)。
+前端中栏目前仍只走本地规则，**还没接上这套接口**（见「AI 接入还差什么」第 1 条）。
 
 ### 打开测试窗口的两种方式
 
@@ -313,54 +330,51 @@ app/
 
 ## AI 接入还差什么
 
-> 一句话现状：**契约是完整的、落库链路是通的、模型还没接**。
-> 没有注册 provider 时 `POST /ai/nl2command` 返回 `501 AI_UNAVAILABLE`（响应 details 里带完整契约），
-> `/health` 的 `ai.available` 为 `false`；界面右上角因此一直显示「AI 未接入」。
+> 一句话现状：**provider 已经接上了（`modules/ai/`），密钥一配就能对话**；
+> 没配密钥时行为与以前一致 —— `/ai/nl2command` 返回 `501 AI_UNAVAILABLE`，
+> 传 `fallback: "rules"` 走本地规则，界面右上角显示「AI 未接入」。
 > 补齐不需要改 `src/core`：`services.aiBridge` 已在全局服务表里，新模块能直接拿到。
 >
-> 模型要建**待办/日程**时的调用姿势（选哪个集合、哪些字段必填、四个常见错误写法）在
-> [接口文档.md 的「★ AI 速查」](docs/接口文档.md) 里，并有测试守着文档与工具清单不漂移。
+> 模型要建**待办/日程**时的调用姿势（选哪个集合、哪些字段必填、五个常见错误写法）在
+> [接口文档.md 的「★ AI 速查」](docs/接口文档.md) 里；同一套判定表也被写进了系统提示词
+> （`modules/ai/prompt.js`），并有测试守着文档与工具清单不漂移。
 
 ### 已经就绪的
 
 | 环节 | 位置 | 状态 |
 | --- | --- | --- |
 | 指令对象契约 | `src/core/ai/ai-bridge.js` 顶部注释 | `action / target / fields / filters / confidence / warnings / explain`，与本地规则解析器**同一种结构** |
+| **provider 实现** | `modules/ai/{provider,config}.js` | ✅ OpenAI 兼容（默认 DeepSeek）：SSE 流式、超时、错误映射；密钥落 `data/ai-config.json`（0600），接口只回显末四位 |
+| **多轮对话与流式** | `modules/ai/chat-service.js` + WebSocket `ai_delta` / `ai_message` | ✅ 会话与消息落库，历史按轮数截断后带给上游；HTTP 仍一次返回最终结果 |
+| **上下文注入** | `GET /ai/context`（`modules/ai/chat-service.js`） | ✅ 今天/星期/视图 + 近期数据摘要 + 记忆预算（记忆未装配时为空，见 [接口文档 §10](docs/接口文档.md)） |
+| **模型草稿预校验** | `modules/ai/drafts.js` → `commands.execute(dryRun)` | ✅ 模型只能提议：抽 ```command 草稿 → 真实字段校验（不写库）→ 确认卡 → 用户点了才落库 |
 | 落库链路 | `modules/calendar/module.js` 里 `registerHandler('event' / 'schedule' / 'todo')` | ✅ 实测：`/ai/nl2command { fallback: "rules" }` 拿到 draft → `/commands/execute { draft }` 真的建出日程与待办 |
-| 降级解析 | `CommandService.tryParse`（约定不抛异常） | ✅ 传 `fallback: "rules"` 时 `provider` 标为 `rules`、`degraded: true`，AI 挂了也能用 |
-| 能力清单 | `GET /ai/capabilities` 聚合各模块 `aiTools` | ✅ 日历 **19** 个（`modules/calendar/tools.js`）+ 思源学堂 **8** 个，每项带 `module` |
+| 降级解析 | `CommandService.tryParse`（约定不抛异常） | ✅ **未配密钥时不注册 provider**，`fallback: "rules"` 不会被挡死；AI 挂了也能用 |
+| 能力清单 | `GET /ai/capabilities` 聚合各模块 `aiTools` | ✅ 日历 **19** 个 + 思源学堂 **8** 个 + AI **2** 个（共 29），每项带 `module` |
 | 前端对话与确认卡 | `src/renderer/shell/app.js`（中栏，不属于日历视图） | ✅ 「自然语言 → 草稿确认卡 → 点确认才落库 → 可取消」，本地规则下就能用 |
 | provider 注册位 | `src/server/index.js` 的 `services = { store, commands, aiBridge, hub, broadcast }` | ✅ 模块在自己的 `createServices({ services })` 里就能注册 provider |
 
 ### 还差的（按重要性）
 
-1. **provider 实现本身** —— 唯一的硬缺口。需要新建 `src/modules/ai/`，在 `createServices` 里注册：
+1. **前端还没接 `/ai/chat`**：中栏对话目前仍只调 `/commands/parse`（本地规则），
+   既没调 AI、也没有流式渲染与"正在输入"的增量气泡。后端接口与 WS 事件都已就绪
+   （[接口文档 6.4](docs/接口文档.md)），差的是一次 renderer 侧接线 + 一个「设置 → AI」的密钥输入框。
 
-   ```js
-   services.aiBridge.registerProvider({
-     name: 'deepseek',
-     async nlToCommand(text, context) { /* 返回指令对象，不要直接写库 */ },
-   });
-   ```
+2. **产出的 `source` 没能区分人机**：本地规则解析器写 `"command"`，模型草稿目前也走同一条
+   `/commands/execute`，所以同样是 `command`。要在数据上区分「这条是模型加的」，
+   可以给草稿打 `fields.source = "ai"` —— 注意这与"用户确认后才落库"并不冲突：
+   人确认的是**内容**，不是**来源**。`Event` / `Schedule` 的 `source` 枚举已含 `manual / command / ai / import`。
 
-   模型调用、密钥管理、超时重试都该留在这个模块里。密钥建议放 `ctx.dataDir` 下的 `0600` 文件，
-   不要进 JsonStore（集合是 `0644` 的业务数据，语义不同）。
+3. **没有工具调用循环**：`aiTools` 只是一份清单，框架不会替模型执行 tool call。
+   走 Agent 路线（模型自己查数据、自己决定调哪个工具）需要实现「模型 → 调工具 → 回灌结果」的循环，
+   工具落点就是清单里那些已实现的 HTTP 接口。建议只读工具先放开，写操作仍走草稿确认。
 
-2. **产出的 `source` 要标 `"ai"`**：本地规则解析器写 `"command"`，模型写的应是 `"ai"`
-   （`Event` / `Schedule` 的 `source` 枚举已含 `manual / command / ai / import`），
-   否则事后分不清哪些数据是模型加的。
+4. **记忆（Agent 记忆）只有契约**：[接口文档 §10](docs/接口文档.md) 把数据模型、6 个接口、
+   注入预算与排序、「AI 推断的记忆一律不能直接写」都定死了，`/ai/context` 的钩子也留好了
+   （记忆模块只要暴露 `services.memory.inject` 就自动生效），差的只是一个模块。
 
-3. **没有上下文注入**：`/ai/nl2command` 的 `body.context` 目前原样透传，没人组装
-   「当前时间 / 当前视图 / 近期日程摘要」。要支持「把那个会推迟到明天」这类指代，得先有这一层。
-   **契约已经写好：[接口文档.md 第 10 节「记忆」](docs/接口文档.md)** —— 记忆的数据模型、
-   6 个接口、注入预算与排序、以及「AI 推断的记忆一律不能直接写、只能提议」的硬规则都在里面，
-   代码未落地（`/memories*` 与 `/ai/context` 现在返回 404）。
-
-4. **没有工具调用循环**：`aiTools` 只是一份清单，框架不会替模型执行 tool call。
-   走 Agent 路线（而不是「一句话 → 一个指令对象」）需要自己实现「模型 → 调工具 → 回灌结果」的循环，
-   工具落点就是清单里那些已实现的 HTTP 接口。
-
-5. **没有多轮与流式**：provider 契约是「一次调用返回一个指令对象」，不带对话历史，前端也没有流式渲染。
+5. **没有写入权限边界**：目前任何调用方都能 `POST /commands/execute` 直接落库（本机 Electron 壳下可接受）。
+   真要开放 Agent，需要决定「谁能写」以及写操作是否强制先跑 `dryRun` 预览。
 
 6. **没有写入权限边界**：目前任何调用方都能 `POST /commands/execute` 直接落库（本机 Electron 壳下可接受）。
    真要开放 Agent，需要决定「谁能写」以及写操作是否强制先跑 `dryRun` 预览。
@@ -370,9 +384,12 @@ app/
 > 下面这些「加一个功能」的活，都按 [模块开发指南.md](docs/模块开发指南.md) 的方式做：
 > 新建 `src/modules/<id>/` + `src/renderer/views/<id>.js`，不用修改 `src/core` 与外壳。
 
-- 接入 AI provider（`aiBridge.registerProvider`）实现自然语言理解 —— 具体缺哪几块见上面「[AI 接入还差什么](#ai-接入还差什么)」；
+- **前端接上 AI 对话**：中栏改调 `POST /ai/chat`，订阅 WebSocket 的 `ai_delta` 做流式气泡，
+  并在「设置 → AI」加一个密钥输入框（走 `POST /ai/config`，密钥永不回显）—— 后端已经全部就绪；
+- **工具调用循环**（让模型自己查数据）：在 `modules/ai/` 里实现「模型 → 调工具 → 回灌结果」，
+  工具落点就是 `aiTools` 清单里的 HTTP 接口；建议只读先放开，写操作仍走草稿确认；
 - **记忆模块**（`src/modules/memory/` + 设置页里的管理区块）：契约已定，照 [接口文档.md 第 10 节](docs/接口文档.md) 实现即可 ——
-  数据模型、6 个接口、注入预算与排序、负记忆（`rejected`）与冲突 409 都写好了；
+  数据模型、6 个接口、注入预算与排序、负记忆（`rejected`）与冲突 409 都写好了，`/ai/context` 会自动接上；
 - 节气与农历节日扩展（节气需要真正的天文算法，别用近似表）；
 - 导入 PotatoTimer 学习记录（`source: "import"` + `externalId` 去重）；
 - 移动教务（jwapp）课表导入：思源学堂没有上课时间/地点，真正的「自动生成课表」需要接这一路的接口；

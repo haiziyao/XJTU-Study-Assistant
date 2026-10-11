@@ -255,6 +255,13 @@ export class TodoService {
     return decorate(created, todayKey());
   }
 
+  /** 只校验、不落库（与 create 同一条归一化路径），供 dryRun 预览与 AI 草稿预校验。 */
+  preview(input) {
+    const data = normalize(input);
+    if (data.completed && !data.completedAt) data.completedAt = new Date().toISOString();
+    return data;
+  }
+
   async update(id, patch) {
     const current = this.get(id);
     const merged = { ...pickDefined(current, EDITABLE), ...normalizeInput(patch) };

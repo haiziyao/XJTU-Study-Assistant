@@ -18,6 +18,10 @@ const TARGET_LABEL = { schedule: '日程', event: '日历事件', todo: '待办'
 const labelOf = (target) => TARGET_LABEL[target] ?? target;
 
 export function createCalendarCommands({ events, schedules, todos, store }) {
+  /** 三个 target 各自的集合服务：写库与「只校验」都从这里取，避免出现两套校验。 */
+  const targetService = (target) =>
+    target === 'todo' ? todos : target === 'schedule' ? schedules : target === 'event' ? events : null;
+
   /** 按 filters 定位待操作记录；id 优先。三个集合的过滤条件形状一致，但各自独立查询。 */
   function locate(draft) {
     const filters = draft.filters ?? {};
@@ -48,7 +52,13 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
   return {
     async create(draft, options) {
       const fields = { ...(draft.fields ?? {}), source: draft.fields?.source ?? 'command' };
-      if (options.dryRun) return { dryRun: true, planned: { action: 'create', target: draft.target, fields } };
+      if (options.dryRun) {
+        // 预览必须跑**真实的字段校验**（只是不写库）：否则"缺 startTime"这类错误要等用户
+        // 点了确认才冒出来，确认卡就成了摆设 —— 走 AI 的草稿尤其依赖这一步兜住模型的编造字段。
+        // `planned` 是原样回显（模型到底给了什么），`validated` 是校验/归一化后的最终字段。
+        const validated = targetService(draft.target)?.preview(fields) ?? null;
+        return { dryRun: true, planned: { action: 'create', target: draft.target, fields }, validated };
+      }
       if (draft.target === 'todo') {
         const item = await todos.create(fields);
         return { item, affected: [{ id: item.id, title: item.title, date: item.deadline }] };

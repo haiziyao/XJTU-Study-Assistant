@@ -230,6 +230,17 @@ export class ScheduleService {
     return created;
   }
 
+  /**
+   * 只校验、不落库：与 `create` **完全同一条**归一化路径。
+   *
+   * 存在的理由：`/commands/execute { dryRun: true }` 的确认卡必须能提前报出
+   * 「缺 startTime」这类错误。以前 dryRun 只是把字段原样回显，于是错误要等用户
+   * 点了确认才冒出来 —— 对 AI 草稿来说这一步是唯一的安全网。
+   */
+  preview(input) {
+    return normalize(input, { categories: this.categories });
+  }
+
   async update(id, patch) {
     const current = this.get(id);
     const merged = { ...pickDefined(current, EDITABLE), ...patch };

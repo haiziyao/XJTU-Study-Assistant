@@ -147,6 +147,13 @@ export class EventService {
     return created;
   }
 
+  /** 只校验、不落库（与 create 同一条归一化路径），供 dryRun 预览与 AI 草稿预校验。 */
+  preview(input) {
+    const data = normalize(input, { categories: this.categories });
+    if (!data.endDate) data.endDate = data.startDate;
+    return data;
+  }
+
   async update(id, patch) {
     const current = this.get(id);
     const data = normalize({ ...pickDefined(current, EDITABLE), ...patch }, { partial: false, categories: this.categories });
