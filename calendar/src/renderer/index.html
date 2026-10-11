@@ -29,7 +29,22 @@
           <h1 class="chat-title">对话</h1>
           <span class="badge" id="ai-badge">AI 未接入</span>
           <span class="status-pill" id="status">正在连接后端…</span>
-          <button class="panel-toggle" id="panel-toggle" type="button" title="收起右侧视图">⟩</button>
+          <!-- 打磨点：收起/展开图标改用内联 SVG，方向由 CSS transform 控制 -->
+          <button class="panel-toggle" id="panel-toggle" type="button" title="收起右侧视图">
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M9.5 5.5l7 6.5-7 6.5" />
+            </svg>
+          </button>
         </header>
 
         <div class="chat-log" id="chat-log"></div>
