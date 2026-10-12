@@ -56,7 +56,7 @@ const context = await notes.readForAI({ ids: ['note-id'], limit: 5 });
 
 内置 Provider 声明 `edit: true` 并实现 `openNote(id)`；“新建笔记”和“编辑笔记”进入 `editor.html`，不再在摘要弹层中编辑。外部 Provider 沿用自己的 `openNote` 与创建流程。
 
-- 左侧编辑、右侧实时预览，复用 `PCRichText` 的 Markdown / LaTeX 子集；窄屏上下展示。
+- 左侧编辑、右侧实时预览，复用 `PCRichText` 的 Markdown / LaTeX 子集；手机窄屏改为“编辑 / 预览”单页切换，不同时挤压两个面板。
 - 新建使用 `POST /api/v1/notes`；已有笔记通过 `PATCH /api/v1/notes/:id` 保存，支持标题、正文、标签、格式及状态，携带 `expectedUpdatedAt` 检测冲突。
 - 原有附件、来源和日历关联保留；正文不进入浏览器缓存。
 - 紧凑顶栏直接编辑标题；标签、附件说明和外观选项收进“属性”，不占用常驻标题区。

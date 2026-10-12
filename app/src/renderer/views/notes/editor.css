@@ -34,6 +34,7 @@
 .note-editor-view-tabs { margin-left: auto; display: flex; gap: 2px; padding: 2px; border-radius: 6px; background: var(--bg-base); }
 .note-editor-view-tabs button { font-size: 12px; padding-inline: 9px; color: var(--fg-3); }
 .note-editor-view-tabs button[aria-pressed='true'] { background: var(--bg-surface); color: var(--blue); box-shadow: var(--shadow-1); }
+.note-editor-mobile-label { display: none; }
 .note-editor-sync { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--fg-3); white-space: nowrap; }
 .note-editor-sync input { accent-color: var(--blue); }
 .note-editor-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
@@ -87,12 +88,18 @@
   .note-editor-status { margin-right: auto; max-width: none; }
   .note-editor-properties { position: static; }
   .note-editor-properties-panel { left: 16px; right: 16px; top: 100%; width: auto; }
-  .note-editor-workspace { grid-template-columns: 1fr; overflow: auto; }
-  .note-editor-pane { min-height: 40dvh; }
-  .note-editor-source { border-right: 0; border-bottom: 1px solid var(--line); }
-  .note-editor-source-content { min-height: 260px; }
+  .note-editor-desktop-label { display: none; }
+  .note-editor-mobile-label { display: inline; }
+  .note-editor-view-tabs { order: 2; width: 100%; margin-left: 0; }
+  .note-editor-view-tabs button { flex: 1; }
+  .note-editor-workspace { grid-template-columns: minmax(0, 1fr); overflow: hidden; }
+  .note-editor-pane { min-height: 0; }
+  .note-editor[data-view='split'] .note-editor-output { display: none; }
+  .note-editor[data-view='read'] .note-editor-output { display: flex; }
+  .note-editor-source { border-right: 0; border-bottom: 0; }
+  .note-editor-source-content { min-height: 0; }
   #note-body, .note-editor-highlight, .note-editor-line-numbers { font-size: 16px; }
-  .note-editor-preview { min-height: 200px; overflow: visible; padding: 20px; }
+  .note-editor-preview { width: 100%; min-height: 0; overflow: auto; padding: 20px; }
   .note-editor-footer { flex-wrap: wrap; gap: 8px 16px; padding-inline: 16px; }
   .note-editor-shortcut { display: none; }
 }
