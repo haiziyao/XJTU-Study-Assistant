@@ -86,6 +86,20 @@ const MAX_QUERY_ITEMS = 20;
 const MAX_ROUNDS = 5;
 
 /**
+ * 滚动摘要（长对话不丢线）。
+ *
+ * 问题：`historyTurns` 一到就**硬截断**，用户聊到第 40 轮时，第 1 轮的约定（"我周三下午不方便"、
+ * "这次考试按 60% 平时分算"）已经不在上下文里了，模型于是"忘了"——用户感觉是"聊着聊着就断了"。
+ *
+ * 做法：把窗口之外**已经聊过去**的部分压成一段不超过 `SUMMARY_MAX_CHARS` 的摘要，常驻系统提示词。
+ *   - 只在"未摘要的旧消息 ≥ `SUMMARY_MIN_MESSAGES` 条"时才压一次（不是每轮都调模型）；
+ *   - 压过就记 `summaryCount`（已覆盖多少条），下次只压新增的部分，不重复烧 token；
+ *   - **压缩失败不阻塞对话**：拿旧摘要继续，宁可少记一点也不让这条消息发不出去。
+ */
+const SUMMARY_MIN_MESSAGES = 6;
+const SUMMARY_MAX_CHARS = 600;
+
+/**
  * 思考强度 → 官方 `reasoning_effort`。
  *
  * 官方合法取值只有 `none / low / high / max`（**没有 medium**：它只是兼容别名，会映射成 high，
@@ -595,6 +609,8 @@ export class AiChatService {
     });
 
     const enriched = await this.buildContext(context);
+    // 长对话：把窗口之外的旧内容压成摘要（失败就沿用旧摘要，绝不因此发不出消息）
+    const summary = await this.#ensureSummary(conversation);
     // 作图：设置里开着就给（默认开），关着但用户用了「画…」这类指令词也临时给
     const draw = this.config.get().drawMode !== false || DRAW_KEYWORDS.test(trimmed);
     const history = this.#history(conversation.id);
@@ -612,6 +628,8 @@ export class AiChatService {
           // 放在展开之后，免得请求体里的 context 把这轮的选择覆盖掉。
           permission: mode,
           search: searchMode,
+          // 摘要由上面 #ensureSummary 产出/复用；没有就是空串，提示词里不会多一段
+          summary,
         }),
       },
       ...history.slice(0, -1),
@@ -841,9 +859,18 @@ export class AiChatService {
         module: 'ai',
         payload: { conversationId: conversation.id, message: saved, drafts, queried, rounds, roundLimit: hitRoundLimit },
       });
+      const savedConversation = this.store.aiConversations.get(conversation.id);
       return {
         ok: true,
-        conversation: this.store.aiConversations.get(conversation.id),
+        conversation: savedConversation,
+        /**
+         * 这次回复是否刚做过"滚动摘要"：界面据此提示一句"较早的内容已压缩"。
+         * 为什么要让用户看见：上下文被压缩后模型的记忆方式变了（早期细节只剩摘要），
+         * 用户有权知道这件事发生过，而不是某天发现"它怎么忘了我说过的话"。
+         */
+        compacted: summary
+          ? { active: true, chars: summary.length, covered: Number(savedConversation?.summaryCount ?? 0) }
+          : { active: false },
         user: userMessage,
         assistant: saved,
         drafts,
@@ -880,6 +907,66 @@ export class AiChatService {
   }
 
   // ---------------------------------------------------------------- 内部
+
+  /**
+   * 需要时生成/更新这段对话的滚动摘要，返回要注入提示词的文本（没有就返回空串）。
+   *
+   * 触发条件是"窗口之外还有没压过的消息，且数量够多"，所以：
+   *   - 正常短对话一次压缩都不会发生（不花额外的钱）；
+   *   - 长对话每积累 `SUMMARY_MIN_MESSAGES` 条才压一次；
+   *   - 已经覆盖的部分不重压（`summaryCount` 记着覆盖到第几条）。
+   */
+  async #ensureSummary(conversation) {
+    const existing = String(conversation?.summary ?? '').trim();
+    const covered = Number(conversation?.summaryCount ?? 0);
+    const turns = this.config.get().historyTurns ?? 0;
+    if (turns <= 0) return existing;
+
+    const all = this.#messagesOf(conversation.id).filter(
+      (item) => (item.role === 'user' || item.role === 'assistant') && item.status !== 'failed' && item.content,
+    );
+    // 窗口之外的部分才是"该被压缩"的：窗口里的内容模型直接看得到，压了纯属浪费
+    const older = all.slice(0, Math.max(0, all.length - turns * 2));
+    if (older.length - covered < SUMMARY_MIN_MESSAGES) return existing;
+
+    const fresh = older.slice(covered);
+    const transcript = fresh
+      .slice(-40) // 一次最多压 40 条：再长的对话也是分批压，避免单次请求过大
+      .map((item) => `${item.role === 'user' ? '用户' : '助手'}：${String(item.content).slice(0, 500)}`)
+      .join('\n');
+    try {
+      const result = await this.provider.chat({
+        messages: [
+          {
+            role: 'system',
+            content:
+              '你在压缩一段对话，供后续继续对话时使用。只输出摘要本身，不要开场白、不要分点标题。' +
+              `不超过 ${SUMMARY_MAX_CHARS} 字。必须保留：用户的目标与偏好、已经确认的事实与数字、` +
+              '未完成的事与约定、已经做过的操作结论；不要保留寒暄、不要复述助手的长篇解释。',
+          },
+          {
+            role: 'user',
+            content:
+              (existing ? `【已有摘要】\n${existing}\n\n` : '') +
+              `【需要并入的对话】\n${transcript}`,
+          },
+        ],
+        temperature: 0.2,
+      });
+      const text = String(result?.text ?? '').trim().slice(0, SUMMARY_MAX_CHARS);
+      if (!text) return existing;
+      await this.store.aiConversations.update(conversation.id, {
+        summary: text,
+        summaryCount: older.length,
+        summaryAt: new Date().toISOString(),
+      });
+      return text;
+    } catch (error) {
+      // 压缩是"锦上添花"：失败只记日志，绝不让这条消息发不出去
+      this.#log('warn', `对话摘要压缩失败（继续用旧摘要）：${error?.message ?? error}`);
+      return existing;
+    }
+  }
 
   #messagesOf(conversationId) {
     return (this.store.aiMessages?.all?.() ?? [])

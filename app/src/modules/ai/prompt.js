@@ -243,6 +243,19 @@ export const AI_SYSTEM_ROLE =
   '你是「AI 智学」，一个面向西安交通大学学生的本地学习助手：能聊天、能答疑，也能把用户的口头安排变成日历操作草稿。';
 
 /** 聊天入口：system + 历史消息由调用方拼。 */
+/**
+ * 滚动摘要段：长对话里被压缩掉的早期内容。
+ *
+ * 位置紧挨记忆块 —— 两者都是"关于这次对话/这个人，你已经知道什么"，
+ * 放一起模型才容易把摘要里的约定和记忆里的偏好一起用上。
+ * 措辞上明确说"这是压缩过的早期对话"，否则模型会把摘要当成用户刚说的话。
+ */
+function summaryBlock(context = {}) {
+  const summary = String(context.summary ?? '').trim();
+  if (!summary) return '';
+  return `【此前对话的摘要（较早的内容已压缩，别当成用户刚说的话）】\n${summary}`;
+}
+
 export function buildChatSystemPrompt(context = {}) {
   return [
     AI_SYSTEM_ROLE,
@@ -250,6 +263,7 @@ export function buildChatSystemPrompt(context = {}) {
     timeBlock(context),
     summarizeContext(context),
     memoryBlock(context),
+    summaryBlock(context),
     '',
     DOMAIN_RULES,
     domainBlocks(context),

@@ -92,8 +92,10 @@
     /**
      * 联网搜索通道：off 不联网 / web 从校外网搜索 / campus 从校内网搜索。
      *
-     * 目前只是**状态位**：后端只把它写进提示词，检索通道还没接入（模型会如实说明），
-     * 界面上如实标出来，免得用户以为真的搜了网。也要持久化 —— 选"校内网"的人不会每次重开都重选。
+     * **真的会联网**（见 modules/ai/web-search.js：有 key 走 API，没 key 解析结果页；
+     * campus 会收窄到 *.xjtu.edu.cn，探测到校内可达时并走公网）。
+     * 档位随每条消息发给后端，由服务端决定这轮要不要出网 —— 关掉时后端会明确告诉模型
+     * "联网已关闭"，模型据此如实回答，而不是假装搜过。要持久化：选"校内网"的人不想每次重开重选。
      */
     search: 'off',
     /** 待发送的附件（只活在内存里；发送后只在消息上留元信息）。 */
@@ -946,8 +948,7 @@
           })),
           thinking: state.thinking,
           permission: state.permission,
-          // 联网通道（off / web / campus）：目前后端只拿它写提示词，让模型如实说明没接入检索，
-          // 但请求体先按最终形状带上，通道接进来时前端不用再改一次
+          // 联网通道（off / web / campus）：后端据此决定这轮要不要真的出网并读取网页
           search: state.search,
         },
       });
@@ -965,6 +966,11 @@
       if (state.reasoningNode) {
         if (card.parentNode) dom.chatLog.insertBefore(state.reasoningNode.card, card);
         state.reasoningNode = null;
+      }
+      // 长对话被压缩过：说一句。用户有权知道"较早的内容只剩摘要"，
+      // 否则某天发现助手忘了开头说过的话，只会以为它不靠谱
+      if (result.compacted?.active && result.compacted?.covered) {
+        systemNote(`较早的 ${result.compacted.covered} 条对话已压缩成摘要（约 ${result.compacted.chars} 字）继续带着`, 'meta');
       }
       // 只读查询由后端自动执行了：把数据原样列出来（模型的话可能概括得太粗，用户要看的是具体条目）
       for (const text of result.warnings ?? []) systemNote(text, 'fail');
