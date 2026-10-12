@@ -122,7 +122,11 @@ test('视图注册表：顺序、插槽与跨模块服务符合外壳约定', as
     // 「对话」（id `chat`，order 1）是 AI 中枢：对话管理 / 记忆管理 / 知识库管理 / 定时唤醒，
     // 刻意排在日历之前 —— AI 是这个程序的主入口，管理它的入口不该埋在设置里
     // 注意「网课」没有独立入口：直播 + 回放归到思源学堂视图里，左栏再出现 course 就是回归
-    assert.deepEqual(main, ['chat', 'calendar', 'todo', 'lms', 'academic', 'notes', 'message']);
+    // 「复习」（order 65）与「传输」（order 66）是本轮新增的两个学习/AI 入口：
+    //   复习 = 间隔重复卡片 + 学习目标与 DDL + 学习周报（三个标签一页）
+    //   传输 = 局域网直传（8886 端口，设备间直传不经服务器）
+    // 两页都刻意排在「笔记系统」之后、「消息」之前：它们属于"学习工作流"，不是系统级功能
+    assert.deepEqual(main, ['chat', 'calendar', 'todo', 'lms', 'academic', 'notes', 'review', 'transfer', 'message']);
     // 左栏底部固定为设置
     assert.deepEqual(bottom, ['settings']);
 

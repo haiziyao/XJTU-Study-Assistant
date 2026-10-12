@@ -370,16 +370,40 @@
   }
 
   /**
-   * 把落库的一条消息画回气泡。
+   * 把落库的一条消息画回聊天栏（正文 + **当时的操作痕迹**）。
    *
-   * 只重放正文与附件名：当时那些「确认卡 / 查询卡」的现场（待确认的草稿、查询结果）
-   * 已经过去了，历史里重建它们只会让人以为还能点确认。附件也只留名字 ——
-   * dataURL 不落库（省空间），历史里给不出缩略图，如实显示名字比给个坏图强。
+   * 为什么必须带上操作：用户回到一条旧对话，最想确认的往往不是"我当时说了什么"，
+   * 而是"**我让它干了什么**"——"那条待办到底加上了没有""它当时查到的日程是哪几条"。
+   * 所以：
+   *   - `queried`（当时跑过的只读查询）→ 数据卡片照原样重画：数据是历史事实，点开看明细、跳转都还有效；
+   *   - `executed`（当时自动执行掉的写操作）→ 回执卡重画，并在说明里标「历史回执」，
+   *     否则用户会以为刚刚又执行了一次；
+   *   - `drafts`（当时提议**但没确认**的草稿）→ **不重放按钮**：那次确认的机会早过去了，
+   *     给一个能点的"确认"只会让人误以为现在点还来得及；只留一行痕迹说明当时提议了什么。
+   * 附件同样只留名字：dataURL 不落库（省空间），给不出缩略图时如实显示名字比给个坏图强。
    */
   function renderHistoryMessage(message) {
     const role = message?.role === 'user' ? 'user' : 'bot';
     const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
     const files = attachments.map((item) => ({ name: item?.name ?? '附件', type: item?.type ?? '', size: item?.size ?? 0 }));
+
+    if (role === 'bot') {
+      for (const entry of message?.queried ?? []) {
+        if (entry?.result) queryCard(entry.result);
+        else if (entry?.error) systemNote(`当时有个查询没成功：${entry.error.message ?? entry.error}`, 'fail');
+      }
+      for (const item of message?.executed ?? []) {
+        if (item?.error) systemNote(`当时有一步没成功：${item.error.message ?? item.error}`, 'fail');
+        else if (item?.result) resultCard({ ...item.result, explain: `${item.result.explain ?? '已完成'}（历史回执）` });
+      }
+      for (const entry of message?.drafts ?? []) {
+        const draft = entry?.draft ?? {};
+        const what = actionText(draft) || '一条操作';
+        const title = draft?.fields?.title ? ` · ${draft.fields.title}` : '';
+        systemNote(`当时提议过：${what}${title}（未确认，未写入）`, 'meta');
+      }
+    }
+
     const node = bubble(role, message?.content ?? '', files);
     if (message?.createdAt) node.dataset.at = message.createdAt;
     return node;
@@ -1228,13 +1252,16 @@
   /**
    * 联网搜索的三个选项。
    *
-   * `hint` 里把「校内 / 校外」的区别说清楚：这两个通道走的是完全不同的入口（要不要登录、
-   * 能拿到什么），用户在菜单里就该看到，而不是选完再猜。
+   * `hint` 里把「校内 / 校外」的区别说清楚：这两个通道走的是完全不同的入口、能拿到的东西也不一样，
+   * 用户在菜单里就该看到，而不是选完再猜。**它们都是真的会出网**（见 modules/ai/web-search.js）：
+   * 校外 = 全网检索；校内 = 优先在校内站点自己的搜索里找，再并走公网。
+   *
+   * 这里不再写"检索通道还没接入"——那句话在联网做实之后就成了误导（用户会以为选了也没用）。
    */
   const SEARCH_OPTIONS = [
     { value: 'off', label: '不联网', hint: '只用本地数据与模型已有知识' },
-    { value: 'web', label: '从校外网搜索', hint: '走公网检索（检索通道还没接入）' },
-    { value: 'campus', label: '从校内网搜索', hint: '走校内网络入口（检索通道还没接入）' },
+    { value: 'web', label: '从校外网搜索', hint: '全网检索：搜到的网页会抓正文，回答要带出处链接' },
+    { value: 'campus', label: '从校内网搜索', hint: '先查校内站点（教务/图书馆/学院/书院），再并走公网' },
   ];
 
   /* ------------------------------------------------------------ 本地小状态 */
@@ -1279,7 +1306,7 @@
         control: 'search',
         value: state.search,
         options: SEARCH_OPTIONS,
-        hint: '检索通道还没接入：选中的通道会写进提示词，模型会如实说明它没有真的搜网',
+        hint: '选中的通道会随每条消息发给后端，由它决定这轮要不要真的出网；关掉时模型会如实说明没联网',
         // title 用「刚选中的值」而不是 state.search：composeSelect 的 paint() 在 onChange 之前跑，
         // 读全局状态会慢一拍（选完 title 还写着上一个通道）
         title: (label, value) => searchTitle(value),
@@ -1340,15 +1367,13 @@
   }
 
   /**
-   * 「联网搜索」按钮的 title：**如实**写明当前通道与「检索还没接入」，别让人以为真的搜了网。
+   * 「联网搜索」按钮的 title：如实写明当前通道（**它是真的会出网的**，别再写成"还没接入"）。
    *
    * @param {string} [value] 当前通道；默认取 `state.search`（菜单选中那一刻要传刚选的值，见 renderControls）
    */
   function searchTitle(value = state.search) {
     const found = SEARCH_OPTIONS.find((item) => item.value === value) ?? SEARCH_OPTIONS[0];
-    const suffix =
-      value === 'off' ? '只用本地数据与模型已有知识' : `${found.label}（检索通道还没接入，模型会如实说明）`;
-    return `联网搜索：${suffix}`;
+    return `联网搜索：${found.label} · ${found.hint}`;
   }
 
   /**
