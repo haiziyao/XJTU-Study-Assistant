@@ -5,14 +5,15 @@
   const CACHE_PREFIX = 'ai-study.notes.summary.v1.';
   const CACHE_TTL = 7 * 86400000;
   const CACHE_LIMIT = 100;
-  const IMPORT_ACCEPT = '.md,.markdown,.txt,.html,.htm,.pdf,.doc,.docx,.png,.jpg,.jpeg,.webp';
+  const IMPORT_ACCEPT = '.md,.markdown,.txt,.html,.htm,.pdf,.doc,.docx,.ppt,.pptx,.png,.jpg,.jpeg,.webp,.gif';
   const MAX_IMPORT_FILES = 8;
-  const MAX_IMPORT_FILE_BYTES = 512 * 1024;
-  const MAX_IMPORT_TOTAL_BYTES = 4 * 1024 * 1024;
-  const STATUS = { draft: '草稿', processing: '整理中', ready: '已整理', failed: '处理失败' };
+  const MAX_IMPORT_FILE_BYTES = 6 * 1024 * 1024;
+  const MAX_IMPORT_TOTAL_BYTES = 10 * 1024 * 1024;
+  const STATUS = { draft: '草稿', unorganized: '未整理', processing: '整理中', ready: '已整理', failed: '处理失败', archived: '已归档' };
   const SOURCE = { manual: '手动', snapshot: '随手拍', import: '导入' };
-  const EMPTY_CAPS = { connected: false, search: false, markdown: false, view: false, upload: false, aiRead: false, export: false, capture: false, subscriptions: false };
+  const EMPTY_CAPS = { connected: false, search: false, markdown: false, view: false, edit: false, manage: false, upload: false, aiRead: false, export: false, capture: false, subscriptions: false };
   const FORBIDDEN = /^(body|content|markdown|ocr|ocrText|image|images|imageUrl|file|files|filePath|path|attachment|attachments|blob|base64|data)$/i;
+  const requestedSelection = new URLSearchParams(location.search).get('note');
   const state = {
     provider: null,
     caps: { ...EMPTY_CAPS },
@@ -33,6 +34,13 @@
     tag: '',
     sort: 'updated',
     autoConnecting: false,
+    mode: 'notes',
+    baseLayout: 'table',
+    graphScope: 'local',
+    graphData: null,
+    canvases: [],
+    canvasId: null,
+    canvasSelected: new Set(),
   };
 
   const localStore = () => { try { return window.localStorage ?? null; } catch { return null; } };
@@ -59,7 +67,7 @@
     const listNotes = async (filters = {}) => (await request(`/notes${queryString(filters)}`)).items ?? [];
     return {
       cacheNamespace: 'builtin-main-program',
-      capabilities: () => ({ search: true, markdown: true, view: true, edit: true, upload: true, aiRead: true }),
+      capabilities: () => ({ search: true, markdown: true, view: true, edit: true, manage: true, upload: true, capture: true, aiRead: true }),
       listNotes,
       openNote(id) {
         const currentUrl = location.href || `${location.origin}${location.pathname}`;
@@ -70,6 +78,19 @@
         location.href = target.href;
       },
       searchNotes: (query, filters = {}) => listNotes({ ...filters, query }),
+      updateNote: async (id, input) => (await request(`/notes/${encodeURIComponent(id)}`, { method: 'PATCH', body: input })).summary,
+      deleteNote: async (id, permanent = false) => request(`/notes/${encodeURIComponent(id)}${permanent ? '?permanent=true' : ''}`, { method: 'DELETE' }),
+      restoreNote: async (id) => (await request(`/notes/${encodeURIComponent(id)}/restore`, { method: 'POST', body: {} })).summary,
+      listTrash: async () => (await request('/notes?deleted=true&limit=500')).items ?? [],
+      graph: async (filters = {}) => request(`/notes/graph${queryString(filters)}`),
+      templates: async () => (await request('/note-templates')).items ?? [],
+      instantiateTemplate: async (id, input) => (await request(`/note-templates/${encodeURIComponent(id)}/instantiate`, { method: 'POST', body: input })).summary,
+      daily: async (date) => (await request('/notes/daily', { method: 'POST', body: { date } })).summary,
+      listCanvases: async () => (await request('/note-canvases')).items ?? [],
+      createCanvas: async (input) => (await request('/note-canvases', { method: 'POST', body: input })).item,
+      updateCanvas: async (id, input) => (await request(`/note-canvases/${encodeURIComponent(id)}`, { method: 'PATCH', body: input })).item,
+      listViews: async () => (await request('/note-views')).items ?? [],
+      createView: async (input) => (await request('/note-views', { method: 'POST', body: input })).item,
       async createDraft(input) {
         return (await request('/notes', { method: 'POST', body: { ...input, source: 'manual', status: 'draft' } })).summary;
       },
@@ -88,10 +109,22 @@
         }
         return out;
       },
+      async startCapture(input = {}) {
+        const file = Array.from(input.files ?? [])[0];
+        if (!file) throw new Error('请先拍照或选择一张图片');
+        const result = await request('/notes', {
+          method: 'POST',
+          body: {
+            title: input.title || `随手拍 ${new Date().toLocaleString()}`, tags: input.tags, anchor: input.anchor,
+            source: 'snapshot', status: 'unorganized', body: '', mediaCount: 1,
+            attachments: [{ name: file.name || '随手拍.jpg', type: file.type || 'image/jpeg', size: file.size, dataUrl: await readFile(file, 'data') }],
+          },
+        });
+        return result.summary;
+      },
       async readNote(id) {
         const note = (await request(`/notes/${encodeURIComponent(id)}`)).note;
-        const attachments = (note.attachments ?? []).map((file) => `- 附件：${file.name}（${file.type || '未知类型'}，${file.size || 0} 字节）`).join('\n');
-        return { format: note.format === 'text' ? 'text' : 'markdown', text: [note.body, attachments].filter(Boolean).join('\n\n') || '（空白笔记）' };
+        return { format: note.format === 'text' ? 'text' : 'markdown', text: note.body || '（空白笔记）', attachments: note.attachments ?? [] };
       },
       async renderMarkdown(id) { return (await this.readNote(id)).text; },
       async readNotesForAI(input) { return (await request('/notes/ai-context', { method: 'POST', body: input })).items ?? []; },
@@ -123,9 +156,16 @@
       id: String(value.id),
       title: String(value.title ?? '').trim() || '未命名笔记',
       source: ['manual', 'snapshot', 'import'].includes(value.source) ? value.source : 'manual',
-      status: ['draft', 'processing', 'ready', 'failed'].includes(value.status) ? value.status : 'draft',
+      status: ['draft', 'unorganized', 'processing', 'ready', 'failed', 'archived'].includes(value.status) ? value.status : 'draft',
       anchor: anchorOf(value.anchor),
       tags: Array.isArray(value.tags) ? value.tags.map(String).map((v) => v.trim()).filter(Boolean).slice(0, 12) : [],
+      folder: String(value.folder ?? '').slice(0, 300),
+      aliases: Array.isArray(value.aliases) ? value.aliases.map(String).slice(0, 20) : [],
+      properties: value.properties && typeof value.properties === 'object' ? value.properties : {},
+      favorite: Boolean(value.favorite),
+      links: Array.isArray(value.links) ? value.links.slice(0, 500) : [],
+      revision: Math.max(1, Number(value.revision) || 1),
+      deletedAt: value.deletedAt ?? null,
       mediaCount: Math.max(0, Number(value.mediaCount) || 0),
       createdAt: String(value.createdAt ?? new Date().toISOString()),
       updatedAt: String(value.updatedAt ?? value.createdAt ?? new Date().toISOString()),
@@ -189,7 +229,7 @@
     state.provider = provider;
     state.namespace = typeof provider.cacheNamespace === 'string' && provider.cacheNamespace.trim() ? provider.cacheNamespace.trim() : null;
     state.items = loadCache();
-    state.selected = state.items[0]?.id ?? null;
+    state.selected = requestedSelection || state.items[0]?.id || null;
     state.caps = { ...EMPTY_CAPS, ...((await provider.capabilities?.()) ?? {}), connected: true };
     state.offline = false;
     if (typeof provider.subscribe === 'function') {
@@ -217,7 +257,7 @@
     if (event.type === 'deleted') {
       state.items = state.items.filter((item) => item.id !== String(event.id));
       if (state.selected === String(event.id)) state.selected = state.items[0]?.id ?? null;
-      saveCache();
+      if (state.mode !== 'trash') saveCache();
     }
     if (event.type === 'processing') {
       const item = state.items.find((candidate) => candidate.id === String(event.id));
@@ -258,7 +298,7 @@
     state.error = null;
     render();
     try {
-      const filters = { source: state.filter === 'snapshot' ? 'snapshot' : undefined, status: state.filter === 'pending' ? 'processing' : undefined, tag: state.tag || undefined, limit: CACHE_LIMIT };
+      const filters = { source: state.filter === 'snapshot' ? 'snapshot' : undefined, status: state.filter === 'pending' ? 'processing' : undefined, tag: state.tag || undefined, deleted: state.mode === 'trash' ? 'true' : undefined, limit: state.mode === 'trash' ? 500 : CACHE_LIMIT };
       const result = state.query && state.caps.search && typeof state.provider.searchNotes === 'function'
         ? await state.provider.searchNotes(state.query, filters)
         : await state.provider.listNotes(filters);
@@ -267,7 +307,7 @@
       await refreshCalendar();
       state.lastSync = new Date().toISOString();
       state.offline = false;
-      saveCache();
+      if (state.mode !== 'trash') saveCache();
     } catch (error) {
       state.error = error;
       state.offline = state.items.length > 0;
@@ -287,9 +327,9 @@
     if (state.caps.view && typeof state.provider?.readNote === 'function') result = await state.provider.readNote(String(id));
     else if (state.caps.markdown && typeof state.provider?.renderMarkdown === 'function') result = await state.provider.renderMarkdown(String(id));
     else throw new Error('AI 智学主程序尚未提供查看笔记能力');
-    if (typeof result === 'string') return { format: 'markdown', text: result };
+    if (typeof result === 'string') return { format: 'markdown', text: result, attachments: [] };
     const text = [result?.text, result?.markdown, result?.content].find((value) => typeof value === 'string') ?? '';
-    return { format: result?.format === 'text' ? 'text' : 'markdown', text };
+    return { format: result?.format === 'text' ? 'text' : 'markdown', text, attachments: Array.isArray(result?.attachments) ? result.attachments : [] };
   }
 
   async function upload(files, input = {}) {
@@ -302,9 +342,9 @@
     let total = 0;
     for (const file of list) {
       const size = Math.max(0, Number(file?.size) || 0); total += size;
-      if (size > MAX_IMPORT_FILE_BYTES) throw new Error(`“${file?.name ?? '文件'}”超过 512 KB`);
+      if (size > MAX_IMPORT_FILE_BYTES) throw new Error(`“${file?.name ?? '文件'}”超过 6 MB`);
     }
-    if (total > MAX_IMPORT_TOTAL_BYTES) throw new Error('本次上传文件总大小超过 4 MB');
+    if (total > MAX_IMPORT_TOTAL_BYTES) throw new Error('本次上传文件总大小超过 10 MB');
     const result = await state.provider.uploadNotes(list, {
       title: String(input.title ?? '').trim(),
       tags: Array.isArray(input.tags) ? input.tags.map(String).map((value) => value.trim()).filter(Boolean) : [],
@@ -375,6 +415,7 @@
       if (state.filter === 'today' && date !== now) return false;
       if (state.filter === 'pending' && !['draft', 'processing', 'failed'].includes(item.status)) return false;
       if (state.filter === 'snapshot' && item.source !== 'snapshot') return false;
+      if (state.filter === 'favorite' && !item.favorite) return false;
       if (state.tag && !item.tags.includes(state.tag)) return false;
       return true;
     });
@@ -385,9 +426,15 @@
 
   function renderToolbar(host) {
     const bar = mk('div', 'toolbar wrap notes-toolbar');
+    const modes = mk('div', 'notes-mode-tabs');
+    for (const [key, label] of [['notes', '笔记'], ['graph', '知识图谱'], ['bases', '数据库视图'], ['canvas', 'Canvas'], ['trash', '回收站']]) {
+      const button = mk('button', `notes-mode-tab${state.mode === key ? ' active' : ''}`, label); button.type = 'button';
+      button.addEventListener('click', async () => { const leavingTrash = state.mode === 'trash' && key !== 'trash'; state.mode = key; state.graphData = null; if (key === 'notes' || key === 'trash' || leavingTrash) await refresh(); else render(); }); modes.appendChild(button);
+    }
+    bar.appendChild(modes);
     const first = mk('div', 'toolbar-row');
     const seg = mk('div', 'seg');
-    for (const [key, label] of [['all', '全部'], ['today', '今天'], ['pending', '待整理'], ['snapshot', '随手拍']]) {
+    for (const [key, label] of [['all', '全部'], ['today', '今天'], ['pending', '待整理']]) {
       const button = mk('button', `seg-btn${state.filter === key ? ' active' : ''}`, label);
       button.type = 'button';
       button.addEventListener('click', () => { state.filter = key; render(); });
@@ -412,7 +459,13 @@
       if (state.caps.edit && state.provider?.openNote) state.provider.openNote(null);
       else openComposer('manual', create);
     });
-    first.append(seg, mk('span', 'spacer'), connection, capture, uploadButton, create);
+    const daily = mk('button', 'ghost-btn', '今日笔记'); daily.type = 'button'; daily.disabled = !state.provider?.daily;
+    daily.addEventListener('click', async () => { try { const item = await state.provider.daily(today()); merge(item); state.provider.openNote(item.id); } catch (error) { state.ctx?.toast?.(`创建失败：${error.message}`); } });
+    const template = mk('button', 'ghost-btn', '从模板新建'); template.type = 'button'; template.disabled = !state.provider?.templates;
+    template.addEventListener('click', () => openTemplateChooser(template));
+    const focus = mk('button', 'ghost-btn', document.body.classList.contains('notes-focus') ? '退出专注' : '专注模式'); focus.type = 'button';
+    focus.addEventListener('click', () => { document.body.classList.toggle('notes-focus'); render(); });
+    first.append(seg, mk('span', 'spacer'), connection, capture, uploadButton, daily, template, focus, create);
 
     const second = mk('div', 'toolbar-row notes-filter-row');
     const search = mk('input', 'notes-search');
@@ -427,7 +480,9 @@
     const sort = mk('select', 'notes-sort');
     [['updated', '最近更新'], ['created', '最近创建']].forEach(([value, label]) => sort.appendChild(option(value, label, value === state.sort)));
     sort.addEventListener('change', () => { state.sort = sort.value; render(); });
-    second.append(search, tags, sort);
+    const favorite = mk('button', `ghost-btn${state.filter === 'favorite' ? ' active' : ''}`, '★ 收藏'); favorite.type = 'button';
+    favorite.addEventListener('click', () => { state.filter = state.filter === 'favorite' ? 'all' : 'favorite'; render(); });
+    second.append(search, tags, sort, favorite);
     bar.append(first, second);
     host.appendChild(bar);
   }
@@ -442,8 +497,8 @@
     if (!items.length && !state.loading) list.appendChild(emptyBox(state.provider ? '还没有笔记。可以新建笔记，或拍下内容交给 AI 智学整理。' : 'AI 智学主程序尚未连接。连接后可在这里浏览、创建并关联笔记。'));
     for (const item of items) {
       const card = mk('button', `notes-card${state.selected === item.id ? ' active' : ''}`); card.type = 'button';
-      const head = mk('div', 'notes-card-head'); head.append(mk('span', 'notes-card-title', item.title), pill(item));
-      card.append(head, mk('div', 'notes-anchor', anchorText(item)));
+      const head = mk('div', 'notes-card-head'); head.append(mk('span', 'notes-card-title', `${item.favorite ? '★ ' : ''}${item.title}`), pill(item));
+      card.append(head, mk('div', 'notes-anchor', item.folder ? `${item.folder} · ${anchorText(item)}` : anchorText(item)));
       if (item.tags.length) { const tags = mk('div', 'notes-tags'); item.tags.slice(0, 4).forEach((tag) => tags.appendChild(mk('span', 'tag notes-tag', tag))); card.appendChild(tags); }
       card.appendChild(mk('div', 'notes-meta', `${SOURCE[item.source]} · ${item.mediaCount} 张图片 · ${formatTime(item.updatedAt)}`));
       card.addEventListener('click', () => { state.selected = item.id; render(); });
@@ -466,6 +521,23 @@
       preview.innerHTML = '';
       if (result.format === 'markdown' && window.PCRichText?.render) window.PCRichText.render(preview, result.text);
       else preview.textContent = result.text;
+      if (result.attachments?.length) {
+        const files = mk('div', 'notes-viewer-attachments');
+        files.appendChild(mk('strong', '', '原始附件'));
+        for (const file of result.attachments) {
+          if ((file.type || '').startsWith('image/')) {
+            const image = mk('img', 'notes-attachment-image'); image.src = file.dataUrl; image.alt = file.name; files.appendChild(image);
+          } else if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')) {
+            const object = mk('object', 'notes-attachment-pdf'); object.data = file.dataUrl; object.type = 'application/pdf'; object.setAttribute('aria-label', `PDF 预览：${file.name}`); files.appendChild(object);
+          } else if (/\.(doc|ppt)$/i.test(file.name || '')) {
+            files.appendChild(mk('p', 'notes-import-warning', '这是旧版 Office 格式，网页暂时不能提取正文，请下载原文件查看。'));
+          }
+          const link = mk('a', 'ghost-btn', `下载/打开 ${file.name}`);
+          link.href = file.dataUrl; link.download = file.name; link.rel = 'noopener';
+          files.appendChild(link);
+        }
+        body.appendChild(files);
+      }
     } catch (reason) {
       preview.innerHTML = '';
       preview.appendChild(errorBox(`预览失败：${reason.message}`));
@@ -478,7 +550,7 @@
     const head = mk('div', 'notes-detail-head'); head.append(mk('div', 'notes-detail-title', item.title), pill(item)); detail.appendChild(head);
     if (item.previewText) detail.appendChild(mk('p', 'notes-preview', item.previewText));
     const facts = mk('div', 'notes-facts');
-    for (const [label, value] of [['来源', SOURCE[item.source]], ['关联', anchorText(item)], ['图片', `${item.mediaCount} 张`], ['创建', formatTime(item.createdAt)], ['更新', formatTime(item.updatedAt)]]) {
+    for (const [label, value] of [['目录', item.folder || '未分类'], ['课程', item.properties?.course || '—'], ['类型', item.properties?.type || '普通笔记'], ['来源', SOURCE[item.source]], ['关联', anchorText(item)], ['知识链接', `${item.links?.length || 0} 条`], ['图片', `${item.mediaCount} 张`], ['创建', formatTime(item.createdAt)], ['更新', formatTime(item.updatedAt)]]) {
       const row = mk('div', 'kv'); row.append(mk('span', 'kv-key', label), mk('span', 'kv-val', value)); facts.appendChild(row);
     }
     detail.appendChild(facts);
@@ -487,8 +559,16 @@
     openButton.addEventListener('click', () => open(item.id).catch((error) => state.ctx?.toast?.(`打开失败：${error.message}`))); actions.appendChild(openButton);
     if ((state.caps.view && state.provider?.readNote) || (state.caps.markdown && state.provider?.renderMarkdown)) { const button = mk('button', 'ghost-btn', '查看笔记'); button.type = 'button'; button.disabled = state.offline; button.addEventListener('click', () => openNoteViewer(item, button)); actions.appendChild(button); }
     if (state.caps.export && state.provider?.exportNote) { const button = mk('button', 'ghost-btn', '导出'); button.type = 'button'; button.addEventListener('click', () => state.provider.exportNote(item.id, 'markdown')); actions.appendChild(button); }
+    if (state.provider?.updateNote) {
+      const favorite = mk('button', 'ghost-btn', item.favorite ? '取消收藏' : '收藏'); favorite.type = 'button';
+      favorite.addEventListener('click', async () => { const next = await state.provider.updateNote(item.id, { favorite: !item.favorite, expectedUpdatedAt: item.updatedAt }); merge(next); render(); }); actions.appendChild(favorite);
+    }
+    if (state.provider?.deleteNote) {
+      const remove = mk('button', 'ghost-btn danger', '移到回收站'); remove.type = 'button';
+      remove.addEventListener('click', async () => { if (!confirm(`将“${item.title}”移到回收站？`)) return; await state.provider.deleteNote(item.id); state.items = state.items.filter((one) => one.id !== item.id); state.selected = state.items[0]?.id ?? null; saveCache(); render(); }); actions.appendChild(remove);
+    }
     if (item.status === 'failed' && state.provider?.retryProcessing) { const button = mk('button', 'ghost-btn', '重新识别'); button.type = 'button'; button.addEventListener('click', async () => { await state.provider.retryProcessing(item.id); merge({ ...item, status: 'processing' }); render(); }); actions.appendChild(button); }
-    detail.append(actions, mk('div', 'notes-boundary', '正文、图片和识别结果由 AI 智学主程序持有，本页面只展示摘要。'));
+    detail.append(actions, mk('div', 'notes-boundary', '正文按需读取；编辑器支持 Markdown、属性、双向链接、历史版本与自动保存。'));
     host.appendChild(detail);
   }
 
@@ -505,14 +585,14 @@
     const body = mask.querySelector('.modal-body'); const foot = mask.querySelector('.modal-foot');
     const title = mk('input', 'notes-title-input'); title.placeholder = '未命名笔记';
     const tags = mk('input', 'notes-tags-input'); tags.placeholder = '标签用逗号分隔';
-    const files = mk('input', 'notes-file-input'); files.type = 'file'; files.multiple = true; files.accept = IMPORT_ACCEPT;
-    const fileSummary = mk('div', 'notes-file-summary', '支持 Markdown、文本、HTML、PDF、Word 和常见图片；最多 8 个文件，单个 512 KB。');
+    const files = mk('input', 'notes-file-input'); files.type = 'file'; files.multiple = !capture; files.accept = capture ? 'image/*' : IMPORT_ACCEPT; if (capture) files.setAttribute('capture', 'environment');
+    const fileSummary = mk('div', 'notes-file-summary', capture ? '点击后拍照或从相册选择一张图片。' : '支持 Markdown、文本、PDF、DOCX、PPTX 和常见图片；最多 8 个文件，单个 6 MB。');
     const mode = mk('select', 'notes-anchor-mode'); mode.append(option('none', '不关联日历', true), option('date', '关联某一天'), option('schedule', '关联某条日程'));
     const date = mk('input', 'notes-anchor-date'); date.type = 'date'; date.value = today(); date.disabled = true;
     const schedules = mk('select', 'notes-schedule-select'); schedules.disabled = true; schedules.appendChild(option('', '请先选择日期'));
     const error = mk('div', 'modal-error hidden');
-    if (importing) body.append(field('选择文件', files), fileSummary);
-    if (!capture) body.appendChild(field(importing ? '笔记标题（可选）' : '标题', title));
+    if (importing || capture) body.append(field(capture ? '拍照或选择图片' : '选择文件', files), fileSummary);
+    body.appendChild(field(importing || capture ? '笔记标题（可选）' : '标题', title));
     body.append(field('标签', tags), field('关联方式', mode), field('日期', date), field('日程', schedules), error);
     async function loadSchedules() {
       schedules.disabled = true; schedules.innerHTML = ''; schedules.appendChild(option('', '正在读取日程…'));
@@ -526,7 +606,7 @@
     mode.addEventListener('change', () => { date.disabled = mode.value === 'none'; if (mode.value === 'schedule') loadSchedules(); else schedules.disabled = true; });
     date.addEventListener('change', () => { if (mode.value === 'schedule') loadSchedules(); });
     const cancel = mk('button', 'ghost-btn', '取消'); cancel.type = 'button'; cancel.addEventListener('click', mask._close);
-    const save = mk('button', 'primary-btn', capture ? '开始拍摄' : importing ? '上传并查看' : '创建并打开'); save.type = 'button'; save.disabled = importing; foot.append(cancel, save);
+    const save = mk('button', 'primary-btn', capture ? '保存到笔记' : importing ? '上传并查看' : '创建并打开'); save.type = 'button'; save.disabled = importing || capture; foot.append(cancel, save);
     files.addEventListener('change', () => {
       const selected = Array.from(files.files ?? []); save.disabled = !selected.length;
       fileSummary.textContent = selected.length ? `已选择 ${selected.length} 个文件 · ${selected.map((file) => file.name).join('、')}` : '尚未选择文件';
@@ -537,23 +617,128 @@
       if (mode.value === 'schedule' && schedules.value) anchor = { type: 'schedule', scheduleId: schedules.value, occurrenceDate: date.value };
       save.disabled = cancel.disabled = true; error.classList.add('hidden');
       try {
-        const input = { source, anchor, tags: tags.value.split(/[,，]/).map((v) => v.trim()).filter(Boolean) }; if (!capture) input.title = title.value.trim();
+        const input = { source, anchor, tags: tags.value.split(/[,，]/).map((v) => v.trim()).filter(Boolean), title: title.value.trim() };
         if (importing) {
           const items = await upload(files.files, input); files.value = ''; mask._close();
           if (items[0] && ((state.caps.view && state.provider?.readNote) || (state.caps.markdown && state.provider?.renderMarkdown))) await openNoteViewer(items[0], trigger);
           return;
         }
+        if (capture) {
+          const picked = Array.from(files.files ?? []); const size = Number(picked[0]?.size) || 0;
+          if (!picked.length) throw new Error('请先拍照或选择一张图片');
+          if (size > MAX_IMPORT_FILE_BYTES) throw new Error('图片超过 6 MB，请压缩后再试');
+          input.files = picked;
+        }
         const result = capture ? await state.provider.startCapture(input) : await state.provider.createDraft(input);
         if (!result) return mask._close();
-        const item = merge({ ...result, source }); mask._close(); render(); if (!capture && state.provider.openNote) await state.provider.openNote(item.id);
+        const item = merge({ ...result, source }); mask._close(); render();
+        if (capture && state.provider.readNote) await openNoteViewer(item, trigger); else if (state.provider.openNote) await state.provider.openNote(item.id);
       } catch (reason) { error.textContent = reason.message; error.classList.remove('hidden'); save.disabled = cancel.disabled = false; }
     });
     title.focus();
   }
 
+  async function openTemplateChooser(trigger) {
+    const mask = modal('从模板新建笔记', trigger); const body = mask.querySelector('.modal-body'); const foot = mask.querySelector('.modal-foot');
+    const select = mk('select'); const title = mk('input'); title.placeholder = '笔记标题'; const course = mk('input'); course.placeholder = '课程（可选）'; const folder = mk('input'); folder.placeholder = '目录（可选）';
+    body.append(field('模板', select), field('标题', title), field('课程', course), field('目录', folder));
+    const cancel = mk('button', 'ghost-btn', '取消'); cancel.type = 'button'; cancel.addEventListener('click', mask._close);
+    const create = mk('button', 'primary-btn', '创建并编辑'); create.type = 'button'; create.disabled = true; foot.append(cancel, create);
+    try {
+      const templates = await state.provider.templates(); templates.forEach((item) => select.appendChild(option(item.id, item.name))); create.disabled = !templates.length;
+    } catch (error) { body.appendChild(errorBox(`模板读取失败：${error.message}`)); }
+    create.addEventListener('click', async () => {
+      create.disabled = true;
+      try { const item = await state.provider.instantiateTemplate(select.value, { title: title.value.trim(), course: course.value.trim(), folder: folder.value.trim(), properties: { course: course.value.trim() } }); merge(item); mask._close(); state.provider.openNote(item.id); }
+      catch (error) { body.appendChild(errorBox(`创建失败：${error.message}`)); create.disabled = false; }
+    });
+  }
+
+  function renderGraph(host) {
+    const shell = mk('div', 'notes-special notes-graph-view');
+    const controls = mk('div', 'notes-special-controls');
+    const scope = mk('select'); [['local', '当前笔记 · 两层'], ['global', '全部笔记']].forEach(([value, label]) => scope.appendChild(option(value, label, value === state.graphScope)));
+    scope.addEventListener('change', () => { state.graphScope = scope.value; state.graphData = null; render(); });
+    const canvasButton = mk('button', 'ghost-btn', '将图谱放入 Canvas'); canvasButton.type = 'button'; canvasButton.disabled = !state.graphData?.nodes?.length;
+    canvasButton.addEventListener('click', async () => {
+      const nodes = state.graphData.nodes.map((node, index) => ({ id: `n-${node.id}`, type: 'file', noteId: node.id, x: 80 + index % 4 * 190, y: 70 + Math.floor(index / 4) * 130, width: 160, height: 84 }));
+      const edges = state.graphData.edges.map((edge, index) => ({ id: `e-${index}`, fromNode: `n-${edge.source}`, toNode: `n-${edge.target}` }));
+      const item = await state.provider.createCanvas({ name: `知识图谱 ${today()}`, nodes, edges }); state.canvasId = item.id; state.mode = 'canvas'; render();
+    });
+    controls.append(scope, canvasButton); shell.appendChild(controls);
+    const stage = mk('div', 'notes-graph-stage'); stage.appendChild(mk('div', 'loading', '正在生成知识图谱…')); shell.appendChild(stage); host.appendChild(shell);
+    if (state.graphData) return drawGraph(stage, state.graphData);
+    const filters = state.graphScope === 'local' && state.selected ? { id: state.selected, depth: 2 } : {};
+    state.provider.graph(filters).then((data) => { if (state.mode !== 'graph') return; state.graphData = data; stage.innerHTML = ''; drawGraph(stage, data); canvasButton.disabled = !data.nodes.length; }).catch((error) => { stage.innerHTML = ''; stage.appendChild(errorBox(`图谱读取失败：${error.message}`)); });
+  }
+
+  function drawGraph(stage, data) {
+    if (!data.nodes.length) return stage.appendChild(emptyBox('还没有知识链接。在正文中输入 [[另一篇笔记]] 后，关系会显示在这里。'));
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('viewBox', '0 0 900 560'); svg.setAttribute('class', 'notes-graph-svg');
+    const points = new Map(); const centerX = 450; const centerY = 280; const radius = Math.min(220, 80 + data.nodes.length * 12);
+    data.nodes.forEach((node, index) => { const angle = index / data.nodes.length * Math.PI * 2 - Math.PI / 2; points.set(node.id, { x: centerX + Math.cos(angle) * radius, y: centerY + Math.sin(angle) * radius }); });
+    for (const edge of data.edges) { const from = points.get(edge.source); const to = points.get(edge.target); const line = document.createElementNS(svg.namespaceURI, 'line'); for (const [key, value] of Object.entries({ x1: from.x, y1: from.y, x2: to.x, y2: to.y })) line.setAttribute(key, value); line.setAttribute('class', 'notes-graph-edge'); svg.appendChild(line); }
+    for (const node of data.nodes) {
+      const point = points.get(node.id); const group = document.createElementNS(svg.namespaceURI, 'g'); group.setAttribute('class', `notes-graph-node${node.id === state.selected ? ' active' : ''}`); group.setAttribute('transform', `translate(${point.x} ${point.y})`); group.setAttribute('tabindex', '0');
+      const circle = document.createElementNS(svg.namespaceURI, 'circle'); circle.setAttribute('r', node.favorite ? 25 : 20); const text = document.createElementNS(svg.namespaceURI, 'text'); text.setAttribute('y', '38'); text.setAttribute('text-anchor', 'middle'); text.textContent = node.title.slice(0, 18); group.append(circle, text);
+      const openNode = () => { state.selected = node.id; state.provider.openNote(node.id); }; group.addEventListener('click', openNode); group.addEventListener('keydown', (event) => { if (event.key === 'Enter') openNode(); }); svg.appendChild(group);
+    }
+    stage.appendChild(svg);
+  }
+
+  function renderBases(host) {
+    const shell = mk('div', 'notes-special notes-bases'); const controls = mk('div', 'notes-special-controls');
+    for (const [layout, label] of [['table', '表格'], ['cards', '卡片'], ['kanban', '看板']]) { const button = mk('button', `ghost-btn${state.baseLayout === layout ? ' active' : ''}`, label); button.type = 'button'; button.addEventListener('click', () => { state.baseLayout = layout; render(); }); controls.appendChild(button); }
+    for (const [label, query, layout] of [['待复习', 'status:待复习', 'kanban'], ['按课程', '', 'table'], ['最近修改', '', 'cards'], ['错题', 'type:错题', 'kanban']]) {
+      const preset = mk('button', 'ghost-btn', label); preset.type = 'button'; preset.addEventListener('click', async () => { state.query = query; state.baseLayout = layout; await refresh(); }); controls.appendChild(preset);
+    }
+    const saveView = mk('button', 'ghost-btn', '保存当前视图'); saveView.type = 'button'; saveView.addEventListener('click', async () => { const name = prompt('视图名称', '我的笔记视图'); if (!name) return; await state.provider.createView({ name, layout: state.baseLayout, filters: { query: state.query, tag: state.tag }, sort: state.sort }); state.ctx?.toast?.('视图已保存'); }); controls.appendChild(saveView);
+    shell.appendChild(controls); const items = visibleItems();
+    if (state.baseLayout === 'table') {
+      const wrap = mk('div', 'notes-base-table-wrap'); const table = document.createElement('table'); table.className = 'notes-base-table'; table.innerHTML = '<thead><tr><th>标题</th><th>课程</th><th>类型</th><th>状态</th><th>复习日期</th><th>更新</th></tr></thead>'; const tbody = document.createElement('tbody');
+      for (const item of items) { const tr = document.createElement('tr'); for (const value of [item.title, item.properties?.course || '—', item.properties?.type || '普通笔记', item.properties?.status || '—', item.properties?.reviewDate || '—', formatTime(item.updatedAt)]) { const td = document.createElement('td'); td.textContent = value; tr.appendChild(td); } tr.addEventListener('click', () => state.provider.openNote(item.id)); tbody.appendChild(tr); } table.appendChild(tbody); wrap.appendChild(table); shell.appendChild(wrap);
+    } else if (state.baseLayout === 'cards') {
+      const cards = mk('div', 'notes-base-cards'); for (const item of items) { const card = mk('button', 'notes-base-card'); card.type = 'button'; card.append(mk('strong', '', item.title), mk('span', '', item.properties?.course || item.folder || '未分类'), mk('p', '', item.previewText || '空白笔记')); card.addEventListener('click', () => state.provider.openNote(item.id)); cards.appendChild(card); } shell.appendChild(cards);
+    } else {
+      const board = mk('div', 'notes-kanban'); const groups = new Map(); for (const item of items) { const key = item.properties?.status || '未设置'; if (!groups.has(key)) groups.set(key, []); groups.get(key).push(item); }
+      for (const [name, group] of groups) { const column = mk('section', 'notes-kanban-column'); column.appendChild(mk('h3', '', `${name} · ${group.length}`)); for (const item of group) { const card = mk('button', 'notes-kanban-card', item.title); card.type = 'button'; card.addEventListener('click', () => state.provider.openNote(item.id)); column.appendChild(card); } board.appendChild(column); } shell.appendChild(board);
+    }
+    host.appendChild(shell);
+  }
+
+  function renderCanvas(host) {
+    const shell = mk('div', 'notes-special notes-canvas-view'); const controls = mk('div', 'notes-special-controls'); const select = mk('select'); const create = mk('button', 'ghost-btn', '+ 新建画布'); const add = mk('button', 'ghost-btn', '添加当前笔记'); const addText = mk('button', 'ghost-btn', '文本卡片'); const addGroup = mk('button', 'ghost-btn', '分组'); const connect = mk('button', 'ghost-btn', '连接选中节点');
+    controls.append(select, create, add, addText, addGroup, connect); shell.appendChild(controls); const board = mk('div', 'notes-canvas-board'); shell.appendChild(board); host.appendChild(shell);
+    const paint = (canvas) => {
+      board.innerHTML = ''; if (!canvas) return board.appendChild(emptyBox('新建一个 Canvas，把笔记拖到二维空间中整理思路。'));
+      const noteMap = new Map(state.items.map((item) => [item.id, item]));
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('class', 'notes-canvas-lines'); const nodesById = new Map((canvas.nodes || []).map((node) => [node.id, node]));
+      for (const edge of canvas.edges || []) { const from = nodesById.get(edge.fromNode); const to = nodesById.get(edge.toNode); if (!from || !to) continue; const line = document.createElementNS(svg.namespaceURI, 'line'); line.setAttribute('x1', (from.x || 20) + (from.width || 170) / 2); line.setAttribute('y1', (from.y || 20) + 34); line.setAttribute('x2', (to.x || 20) + (to.width || 170) / 2); line.setAttribute('y2', (to.y || 20) + 34); svg.appendChild(line); } board.appendChild(svg);
+      for (const node of canvas.nodes || []) { const card = mk('div', `notes-canvas-node notes-canvas-${node.type || 'text'}${state.canvasSelected.has(node.id) ? ' selected' : ''}`); card.style.left = `${node.x || 20}px`; card.style.top = `${node.y || 20}px`; card.style.width = `${node.width || (node.type === 'group' ? 360 : 170)}px`; card.style.height = `${node.height || (node.type === 'group' ? 220 : 84)}px`; card.textContent = node.type === 'file' ? noteMap.get(node.noteId)?.title || '缺失笔记' : node.text || (node.type === 'group' ? '分组' : '文本卡片'); card.tabIndex = 0; if (node.type === 'file') card.addEventListener('dblclick', () => state.provider.openNote(node.noteId)); card.addEventListener('click', () => { if (state.canvasSelected.has(node.id)) state.canvasSelected.delete(node.id); else state.canvasSelected.add(node.id); paint(canvas); }); let drag = null; card.addEventListener('pointerdown', (event) => { drag = { x: event.clientX, y: event.clientY, left: node.x || 20, top: node.y || 20 }; card.setPointerCapture?.(event.pointerId); }); card.addEventListener('pointermove', (event) => { if (!drag) return; node.x = drag.left + event.clientX - drag.x; node.y = drag.top + event.clientY - drag.y; card.style.left = `${node.x}px`; card.style.top = `${node.y}px`; }); card.addEventListener('pointerup', () => { if (!drag) return; drag = null; state.provider.updateCanvas(canvas.id, { nodes: canvas.nodes }).then(() => paint(canvas)); }); board.appendChild(card); }
+    };
+    state.provider.listCanvases().then((items) => { state.canvases = items; state.canvasId ||= items[0]?.id ?? null; select.innerHTML = ''; select.appendChild(option('', items.length ? '选择画布' : '暂无画布')); items.forEach((item) => select.appendChild(option(item.id, item.name, item.id === state.canvasId))); paint(items.find((item) => item.id === state.canvasId)); });
+    select.addEventListener('change', () => { state.canvasId = select.value; paint(state.canvases.find((item) => item.id === state.canvasId)); });
+    create.type = add.type = 'button'; create.addEventListener('click', async () => { const item = await state.provider.createCanvas({ name: `新画布 ${state.canvases.length + 1}`, nodes: [], edges: [] }); state.canvasId = item.id; render(); });
+    add.disabled = !state.selected; add.addEventListener('click', async () => { let canvas = state.canvases.find((item) => item.id === state.canvasId); if (!canvas) canvas = await state.provider.createCanvas({ name: '知识画布', nodes: [], edges: [] }); const nodes = [...(canvas.nodes || []), { id: `n-${Date.now()}`, type: 'file', noteId: state.selected, x: 40 + (canvas.nodes?.length || 0) * 24, y: 50 + (canvas.nodes?.length || 0) * 18, width: 170, height: 84 }]; await state.provider.updateCanvas(canvas.id, { nodes }); state.canvasId = canvas.id; render(); });
+    addText.addEventListener('click', async () => { const text = prompt('文本卡片内容'); if (!text) return; const canvas = state.canvases.find((item) => item.id === state.canvasId); if (!canvas) return; canvas.nodes = [...(canvas.nodes || []), { id: `n-${Date.now()}`, type: 'text', text, x: 80, y: 80, width: 190, height: 90 }]; await state.provider.updateCanvas(canvas.id, { nodes: canvas.nodes }); paint(canvas); });
+    addGroup.addEventListener('click', async () => { const name = prompt('分组名称', '新分组'); if (!name) return; const canvas = state.canvases.find((item) => item.id === state.canvasId); if (!canvas) return; canvas.nodes = [...(canvas.nodes || []), { id: `n-${Date.now()}`, type: 'group', text: name, x: 40, y: 40, width: 360, height: 220 }]; await state.provider.updateCanvas(canvas.id, { nodes: canvas.nodes }); paint(canvas); });
+    connect.addEventListener('click', async () => { const canvas = state.canvases.find((item) => item.id === state.canvasId); const selected = [...state.canvasSelected]; if (!canvas || selected.length !== 2) return state.ctx?.toast?.('请先点选两个节点'); canvas.edges = [...(canvas.edges || []), { id: `e-${Date.now()}`, fromNode: selected[0], toNode: selected[1] }]; state.canvasSelected.clear(); await state.provider.updateCanvas(canvas.id, { edges: canvas.edges }); paint(canvas); });
+  }
+
+  function renderTrash(host) {
+    const shell = mk('div', 'notes-special notes-trash');
+    if (!state.items.length) shell.appendChild(emptyBox('回收站为空。删除的笔记会在这里保留，确认后才会永久删除。'));
+    for (const item of state.items) { const row = mk('div', 'notes-trash-row'); row.append(mk('div', 'notes-trash-title', item.title), mk('span', 'notes-meta', `删除于 ${formatTime(item.deletedAt)}`)); const restore = mk('button', 'ghost-btn', '恢复'); restore.type = 'button'; restore.addEventListener('click', async () => { await state.provider.restoreNote(item.id); await refresh(); }); const remove = mk('button', 'ghost-btn danger', '永久删除'); remove.type = 'button'; remove.addEventListener('click', async () => { if (!confirm(`永久删除“${item.title}”？此操作不能撤销。`)) return; await state.provider.deleteNote(item.id, true); await refresh(); }); row.append(restore, remove); shell.appendChild(row); }
+    host.appendChild(shell);
+  }
+
   function render() {
     if (!state.mount) return;
     state.mount.innerHTML = ''; renderToolbar(state.mount);
+    if (state.mode === 'graph') return renderGraph(state.mount);
+    if (state.mode === 'bases') return renderBases(state.mount);
+    if (state.mode === 'canvas') return renderCanvas(state.mount);
+    if (state.mode === 'trash') return renderTrash(state.mount);
     const workspace = mk('div', 'notes-workspace'); const items = visibleItems(); renderList(workspace, items);
     renderDetail(workspace, items.find((item) => item.id === state.selected) ?? items[0] ?? null); state.mount.appendChild(workspace);
   }

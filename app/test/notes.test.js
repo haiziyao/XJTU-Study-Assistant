@@ -91,6 +91,24 @@ test('手动上传把 File 直接交给 Provider，返回摘要后可立即查�
   assert.doesNotMatch(JSON.stringify(notes.ingestSnapshot(summary({ id: 'safe' }))), /privateBody/);
 });
 
+test('笔记页只保留一个可用的随手拍入口，并把图片交给 Provider', async () => {
+  const app = bootRenderer({ api, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
+  const mount = await app.render('notes'); const notes = app.PCModules.getService('notes'); let captured;
+  await notes.connectProvider({
+    capabilities: () => ({ capture: true, view: true }), listNotes: () => [],
+    startCapture: async (input) => { captured = input; return summary({ id: 'shot-1', title: input.title || '随手拍', source: 'snapshot', status: 'unorganized', mediaCount: 1, anchor: null }); },
+    readNote: async () => ({ format: 'markdown', text: '图片笔记', attachments: [] }),
+  });
+  const buttons = mount.querySelectorAll('button').filter((button) => button.textContent === '随手拍');
+  assert.equal(buttons.length, 1); assert.equal(buttons[0].disabled, false);
+  buttons[0].listeners.click[0]();
+  const input = app.context.document.body.querySelector('.notes-file-input'); input.files = [{ name: 'camera.jpg', type: 'image/jpeg', size: 100 }]; input.listeners.change[0]();
+  app.context.document.body.querySelector('.notes-title-input').value = '黑板内容';
+  const save = app.context.document.body.querySelectorAll('button').find((button) => button.textContent === '保存到笔记'); await save.listeners.click[0]();
+  assert.equal(captured.files[0].name, 'camera.jpg'); assert.equal(captured.title, '黑板内容');
+  assert.match(mount.textContent, /黑板内容/);
+});
+
 test('上传限制在调用 Provider 前生效，查看纯文本不会注入 HTML', async () => {
   const app = bootRenderer({ api, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
   const mount = await app.render('notes');
@@ -102,7 +120,7 @@ test('上传限制在调用 Provider 前生效，查看纯文本不会注入 HTM
     uploadNotes: () => { uploads += 1; return summary(); },
     readNote: () => ({ format: 'text', text: '<img src=x onerror=alert(1)>' }),
   });
-  await assert.rejects(() => notes.upload([{ name: 'too-large.pdf', size: 513 * 1024 }]), /超过 512 KB/);
+  await assert.rejects(() => notes.upload([{ name: 'too-large.pdf', size: 6 * 1024 * 1024 + 1 }]), /超过 6 MB/);
   assert.equal(uploads, 0);
   const result = await notes.read('note-1');
   assert.equal(result.format, 'text'); assert.equal(result.text, '<img src=x onerror=alert(1)>');

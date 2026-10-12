@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 
 const script = readFileSync(new URL('../src/renderer/kit/theme.js', import.meta.url), 'utf8');
+const academicCss = readFileSync(new URL('../src/renderer/views/academic.css', import.meta.url), 'utf8');
 function setup({ saved, dark = false, blocked = false } = {}) {
   const values = new Map(saved ? [['zhixue.appearance', saved]] : []);
   const attrs = {};
@@ -51,4 +52,10 @@ test('存储被禁用或偏好无效时仍能使用外观切换', () => {
   app.theme.setMode('dark');
   assert.equal(app.attrs['data-theme'], 'dark');
   assert.equal(setup({ saved: 'unknown' }).theme.getMode(), 'system');
+});
+
+test('学业卡片只使用共享主题变量，不残留写死的深色卡片', () => {
+  assert.match(academicCss, /\.ac-card\s*\{[^}]*background:\s*var\(--bg-surface\)/s);
+  assert.match(academicCss, /\.ac-stat\s*\{[^}]*background:\s*var\(--bg-surface\)/s);
+  assert.doesNotMatch(academicCss, /var\(--(?:card|input-bg|muted|accent),/);
 });

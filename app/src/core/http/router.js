@@ -7,7 +7,7 @@
 
 import { ERROR_CODES } from '../../shared/constants.js';
 
-const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_BODY_BYTES = 12 * 1024 * 1024;
 
 /** 业务异常：携带 HTTP 状态码与统一错误码。 */
 export class HttpError extends Error {

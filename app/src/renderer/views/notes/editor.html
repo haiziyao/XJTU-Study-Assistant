@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src http://127.0.0.1:* ws://127.0.0.1:*; style-src 'self'; img-src 'self' data: http://127.0.0.1:*" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src http://127.0.0.1:* ws://127.0.0.1:*; style-src 'self'; img-src 'self' data: http://127.0.0.1:*; object-src 'self' data: blob:; frame-src 'self' data: blob:" />
     <title>笔记编辑 · 智学</title>
     <script src="../../kit/theme.js"></script>
     <link rel="stylesheet" href="../../shell/shell.css" />
@@ -21,6 +21,20 @@
           <section class="note-editor-properties-panel" aria-label="笔记属性">
             <label for="note-tags">标签</label>
             <input id="note-tags" class="note-editor-tags" placeholder="用逗号分隔，例如：高数，复习" aria-label="笔记标签" />
+            <label for="note-folder">目录</label>
+            <input id="note-folder" placeholder="例如：大二上/高等数学" />
+            <label for="note-aliases">别名</label>
+            <input id="note-aliases" placeholder="用逗号分隔" />
+            <div class="note-editor-property-grid">
+              <label>笔记状态<select id="note-workflow-status"><option value="draft">草稿</option><option value="unorganized">未整理</option><option value="processing">整理中</option><option value="ready">已整理</option><option value="archived">已归档</option></select></label>
+              <label>课程<input id="note-course" placeholder="高等数学" /></label>
+              <label>章节<input id="note-chapter" placeholder="第三章" /></label>
+              <label>类型<select id="note-type"><option value="">普通笔记</option><option>课堂笔记</option><option>错题</option><option>实验报告</option><option>论文阅读</option><option>每日笔记</option></select></label>
+              <label>学习进度<select id="note-study-status"><option value="">未设置</option><option>学习中</option><option>待复习</option><option>已掌握</option></select></label>
+              <label>掌握程度<input id="note-mastery" type="number" min="0" max="5" placeholder="0–5" /></label>
+              <label>复习日期<input id="note-review-date" type="date" /></label>
+            </div>
+            <label class="note-editor-favorite"><input id="note-favorite" type="checkbox" /> 收藏这篇笔记</label>
             <div id="note-attachments" class="note-editor-attachments" hidden></div>
             <label for="editor-appearance">外观</label>
             <select id="editor-appearance" aria-label="颜色模式"><option value="system">跟随系统</option><option value="light">白天模式</option><option value="dark">夜间模式</option></select>
@@ -48,8 +62,10 @@
           <button type="button" data-format="code" aria-label="插入代码块" title="代码块"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7-5 5 5 5m10-10 5 5-5 5M14 4l-4 16" /></svg></button>
           <button type="button" data-format="table" aria-label="插入表格" title="表格"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18M9 3v18" /></svg></button>
           <button type="button" data-format="link" aria-label="插入链接" title="链接"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 13 4-4M8 16l-2 2a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0m2 1 2-2a4 4 0 0 1 6 6l-5 5a4 4 0 0 1-6 0" transform="translate(1 0)" /></svg></button>
+          <button type="button" data-format="wiki" aria-label="插入内部链接" title="内部链接 [[笔记]]">[[ ]]</button>
         </div>
         <div class="note-editor-view-tabs" role="group" aria-label="显示方式">
+          <button type="button" data-view="source" aria-pressed="false">源码</button>
           <button type="button" data-view="split" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M12 3v18" /></svg>分栏</button>
           <button type="button" data-view="read" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5C8 3 5 3 2 4v16c3-1 6-1 10 1 4-2 7-2 10-1V4c-3-1-6-1-10 1Zm0 0v16" /></svg>阅读</button>
         </div>
@@ -62,12 +78,19 @@
             <div class="note-editor-source-layer">
               <pre id="note-highlight" class="note-editor-highlight" aria-hidden="true"></pre>
               <textarea id="note-body" aria-label="Markdown 正文" spellcheck="false" wrap="off" maxlength="200000" placeholder="# 从这里开始&#10;&#10;支持标题、列表、引用、代码和公式。"></textarea>
+              <div id="wiki-suggestions" class="note-wiki-suggestions" hidden></div>
             </div>
           </div>
         </section>
         <section class="note-editor-pane note-editor-output" aria-label="实时预览">
           <header class="note-editor-pane-head"><h2>实时预览</h2></header>
           <article id="note-preview" class="note-editor-preview richtext"></article>
+          <section id="note-attachment-preview" class="note-editor-media" hidden aria-label="附件预览"></section>
+          <aside class="note-editor-inspector">
+            <details open><summary>大纲</summary><div id="note-outline"></div></details>
+            <details><summary>链接与反向链接</summary><div id="note-links">保存后显示知识关联</div></details>
+            <details><summary>历史版本</summary><div id="note-versions">保存后显示历史版本</div></details>
+          </aside>
         </section>
       </section>
       <footer class="note-editor-footer"><span id="word-count">0 字符 · 1 行</span><label class="note-editor-sync"><input id="sync-scroll" type="checkbox" checked /> 同步滚动</label><span class="note-editor-shortcut">Ctrl / ⌘ + S 保存 · Tab 缩进</span></footer>

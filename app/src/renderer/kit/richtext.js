@@ -264,6 +264,10 @@ window.PCRichText = (function () {
   /** 行内元素：先转义，再按固定顺序替换（粗体优先于斜体）。 */
   function renderInline(text) {
     let out = escapeHtml(text);
+    out = out.replace(/\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]/g, (match, target, heading, alias) => {
+      const label = alias || `${target}${heading ? ` › ${heading}` : ''}`;
+      return `<span class="rt-wikilink" data-note-title="${target}"${heading ? ` data-note-heading="${heading}"` : ''}>${label}</span>`;
+    });
     out = out.replace(/`([^`]+)`/g, (m, code) => `<code class="rt-code">${code}</code>`);
     out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');

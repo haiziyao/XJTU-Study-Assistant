@@ -181,6 +181,7 @@
 
   function selectView(view) {
     state.view = view;
+    if (view !== 'notes') document.body.classList.remove('notes-focus');
     for (const button of document.querySelectorAll('.nav-item')) {
       button.classList.toggle('active', button.dataset.view === view);
     }

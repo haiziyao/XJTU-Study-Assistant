@@ -780,7 +780,7 @@ test('LMS：回放下载真落盘 —— 按课程/活动分层、先写 .part �
     const started = await call('POST', '/lms/downloads', { activityId: 5007, video });
     assert.equal(started.status, 200);
     assert.equal(started.body.status, 'running');
-    assert.match(started.body.path, /downloads\/数据结构\/第 5 周回放\/教室录像_1\.00KB\.mp4$/);
+    assert.match(started.body.path.replaceAll('\\', '/'), /downloads\/数据结构\/第 5 周回放\/教室录像_1\.00KB\.mp4$/);
 
     let job = started.body;
     for (let i = 0; i < 60 && job.status === 'running'; i += 1) {

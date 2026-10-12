@@ -117,10 +117,10 @@ test('视图注册表：顺序、插槽与跨模块服务符合外壳约定', as
     const main = ids('main');
     const bottom = ids('bottom');
 
-    // 左栏上部：日历 / 待办 / 思源学堂 / 学业 / 笔记系统 / 随手拍 / 消息
+    // 左栏上部：日历 / 待办 / 思源学堂 / 学业 / 笔记系统 / 消息；随手拍已并入笔记系统
     // 「学业」原先是 `study` 占位页，已由 views/academic.js 以 id `academic` 正式实现
     // 注意「网课」没有独立入口：直播 + 回放归到思源学堂视图里，左栏再出现 course 就是回归
-    assert.deepEqual(main, ['calendar', 'todo', 'lms', 'academic', 'notes', 'snapshot', 'message']);
+    assert.deepEqual(main, ['calendar', 'todo', 'lms', 'academic', 'notes', 'message']);
     // 左栏底部固定为设置
     assert.deepEqual(bottom, ['settings']);
 

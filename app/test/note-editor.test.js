@@ -62,22 +62,27 @@ test('编辑页首次保存创建笔记，再次保存更新同一 ID，刷新�
   app.input('note-title', '学习笔记'); app.input('note-body', '# 初稿');
   await app.save();
   assert.equal(calls[0].method, 'POST'); assert.equal(calls[0].body.body, '# 初稿');
+  assert.equal(calls[0].body.status, 'draft', '新笔记不能因为写了正文就自动标记为已整理');
   assert.equal(new URL(app.context.location.href).searchParams.get('id'), 'note-1');
+  assert.equal(new URL(app.get('back-to-notes').href).searchParams.get('note'), 'note-1', '返回列表时必须携带当前笔记 ID');
   app.input('note-body', '## 修改后的正文');
+  app.input('note-workflow-status', 'unorganized');
   await app.save();
   assert.equal(calls[1].method, 'PATCH'); assert.ok(calls[1].url.endsWith('/notes/note-1'));
   assert.equal(calls[1].body.expectedUpdatedAt, 'version-1');
+  assert.equal(calls[1].body.status, 'unorganized', '用户选择的未整理状态必须持久化');
   assert.equal(app.get('save-status').dataset.state, 'saved');
 
   const reopened = setup(async () => ok({ note: { title: '学习笔记', body: '## 修改后的正文', tags: ['复习'], updatedAt: 'version-2', attachments: [] } }), 'note-1');
   await flush();
   assert.equal(reopened.get('note-body').value, '## 修改后的正文');
+  assert.equal(new URL(reopened.get('back-to-notes').href).searchParams.get('note'), 'note-1');
   assert.equal(reopened.get('note-tags').value, '复习');
   assert.equal(reopened.get('save-note').disabled, false);
 
   let attachmentUpdate;
   const attachmentOnly = setup(async (url, options) => {
-    if (!options.method) return ok({ note: { title: '课件', body: '', tags: [], updatedAt: 'version-1', attachments: [{ name: '课件.pdf' }] } });
+    if (!options.method) return ok({ note: { title: '课件', body: '', tags: [], status: 'ready', updatedAt: 'version-1', attachments: [{ name: '课件.pdf' }] } });
     attachmentUpdate = JSON.parse(options.body);
     return ok({ summary: { id: 'note-file', updatedAt: 'version-2' } });
   }, 'note-file');

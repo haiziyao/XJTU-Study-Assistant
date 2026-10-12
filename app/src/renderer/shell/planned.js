@@ -3,7 +3,7 @@
  *
  * 这些功能尚未实现，但左栏先保留入口，让整体导航从第一天起就是完整形态。
  *
- * 目前占位：随手拍。
+ * 当前没有占位页；随手拍已合并进笔记系统。
  * 已经落地、不再占位的：「学业」由 `views/academic.js` 实现（id `academic`，order 40）、
  * 「笔记系统」由 `views/notes/notes.js` 实现（id `notes`，order 50）。
  * 「网课」不再是独立入口 —— 直播与回放本来就来自思源学堂，已并入 `views/lms.js` 的「网课」页签。
@@ -17,20 +17,7 @@
  */
 
 (function () {
-  const PLANNED = [
-    {
-      id: 'snapshot',
-      label: '随手拍',
-      icon: '📷',
-      order: 60,
-      desc: '随手拍只负责「拍下来先存着」，识别与整理交给笔记系统与主程序。',
-      bullets: [
-        '拍摄 / 选图由主程序或系统能力完成，本模块不处理图片二进制',
-        '一条随手拍确认后：进「笔记系统」，或用 POST /api/v1/todos、POST /api/v1/events 生成待办 / 日程',
-        '落库时间沿用日历统一的日期与时刻语义（YYYY-MM-DD、HH:MM）',
-      ],
-    },
-  ];
+  const PLANNED = [];
 
   for (const item of PLANNED) {
     const view = placeholderView(item.label, item.desc, item.bullets);

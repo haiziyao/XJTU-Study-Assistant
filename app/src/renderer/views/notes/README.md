@@ -26,7 +26,7 @@ await notes.connectProvider({
 { type: 'schedule', scheduleId: '...', occurrenceDate: 'YYYY-MM-DD' }
 ```
 
-独立随手拍入口调用 `notes.ingestSnapshot(summary)`。该入口拒绝正文、OCR、图片、附件、路径、Blob 和 Base64 数据。
+应用左侧不再单列“随手拍”占位页；随手拍统一位于笔记系统。内置 Provider 使用摄像头/相册文件输入创建 `source: snapshot` 的未整理笔记；外部程序仍可通过 `notes.ingestSnapshot(summary)` 投递安全摘要。
 
 本地缓存最多 100 条、有效期 7 天，只保存摘要白名单字段；主程序始终是唯一事实源。
 
@@ -37,7 +37,7 @@ Provider 声明 `markdown: true` 后，详情区会显示“查看笔记”。�
 - 声明 `upload: true` 并实现 `uploadNotes(files, input)` 后开放“手动上传”。`files` 是浏览器原始 `File[]`，`input` 只包含可选标题、标签与日历挂载；Provider 必须返回一个摘要、摘要数组或 `{ items }`。本模块不读取、复制或缓存文件内容。
 - 声明 `view: true` 并实现 `readNote(noteId)` 后开放“查看笔记”。返回字符串，或 `{ format: 'markdown | text', text }`。为兼容旧 Provider，`markdown: true + renderMarkdown(noteId)` 仍可提供查看能力。
 - 查看内容仅存在于当前弹层。Markdown 经过 `PCRichText` 安全渲染，`text` 使用纯文本展示，Provider 返回的 HTML 不会直接注入页面。
-- 默认上传限制：单次最多 8 个文件、单文件 512 KB、合计 4 MB；支持 Markdown、文本、HTML、PDF、Word 和常见图片。限制用于适配本地 JSON API 的 1 MB 单请求上限；每个文件单独交给主程序保存。
+- 默认上传限制：单次最多 8 个文件、单文件 6 MB、合计 10 MB；支持 Markdown、文本、HTML、PDF、DOCX、PPTX 和常见图片。PDF 与图片可在网页内预览；DOCX/PPTX 会提取正文为 Markdown，PDF 同时尽力提取可搜索文本。旧版 DOC/PPT 只保留下载入口。
 
 ## AI 读取挂载点
 
@@ -62,3 +62,13 @@ const context = await notes.readForAI({ ids: ['note-id'], limit: 5 });
 - 紧凑顶栏直接编辑标题；标签、附件说明和外观选项收进“属性”，不占用常驻标题区。
 - 支持源码行号与配色、撤销 / 重做、分栏 / 阅读切换、Ctrl / Cmd + S、Tab 缩进、常用格式工具（含表格）、同步滚动、未保存提醒；失败后保留当前输入。
 - 主页面与编辑页共用白天 / 夜间 / 跟随系统偏好。
+
+## Obsidian 式知识工作区
+
+- 正文支持 `[[标题]]`、`[[标题#章节]]` 与 `[[标题|显示文字]]`；保存时生成出链，详情接口提供反向链接和未链接提及。
+- 笔记具备目录、别名、收藏和学习属性（课程、章节、类型、状态、掌握程度、复习日期）；搜索支持 `tag:`、`folder:`、`course:`、`type:`、`status:` 与排除词。
+- 笔记首页提供局部/全局知识图谱、表格/卡片/看板、每日笔记、内置学习模板、回收站和 Canvas。
+- 自动保存采用 800ms 防抖；服务端最多保留每篇 50 个版本，自动保存快照间隔不少于 5 分钟，手动保存、重命名和删除强制留档。
+- 删除默认为软删除；永久删除只能对回收站中的笔记执行。
+
+新增接口包括 `GET /notes/graph`、`GET /notes/:id/links`、`GET /notes/:id/versions`、`POST /notes/:id/restore`，以及 `/note-templates`、`/note-views`、`/note-canvases` 资源组。旧 `notes.json` 会在读取时补齐新字段，不需要破坏性迁移。

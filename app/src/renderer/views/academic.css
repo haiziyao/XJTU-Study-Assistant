@@ -5,12 +5,12 @@
 
 .ac-head { margin-bottom: 2px; }
 .ac-title { margin: 0 0 4px; font-size: 18px; }
-.ac-sub { margin: 0; color: var(--muted, #8a8f98); font-size: 13px; line-height: 1.6; }
-.ac-muted { color: var(--muted, #8a8f98); font-size: 13px; }
+.ac-sub { margin: 0; color: var(--fg-3); font-size: 13px; line-height: 1.6; }
+.ac-muted { color: var(--fg-3); font-size: 13px; }
 
 .ac-card {
-  background: var(--card, #1c1f26);
-  border: 1px solid var(--line, #2a2f3a);
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
   border-radius: 10px;
   padding: 14px 16px;
 }
@@ -21,8 +21,8 @@
 /* ---------------------------------------------------------------- 工具条 */
 
 .ac-select, .ac-input {
-  background: var(--input-bg, #14171d);
-  border: 1px solid var(--line, #2a2f3a);
+  background: var(--control-bg);
+  border: 1px solid var(--line);
   border-radius: 8px;
   color: inherit;
   padding: 6px 10px;
@@ -30,42 +30,42 @@
 }
 .ac-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .ac-form .ac-input { min-width: 180px; }
-.ac-toolbar-note { font-size: 12px; color: var(--muted, #8a8f98); }
+.ac-toolbar-note { font-size: 12px; color: var(--fg-3); }
 
 /* ---------------------------------------------------------------- 统计卡 */
 
 .ac-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
 .ac-stat {
-  background: var(--card, #1c1f26);
-  border: 1px solid var(--line, #2a2f3a);
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
   border-radius: 10px;
   padding: 12px 14px;
 }
-.ac-stat-label { font-size: 12px; color: var(--muted, #8a8f98); }
+.ac-stat-label { font-size: 12px; color: var(--fg-3); }
 .ac-stat-value { font-size: 24px; font-weight: 600; margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
-.ac-stat-hint { font-size: 12px; color: var(--muted, #8a8f98); }
+.ac-stat-hint { font-size: 12px; color: var(--fg-3); }
 
 /* ---------------------------------------------------------------- 分析卡 */
 
-.ac-analysis { border-left: 3px solid var(--accent, #4c8dff); }
+.ac-analysis { border-left: 3px solid var(--blue); }
 .ac-analysis-text { margin: 0 0 8px; line-height: 1.75; font-size: 14px; white-space: pre-wrap; }
-.ac-analysis-meta { margin: 0; font-size: 12px; color: var(--muted, #8a8f98); }
+.ac-analysis-meta { margin: 0; font-size: 12px; color: var(--fg-3); }
 
 .ac-badge {
   display: inline-block;
   padding: 1px 7px;
   border-radius: 999px;
   font-size: 11px;
-  border: 1px solid var(--line, #2a2f3a);
+  border: 1px solid var(--line);
 }
-.ac-badge-ai { border-color: #4c8dff; color: #7fb0ff; }
-.ac-badge-local { border-color: #8a8f98; color: #a9aeb6; }
-.ac-badge-stale { border-color: #d99a2b; color: #e0ab4a; }
+.ac-badge-ai { border-color: var(--blue); color: var(--blue); }
+.ac-badge-local { border-color: var(--fg-3); color: var(--fg-2); }
+.ac-badge-stale { border-color: var(--orange); color: var(--orange); }
 
 /* ---------------------------------------------------------------- 批量条 */
 
 .ac-bulk { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.ac-bulk-label { font-size: 13px; color: var(--muted, #8a8f98); }
+.ac-bulk-label { font-size: 13px; color: var(--fg-3); }
 .ac-bulk button { padding: 4px 10px; font-size: 12px; }
 
 /* ---------------------------------------------------------------- 成绩表 */
@@ -74,21 +74,21 @@
 .ac-table th {
   text-align: left;
   font-weight: 500;
-  color: var(--muted, #8a8f98);
-  border-bottom: 1px solid var(--line, #2a2f3a);
+  color: var(--fg-3);
+  border-bottom: 1px solid var(--line);
   padding: 6px 10px;
 }
-.ac-table td { padding: 7px 10px; border-bottom: 1px solid var(--line-faint, #23262e); }
+.ac-table td { padding: 7px 10px; border-bottom: 1px solid var(--line); }
 .ac-col-check { width: 46px; text-align: center; }
 .ac-col-num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* 学期分隔行：不用斑马纹，而是明确的一条带底色的标题行 —— 一眼能看出分了几段 */
 .ac-term-row td {
   padding: 0;
-  border-bottom: 1px solid var(--line, #2a2f3a);
-  background: var(--bg-elevated, #232733);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elevated);
 }
-.ac-term-row:not(:first-child) td { border-top: 1px solid var(--line, #2a2f3a); }
+.ac-term-row:not(:first-child) td { border-top: 1px solid var(--line); }
 .ac-term-head {
   display: flex;
   align-items: baseline;
@@ -100,7 +100,7 @@
   background: inherit;
 }
 .ac-term-name { font-weight: 600; font-size: 13px; }
-.ac-term-meta { font-size: 12px; color: var(--muted, #8a8f98); font-variant-numeric: tabular-nums; }
+.ac-term-meta { font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 /* 学期行的「整学期计入 / 整学期屏蔽」三态勾选框：推到最右，别跟学期名与口径挤在一起 */
 .ac-term-check {
   margin-left: auto;
@@ -108,11 +108,11 @@
   align-items: center;
   gap: 5px;
   font-size: 12px;
-  color: var(--muted, #8a8f98);
+  color: var(--fg-3);
   cursor: pointer;
   white-space: nowrap;
 }
-.ac-term-check:hover { color: var(--fg, #e6e6ea); }
+.ac-term-check:hover { color: var(--fg); }
 .ac-term-check input { cursor: pointer; }
 .ac-term-check input:disabled { cursor: not-allowed; }
 
@@ -125,8 +125,8 @@
   font-size: 11px;
   padding: 0 6px;
   border-radius: 999px;
-  border: 1px solid var(--line, #2a2f3a);
-  color: var(--muted, #8a8f98);
+  border: 1px solid var(--line);
+  color: var(--fg-3);
   margin-right: 4px;
 }
 
@@ -139,5 +139,5 @@
   padding: 9px 12px;
   font-size: 13px;
 }
-.ac-warn-inline { color: #e0ab4a; font-size: 13px; margin: 0 0 8px; }
+.ac-warn-inline { color: var(--orange); font-size: 13px; margin: 0 0 8px; }
 .ac-attention { margin: 6px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.8; }

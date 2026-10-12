@@ -21,7 +21,11 @@
 .note-editor-properties-panel { position: absolute; right: 0; top: calc(100% + 10px); width: 290px; display: flex; flex-direction: column; gap: 9px; padding: 20px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg-surface); box-shadow: var(--shadow-2); }
 .note-editor-properties-panel label { color: var(--fg-3); font-size: 12px; }
 .note-editor-properties-panel label:not(:first-child) { margin-top: 8px; }
-.note-editor-tags, .note-editor-properties-panel select { font-size: 13px; width: 100%; }
+.note-editor-tags, .note-editor-properties-panel select, .note-editor-properties-panel input { font-size: 13px; width: 100%; }
+.note-editor-property-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.note-editor-property-grid label { display: grid; gap: 5px; margin: 0 !important; }
+.note-editor-favorite { display: flex !important; align-items: center; gap: 7px; }
+.note-editor-favorite input { width: auto; }
 .note-editor-attachments { color: var(--fg-3); font-size: 12px; overflow-wrap: anywhere; }
 .note-editor-property-hint { margin-top: 8px; color: var(--fg-3); font-size: 12px; }
 .note-editor-error { flex: none; padding: 10px 20px; color: var(--red); background: color-mix(in srgb, var(--red) 7%, var(--bg-surface)); border-bottom: 1px solid color-mix(in srgb, var(--red) 30%, var(--line)); }
@@ -44,6 +48,9 @@
 .note-editor-source-content { flex: 1; min-height: 0; display: flex; overflow: hidden; padding: 22px 0 0; }
 .note-editor-line-numbers { flex: none; width: 48px; margin: 0; padding: 0 12px 0 0; color: var(--fg-3); opacity: .65; text-align: right; user-select: none; font: 14px/1.9 Consolas, 'Cascadia Code', 'Microsoft YaHei', monospace; }
 .note-editor-source-layer { position: relative; flex: 1; min-width: 0; min-height: 0; }
+.note-wiki-suggestions { position: absolute; z-index: 5; left: 12px; bottom: 12px; width: min(360px, calc(100% - 24px)); max-height: 220px; overflow: auto; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-elevated); box-shadow: var(--shadow-2); }
+.note-wiki-suggestions button { display: block; width: 100%; padding: 8px 10px; border: 0; background: transparent; color: var(--fg); text-align: left; }
+.note-wiki-suggestions button:hover, .note-wiki-suggestions button:focus { background: var(--bg-hover); color: var(--blue); }
 #note-body, .note-editor-highlight { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0 20px 22px 0; border: 0; border-radius: 0; background: transparent; font: 14px/1.9 Consolas, 'Cascadia Code', 'Microsoft YaHei', monospace; letter-spacing: normal; white-space: pre; tab-size: 2; }
 .note-editor-highlight { overflow: hidden; pointer-events: none; color: var(--fg); }
 .note-editor-highlight .note-token-heading { color: var(--blue); }
@@ -55,6 +62,11 @@
 #note-body:focus { box-shadow: none; }
 .note-editor-source:focus-within .note-editor-pane-head h1 { color: var(--blue); }
 .note-editor-preview { flex: 1; min-height: 0; overflow: auto; padding: 20px 30px 48px; color: var(--fg); font-size: 15px; line-height: 1.9; overflow-wrap: anywhere; }
+.note-editor-inspector { flex: none; max-height: 34%; overflow: auto; border-top: 1px solid var(--line); padding: 8px 18px 14px; font-size: 12px; color: var(--fg-2); }
+.note-editor-inspector details { padding: 5px 0; }
+.note-editor-inspector summary { cursor: pointer; color: var(--fg); font-weight: 600; }
+.note-editor-inspector button, .note-editor-inspector a { display: block; width: 100%; padding: 5px 0; border: 0; background: transparent; color: var(--blue); text-align: left; }
+.note-outline-level-2 { padding-left: 12px !important; }.note-outline-level-3 { padding-left: 24px !important; }
 /* PCRichText maps headings to h3–h6 for chat; use a document hierarchy here. */
 .note-editor-preview h3.rt-h { font-size: 25px; line-height: 1.5; margin: 0 0 18px; }
 .note-editor-preview h4.rt-h { font-size: 19px; margin: 22px 0 10px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
@@ -70,6 +82,8 @@
 .note-editor[data-view='read'] .note-editor-source { display: none; }
 .note-editor[data-view='read'] .note-editor-workspace { grid-template-columns: minmax(0, 1fr); }
 .note-editor[data-view='read'] .note-editor-preview { width: min(100%, 860px); margin-inline: auto; }
+.note-editor[data-view='source'] .note-editor-output { display: none; }
+.note-editor[data-view='source'] .note-editor-workspace { grid-template-columns: minmax(0, 1fr); }
 .note-editor-leave { max-width: min(480px, 92vw); padding: 24px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--bg-surface); color: var(--fg); box-shadow: var(--shadow-2); }
 .note-editor-leave::backdrop { background: var(--overlay); }
 .note-editor-leave h2 { margin: 0 0 12px; font-size: 18px; }
@@ -103,3 +117,10 @@
   .note-editor-highlight { display: none; }
   #note-body { color: CanvasText; -webkit-text-fill-color: CanvasText; }
 }
+.note-editor-attachments { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.note-editor-attachments a { color: var(--blue); text-decoration: none; }
+.note-editor-media { padding: 0 28px 24px; }
+.note-editor-media img { display: block; max-width: 100%; max-height: 60vh; margin: 0 auto; border-radius: 8px; object-fit: contain; }
+.note-editor-media object { width: 100%; height: 60vh; min-height: 420px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+.note-editor-media p { color: var(--fg-3); }
+.note-editor-attachments a:hover { text-decoration: underline; }

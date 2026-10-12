@@ -158,6 +158,10 @@ body.panel-collapsed .panel {
   display: none;
 }
 
+body.notes-focus .app { grid-template-columns: var(--sidebar-w) minmax(0,1fr); }
+body.notes-focus .chat { display: none; }
+body.notes-focus .panel { grid-column: 2; width: auto; }
+
 /* ------------------------------------------------------------- 左：功能栏 */
 
 .sidebar {
@@ -1376,6 +1380,7 @@ body.panel-collapsed .panel {
 .rt-link {
   color: var(--blue);
 }
+.rt-wikilink { color: var(--blue); border-bottom: 1px dashed currentColor; cursor: pointer; }
 .rt-table-wrap { overflow-x: auto; margin: 14px 0; }
 .rt-table { border-collapse: collapse; width: 100%; font-size: 13px; }
 .rt-table th, .rt-table td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; }

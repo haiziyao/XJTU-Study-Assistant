@@ -10,9 +10,15 @@ export default {
   id: 'notes',
   title: '笔记',
   order: 40,
-  collections: [{ name: 'notes', file: 'notes.json' }],
+  collections: [
+    { name: 'notes', file: 'notes.json' },
+    { name: 'noteVersions', file: 'note-versions.json' },
+    { name: 'noteTemplates', file: 'note-templates.json' },
+    { name: 'noteViews', file: 'note-views.json' },
+    { name: 'noteCanvases', file: 'note-canvases.json' },
+  ],
   aiPrompt: AI_PROMPT,
-  aiQueryFields: { note: ['id', 'title', 'format', 'text', 'tags', 'anchor', 'updatedAt'] },
+  aiQueryFields: { note: ['id', 'title', 'format', 'text', 'tags', 'folder', 'aliases', 'properties', 'links', 'anchor', 'updatedAt'] },
   aiTools: [{
     name: 'notes_query',
     description: '按 ID 或关键词只读查询用户笔记，返回标题、正文、标签和日历关联',

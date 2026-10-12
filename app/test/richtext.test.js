@@ -92,6 +92,14 @@ test('Markdown：标题 / 列表 / 引用 / 分隔线 / 粗斜体 / 行内代码
   assert.match(html, /<del>删<\/del>/);
 });
 
+test('Markdown：Obsidian Wiki 链接安全渲染标题、章节与别名', () => {
+  const html = rt.toHtml('参见 [[牛顿定律#第二定律|F=ma]] 与 [[动量]]');
+  assert.match(html, /class="rt-wikilink"/);
+  assert.match(html, /data-note-title="牛顿定律"/);
+  assert.match(html, /data-note-heading="第二定律"/);
+  assert.match(html, />F=ma<\/span>/);
+});
+
 test('Markdown 与公式混排：公式里的 * _ { 不被误伤', () => {
   const html = rt.toHtml('注意 $a_b * c$ 这里的下标');
   assert.match(html, /m-sub/);

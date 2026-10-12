@@ -2,6 +2,7 @@
 (function () {
   'use strict';
   const params = new URLSearchParams(location.search);
+  const enhancedUi = Boolean(document.body);
   const apiBase = (params.get('api') || (location.protocol.startsWith('http') ? `${location.origin}/api/v1` : 'http://127.0.0.1:3210/api/v1')).replace(/\/$/, '');
   const title = document.getElementById('note-title');
   const tags = document.getElementById('note-tags');
@@ -18,6 +19,21 @@
   const redoButton = document.getElementById('redo-note');
   const editor = document.getElementById('note-editor');
   const properties = document.getElementById('note-properties');
+  const folder = document.getElementById('note-folder');
+  const aliases = document.getElementById('note-aliases');
+  const course = document.getElementById('note-course');
+  const chapter = document.getElementById('note-chapter');
+  const noteType = document.getElementById('note-type');
+  const studyStatus = document.getElementById('note-study-status');
+  const mastery = document.getElementById('note-mastery');
+  const reviewDate = document.getElementById('note-review-date');
+  const favorite = document.getElementById('note-favorite');
+  const workflowStatus = document.getElementById('note-workflow-status');
+  const suggestions = document.getElementById('wiki-suggestions');
+  const outline = document.getElementById('note-outline');
+  const linksPanel = document.getElementById('note-links');
+  const versionsPanel = document.getElementById('note-versions');
+  const attachmentPreview = document.getElementById('note-attachment-preview');
   let id = params.get('id');
   let updatedAt = null;
   let loaded = !id;
@@ -26,20 +42,42 @@
   let hasAttachments = false;
   let saved = '';
   let previewTimer;
+  let autosaveTimer;
+  let noteIndex = [];
   let past = [];
   let future = [];
   let previousBody = { text: body.value, start: 0, end: 0 };
-  const snapshot = () => JSON.stringify({ title: title.value, tags: tags.value, body: body.value });
+  const snapshot = () => JSON.stringify({
+    title: title.value, tags: tags.value, body: body.value, folder: folder.value, aliases: aliases.value,
+    course: course.value, chapter: chapter.value, type: noteType.value, studyStatus: studyStatus.value,
+    mastery: mastery.value, reviewDate: reviewDate.value, favorite: favorite.checked, workflowStatus: workflowStatus.value,
+  });
   const dirty = () => snapshot() !== saved;
 
-  // Keep explicit API routing when the editor is opened from an Electron/file page.
-  const returnUrl = new URL(location.protocol === 'file:' ? '../../index.html' : '../../', location.href);
-  returnUrl.searchParams.set('view', 'notes');
-  if (params.has('api')) returnUrl.searchParams.set('api', apiBase);
-  back.href = returnUrl.href;
+  // Keep explicit API routing and the active note when returning to the workspace.
+  function updateReturnUrl() {
+    const returnUrl = new URL(location.protocol === 'file:' ? '../../index.html' : '../../', location.href);
+    returnUrl.searchParams.set('view', 'notes');
+    if (id) returnUrl.searchParams.set('note', id);
+    if (params.has('api')) returnUrl.searchParams.set('api', apiBase);
+    back.href = returnUrl.href;
+  }
+  updateReturnUrl();
 
   function setStatus(text, state = '') { status.textContent = text; status.dataset.state = state; }
   function showError(message = '') { errorBox.textContent = message; errorBox.hidden = !message; }
+  function renderAttachmentPreviews(files = []) {
+    attachmentPreview.innerHTML = ''; attachmentPreview.hidden = !files.length;
+    for (const file of files) {
+      if ((file.type || '').startsWith('image/')) {
+        const image = document.createElement('img'); image.src = file.dataUrl; image.alt = file.name; attachmentPreview.appendChild(image);
+      } else if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')) {
+        const object = document.createElement('object'); object.data = file.dataUrl; object.type = 'application/pdf'; object.setAttribute('aria-label', `PDF 预览：${file.name}`); attachmentPreview.appendChild(object);
+      } else if (/\.(doc|ppt)$/i.test(file.name || '')) {
+        const hint = document.createElement('p'); hint.textContent = '旧版 Office 文件无法在网页中提取正文，请使用上方“下载/打开”查看原文件。'; attachmentPreview.appendChild(hint);
+      }
+    }
+  }
   function syncSource() {
     highlight.scrollTop = body.scrollTop;
     highlight.scrollLeft = body.scrollLeft;
@@ -80,8 +118,15 @@
       preview.innerHTML = '';
       const hint = document.createElement('p'); hint.className = 'note-editor-empty';
       hint.textContent = '从左侧开始书写，预览会在这里实时呈现。'; preview.appendChild(hint);
-    } else window.PCRichText.render(preview, body.value);
+    } else {
+      window.PCRichText.render(preview, body.value);
+      preview.querySelectorAll?.('.rt-wikilink').forEach((link) => link.addEventListener('click', () => {
+        const target = noteIndex.find((item) => [item.title, ...(item.aliases || [])].some((name) => name.toLowerCase() === link.dataset.noteTitle.toLowerCase()));
+        if (target) { const url = new URL(location.href); url.searchParams.set('id', target.id); location.href = url.href; }
+      }));
+    }
     document.getElementById('word-count').textContent = `${body.value.length.toLocaleString()} 字符 · ${body.value.split('\n').length} 行`;
+    renderOutline();
     document.title = `${title.value.trim() || '未命名笔记'}${dirty() ? ' *' : ''} · 智学笔记`;
   }
   function changed(record = true) {
@@ -89,6 +134,9 @@
     renderSource();
     if (!saving) setStatus(dirty() ? '有未保存的更改' : id ? '所有更改已保存' : '新笔记 · 尚未保存', dirty() ? 'dirty' : id ? 'saved' : '');
     clearTimeout(previewTimer); previewTimer = setTimeout(renderPreview, 100);
+    clearTimeout(autosaveTimer);
+    if (enhancedUi && loaded && dirty()) autosaveTimer = setTimeout(() => save('autosave'), 800);
+    renderWikiSuggestions();
   }
   async function request(path, options = {}) {
     const response = await fetch(`${apiBase}${path}`, {
@@ -99,20 +147,29 @@
     if (!response.ok || payload.ok === false) throw new Error(payload.error?.message || `请求失败（${response.status}）`);
     return payload;
   }
-  async function save() {
+  async function save(reason = 'manual') {
     if (saving || !loaded) return false;
     if (body.value.length > 200000) { showError('正文最多支持 200,000 字符，请精简后再保存。'); return false; }
     const submitted = snapshot();
     const fields = {
       title: title.value.trim() || '未命名笔记', body: body.value,
       tags: tags.value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean).slice(0, 12),
-      format: 'markdown', status: body.value.trim() || hasAttachments ? 'ready' : 'draft',
+      folder: folder.value.trim(), aliases: aliases.value.split(/[,，]/).map((value) => value.trim()).filter(Boolean), favorite: favorite.checked,
+      properties: {
+        course: course.value.trim(), chapter: chapter.value.trim(), type: noteType.value,
+        status: studyStatus.value, mastery: mastery.value === '' ? null : Number(mastery.value), reviewDate: reviewDate.value || null,
+      },
+      format: 'markdown', status: workflowStatus.value || 'draft',
+      versionReason: reason,
     };
     if (id) fields.expectedUpdatedAt = updatedAt;
+    let succeeded = false;
     saving = true; saveButton.disabled = true; showError(); setStatus('正在保存…');
     try {
       const result = await request(id ? `/notes/${encodeURIComponent(id)}` : '/notes', { method: id ? 'PATCH' : 'POST', body: fields });
       id = result.summary.id; updatedAt = result.summary.updatedAt;
+      updateReturnUrl();
+      succeeded = true;
       const url = new URL(location.href); url.searchParams.set('id', id); history.replaceState(null, '', url.href);
       // Edits typed during a slow request remain dirty; only the submitted snapshot was saved.
       if (snapshot() === submitted) {
@@ -120,12 +177,17 @@
       } else saved = submitted;
       setStatus(dirty() ? '有未保存的更改' : '所有更改已保存', dirty() ? 'dirty' : 'saved');
       renderPreview();
+      if (enhancedUi) await refreshRelations();
       return !dirty();
     } catch (error) { showError(`保存失败：${error.message}`); setStatus('保存失败，正文仍在当前页面', 'error'); return false; }
-    finally { saving = false; saveButton.disabled = false; }
+    finally {
+      saving = false; saveButton.disabled = false;
+      if (enhancedUi && succeeded && dirty()) { clearTimeout(autosaveTimer); autosaveTimer = setTimeout(() => save('autosave'), 800); }
+    }
   }
-  saveButton.addEventListener('click', save);
-  for (const input of [title, tags, body]) input.addEventListener('input', () => changed());
+  saveButton.addEventListener('click', () => save('manual'));
+  workflowStatus.value ||= 'draft';
+  for (const input of [title, tags, body, folder, aliases, course, chapter, noteType, workflowStatus, studyStatus, mastery, reviewDate, favorite]) input.addEventListener('input', () => changed(input === body));
   body.addEventListener('beforeinput', captureSelection);
   body.addEventListener('scroll', syncSource);
   undoButton.addEventListener('click', () => restoreEdit(past, future));
@@ -140,7 +202,7 @@
   });
   properties.addEventListener('keydown', (event) => { if (event.key === 'Escape') { properties.open = false; properties.querySelector('summary')?.focus(); } });
   document.addEventListener('keydown', (event) => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); save(); }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); save('manual'); }
   });
   body.addEventListener('keydown', (event) => {
     if ((event.ctrlKey || event.metaKey) && !event.isComposing) {
@@ -163,7 +225,7 @@
     const formats = {
       heading: ['## ', '', '标题'], bold: ['**', '**', '粗体文字'], italic: ['*', '*', '斜体文字'],
       list: ['- ', '', '列表项'], quote: ['> ', '', '引用内容'], code: ['```\n', '\n```', '代码'],
-      link: ['[', '](https://example.com)', '链接文字'],
+      link: ['[', '](https://example.com)', '链接文字'], wiki: ['[[', ']]', '关联笔记'],
       strike: ['~~', '~~', '文字'], table: ['| 列一 | 列二 |\n| --- | --- |\n| ', ' | 内容 |\n', '内容'],
     };
     const [before, after, sample] = formats[button.dataset.format];
@@ -198,7 +260,7 @@
   document.getElementById('leave-save').addEventListener('click', async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
-    const success = await save();
+    const success = await save('manual');
     button.disabled = false;
     leaveDialog.close();
     if (success) leave();
@@ -210,18 +272,80 @@
     try {
       const { note } = await request(`/notes/${encodeURIComponent(id)}`);
       title.value = note.title; tags.value = (note.tags || []).join('，'); body.value = note.body || '';
+      workflowStatus.value = note.status || 'draft';
+      folder.value = note.folder || ''; aliases.value = (note.aliases || []).join('，'); favorite.checked = Boolean(note.favorite);
+      course.value = note.properties?.course || ''; chapter.value = note.properties?.chapter || ''; noteType.value = note.properties?.type || '';
+      studyStatus.value = note.properties?.status || ''; mastery.value = note.properties?.mastery ?? ''; reviewDate.value = note.properties?.reviewDate || '';
       updatedAt = note.updatedAt; saved = snapshot(); loaded = true;
       resetHistory();
       hasAttachments = Boolean(note.attachments?.length);
       const attachments = document.getElementById('note-attachments');
       if (note.attachments?.length) {
-        attachments.hidden = false; attachments.textContent = `已保留附件：${note.attachments.map((file) => file.name).join('、')}`;
+        attachments.hidden = false; attachments.textContent = '';
+        const label = document.createElement('span'); label.textContent = '原始附件：'; attachments.appendChild(label);
+        for (const file of note.attachments) {
+          const link = document.createElement('a'); link.href = file.dataUrl; link.download = file.name; link.rel = 'noopener'; link.textContent = `下载/打开 ${file.name}`;
+          attachments.appendChild(link);
+        }
       }
+      renderAttachmentPreviews(note.attachments ?? []);
       setStatus('所有更改已保存', 'saved'); renderPreview();
+      if (enhancedUi) await refreshRelations();
       title.disabled = tags.disabled = body.disabled = false; saveButton.disabled = false;
     } catch (error) {
       showError(`读取失败：${error.message}。请返回笔记列表后重新打开。`); setStatus('读取失败', 'error');
     }
   }
+
+  function renderOutline() {
+    outline.innerHTML = '';
+    for (const match of body.value.matchAll(/^(#{1,3})\s+(.+)$/gm)) {
+      const button = document.createElement('button'); button.type = 'button'; button.className = `note-outline-level-${match[1].length}`; button.textContent = match[2];
+      button.addEventListener('click', () => { body.focus(); body.setSelectionRange(match.index, match.index); }); outline.appendChild(button);
+    }
+    if (!outline.children.length) outline.textContent = '正文中还没有标题';
+  }
+
+  function renderWikiSuggestions() {
+    const before = body.value.slice(0, body.selectionStart);
+    const match = before.match(/\[\[([^\]]*)$/);
+    if (!match) { suggestions.hidden = true; return; }
+    const needle = match[1].toLowerCase();
+    const choices = noteIndex.filter((item) => item.id !== id && [item.title, ...(item.aliases || [])].some((name) => name.toLowerCase().includes(needle))).slice(0, 8);
+    suggestions.innerHTML = '';
+    for (const item of choices) {
+      const button = document.createElement('button'); button.type = 'button'; button.textContent = `${item.title}${item.folder ? ` · ${item.folder}` : ''}`;
+      button.addEventListener('click', () => {
+        const start = body.selectionStart - match[0].length; body.setRangeText(`[[${item.title}]]`, start, body.selectionStart, 'end'); suggestions.hidden = true; body.focus(); changed();
+      }); suggestions.appendChild(button);
+    }
+    suggestions.hidden = !choices.length;
+  }
+
+  async function refreshRelations() {
+    if (!id) return;
+    try {
+      const [linkData, versionData] = await Promise.all([request(`/notes/${encodeURIComponent(id)}/links`), request(`/notes/${encodeURIComponent(id)}/versions`)]);
+      linksPanel.innerHTML = '';
+      const groups = [['引用', linkData.outgoing], ['反向链接', linkData.backlinks], ['未链接提及', linkData.unlinked]];
+      for (const [label, items] of groups) {
+        const heading = document.createElement('strong'); heading.textContent = `${label} · ${items.length}`; linksPanel.appendChild(heading);
+        for (const item of items.slice(0, 12)) {
+          const button = document.createElement('button'); button.type = 'button'; button.textContent = item.title || item.target;
+          if (item.targetId || item.id) button.addEventListener('click', () => { const url = new URL(location.href); url.searchParams.set('id', item.targetId || item.id); location.href = url.href; });
+          linksPanel.appendChild(button);
+        }
+      }
+      versionsPanel.innerHTML = '';
+      for (const version of versionData.items.slice(0, 12)) {
+        const button = document.createElement('button'); button.type = 'button'; button.textContent = `${new Date(version.createdAt).toLocaleString()} · ${version.reason}`;
+        button.addEventListener('click', async () => { if (!confirm('恢复这个历史版本？当前版本会先自动备份。')) return; await request(`/notes/${encodeURIComponent(id)}/versions/${encodeURIComponent(version.id)}/restore`, { method: 'POST', body: {} }); location.reload(); });
+        versionsPanel.appendChild(button);
+      }
+      if (!versionData.items.length) versionsPanel.textContent = '还没有历史快照';
+    } catch (error) { linksPanel.textContent = `关联读取失败：${error.message}`; }
+  }
+
+  if (enhancedUi) request('/notes?limit=500').then((result) => { noteIndex = result.items || []; }).catch(() => {});
   load();
 })();
