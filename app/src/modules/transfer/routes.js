@@ -26,6 +26,15 @@ export function registerTransferRoutes(router, { own, apiPrefix }) {
   /** 改设备名 / 可被发现 / 允许接收。 */
   router.post(`${P}/settings`, ({ body }) => transfer.updateSettings(body ?? {}));
 
+  /**
+   * 局域网网关开关（「传输」页那个开关，**默认关**）。
+   * 打开后 `http://<本机IP>:8886/app` 才存在，且要配对码换来的局域网令牌才能用。
+   */
+  router.post(`${P}/gateway`, ({ body }) => transfer.updateGateway(body ?? {}));
+
+  /** 注销所有局域网令牌：一键把已经连上的手机（全部）踢掉，它们下次要重新输配对码。 */
+  router.post(`${P}/gateway/revoke`, () => transfer.revokeLanTokens());
+
   /** 集合清单：哪些能传、哪些接收侧写不进来（界面直接照着显示原因）。 */
   router.get(`${P}/catalog`, () => ({ catalog: catalog() }));
 

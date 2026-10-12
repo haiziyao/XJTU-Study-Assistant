@@ -1911,8 +1911,78 @@ export async function searchWebDetailed({
 // 读正文
 // ---------------------------------------------------------------------------
 
-/** 正文清洗时要整块丢掉的标签（地图/表单/导航这些不是正文）。 */
-const DROP_TAGS = 'script|style|noscript|template|svg|canvas|iframe|object|embed|form|nav|header|footer|aside|button|select|option|dialog';
+/**
+ * 正文清洗时要整块丢掉的标签（地图/表单/导航这些不是正文）。
+ *
+ * **这一版把 `form` 从上面那张表里拿出来了**（原来有它）：博达 VSB 站群的新模板
+ * 把**整篇文章包在 `<form name="_newscontent_fromname">` 里** —— 标题目录、发布时间、
+ * `<div id="vsb_content">` 全是它的子节点。原来那条"丢掉 form 包括内容"会把正文一起吃掉。
+ * 实测证据（2026-10-13，`https://sae.xjtu.edu.cn/info/1024/1173.htm`，页面 23,845 字节）：
+ * 带 `form` 时清洗结果 **865 字全是导航**（学校首页/学院概况/师资队伍…，正文一个字没有），
+ * 把 `form` 拿掉后同一页清洗出 **1495 字**，`汤铁钢`/`申胜平`/`徐自力` 等正文人名全在。
+ * 表单控件本身照旧会被剥成空文本（`<input>`/`<select>`/`<option>` 仍在表里），
+ * 所以"丢表单"这个意图不受影响，只是不再把 form 的**内容**（往往就是正文容器）也丢掉。
+ */
+const DROP_TAGS = 'script|style|noscript|template|svg|canvas|iframe|object|embed|nav|header|footer|aside|button|select|option|dialog';
+
+/**
+ * 站内正文容器的开头标记（**先取容器，再清洗**）。
+ *
+ * 为什么需要它：一类校内页面（博达 VSB 站群的新模板）把正文放在固定的容器里，
+ * 但同一页还有**两份完整重复的导航**（PC 一份、移动端一份）与页脚。
+ * 只做"整页剥标签 + 逐行去噪"时，导航占的篇幅可能比正文还长、而且长得很像正文行，
+ * 模型拿到的仍是一堆菜单。命中容器就等于直接定位到正文区，把这些噪声一次性绕开。
+ *
+ * 标记只取**语义明确**的绝对路径（`#vsb_content`、`.v_news_content` 等），
+ * 故意不写 `.content` 这种大路货 —— 猜错容器比不猜更糟（会把别的区块当正文）。
+ */
+const CONTENT_CONTAINER_RE = /<(?:div|article|section|td)\b[^>]*\bid\s*=\s*["']?(?:vsb_content(?:_other)?|v_news_content|vsb_content_100|articleContent|article_content|zoom)["']?[^>]*>|<(?:div|article|section|td)\b[^>]*\bclass\s*=\s*["'][^"']*(?:\bv_news_content\b|vsbcontent)[^"']*["'][^>]*>/i;
+
+/**
+ * 容器一路不闭合时的兜底上限：超过就认为标记只是"提到"了这些名字，不算容器。
+ * 防止把 `id="vsb_content"` 出现在脚本字符串里的整页都当成正文。
+ */
+const CONTAINER_FALLBACK_CHARS = 200_000;
+
+/** 清洗后短于这个字数就算"没拿到真正文"，触发摘要兜底。 */
+export const PAGE_TEXT_MIN_CHARS = 200;
+
+/**
+ * 站内 `content.jsp`：**实测结论是"不能用来取正文"，所以没有实现这条通道。**
+ *
+ * 2026-10-13 真网实测（带浏览器 UA 的 curl，目标页 `https://sae.xjtu.edu.cn/info/1024/1173.htm`）：
+ *
+ * 1. 整页 HTML 里 `content.jsp` 只出现 **1 次**，在页头的计数脚本里：
+ *    `<script type="text/javascript">_jsq_(1024,'/content.jsp',1173,1940881638)</script>`。
+ *    它引的 `/system/resource/js/counter.js` 里 `_jsq_` 是 `new Image()` 打点，
+ *    参数是 (treeid, pagename, newsid, owner) —— 这是**浏览量计数器**，不是取正文的接口。
+ * 2. 按 VSB9 的通用形状请求：
+ *    `GET /content.jsp?urltype=news.NewsContentUrl&wbtreeid=1024&wbnewsid=1173`
+ *    → **HTTP 200 / 26,775 字节 / `text/html;charset=UTF-8`**，但返回的是**整页 HTML**
+ *    （页头页脚 + 两份导航都在：`学校首页` 1 次、`汤铁钢` 4 次），**不是正文片段**。
+ * 3. 换成别的参数顺序（`wbtreeid` 提到最前、或去掉 `urltype`）→ HTTP 200 / **101 字节**：
+ *    `<html><body><p …>无效的访问地址</p></body></html>`。说明 `urltype` 与参数顺序都强校验，
+ *    而校验通过时它只是**把同一个页面又吐了一遍**（与 `.htm` 差 360 字节，去空白后同构）。
+ *
+ * 结论：正文本来就在 `.htm` 里（`<div id="vsb_content">`），**并不存在"JS 之后才加载正文"**；
+ * 只看到导航是 `htmlToText` 把 `<form>` 连内容一起丢掉造成的（见 `DROP_TAGS` 注释）。
+ * 所以这里不开任何站内接口通道：少一次请求、少一个会静默变形的猜测，
+ * 也不因为猜 URL 形状对站方多打流量。将来真要接，按下面的形状重测再说。
+ */
+export const VSB_CONTENT_ENDPOINT_SHAPE =
+  'content.jsp?urltype=news.NewsContentUrl&wbtreeid=<treeid>&wbnewsid=<newsid>（2026-10-13 实测：返回整页，不是正文片段）';
+
+/** 正文来源标记：容器 / 整页 / meta 摘要。模型侧据此区分"读了全文"与"只看到摘要"。 */
+export const PAGE_TEXT_VIA = Object.freeze({
+  container: 'container',
+  body: 'body',
+  meta: 'meta-description',
+});
+
+/** 摘要兜底时附给模型的口径：**必须**跟着正文一起回灌，否则模型会把摘要当全文承诺细节。 */
+export const META_DESCRIPTION_NOTE =
+  '这段是页面摘要（<meta description>），不是正文全文；正文可能由脚本渲染、在图片里或需要登录。'
+  + '只允许按摘要里确实出现的信息回答，不要补充摘要之外的细节。';
 
 /**
  * HTML → 纯文本。
@@ -1971,28 +2041,192 @@ export function truncateText(text, maxChars) {
   return `${source.slice(0, limit)}\n…（正文过长，已按设置截断，仅保留前 ${limit} 字）`;
 }
 
-/** 一个页面从 HTML 到可给模型看的正文。 */
-export function extractPageText(html, { maxChars = READ_MAX_CHARS } = {}) {
-  return truncateText(stripNoiseLines(htmlToText(html)), maxChars);
+/**
+ * 从 `openIndex` 处的开始标签起，按**同层 `<div>` 配对**找出容器正文。
+ *
+ * 为什么不能直接用"第一个 `</div>`"收尾：VSB 的 `#vsb_content` 里嵌了
+ * `<div class="v_news_content">` 和若干 `<p>`，第一个 `</div>` 属于内层，
+ * 会**把正文截掉一半**（实测 1173 页只留得下开头两段）。
+ * 所以这里数同层 div 的进出去配对外层那个，`<script>`/`<form>` 之类的无关标签不参与计数。
+ *
+ * 一路找不到配对时返回一大段（由调用方按长度闸门丢弃），**不返回 null** ——
+ * 因为"没配对"最常见的原因就是页面被截断，这时前半段仍然是能用的正文。
+ */
+function sliceContainerBody(html, openIndex) {
+  const startTag = /^<[a-zA-Z]+/.exec(html.slice(openIndex));
+  if (!startTag) return '';
+  const bodyStart = html.indexOf('>', openIndex);
+  if (bodyStart < 0) return '';
+  const tagName = startTag[0].slice(1).toLowerCase();
+  // 只有 div 需要配对：`<td>`/`<section>` 这类正文容器里再套同名标签的情况实测没有
+  if (tagName !== 'div') return html.slice(bodyStart + 1, bodyStart + 1 + CONTAINER_FALLBACK_CHARS);
+  const openRe = /<div\b/gi;
+  const closeRe = /<\/div\s*>/gi;
+  openRe.lastIndex = bodyStart + 1;
+  closeRe.lastIndex = bodyStart + 1;
+  let depth = 1;
+  for (;;) {
+    const open = openRe.exec(html);
+    const close = closeRe.exec(html);
+    if (!close) return html.slice(bodyStart + 1, bodyStart + 1 + CONTAINER_FALLBACK_CHARS);
+    if (open && open.index < close.index) {
+      depth += 1;
+      closeRe.lastIndex = open.index;
+      continue;
+    }
+    depth -= 1;
+    // 配对外层容器时收尾：内层的 `</div>` 只是让 depth 减 1，不会提前截断正文
+    if (depth === 0) return html.slice(bodyStart + 1, close.index);
+    openRe.lastIndex = close.index;
+  }
 }
 
-/** 读一个页面。**永远不 throw**：失败折叠成 `{ ok:false, error }`。 */
+/** 取站内正文容器里的 HTML；没有容器就返回 `null`。 */
+function extractContentContainer(html) {
+  const source = String(html ?? '');
+  const match = CONTENT_CONTAINER_RE.exec(source);
+  if (!match) return null;
+  return sliceContainerBody(source, match.index);
+}
+
+/**
+ * 取 `<meta name="description">` / `<meta property="og:description">` 的 `content`。
+ *
+ * 三种写法都要认：`name="description"`（最常见）、`property="og:description"`（分享卡片）、
+ * 以及**属性顺序颠倒**（`content` 写在 `name` 前面）与单引号/无引号 ——
+ * 校内页面是模板批量生成的，这几种在实测里都出现过。
+ */
+export function extractMetaDescription(html) {
+  const source = String(html ?? '');
+  // 先只切出 <meta …> 标签本身，避免把正文里的 "name=description" 误当元信息
+  for (const tag of source.match(/<meta\b[^>]*>/gi) ?? []) {
+    const names = tag.match(/\b(?:name|property)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi) ?? [];
+    const isDescription = names.some((raw) => /description$/i.test(raw.replace(/^[^=]*=\s*["']?/i, '').replace(/["']$/, '').trim()));
+    if (!isDescription) continue;
+    const content = tag.match(/\bcontent\s*=\s*(?:"([\s\S]*?)"|'([\s\S]*?)'|([^\s"'>]+))/i);
+    const value = collapseWhitespace(decodeEntities(content?.[1] ?? content?.[2] ?? content?.[3] ?? ''));
+    if (value) return value;
+  }
+  return '';
+}
+
+/** 摘要与正文是否在说同一段话（避免把摘要重复拼两遍）。 */
+function isSameContent(a, b) {
+  const left = collapseWhitespace(a);
+  const right = collapseWhitespace(b);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const shorter = left.length <= right.length ? left : right;
+  const longer = shorter === left ? right : left;
+  if (shorter.length < 30) return false;
+  // 摘要常是正文的截断版（结尾带省略号），拿前 30 字比对即可
+  return longer.includes(shorter.slice(0, 30));
+}
+
+/**
+ * 一个页面从 HTML 到可给模型看的正文 + **来源标记**。
+ *
+ * 顺序（也是优先级）：**站内正文容器 → 整页清洗 → meta 摘要兜底**。
+ *
+ * 为什么要带 `via` / `note`：摘要是"线索"不是"全文"。抓正文的整条链路里，
+ * 模型只能看到最终文本，它无法分辨"我读完了全文"和"我只看到了两百字摘要" ——
+ * 分不清就会承诺摘要里没有的细节（"会上确定了三项合作"）。所以来源必须**一路传下去**，
+ * 让模型自己按摘要的口径作答（`chat-service` 的 web 投影表里带 `textSource` / `note`）。
+ *
+ * @returns {{text:string, via:'container'|'body'|'meta-description', note:string|null,
+ *            usedMeta:boolean, chars:number, containerChars:number, bodyChars:number}}
+ */
+export function extractPage(html, { maxChars = READ_MAX_CHARS } = {}) {
+  const source = String(html ?? '');
+  const container = extractContentContainer(source);
+  const containerText = container === null ? '' : stripNoiseLines(htmlToText(container));
+  // 整页那条永远算一遍：容器可能只是"提到了 vsb_content"（脚本字符串），也可能命中的是导航区
+  const bodyText = stripNoiseLines(htmlToText(source));
+
+  /**
+   * 容器与整页怎么选：**容器里有文字就用容器**，不按"谁字数多"选。
+   *
+   * 因为 `#vsb_content` 外的两个导航副本（PC + 移动端）加起来通常比正文还长，
+   * 按字数会把导航选回来 —— 那正是这次要修的 bug。容器里有文字就说明这页确实是
+   * "正文在容器里"的模板，正文就是容器里的东西。
+   *
+   * 判断标准取"**非空**"而不是"够长"：短正文也是正文（实测里确实有正文很短的文章页）。
+   * 真正的空壳（`<div id="vsb_content"></div>`）清洗后是空串，会自然落到下面的摘要兜底 ——
+   * 那才是摘要该出场的时候。
+   */
+  const useContainer = Boolean(containerText);
+  let text = useContainer ? containerText : bodyText;
+  let via = useContainer ? PAGE_TEXT_VIA.container : PAGE_TEXT_VIA.body;
+  let note = null;
+
+  // 兜底只为"抓不到正文"服务：正文够长时**绝不**用摘要覆盖它
+  if (text.length < PAGE_TEXT_MIN_CHARS) {
+    const meta = extractMetaDescription(source);
+    if (meta) {
+      // 摘要与正文说的是同一段话时不叠加（否则同一句话出现两遍，白烧 token）
+      const adds = !isSameContent(meta, text);
+      text = adds ? `${meta}\n${text}`.trim() : text || meta;
+      via = PAGE_TEXT_VIA.meta;
+      note = META_DESCRIPTION_NOTE;
+    }
+  }
+
+  if (!text) {
+    return {
+      text: '',
+      via: PAGE_TEXT_VIA.body,
+      note: null,
+      usedMeta: false,
+      chars: 0,
+      containerChars: containerText.length,
+      bodyChars: bodyText.length,
+    };
+  }
+  const finalText = truncateText(text, maxChars);
+  return {
+    text: finalText,
+    via,
+    note,
+    usedMeta: via === PAGE_TEXT_VIA.meta,
+    chars: finalText.length,
+    containerChars: containerText.length,
+    bodyChars: bodyText.length,
+  };
+}
+
+/**
+ * 一个页面从 HTML 到可给模型看的正文（**字符串**，兼容老调用方）。
+ *
+ * 需要知道"这段是正文还是摘要"时用 `extractPage()`（多返回 `via` / `note`）。
+ */
+export function extractPageText(html, { maxChars = READ_MAX_CHARS } = {}) {
+  return extractPage(html, { maxChars }).text;
+}
+
+/**
+ * 读一个页面。**永远不 throw**：失败折叠成 `{ ok:false, error }`。
+ *
+ * 失败条目也照旧带 `via` / `note`（哪怕没有正文）：调用方与测试可以无条件读这两个字段，
+ * 少一类"忘了兜 undefined"的形状错误。
+ */
 async function readOnePage(result, { fetchImpl, maxChars, timeoutMs }) {
   const { title = '', url = '' } = result ?? {};
+  const failed = (error) => ({ title, url, ok: false, text: '', via: PAGE_TEXT_VIA.body, note: null, error });
   const response = await requestText(fetchImpl, url, { timeoutMs, accept: 'text/html,application/xhtml+xml' });
   if (!response.ok) {
-    return { title, url, ok: false, text: '', error: response.error ?? `HTTP ${response.status}` };
+    return failed(response.error ?? `HTTP ${response.status}`);
   }
   const type = String(response.contentType ?? '').toLowerCase();
   // 非网页正文（PDF/图片/JSON 接口）不硬啃：如实报错，让模型知道"这一页读不了"
   if (type && !/^(?:text\/|application\/(?:xhtml\+xml|xml))/.test(type)) {
-    return { title, url, ok: false, text: '', error: `不是网页正文（Content-Type: ${type.split(';')[0]}）` };
+    return failed(`不是网页正文（Content-Type: ${type.split(';')[0]}）`);
   }
-  const text = extractPageText(response.body, { maxChars });
-  if (!text) {
-    return { title, url, ok: false, text: '', error: '页面没有可提取的正文（可能是纯脚本渲染或空页）' };
+  const page = extractPage(response.body, { maxChars });
+  if (!page.text) {
+    return failed('页面没有可提取的正文（可能是纯脚本渲染或空页）');
   }
-  return { title, url, ok: true, text, error: null };
+  // via / note 跟着正文一起回灌：模型必须知道这段是"正文容器里的全文"还是"meta 摘要兜底"
+  return { title, url, ok: true, text: page.text, via: page.via, note: page.note, error: null };
 }
 
 /**
@@ -2009,7 +2243,10 @@ async function readOnePage(result, { fetchImpl, maxChars, timeoutMs }) {
  * @param {Function} [options.fetchImpl]
  * @param {number} [options.concurrency=3] 并发（收敛到 1–4）
  * @param {number} [options.maxChars=4000]
- * @returns {Promise<Array<{title:string,url:string,ok:boolean,text:string,error:string|null}>>}
+ * @returns {Promise<Array<{title:string,url:string,ok:boolean,text:string,
+ *   via:'container'|'body'|'meta-description',note:string|null,error:string|null}>>}
+ *   `via` 说明这段文字是**从哪来的**：`container` 站内正文容器 / `body` 整页清洗 /
+ *   `meta-description` meta 摘要兜底（此时 `note` 会给模型一句"这是摘要不是全文"的口径）。
  */
 export async function readPages(results, options = {}) {
   const { fetchImpl, concurrency, maxChars = READ_MAX_CHARS, timeoutMs = READ_TIMEOUT_MS, log } = options;
@@ -2036,6 +2273,8 @@ export async function readPages(results, options = {}) {
           url: targets[index]?.url ?? '',
           ok: false,
           text: '',
+          via: PAGE_TEXT_VIA.body,
+          note: null,
           error: `读取时发生未预期错误：${error?.message ?? error}`,
         };
       }
@@ -2101,11 +2340,11 @@ export const WEB_SEARCH_TOOL = Object.freeze({
 export const WEB_SEARCH_PROMPT = `【联网检索（web_search）】
 - **什么时候该搜**：用户问的是**你不可能知道的最新/本地信息**时——最新政策与通知、教务/学院/研究生院的具体要求、某门课或某位老师的现状、近期新闻、某个网址上写了什么。用户明确说"搜一下""查一下""网上怎么说"时更要搜。
 - **什么时候别搜**：纯聊天、写作/翻译/改写、代码与算法、基于本地已有数据（日程/待办/成绩/笔记）能回答的问题。**先看本地数据，本地没有才联网**。
-- **怎么用**：需要联网时，按当前对话协议发出一次**联网检索请求**（检索词用关键词组合，别写整句口语；模式按下面那一档）。系统会真的去搜，并把**搜到的真实链接 + 抓到的正文**回灌给你；你**不能**拿记忆里的内容冒充搜索结果，也不要反复发起同一条检索。
+- **怎么用**：需要联网时，按当前对话协议发出一次**联网检索请求**（检索词用关键词组合，别写整句口语；模式按下面那一档）。\n- **用户直接给了网址**（"帮我看看这个页面写了什么 <网址>"）→ **不要再拿网址去搜**（搜索引擎会把 \`https\` 当关键词，返回一堆协议科普文，实测过），改用 \`{"action":"query","target":"web","fields":{"url":"<网址>"}}\` 直接读那一页。系统会真的去搜，并把**搜到的真实链接 + 抓到的正文**回灌给你；你**不能**拿记忆里的内容冒充搜索结果，也不要反复发起同一条检索。
 - **必须引用真实 URL**：每个结论后面用 markdown 链接写出它来自哪一条结果，形如 [教务处通知](https://dean.xjtu.edu.cn/xxx)。**只允许引用系统真实返回过的 URL**。
 - **绝对不许编造链接、标题、日期或引文**。编一个看起来很像的校内链接，比"没查到"糟糕得多。
 - **搜不到就直说**：没有结果或检索失败时，如实告诉用户"这次没搜到 / 检索被拦截了"，可以说明你试过什么（例如"没配置搜索 API 密钥、结果页被反爬挡住"），并给出可行的下一步（换个说法再搜、自己打开某网址、等会儿再试）。**不要**用"根据我的知识"来掩盖一次失败的检索。
-- **正文与摘要要分清**：只拿到摘要的条目，就说"这条只看到标题与摘要"，不要当成读完了全文。
+- **正文与摘要要分清**：每条结果都带 \`textSource\` —— \`container\`/\`body\` 是**抓到的正文**，\`meta-description\` 表示**只拿到了页面摘要**（此时 \`note\` 会写明"这是摘要，不是正文全文"）。看到 \`meta-description\` 就说"这条只看到标题与摘要"，只按摘要里确实出现的信息回答，**不要补充摘要之外的细节，也不要说"全文里还写了…"**。没有正文（\`ok:false\`）的条目同样如实说明。
 - **校内信息的边界**：campus 档只保证把检索收窄到校内站点，**不等于**登录了校内系统。需要登录才能看到的成绩、作业、课表，仍然要用本地已同步的数据回答，不要假装看到了网页。`;
 
 /** 三档检索开关对应的提示词（可直接替换 prompt.js 里的 SEARCH_NOTES）。 */
@@ -2145,7 +2384,13 @@ export default {
   dedupeResults,
   htmlToText,
   stripNoiseLines,
+  extractPage,
   extractPageText,
+  extractMetaDescription,
+  PAGE_TEXT_VIA,
+  PAGE_TEXT_MIN_CHARS,
+  META_DESCRIPTION_NOTE,
+  VSB_CONTENT_ENDPOINT_SHAPE,
   truncateText,
   parseBingResults,
   parseBaiduResults,

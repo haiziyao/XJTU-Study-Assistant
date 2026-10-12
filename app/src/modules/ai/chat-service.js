@@ -1091,7 +1091,18 @@ export class AiChatService {
         out.push(await this.#runWebQuery(entry, searchMode));
         continue;
       }
-      if (entry.error) continue;
+      /**
+       * 校验没过的查询**也要记进本轮结果**，不能悄悄跳过。
+       *
+       * 实测过的事故：模型说"我把原文调出来看"，草稿却被 400 挡掉（path 传了 URL），
+       * 旧代码在这里 `continue` → 本轮"没有新查询" → 循环立刻结束 → 用户只看到那句
+       * "我去看看"，既没有结果也没有解释。失败也是结果：把它回灌（见 #withQueryResults
+       * 的 failed 段），模型才有机会改个写法重试或如实说明。
+       */
+      if (entry.error) {
+        out.push({ draft: entry.draft, error: entry.error });
+        continue;
+      }
       try {
         const result = await this.commands.execute(entry.draft, { dryRun: true });
         out.push({ draft: entry.draft, result: this.#compactQueryResult(entry.draft.target, result) });
@@ -1139,6 +1150,9 @@ export class AiChatService {
         error: page.error ?? null,
         chars: String(page.text ?? '').length,
         text: String(page.text ?? '').slice(0, WEB_TEXT_CHARS),
+        // 来源口径与正文一起回灌（见下方 #compactQueryResult 的 web 投影表）
+        textSource: page.via ?? null,
+        note: page.note ?? null,
       };
     });
     return {
@@ -1155,6 +1169,57 @@ export class AiChatService {
   }
 
   /**
+   * 读用户/模型指定的一批网址（`fields.url`，可逗号或换行分隔多条）。
+   *
+   * 与"搜索后读正文"共用同一套抓取与清洗（`readPages`），所以正文容器识别、meta 摘要兜底、
+   * 失败原因这些都一致；区别只是**不经过搜索引擎**。
+   */
+  async #readGivenUrls(draft, rawUrls) {
+    const urls = String(rawUrls)
+      .split(/[\s,，]+/)
+      .map((item) => item.trim())
+      .filter((item) => /^https?:\/\//i.test(item))
+      .slice(0, 5);
+    if (!urls.length) {
+      return { draft, error: { code: 'BAD_REQUEST', message: 'fields.url 里没有可用的 http(s) 网址' } };
+    }
+    const config = this.config.get() ?? {};
+    const limit = normalizeSearchLimit(config.searchMaxPages, { fallback: SEARCH_LIMIT_DEFAULT });
+    const log = (level, message) => this.#log(level, message);
+    try {
+      const pages = await readPages(
+        urls.map((url) => ({ title: url, url })),
+        { limit, log, fetchImpl: this.searchFetch ?? undefined },
+      );
+      const items = pages.map((page) => ({
+        title: page.title && page.title !== page.url ? page.title : page.url,
+        url: page.url,
+        snippet: '',
+        source: 'direct',
+        scope: /(^|\.)xjtu\.edu\.cn$/i.test((() => { try { return new URL(page.url).hostname; } catch { return ''; } })()) ? 'campus' : 'web',
+        text: String(page.text ?? '').slice(0, WEB_TEXT_CHARS),
+        chars: String(page.text ?? '').length,
+        textSource: page.via ?? null,
+        note: page.note ?? null,
+        ok: page.ok !== false,
+        error: page.error ?? null,
+      }));
+      const read = items.filter((item) => item.chars > 0).length;
+      return {
+        draft,
+        result: this.#compactQueryResult(WEB_TARGET, {
+          filters: { url: urls.join(' '), mode: 'direct' },
+          count: items.length,
+          items,
+          explain: `直接读取指定网址：${urls.length} 个，读到正文 ${read} 个`,
+        }),
+      };
+    } catch (error) {
+      return { draft, error: { code: error.code ?? 'INTERNAL', message: `读取指定网址失败：${error.message}` } };
+    }
+  }
+
+  /**
    * 联网检索：搜结果 → 读正文 → 合成一条只读查询结果。
    *
    * 为什么不在命令服务里注册一个 `web` handler（那样看着更"统一"）：命令 handler 的签名
@@ -1166,20 +1231,37 @@ export class AiChatService {
    */
   async #runWebQuery(entry, searchMode) {
     const draft = entry.draft;
+    /**
+     * 用户**直接给了网址**时，读那一页，而不是"拿网址去搜"。
+     *
+     * 实测过的笑话：用户说"帮我看看这个页面写了什么：https://sae.xjtu.edu.cn/info/1024/1173.htm"，
+     * 模型把整条 URL 当检索词丢给搜索引擎，引擎把 "https" 当成关键词，返回了一堆 HTTP 协议科普文 ——
+     * 页面一个字没读到，模型只能如实说"这次检索等于白跑了"。
+     * 有 URL 就直接抓（正文提取那套逻辑照用），这才是"看看这个页面"的正解。
+     */
+    const directUrl = String(draft.fields?.url ?? '').trim();
     const query = String(draft.fields?.query ?? draft.filters?.q ?? '').trim();
-    if (!query) {
-      return { draft, error: { code: 'BAD_REQUEST', message: '联网检索缺少检索词（fields.query）' } };
+    if (!directUrl && !query) {
+      return {
+        draft,
+        error: {
+          code: 'BAD_REQUEST',
+          message: '联网检索要么给检索词（fields.query），要么给要读的网址（fields.url）',
+        },
+      };
     }
+    // 同一个开关管两件事：读指定网址同样是"出网"，用户关掉联网就不做
     if (!WEB_SEARCH_MODES.includes(searchMode) || searchMode === 'off') {
       return {
         draft,
         error: {
           code: 'SEARCH_OFF',
           message:
-            '联网搜索已关闭（输入框下面的地球图标选了「不联网」）。想让我搜，先把它切成「从校外网搜索」或「从校内网搜索」。',
+            '联网搜索已关闭（输入框下面的地球图标选了「不联网」）。想让我读这个页面，先把它切成「从校外网搜索」或「从校内网搜索」。',
         },
       };
     }
+    if (directUrl) return this.#readGivenUrls(draft, directUrl);
     // 通道以界面为准：界面选校外时，模型写 campus 也不越权（反过来同理）
     const mode = searchMode;
     const config = this.config.get() ?? {};
@@ -1229,6 +1311,9 @@ export class AiChatService {
           chars: String(page.text ?? '').length,
           ok: page.ok !== false,
           error: page.error ?? null,
+          // 来源口径：`meta` 时 note 会写明"这是摘要不是全文"，模型据此才算真的知道
+          textSource: page.via ?? null,
+          note: page.note ?? null,
         };
       });
       const read = items.filter((item) => item.text).length;
@@ -1282,7 +1367,10 @@ export class AiChatService {
       // 联网检索：**必须带上 text（正文）与 url** —— 只给标题，模型就只能凭标题猜，
       // 回答会写得像"读过了"；`ok`/`error` 让它知道哪几条根本没抓到正文（如实说明）。
       // 这条曾经漏掉过：items 里只剩 title，模型于是拿不到任何网页内容。
-      web: ['title', 'url', 'snippet', 'source', 'scope', 'text', 'chars', 'ok', 'error'],
+      // `textSource`/`note` 是**来源口径**：`container`=站内正文容器（真全文）、
+      // `body`=整页清洗、`meta`=只拿到 meta 摘要。没有它，模型分不清
+      // "我读完了全文"和"我只看到两百字摘要"，就会承诺摘要里没有的细节。
+      web: ['title', 'url', 'snippet', 'source', 'scope', 'text', 'chars', 'textSource', 'note', 'ok', 'error'],
     };
     // 模块声明的投影表覆盖内置表（内置三张表保持原样，行为不变）
     const fields = this.queryFields?.[target] ?? FIELDS[target] ?? ['id', 'title'];

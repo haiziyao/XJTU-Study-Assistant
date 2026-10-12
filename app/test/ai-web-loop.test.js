@@ -285,3 +285,142 @@ test('联网检索：试搜接口把诊断信息一起给出来（后端选择 /
     await mock.close();
   }
 });
+
+/**
+ * 这一条钉住的是**来源口径有没有真的到模型手里**。
+ *
+ * 校内一类页面（VSB 新模板）把正文放在容器里、页面外只有导航与 `<meta description>`。
+ * 抓不到正文时我们会回退取摘要 —— 但摘要不是全文：模型若分不清这两者，
+ * 就会拿两百字摘要承诺"会上确定了三项合作"。所以 `textSource` / `note` 必须
+ * 跟着正文一起进提示词，而不是只在我们自己的返回值里。
+ */
+test('联网检索：只拿到 meta 摘要的条目，回灌里带 textSource=meta 与"不是全文"的说明', async () => {
+  const mock = await startMockAi({
+    apiKey: KEY,
+    replies: [
+      `我查一下。\n${fenced({ ok: true, action: 'query', target: 'web', fields: { query: '流体物理研究所 来访' }, explain: '查一下' })}`,
+      '这条我只看到摘要。',
+    ],
+  });
+  const DESCRIPTION = '6月21日，中国工程物理研究院流体物理研究所汤铁钢副所长等一行7人到访航天航空学院，进行技术交流。';
+  const NAV = '<nav>首页 | 学院概况 | 师资队伍 | 人才培养 | 科学研究 | 学生风采</nav>';
+  let origin = '';
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    if (url.pathname.startsWith('/doc')) {
+      // 正文**真的不在页面里**：只有导航 + meta 摘要（纯脚本渲染那类模板）
+      res.end(
+        `<!doctype html><html><head><title>工作动态</title>`
+        + `<meta name="description" content="${DESCRIPTION}"></head>`
+        + `<body>${NAV}<div id="main">当前位置： 党建工作 工作动态 正文</div></body></html>`,
+      );
+      return;
+    }
+    const items = [1, 2].map((n) => ({
+      url: `http://127.0.0.1:${server.address().port}/doc${n}?i=${n}`,
+      title: `流体物理研究所 来访 第 ${n} 条`,
+      snippet: '流体物理研究所来访航天航空学院的摘要',
+    }));
+    res.end(bingPage(items));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  origin = `http://127.0.0.1:${server.address().port}`;
+  const ENGINE_HOSTS = /(^|\.)(bing\.com|baidu\.com|sogou\.com|so\.com|duckduckgo\.com|mojeek\.com)$/i;
+  const fetchImpl = (input, init) => {
+    const raw = typeof input === 'string' ? input : input?.url ?? String(input);
+    const url = new URL(raw);
+    if (ENGINE_HOSTS.test(url.hostname)) return fetch(`${origin}/search?${url.searchParams.toString()}`, init);
+    if (url.hostname === '127.0.0.1' || url.hostname === 'localhost') return fetch(raw, init);
+    throw new Error(`测试不该访问外网：${raw}`);
+  };
+  const { app, call } = await startApp({ searchFetch: fetchImpl });
+  try {
+    await configure(call, mock, { searchMaxPages: 5 });
+    const sent = await call('POST', '/ai/chat', {
+      text: '搜一下流体物理研究所来访',
+      search: 'web',
+      permission: 'manual',
+      stream: false,
+    });
+    assert.equal(sent.status, 200, JSON.stringify(sent.body));
+
+    const items = (sent.body.queried ?? [])[0]?.result?.items ?? [];
+    const metaItem = items.find((item) => item.textSource === 'meta-description');
+    assert.ok(metaItem, `要有条目标明 textSource=meta-description：${JSON.stringify(items.map((i) => i.textSource))}`);
+    assert.match(metaItem.note, /摘要/);
+    assert.match(metaItem.note, /不是正文全文/);
+    assert.ok(metaItem.text.includes('汤铁钢'), '摘要内容要带回来，模型才答得出"谁来了"');
+
+    // 真正要钉的：这些字段**进了发给模型的提示词**，不是只停在我们自己的返回值里
+    const fedBack = mock.state.bodies
+      .flatMap((body) => body.messages ?? [])
+      .map((message) => String(message.content ?? ''))
+      .join('\n');
+    assert.match(fedBack, /"textSource":"meta-description"/, '回灌里要有 textSource');
+    assert.match(fedBack, /"note":"[^"]*不是正文全文/, '回灌里要有"这是摘要不是全文"的口径');
+    assert.match(fedBack, /汤铁钢/, '回灌里要有摘要原文');
+  } finally {
+    await app.close();
+    await server.close();
+    await mock.close();
+  }
+});
+
+
+test('联网检索：用户给了网址时直接读那一页，而不是拿网址去搜', async () => {
+  // 假网页要先起，草稿里的网址必须是**真能连上的那个**（我第一版写成占位端口，结果读了个空）
+  const web = await startFakeWeb();
+  const docUrl = `${web.origin}/doc1`;
+  const mock = await startMockAi({
+    apiKey: KEY,
+    replies: [
+      `我去读一下这个页面。\n${fenced({ ok: true, action: 'query', target: 'web', fields: { url: docUrl }, explain: '读指定页面' })}`,
+      '读到了，页面上写的是转专业申请时间。',
+    ],
+  });
+  const { app, call } = await startApp({ searchFetch: web.fetchImpl });
+  try {
+    await configure(call, mock, { searchMaxPages: 5 });
+    const sent = await call('POST', '/ai/chat', {
+      text: `帮我看看这个页面写了什么：${docUrl}`,
+      search: 'web',
+      stream: false,
+    });
+    assert.equal(sent.status, 200, JSON.stringify(sent.body));
+    const entry = (sent.body.queried ?? [])[0];
+    assert.ok(entry?.result, `应该有一条检索结果：${JSON.stringify(sent.body.queried)?.slice(0, 300)}`);
+    assert.equal(entry.result.items[0].source, 'direct', '直接读取的条目要标 source=direct');
+    assert.match(String(entry.result.items[0].text ?? ''), /转专业申请时间/, '要把那一页的正文读回来');
+    assert.equal(web.hits.length, 0, '不该拿网址去搜（搜索引擎会把 https 当关键词）');
+  } finally {
+    await app.close();
+    await web.close();
+    await mock.close();
+  }
+});
+
+test('联网检索：联网关掉时不给读网址，并说明怎么打开', async () => {
+  const web = await startFakeWeb();
+  const docUrl = `${web.origin}/doc1`;
+  const mock = await startMockAi({
+    apiKey: KEY,
+    replies: [
+      `我去读。\n${fenced({ ok: true, action: 'query', target: 'web', fields: { url: docUrl }, explain: '读页面' })}`,
+      '好，那我不读了。',
+    ],
+  });
+  const { app, call } = await startApp({ searchFetch: web.fetchImpl });
+  try {
+    await configure(call, mock);
+    const sent = await call('POST', '/ai/chat', { text: `帮我看看 ${docUrl}`, search: 'off', stream: false });
+    const entry = (sent.body.queried ?? [])[0];
+    assert.equal(entry?.error?.code, 'SEARCH_OFF', JSON.stringify(sent.body.queried)?.slice(0, 300));
+    assert.match(entry.error.message, /地球图标|不联网/, '要说清怎么打开');
+    assert.equal(web.pages.length, 0, '关掉联网就不许抓页面');
+  } finally {
+    await app.close();
+    await web.close();
+    await mock.close();
+  }
+});

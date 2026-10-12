@@ -897,6 +897,10 @@ test('提示词：讲清何时该搜、必须引用真实 URL、搜不到要说�
   assert.ok(text.includes('绝对不许编造链接'));
   assert.ok(text.includes('搜不到就直说'));
   assert.ok(text.includes('先看本地数据'));
+  // 「摘要不是全文」这条要指名道姓：模型得知道看 `textSource` 判断手里的是正文还是摘要
+  assert.ok(text.includes('正文与摘要要分清'));
+  assert.ok(text.includes('textSource'), '要告诉模型看哪个字段区分正文与摘要');
+  assert.ok(text.includes('meta-description'), '要写明"只拿到摘要"时该字段的取值');
 
   // 三档都要有，且 campus 档必须说清"可达 ≠ 登录/不等于确认在校园网"
   assert.deepEqual(Object.keys(WEB_SEARCH_MODE_NOTES), ['off', 'web', 'campus']);

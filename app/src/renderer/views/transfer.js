@@ -147,6 +147,7 @@
       if (ui.data) {
         renderPairing(content);
         renderSwitches(content);
+        renderGateway(content);
         renderPeers(content);
         renderCollections(content);
         renderProgress(content);
@@ -261,6 +262,30 @@
     PC.toast(action === 'delete' ? '已删除刚收下的那条' : '保留两条，已从清单划掉');
     await load();
   });
+
+  /** 局域网网关开关（默认关；打开后手机上才打得开本程序）。 */
+  const setGateway = (enabled) => run('gateway', async () => {
+    await PC.api('/transfer/gateway', { method: 'POST', body: { enabled } });
+    PC.toast(enabled ? '已打开：手机可以打开本程序了（要输配对码）' : '已关闭：局域网入口立刻失效');
+    await load();
+  });
+
+  /** 一键注销所有已授权的手机（它们下次要重新输配对码）。 */
+  const revokeLanTokens = () => run('revoke', async () => {
+    const result = await PC.api('/transfer/gateway/revoke', { method: 'POST', body: {} });
+    PC.toast(result.revoked ? `已注销 ${result.revoked} 台设备，它们需要重新输配对码` : '当前没有被授权的设备');
+    await load();
+  });
+
+  /** 复制：优先用剪贴板 API（失败就提示手动选中，绝不假装成功）。 */
+  async function copyText(text, okText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      PC.toast(okText ?? '已复制');
+    } catch {
+      PC.toast(`复制失败，请手动选中：${text}`);
+    }
+  }
 
   /* ------------------------------------------------------------ 各区块 */
 
@@ -397,6 +422,100 @@
             : `发现通道未启动${discovery.error ? `：${discovery.error}` : ''}——广播被防火墙拦时，直接手工填对方的 IP:8886。`,
       ),
     );
+    host.appendChild(box);
+  }
+
+  /**
+   * 局域网网关：让手机/平板用浏览器打开本程序（iOS 壳与 PWA 的前置入口）。
+   *
+   * 为什么单独一块、默认关：主服务只监听 127.0.0.1（手机连不上是必然的），网关是把
+   * `/app`+`/api`+`/ws` 放到 8886 上对外 —— **这是安全边界的一次外扩**，所以：
+   *   - 默认关，必须由用户自己打开；
+   *   - 进门要配对码（与直传同一个 6 位码、同一套"错 5 次锁 60 秒"）；
+   *   - 风险原话写在卡片里，不粉饰；
+   *   - 一键就能注销所有已授权设备 / 关掉整个入口。
+   */
+  function renderGateway(host) {
+    const data = ui.data;
+    const gateway = data.gateway ?? { enabled: false, urls: [], tokens: [], tokenCount: 0, entry: '' };
+    const box = card('手机 / 平板打开本程序', gateway.enabled ? `已授权 ${gateway.tokenCount} 台设备` : '默认关');
+
+    box.appendChild(
+      switchRow(
+        '允许手机/平板在局域网内打开本程序（默认关）',
+        '打开后，同一局域网内、拿到配对码的设备可以访问你本机的数据（成绩/笔记/对话）。关掉立即全部失效，已进门的设备要重新输码。',
+        gateway.enabled,
+        (checked) => setGateway(checked),
+      ),
+    );
+
+    if (!gateway.enabled) {
+      box.appendChild(
+        mk(
+          'div',
+          'tf-card-note',
+          '主服务只听 127.0.0.1（只有本机打得开），所以手机直接开 http://电脑IP:3210/app 一定连不上。要用手机，就在这里打开网关：它把这个入口放到局域网可达的 8886 上，并且仍然要配对码。',
+        ),
+      );
+      host.appendChild(box);
+      return;
+    }
+
+    const urls = gateway.urls ?? [];
+    if (!urls.length) {
+      box.appendChild(alertBox('没找到局域网地址', '这台机器现在没有非回环的 IPv4 地址（可能没连 Wi-Fi）。连上网络后重新打开本页。', 'warn'));
+    } else {
+      const list = mk('div', 'tf-list');
+      for (const url of urls) {
+        const row = mk('div', 'tf-lan-row');
+        row.appendChild(mk('code', 'tf-lan-url', url));
+        row.appendChild(button('复制', 'ghost-btn', () => copyText(url, '地址已复制，用手机浏览器打开')));
+        list.appendChild(row);
+      }
+      box.appendChild(list);
+    }
+
+    box.appendChild(
+      mk(
+        'div',
+        'tf-card-note',
+        '手机做法：Safari 打开上面的地址 → 输入本页显示的 6 位配对码 → 进入后再「分享 → 添加到主屏幕」，桌面上就有一个像 App 一样的图标。',
+      ),
+    );
+    box.appendChild(mk('div', 'tf-card-note', `一台设备输一次码可连续用 30 分钟（Cookie 到期后重新输码即可）。现在有 ${gateway.tokenCount} 台设备被授权。`));
+
+    // 已授权设备：只显示"能认出是谁"的信息（完整令牌不出现在任何接口响应里）
+    const tokens = gateway.tokens ?? [];
+    if (tokens.length) {
+      const list = mk('div', 'tf-list');
+      for (const session of tokens) {
+        const row = mk('div', 'tf-log-row');
+        const main = mk('div', 'tf-log-main');
+        main.appendChild(mk('div', 'tf-log-title', session.label));
+        main.appendChild(mk('div', 'tf-log-meta', `令牌 ${session.id}… · 到期 ${formatStamp(session.expiresAt)}`));
+        row.appendChild(main);
+        list.appendChild(row);
+      }
+      box.appendChild(list);
+    }
+
+    const actions = mk('div', 'tf-head-right');
+    actions.appendChild(
+      button(ui.busy === 'revoke' ? '注销中…' : '全部注销', 'ghost-btn', () => {
+        if (!tokens.length) return void PC.toast('当前没有被授权的设备');
+        return revokeLanTokens();
+      }),
+    );
+    box.appendChild(actions);
+
+    box.appendChild(
+      alertBox(
+        '安全边界（照实说）',
+        '只监听局域网、不出公网，内容也不加密 —— 配对码就是门票：同一局域网里拿到配对码的人，能看到成绩、笔记与对话。公共 Wi-Fi（咖啡厅/酒店/学校开放网络）下不建议打开；用完就关掉，或点上面的「全部注销」。',
+        'warn',
+      ),
+    );
+
     host.appendChild(box);
   }
 

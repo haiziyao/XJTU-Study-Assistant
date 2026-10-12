@@ -396,3 +396,29 @@
   font-size: 12px;
   text-align: center;
 }
+
+/* ---------------------------------------------------------------- 局域网网关地址 */
+
+/* 一行 = 一个"手机该打开的地址" + 复制按钮。地址用等宽字体、可整体选中：
+   用户手输 `http://172.20.10.3:8886/app` 很容易错一个字符，选中复制才是主路径。 */
+.tf-lan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.tf-lan-url {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  color: var(--fg);
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+.tf-lan-row .ghost-btn {
+  flex: none;
+}

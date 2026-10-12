@@ -31,6 +31,7 @@ import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { HttpError } from '../../core/http/router.js';
 import { COLLECTIONS, COLLECTION_NAMES, catalog, entryOf } from './catalog.js';
 import { createDiscovery } from './discovery.js';
+import { LanGateway } from './gateway.js';
 import {
   BROADCAST_INTERVAL_MS,
   CHUNK_BYTES,
@@ -200,6 +201,19 @@ export class TransferService {
       logger,
       ...(this.options.udp ?? {}),
     });
+
+    /**
+     * 局域网网关（**默认关**，配置项 `.transfer.gateway.enabled`）。
+     *
+     * 为什么由 service 持有而不是在 module.js 里单独建：网关就是**这台设备服务器**上的一组路由
+     * （`/app` 静态托管、`/api` 反向代理、`/ws` WebSocket 代理），跟协议那 4 条路由同一个 socket。
+     * 拆成单独一个类只是为了让"鉴权 + 代理"这块难点单独成文件、能单独读；生命周期是同一个。
+     *
+     * 为什么默认关、且**不落盘**：打开它等于把本机接口放到局域网上（虽然仍要配对码换来的令牌）。
+     * 与「可被发现」同类，属于"必须由用户当场决定"的开关 —— 只在内存里，
+     * 每次启动都要显式打开一次，不给"上次开过就一直开着"的机会。
+     */
+    this.gateway = new LanGateway({ transfer: this, options: this.options.gateway ?? {}, logger });
   }
 
   /* ============================================================ 生命周期 */
@@ -279,6 +293,8 @@ export class TransferService {
       this.server = null;
       this.listening = false;
       this.actualPort = null;
+      // 网关：注销局域网令牌、掐断在飞的 WebSocket 上游连接（留着它们测试进程退不出去）
+      this.gateway?.close();
       if (server) {
         server.closeAllConnections?.();
         if (server.listening) {
@@ -325,6 +341,15 @@ export class TransferService {
         sendError(res, error);
       });
     });
+    // WebSocket 升级：8886 上只有网关提供 `/ws`（转发到主服务的推送通道）。
+    // 网关没开（或路径不认识）就断开 —— 与"没有 upgrade 监听者时 Node 的默认行为"一致。
+    server.on('upgrade', (req, socket, head) => {
+      if (this.gateway?.ownsUpgrade(req)) {
+        this.gateway.handleUpgrade(req, socket, head);
+        return;
+      }
+      socket.destroy();
+    });
     server.on('error', (error) => {
       // 端口被占用是**最常见**的失败：不影响主服务，只在传输页上写清楚怎么办
       this.serverError =
@@ -347,6 +372,24 @@ export class TransferService {
 
   async #handleRequest(req, res) {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '0.0.0.0'}`);
+
+    // 局域网网关（默认关）先接管 `/app`、`/api`、`/ws`：它必须排在设备协议判断与 OPTIONS
+    // 的 204 分支**之前** —— 否则网关的预检会被那句 204 吞掉。用未解码的 pathname 判归属，
+    // 解码与"越界检查"由网关自己做（见 gateway.js 的 #serveStatic）。
+    if (this.gateway?.owns(url.pathname)) {
+      try {
+        await this.gateway.handle(req, res, url);
+      } catch (error) {
+        // 网关的 401/404 是**常态**（手机令牌过期、路径写错），不该每 2 秒往日志里刷一行警告；
+        // 只有真正的故障（5xx / 非 HttpError）才留痕。响应形状与设备服务器完全一致。
+        if (!(error instanceof HttpError) || error.status >= 500) {
+          this.logger?.warn?.(`[transfer] 网关处理 ${req.method} ${req.url} 失败：${error?.message ?? error}`);
+        }
+        sendError(res, error);
+      }
+      return;
+    }
+
     const pathname = decodeURIComponent(url.pathname).replace(/\/+$/, '') || '/';
     const method = req.method ?? 'GET';
 
@@ -432,14 +475,16 @@ export class TransferService {
   }
 
   /**
-   * 配对（`POST /pair`）。
+   * 校验配对码（`POST /pair` 与**局域网网关**共用这一份）。
    *
-   * 为什么要有配对码：同一局域网里任何人都可能往你设备推数据，6 位码是"用户在场"的证明。
-   * 失败计数按 §8.1：最多错 5 次锁 60 秒 —— 6 位码 100 万种可能，不锁的话脚本几分钟就能撞开。
+   * 为什么单独抽出来：错 5 次锁 60 秒这条防爆破线只能有一份实现 ——
+   * 两份拷贝迟早会在"锁定期内正确码也必须拒绝""格式错的码算不算一次失败"这类细节上分叉，
+   * 而分叉的方向通常是**把防线弄松**。网关的 `GET /app?code=` 就是来调这里的。
+   *
+   * 通过返回 `true`；失败按情况抛 400（不是 6 位数字）/ 401（码不对，带剩余次数）/
+   * 429（锁定期内，或这一击正好凑满 5 次）。**令牌**错/过期不走这里（不计入失败次数）。
    */
-  async pair(body = {}) {
-    const at = this.now();
-    if (!this.accepting) throw new HttpError(403, 'NOT_ACCEPTING', '对方没有开启「允许接收数据」');
+  verifyCode(rawCode, at = this.now()) {
     if (this.lockedUntil > at) {
       const retryAfterMs = this.lockedUntil - at;
       throw new HttpError(429, 'RATE_LIMITED', `配对码错误次数过多，请 ${Math.ceil(retryAfterMs / 1000)} 秒后再试`, {
@@ -447,7 +492,7 @@ export class TransferService {
         retryAfterMs,
       });
     }
-    const code = String(body?.code ?? '').trim();
+    const code = String(rawCode ?? '').trim();
     if (!/^\d{6}$/.test(code)) throw HttpError.badRequest('配对码必须是 6 位数字', { field: 'code' });
 
     const current = this.ensureCode(at);
@@ -465,6 +510,19 @@ export class TransferService {
     }
 
     this.codeAttempts = 0;
+    return true;
+  }
+
+  /**
+   * 配对（`POST /pair`）。
+   *
+   * 为什么要有配对码：同一局域网里任何人都可能往你设备推数据，6 位码是"用户在场"的证明。
+   * 失败计数按 §8.1：最多错 5 次锁 60 秒 —— 6 位码 100 万种可能，不锁的话脚本几分钟就能撞开。
+   */
+  async pair(body = {}) {
+    const at = this.now();
+    if (!this.accepting) throw new HttpError(403, 'NOT_ACCEPTING', '对方没有开启「允许接收数据」');
+    this.verifyCode(body?.code, at);
     const device = normalizeDevice(body?.device);
     if (!device.id) throw HttpError.badRequest('缺少 device.id');
     const token = randomBytes(24).toString('hex');
@@ -1123,6 +1181,24 @@ export class TransferService {
     };
   }
 
+  /**
+   * 局域网网关的开关（「传输」页那个开关）。
+   *
+   * 与 `updateSettings` 分开是因为语义不同：`updateSettings` 管的是"设备直传"（可被发现 / 允许接收），
+   * 这里管的是"手机/平板能不能用浏览器打开本程序"。混在一个接口里，前端一个滑块错了会让另一个跟着变。
+   * 开关**不落盘**（理由见构造函数里 gateway 那段注释）：默认永远是关。
+   */
+  updateGateway({ enabled } = {}) {
+    if (enabled !== undefined) this.gateway.setEnabled(Boolean(enabled));
+    return this.status();
+  }
+
+  /** 注销所有局域网令牌（「全部注销」：一次性踢掉所有手机）。 */
+  revokeLanTokens() {
+    const revoked = this.gateway.revokeAll();
+    return { revoked, gateway: this.gateway.status() };
+  }
+
   /** 传输页要的一切（一次请求拿全，页面每 2 秒轮询它）。 */
   status({ logLimit = 20 } = {}) {
     return {
@@ -1137,6 +1213,8 @@ export class TransferService {
       code: this.codeInfo(),
       peers: this.peers(),
       discovery: this.discovery?.status() ?? { enabled: false, bound: false, error: null, peers: 0, port: this.port },
+      // 局域网网关：开着没有、手机该打开哪个地址、现在有几台设备被授权（见 gateway.js）
+      gateway: this.gateway.status(),
       progress: this.progress(),
       catalog: catalog(),
       log: this.logEntries.slice(0, logLimit),

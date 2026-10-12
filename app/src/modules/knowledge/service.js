@@ -360,7 +360,20 @@ export class KnowledgeService {
    * `path` 不在语料目录内 → 400（`HttpError.badRequest`），这是 §14.3 的硬要求。
    */
   read({ path: requestedPath, maxChars = DEFAULT_MAX_CHARS } = {}) {
-    const { item, absPath, outside } = this.#resolve(requestedPath);
+    /**
+     * 允许把**来源 URL** 当 path 传进来。
+     *
+     * 为什么：检索结果里每条都同时带 `path`（语料相对路径）与 `url`（教务处原文链接），
+     * 而模型最容易记住的是 URL —— 实测它就这样发过
+     * `{"action":"query","target":"knowledge","filters":{"path":"https://dean.xjtu.edu.cn/info/1033/8963.htm"}}`，
+     * 然后被 400 挡掉、这一轮白跑（更糟的是它上一句已经说了"我把原文调出来看"，用户只等到一句空话）。
+     * 用户看到的"来源"就是 URL，那 URL 就该能用。
+     */
+    const byUrl = /^https?:\/\//i.test(String(requestedPath ?? ''))
+      ? (this.index?.documents ?? []).find((doc) => doc.url === requestedPath)
+      : null;
+    const effectivePath = byUrl?.path ?? requestedPath;
+    const { item, absPath, outside } = this.#resolve(effectivePath);
     if (outside) throw HttpError.badRequest(`path 不在语料目录内：${requestedPath}`, { field: 'path' });
 
     // 读**原文**（不清洗 Markdown）：`read()` 是"把这一篇给出来"，表格与列表结构
@@ -371,7 +384,11 @@ export class KnowledgeService {
       if (!absPath) throw new Error('语料目录里没有这个文件');
       body = splitFrontMatter(fs.readFileSync(absPath, 'utf8')).body;
     } catch {
-      throw HttpError.badRequest(`语料里没有这一篇：${requestedPath}`, { field: 'path' });
+      throw HttpError.badRequest(
+        `语料里没有这一篇：${requestedPath}。path 要么用结果里的 path 字段（仓库相对路径），要么直接用结果里的 url；` +
+          '也可以改用 filters.q 按关键词检索。',
+        { field: 'path' },
+      );
     }
 
     const text = stripLeadingHeading(body);
