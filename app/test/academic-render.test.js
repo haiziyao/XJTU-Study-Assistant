@@ -150,10 +150,16 @@ test('学业视图：成绩表逐行渲染，未计入的行压暗但不隐藏',
   );
   assert.equal(rows.length, 2, '两门课各一行');
 
+  // 勾选框现在有两类：课程行那个「计入」+ 学期行那个三态「整学期计入」。
+  // 这里只数课程行的（按 `data-grade-id` 认，比按位置稳）。
   const checks = walk(mount).filter((node) => node.tagName === 'INPUT' && node.type === 'checkbox');
-  assert.equal(checks.length, 2);
-  assert.equal(checks[0].checked, true);
-  assert.equal(checks[1].checked, false, '被排除的课勾选框应为未选中');
+  const rowChecks = checks.filter((node) => node.dataset?.gradeId);
+  assert.equal(rowChecks.length, 2, '两门课各一个「计入」勾选框');
+  assert.equal(rowChecks.map((node) => node.dataset.gradeId).join(','), 'g1,g2');
+  assert.equal(rowChecks[0].checked, true);
+  assert.equal(rowChecks[1].checked, false, '被排除的课勾选框应为未选中');
+  // 学期行另有整学期开关：两门课分属两个学期，所以是两个三态框
+  assert.equal(checks.length - rowChecks.length, 2, '每个学期行一个三态「整学期计入」');
 
   // 压暗而不隐藏：行还在、内容还能读到，只是加了标记类
   const off = rows.filter((row) => String(row.className).includes('ac-row-off'));
@@ -168,9 +174,11 @@ test('学业视图：点击勾选框会调用后端单项开关接口', async ()
   const mount = await render('academic');
 
   const checks = walk(mount).filter((node) => node.tagName === 'INPUT' && node.type === 'checkbox');
-  const handler = checks[0].listeners?.change?.[0];
+  const box = checks.find((node) => node.dataset?.gradeId === 'g1');
+  assert.ok(box, '要能找到 g1 那一行的勾选框');
+  const handler = box.listeners?.change?.[0];
   assert.equal(typeof handler, 'function', '勾选框应挂上 change 监听');
-  checks[0].checked = false;
+  box.checked = false;
   handler();
   await new Promise((resolve) => setTimeout(resolve, 20));
 
@@ -178,6 +186,34 @@ test('学业视图：点击勾选框会调用后端单项开关接口', async ()
     calls.some((entry) => entry === 'POST /academic/grades/g1/included'),
     `应调用单项开关接口，实际调用：${calls.join(' | ')}`,
   );
+});
+
+test('学业视图：学期行有「整学期计入」三态开关，点击按整学期提交', async () => {
+  const { api, calls } = makeApi();
+  const { render } = bootRenderer({ api });
+  const mount = await render('academic');
+
+  const toggles = walk(mount).filter(
+    (node) => node.tagName === 'INPUT' && node.type === 'checkbox' && !node.dataset?.gradeId,
+  );
+  assert.equal(toggles.length, 2, '两个学期各一个整学期开关');
+
+  // 只有一个学期是"全部计入"（g1），另一个是"全不选"（g2 被排除）→ 三态要如实反映
+  const states = toggles.map((node) => ({ checked: node.checked, mixed: node.indeterminate }));
+  assert.deepEqual(states, [
+    { checked: true, mixed: false },
+    { checked: false, mixed: false },
+  ]);
+
+  const handler = toggles[1].listeners?.change?.[0];
+  assert.equal(typeof handler, 'function', '整学期开关要挂 change 监听');
+  toggles[1].checked = true;
+  handler();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // 用 ids 提交（不是 term）：学期分组里可能有"未标注学期"，按 term 会打偏
+  const bulkCall = calls.find((entry) => entry.includes('/academic/grades/included/bulk'));
+  assert.ok(bulkCall, `应调用批量接口，实际调用：${calls.join(' | ')}`);
 });
 
 test('学业视图：分析卡如实标注来源与过期状态', async () => {

@@ -1,5 +1,6 @@
 /**
- * 思源学堂视图：首页（自动同步 + 课程）与课程页（课程信息 / 课程回放下载 / 作业 / 资料 / 直播）。
+ * 思源学堂视图：首页（自动同步 + 课程）与课程页（课程信息 / 作业 / 课程回放下载 / 资料 / 直播）。
+ * 课程页的分节顺序是**作业在前、回放在后** —— 学生进课程页第一件事是看有什么要交的。
  *
  * **这里没有登录表单，也不展示账号信息**：登录已收敛到「设置 → 统一身份认证」，
  * 学堂与学业用同一个学校账号，在设置里登录一次两边都会自动完成认证。
@@ -1102,7 +1103,13 @@ function lmsCourseView() {
     }),
   );
 
-  // 2) 课程回放（第一个可用功能：可下载）
+  // 2) 作业（进课程页第一件事是看有什么要交的）
+  const homework = page.groups?.homework ?? [];
+  if (homework.length) {
+    wrap.appendChild(lmsCourseSection({ kind: 'homework', title: '作业', items: homework, renderItem: lmsCourseActivityRow }));
+  }
+
+  // 3) 课程回放（可下载）
   const replays = page.groups?.replay ?? [];
   if (replays.length) {
     wrap.appendChild(
@@ -1110,9 +1117,8 @@ function lmsCourseView() {
     );
   }
 
-  // 3) 作业 / 资料 / 直播 / 其它
+  // 4) 资料 / 直播 / 其它
   const sections = [
-    ['homework', '作业', page.groups?.homework ?? []],
     ['material', '资料', page.groups?.material ?? []],
     ['live', '直播', page.groups?.live ?? []],
     ['other', '其它', page.groups?.other ?? []],
@@ -1131,8 +1137,21 @@ function lmsCourseView() {
  * 整体重画：所有文本都经 textContent 写入（等价于 escapeHtml），不使用 innerHTML 拼接。
  *
  * 顶栏刻意不再有工具条：登录信息收在设置页，这一屏只有「自动同步 + 课程」两张卡。
+ *
+ * 外面这层还负责**保住滚动位置**：这个视图每拉一次数据、点一次折叠都会整体重建 DOM，
+ * 而真正滚动的是里面的 `.view-content`，一重建 scrollTop 就归零 ——
+ * 用户看到的是「每刷新一次就跳回页面顶部」（在几十门课的列表里尤其烦）。
  */
 function lmsPaint() {
+  const restoreScroll = PC.snapshotScroll?.();
+  try {
+    lmsPaintInner();
+  } finally {
+    restoreScroll?.();
+  }
+}
+
+function lmsPaintInner() {
   const mount = lmsUi.mount;
   if (!mount) return;
   mount.innerHTML = '';

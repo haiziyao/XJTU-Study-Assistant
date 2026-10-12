@@ -188,7 +188,25 @@
        按钮放 `.toolbar`（固定在顶部，不随内容滚走）。
      直接把内容 append 到 mount 上，就会表现为「贴边 + 不能滚」。 */
 
+  /**
+   * 重画。
+   *
+   * 外面这层只做一件事：**保住滚动位置**。这个视图每次都 `mount.innerHTML = ''` 整体重建，
+   * 而真正滚动的是里面的 `.view-content`（`flex:1; overflow:auto`）——
+   * 勾一门课的「计入」、同步一次成绩、或者收到一次 `data_changed`，DOM 一换 scrollTop 就归零，
+   * 用户看到的就是「每刷新一次都跳回页面顶部」，一门一门勾的时候尤其难受。
+   * `PC.snapshotScroll()` 按选择器记住位置、重画完再还回去（外壳提供；拿不到就退化成原行为）。
+   */
   function paint() {
+    const restoreScroll = PC.snapshotScroll?.();
+    try {
+      paintInner();
+    } finally {
+      restoreScroll?.();
+    }
+  }
+
+  function paintInner() {
     const mount = ui.mount;
     if (!mount) return;
     mount.innerHTML = '';
@@ -496,6 +514,7 @@
       const includedCount = group.grades.filter((item) => item.included !== false).length;
       if (includedCount !== group.grades.length) chips.push(`已计入 ${includedCount} 门`);
       termHead.appendChild(mk('span', 'ac-term-meta', chips.join(' · ')));
+      termHead.appendChild(termAllToggle(group, includedCount));
 
       termCell.appendChild(termHead);
       termRow.appendChild(termCell);
@@ -516,6 +535,29 @@
     return list.reduce((sum, item) => sum + (typeof item.credit === 'number' ? item.credit : 0), 0);
   }
 
+  /**
+   * 学期级的「整学期计入 / 整学期屏蔽」开关（三态）。
+   *
+   * 为什么放在学期行上：一门一门点 44 次太蠢，而「这学期都是选修，先全屏蔽」是很常见的动作。
+   * 为什么用三态勾选框而不是两个按钮：混合状态（部分计入）最常见，`indeterminate` 能一眼看出来，
+   * 点一下＝全计入，再点一下＝全屏蔽，比摆两个按钮省地方。
+   *
+   * 提交用 `ids` 而不是 `term`：学期行是按 `term` 代码分组的，但「未标注学期」那组的 term 是空串，
+   * 按 term 提交会打到别的记录上；直接给这一组课程的 id 最准（后端 bulk 本来就支持 `ids`）。
+   */
+  function termAllToggle(group, includedCount) {
+    const label = mk('label', 'ac-term-check');
+    label.title = '一键把本学期的课全部计入或全部屏蔽（学分绩只统计计入的课）';
+    const box = mk('input');
+    box.type = 'checkbox';
+    box.checked = includedCount > 0;
+    box.indeterminate = includedCount > 0 && includedCount < group.grades.length;
+    box.disabled = Boolean(ui.busy);
+    box.addEventListener('change', () => void bulk({ ids: group.grades.map((item) => item.id), included: box.checked }));
+    label.append(box, mk('span', null, '整学期计入'));
+    return label;
+  }
+
   /** 单门课的一行。 */
   function gradeRow(grade) {
     const row = mk('tr', grade.included === false ? 'ac-row-off' : '');
@@ -526,6 +568,9 @@
     check.type = 'checkbox';
     check.checked = grade.included !== false;
     check.disabled = ui.busy === `row:${grade.id}`;
+    // 稳定的钩子：这一行到底改哪门课。渲染测试与排查都靠它 ——
+    // 只按"第 N 个 checkbox"找会因为学期行那个三态框插进来而错位（测试就是这么挂过一次）。
+    check.dataset.gradeId = grade.id;
     check.addEventListener('change', () => void toggleOne(grade.id, check.checked));
     checkCell.appendChild(check);
     row.appendChild(checkCell);
