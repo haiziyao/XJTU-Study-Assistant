@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src http://127.0.0.1:* ws://127.0.0.1:*; style-src 'self'; img-src 'self' data: http://127.0.0.1:*" />
+    <title>笔记编辑 · 智学</title>
+    <script src="../../kit/theme.js"></script>
+    <link rel="stylesheet" href="../../shell/shell.css" />
+    <link rel="stylesheet" href="../../shell/theme.css" />
+    <link rel="stylesheet" href="editor.css" />
+  </head>
+  <body class="note-editor-body">
+    <main id="note-editor" class="note-editor" data-view="split">
+      <header class="note-editor-header">
+        <a id="back-to-notes" class="note-editor-back" href="../../?view=notes">← 笔记</a>
+        <input id="note-title" class="note-editor-title" placeholder="未命名笔记" aria-label="笔记标题" maxlength="200" />
+        <span id="save-status" class="note-editor-status" role="status" aria-live="polite">新笔记 · 尚未保存</span>
+        <details id="note-properties" class="note-editor-properties">
+          <summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h4m4 0h8M4 17h10m4 0h2M8 4v6m4-6v6m2 4v6m4-6v6" /></svg>属性</summary>
+          <section class="note-editor-properties-panel" aria-label="笔记属性">
+            <label for="note-tags">标签</label>
+            <input id="note-tags" class="note-editor-tags" placeholder="用逗号分隔，例如：高数，复习" aria-label="笔记标签" />
+            <div id="note-attachments" class="note-editor-attachments" hidden></div>
+            <label for="editor-appearance">外观</label>
+            <select id="editor-appearance" aria-label="颜色模式"><option value="system">跟随系统</option><option value="light">白天模式</option><option value="dark">夜间模式</option></select>
+            <span class="note-editor-property-hint">Markdown 笔记</span>
+          </section>
+        </details>
+        <button type="button" id="theme-toggle" class="theme-toggle" data-compact="true" aria-label="切换白天夜间模式">☾</button>
+        <button type="button" id="save-note" class="primary-btn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>保存</button>
+      </header>
+      <div id="editor-error" class="note-editor-error" role="alert" hidden></div>
+      <div class="note-editor-tools" role="toolbar" aria-label="Markdown 格式工具">
+        <div class="note-editor-tool-group">
+          <button type="button" id="undo-note" aria-label="撤销" title="撤销（Ctrl / ⌘ + Z）" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5-5 5 5 5M4 10h10a5 5 0 0 1 0 10h-3" /></svg></button>
+          <button type="button" id="redo-note" aria-label="重做" title="重做（Ctrl / ⌘ + Shift + Z）" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5 5 5-5 5M20 10H10a5 5 0 0 0 0 10h3" /></svg></button>
+        </div>
+        <div class="note-editor-tool-group">
+          <button type="button" data-format="heading" aria-label="插入二级标题" title="二级标题" class="note-editor-heading-tool">标题 <span aria-hidden="true">⌄</span></button>
+          <button type="button" data-format="bold" aria-label="加粗" title="加粗"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h8a4 4 0 0 1 0 8H6V4h7a4 4 0 0 1 0 8" /></svg></button>
+          <button type="button" data-format="italic" aria-label="斜体" title="斜体"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 4h-9M14 20H5M15 4 9 20" /></svg></button>
+          <button type="button" data-format="strike" aria-label="删除线" title="删除线"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 5H9a4 4 0 0 0-4 4M4 12h16M7 19h8a4 4 0 0 0 4-4" /></svg></button>
+        </div>
+        <div class="note-editor-tool-group">
+          <button type="button" data-format="list" aria-label="插入列表" title="列表"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01" /></svg></button>
+          <button type="button" data-format="quote" aria-label="插入引用" title="引用"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h6v8c0 4-2 6-5 6v-3c2 0 2-1 2-3H4ZM14 5h6v8c0 4-2 6-5 6v-3c2 0 2-1 2-3h-3Z" /></svg></button>
+          <button type="button" data-format="code" aria-label="插入代码块" title="代码块"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7-5 5 5 5m10-10 5 5-5 5M14 4l-4 16" /></svg></button>
+          <button type="button" data-format="table" aria-label="插入表格" title="表格"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18M9 3v18" /></svg></button>
+          <button type="button" data-format="link" aria-label="插入链接" title="链接"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 13 4-4M8 16l-2 2a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0m2 1 2-2a4 4 0 0 1 6 6l-5 5a4 4 0 0 1-6 0" transform="translate(1 0)" /></svg></button>
+        </div>
+        <div class="note-editor-view-tabs" role="group" aria-label="显示方式">
+          <button type="button" data-view="split" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M12 3v18" /></svg>分栏</button>
+          <button type="button" data-view="read" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5C8 3 5 3 2 4v16c3-1 6-1 10 1 4-2 7-2 10-1V4c-3-1-6-1-10 1Zm0 0v16" /></svg>阅读</button>
+        </div>
+      </div>
+      <section class="note-editor-workspace" aria-label="笔记编辑与预览">
+        <section class="note-editor-pane note-editor-source">
+          <header class="note-editor-pane-head"><h1>Markdown</h1></header>
+          <div class="note-editor-source-content">
+            <pre id="note-line-numbers" class="note-editor-line-numbers" aria-hidden="true">1</pre>
+            <div class="note-editor-source-layer">
+              <pre id="note-highlight" class="note-editor-highlight" aria-hidden="true"></pre>
+              <textarea id="note-body" aria-label="Markdown 正文" spellcheck="false" wrap="off" maxlength="200000" placeholder="# 从这里开始&#10;&#10;支持标题、列表、引用、代码和公式。"></textarea>
+            </div>
+          </div>
+        </section>
+        <section class="note-editor-pane note-editor-output" aria-label="实时预览">
+          <header class="note-editor-pane-head"><h2>实时预览</h2></header>
+          <article id="note-preview" class="note-editor-preview richtext"></article>
+        </section>
+      </section>
+      <footer class="note-editor-footer"><span id="word-count">0 字符 · 1 行</span><label class="note-editor-sync"><input id="sync-scroll" type="checkbox" checked /> 同步滚动</label><span class="note-editor-shortcut">Ctrl / ⌘ + S 保存 · Tab 缩进</span></footer>
+    </main>
+    <dialog id="leave-dialog" class="note-editor-leave" aria-labelledby="leave-title">
+      <h2 id="leave-title">还有未保存的更改</h2>
+      <p>保存后再返回笔记列表，或放弃本次更改。</p>
+      <div class="note-editor-leave-actions">
+        <button type="button" id="leave-cancel" class="ghost-btn">继续编辑</button>
+        <button type="button" id="leave-discard" class="ghost-btn">放弃更改并返回</button>
+        <button type="button" id="leave-save" class="primary-btn">保存并返回</button>
+      </div>
+    </dialog>
+    <script src="../../kit/richtext.js"></script>
+    <script src="editor.js"></script>
+  </body>
+</html>

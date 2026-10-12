@@ -1376,6 +1376,12 @@ body.panel-collapsed .panel {
 .rt-link {
   color: var(--blue);
 }
+.rt-table-wrap { overflow-x: auto; margin: 14px 0; }
+.rt-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.rt-table th, .rt-table td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; }
+.rt-table th { background: var(--bg-base); font-weight: 500; }
+.rt-table .rt-align-center { text-align: center; }
+.rt-table .rt-align-right { text-align: right; }
 
 /*
  * 公式（LaTeX 子集）。

@@ -1,0 +1,62 @@
+/* Explicit appearance tokens override the legacy Electron inline palette. */
+:root, :root[data-theme='light'] {
+  color-scheme: light;
+  --bg-base: #f5f7fb !important;
+  --bg-surface: #ffffff !important;
+  --bg-elevated: #eef2f8 !important;
+  --bg-hover: #e7edf6 !important;
+  --fg: #202a3b !important;
+  --fg-2: #526078 !important;
+  --fg-3: #68758a !important;
+  --line: #dce3ed !important;
+  --blue: #315bd6 !important;
+  --red: #c53b50 !important;
+  --green: #18794e !important;
+  --orange: #a85b12 !important;
+  --purple: #7848b5 !important;
+  --shadow-1: 0 1px 3px rgba(32, 42, 59, .06);
+  --shadow-2: 0 16px 48px rgba(32, 42, 59, .16);
+  --ring: #6383e6;
+  --control-bg: #ffffff;
+  --border-hover: #b3c0d5;
+  --scroll-thumb: #b9c5d6;
+  --overlay: rgba(32, 42, 59, .32);
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg-base: #151519 !important;
+  --bg-surface: #1e1e24 !important;
+  --bg-elevated: #26262d !important;
+  --bg-hover: #2c2c35 !important;
+  --fg: #f4f4f7 !important;
+  --fg-2: #b9b9c4 !important;
+  --fg-3: #9696a4 !important;
+  --line: #363640 !important;
+  --blue: #6c8cff !important;
+  --red: #ff6b7a !important;
+  --green: #5cdb8b !important;
+  --orange: #ffb86c !important;
+  --purple: #c792ea !important;
+  --shadow-1: 0 1px 3px rgba(0, 0, 0, .3);
+  --shadow-2: 0 16px 48px rgba(0, 0, 0, .5);
+  --ring: #6c8cff;
+  --control-bg: #19191f;
+  --border-hover: #565665;
+  --scroll-thumb: #555565;
+  --overlay: rgba(8, 8, 10, .6);
+}
+input, select, textarea { background: var(--control-bg); }
+input:hover:not(:disabled), select:hover:not(:disabled), textarea:hover:not(:disabled),
+.ghost-btn:hover, .notes-card:hover { border-color: var(--border-hover); }
+input::placeholder, textarea::placeholder { color: var(--fg-3); opacity: 1; }
+::-webkit-scrollbar-thumb { background-color: var(--scroll-thumb); }
+::-webkit-scrollbar-thumb:hover { background-color: var(--fg-3); }
+.modal-mask { background: var(--overlay); }
+.modal { border-color: var(--line); }
+.theme-toggle {
+  flex: none; padding: 8px 4px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--bg-surface); color: var(--fg-2); font-size: 11px; white-space: nowrap;
+}
+.theme-toggle:hover { background: var(--bg-hover); color: var(--fg); }
+.appearance-setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.appearance-hint { margin: 8px 0 0; color: var(--fg-3); font-size: 12px; }

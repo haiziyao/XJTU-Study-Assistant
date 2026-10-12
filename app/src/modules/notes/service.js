@@ -92,6 +92,34 @@ export class NoteService {
     return summary;
   }
 
+  async update(id, input = {}) {
+    const current = this.get(id);
+    if (input.expectedUpdatedAt !== undefined && input.expectedUpdatedAt !== current.updatedAt) {
+      throw HttpError.conflict('这篇笔记已在其他页面更新。请保留当前正文，重新打开最新版本后再保存。');
+    }
+    const patch = {};
+    if (input.title !== undefined) patch.title = String(input.title).trim().slice(0, 200) || '未命名笔记';
+    if (input.body !== undefined) {
+      if (typeof input.body !== 'string' || input.body.length > MAX_BODY_CHARS) {
+        throw HttpError.badRequest(`笔记正文必须是文本，且不能超过 ${MAX_BODY_CHARS} 字符`);
+      }
+      patch.body = input.body;
+    }
+    if (input.tags !== undefined) patch.tags = tagsOf(input.tags);
+    if (input.format !== undefined) {
+      if (!['markdown', 'text'].includes(input.format)) throw HttpError.badRequest('不支持的笔记格式');
+      patch.format = input.format;
+    }
+    if (input.status !== undefined) {
+      if (!STATUSES.has(input.status)) throw HttpError.badRequest('不支持的笔记状态');
+      patch.status = input.status;
+    }
+    const item = await this.collection.update(String(id), patch);
+    const summary = noteSummary(item);
+    this.broadcast?.({ type: 'notes_changed', payload: { action: 'updated', summary } });
+    return summary;
+  }
+
   async remove(id) {
     this.get(id);
     await this.collection.remove(String(id));

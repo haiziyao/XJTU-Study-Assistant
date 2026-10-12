@@ -295,7 +295,7 @@ window.PCRichText = (function () {
   }
 
   /**
-   * 整段渲染：围栏代码块 → 其它按行分块 → 行内元素。
+   * 整段渲染：围栏代码块 → 表格与其它按行分块 → 行内元素。
    * 返回 HTML 字符串。
    */
   function toHtml(text) {
@@ -321,6 +321,24 @@ window.PCRichText = (function () {
       blocks.push(`<${tag} class="rt-list">${items}</${tag}>`);
       list = null;
     };
+    // Split only unescaped pipes outside inline code; cell content still goes through
+    // the same escaping and math protection as paragraphs.
+    const tableCells = (row) => {
+      const raw = row.trim(); const cells = []; let cell = ''; let ticks = 0;
+      for (let i = 0; i < raw.length; i += 1) {
+        const ch = raw[i];
+        if (ch === '\\' && raw[i + 1] === '|') { cell += '|'; i += 1; continue; }
+        if (ch === '`') {
+          let run = 1; while (raw[i + run] === '`') run += 1;
+          ticks = ticks === run ? 0 : ticks || run; cell += '`'.repeat(run); i += run - 1; continue;
+        }
+        if (ch === '|' && !ticks) { cells.push(cell.trim()); cell = ''; } else cell += ch;
+      }
+      cells.push(cell.trim());
+      if (raw.startsWith('|')) cells.shift();
+      if (raw.endsWith('|') && !raw.endsWith('\\|')) cells.pop();
+      return cells;
+    };
 
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
@@ -343,6 +361,21 @@ window.PCRichText = (function () {
           const cls = lang ? ` class="language-${escapeHtml(lang)}"` : '';
           blocks.push(`<pre class="rt-pre"><code${cls}>${escapeHtml(code)}</code></pre>`);
         }
+        continue;
+      }
+
+      const headers = line.includes('|') ? tableCells(line) : [];
+      const separators = tableCells(lines[index + 1] || '');
+      if (headers.length && headers.length === separators.length && separators.every((cell) => /^:?-{3,}:?$/.test(cell))) {
+        flushParagraph(); flushList();
+        const alignments = separators.map((cell) => cell.startsWith(':') && cell.endsWith(':') ? 'rt-align-center' : cell.endsWith(':') ? 'rt-align-right' : '');
+        const rowHtml = (cells, tag) => `<tr>${headers.map((unused, col) => {
+          const cls = alignments[col] ? ` class="${alignments[col]}"` : '';
+          return `<${tag}${cls}>${restoreMath(renderInline(protectMath(cells[col] || '', store)), store)}</${tag}>`;
+        }).join('')}</tr>`;
+        const rows = []; index += 1;
+        while (index + 1 < lines.length && lines[index + 1].includes('|') && lines[index + 1].trim()) rows.push(rowHtml(tableCells(lines[++index]), 'td'));
+        blocks.push(`<div class="rt-table-wrap"><table class="rt-table"><thead>${rowHtml(headers, 'th')}</thead><tbody>${rows.join('')}</tbody></table></div>`);
         continue;
       }
 

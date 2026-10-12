@@ -59,8 +59,16 @@
     const listNotes = async (filters = {}) => (await request(`/notes${queryString(filters)}`)).items ?? [];
     return {
       cacheNamespace: 'builtin-main-program',
-      capabilities: () => ({ search: true, markdown: true, view: true, upload: true, aiRead: true }),
+      capabilities: () => ({ search: true, markdown: true, view: true, edit: true, upload: true, aiRead: true }),
       listNotes,
+      openNote(id) {
+        const currentUrl = location.href || `${location.origin}${location.pathname}`;
+        const target = new URL('views/notes/editor.html', currentUrl);
+        if (id) target.searchParams.set('id', id);
+        const apiBase = window.PC?.state?.apiBase;
+        if (apiBase) target.searchParams.set('api', apiBase);
+        location.href = target.href;
+      },
       searchNotes: (query, filters = {}) => listNotes({ ...filters, query }),
       async createDraft(input) {
         return (await request('/notes', { method: 'POST', body: { ...input, source: 'manual', status: 'draft' } })).summary;
@@ -400,7 +408,10 @@
     const create = mk('button', 'primary-btn notes-create', '+ 新建笔记');
     create.type = 'button';
     create.disabled = !state.provider || state.offline || !state.provider.createDraft;
-    create.addEventListener('click', () => openComposer('manual', create));
+    create.addEventListener('click', () => {
+      if (state.caps.edit && state.provider?.openNote) state.provider.openNote(null);
+      else openComposer('manual', create);
+    });
     first.append(seg, mk('span', 'spacer'), connection, capture, uploadButton, create);
 
     const second = mk('div', 'toolbar-row notes-filter-row');
@@ -472,7 +483,7 @@
     }
     detail.appendChild(facts);
     const actions = mk('div', 'notes-actions');
-    const openButton = mk('button', 'primary-btn', '在 AI 智学中打开'); openButton.type = 'button'; openButton.disabled = !state.provider?.openNote || state.offline;
+    const openButton = mk('button', 'primary-btn', state.caps.edit ? '编辑笔记' : '在 AI 智学中打开'); openButton.type = 'button'; openButton.disabled = !state.provider?.openNote || state.offline;
     openButton.addEventListener('click', () => open(item.id).catch((error) => state.ctx?.toast?.(`打开失败：${error.message}`))); actions.appendChild(openButton);
     if ((state.caps.view && state.provider?.readNote) || (state.caps.markdown && state.provider?.renderMarkdown)) { const button = mk('button', 'ghost-btn', '查看笔记'); button.type = 'button'; button.disabled = state.offline; button.addEventListener('click', () => openNoteViewer(item, button)); actions.appendChild(button); }
     if (state.caps.export && state.provider?.exportNote) { const button = mk('button', 'ghost-btn', '导出'); button.type = 'button'; button.addEventListener('click', () => state.provider.exportNote(item.id, 'markdown')); actions.appendChild(button); }

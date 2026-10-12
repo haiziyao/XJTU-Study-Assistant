@@ -235,7 +235,8 @@ export function bootRenderer({ api, state = {} } = {}) {
     getComputedStyle: () => ({ getPropertyValue: () => '' }),
     location: { protocol: 'http:', host: '127.0.0.1:3210', hostname: '127.0.0.1', pathname: '/app/', search: '', origin: 'http://127.0.0.1:3210' },
     document: {
-      readyState: 'complete',
+      // These tests drive module views explicitly; shell boot is covered by renderer.test.js.
+      readyState: 'loading',
       body: new El('body'),
       createElement: (tag) => new El(tag),
       getElementById: () => new El('div'),

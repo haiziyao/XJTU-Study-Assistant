@@ -7,6 +7,7 @@
       content="default-src 'self'; connect-src http://127.0.0.1:* ws://127.0.0.1:*; style-src 'self'; img-src 'self' data: http://127.0.0.1:*"
     />
     <title>AI 智学 · 测试窗口</title>
+    <script src="kit/theme.js"></script>
 
     <!-- 样式：外壳 → 各视图自带的样式（新增功能在这里加一行 link） -->
     <link rel="stylesheet" href="shell/shell.css" />
@@ -15,6 +16,7 @@
     <link rel="stylesheet" href="views/academic.css" />
     <link rel="stylesheet" href="views/notes/notes.css" />
     <link rel="stylesheet" href="views/auth.css" />
+    <link rel="stylesheet" href="shell/theme.css" />
   </head>
   <body>
     <div class="app">
@@ -25,6 +27,7 @@
         </div>
         <nav class="nav" id="nav"></nav>
         <div class="nav-grow"></div>
+        <button type="button" id="theme-toggle" class="theme-toggle">☾ 夜间模式</button>
         <nav class="nav nav-bottom" id="nav-bottom"></nav>
       </aside>
 

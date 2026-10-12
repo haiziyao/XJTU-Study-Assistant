@@ -100,6 +100,21 @@ test('Markdown 与公式混排：公式里的 * _ { 不被误伤', () => {
   assert.equal(html.includes('<em>'), false, '公式里的 * 不该被当成斜体');
 });
 
+test('Markdown 表格：对齐、公式与转义分隔符安全渲染；未完整输入保留原文', () => {
+  const html = rt.toHtml('| 记号 | **含义** |\n| :---: | ---: |\n| $\\lambda$ | <img src=x onerror=alert(1)> |\n| `a|b` | c\\|d |\n\n后续正文');
+  assert.match(html, /<table class="rt-table">/);
+  assert.match(html, /<th class="rt-align-center">记号/);
+  assert.match(html, /<th class="rt-align-right"><strong>含义/);
+  assert.match(html, /math-inline/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.equal(html.includes('<img'), false);
+  assert.match(html, /<code class="rt-code">a\|b<\/code>/);
+  assert.match(html, />c\|d<\/td>/);
+  assert.match(html, /后续正文/);
+  assert.equal(rt.toHtml('| 列一 | 列二 |\n| -- |').includes('<table'), false);
+  assert.equal(rt.toHtml('```\n| A | B |\n| --- | --- |\n```').includes('<table'), false);
+});
+
 test('围栏代码块：普通代码保留原文并转义，svg 变成内联图形', () => {
   const code = rt.toHtml('```js\nconst a = 1 < 2;\n```');
   assert.match(code, /rt-pre/);
