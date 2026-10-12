@@ -37,32 +37,11 @@
   word-break: break-word;
 }
 
+/* 未登录引导卡的文字块（登录表单已移到设置页，视图里不再有输入框） */
 .lms-form {
   display: grid;
   gap: 8px;
   max-width: 420px;
-}
-
-.lms-captcha {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.lms-captcha img {
-  height: 34px;
-  min-width: 96px;
-  border-radius: 6px;
-  border: 1px solid var(--line);
-  background: #fff;
-  object-fit: contain;
-  cursor: pointer;
-}
-
-.lms-captcha input {
-  width: 108px;
-  flex: none;
 }
 
 .lms-actions {
@@ -238,15 +217,7 @@
   min-width: 0;
 }
 
-/* 自动同步设置行（状态卡片内） */
-
-.lms-autosync-block {
-  margin-top: 10px;
-  display: grid;
-  gap: 4px;
-  padding-top: 8px;
-  border-top: 1px solid var(--line);
-}
+/* 自动同步小卡（学堂首页第一张卡） */
 
 .lms-autosync {
   display: flex;
@@ -275,6 +246,22 @@
 
 .lms-autosync-toggle:disabled {
   cursor: not-allowed;
+}
+
+/* 首页顶部状态提示：只在「还没读到登录态」或「读取失败」时出现 */
+.lms-status-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.lms-status-notice .lms-error {
+  margin-top: 0;
+}
+
+.lms-status-notice .ghost-btn {
+  flex: none;
 }
 
 /* ---------------------------------------------------------- 活动按课程分组 */

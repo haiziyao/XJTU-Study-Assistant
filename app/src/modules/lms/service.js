@@ -61,9 +61,6 @@ export class LmsService {
     this.http = auth.http;
     this.api = new LmsApi({ http: this.http, config: this.config });
     /** 同步元信息是普通业务数据 → 0644。会话票据由 auth 模块管，不再有 lms-session.json。 */
-    this.jar = new CookieJar();
-    this.http = new HttpClient({ userAgent: config.userAgent, timeoutMs: config.timeoutMs, jar: this.jar });
-    this.auth = new CasAuth({ http: this.http, config, visitorId: visitorId ?? generateVisitorId() });
     // 回放下载：视频直链要带录播站票据 + 学堂 Cookie，只能在主进程下
     this.downloads = new ReplayDownloader({
       http: this.http,
@@ -71,7 +68,6 @@ export class LmsService {
       broadcast,
       log: (message) => this.services?.log?.(message),
     });
-    this.sessionFile = new JsonFile(path.join(this.dataDir, 'lms-session.json'));
     this.metaFile = new JsonFile(path.join(this.dataDir, 'lms-meta.json'), { mode: 0o644 });
     this.verified = false;
     this.restored = false;
