@@ -245,3 +245,45 @@ test('知识库：Electron 暂存清单里带着 knowledge/（否则打包运行
     assert.match(stage[1], new RegExp(`(^|\\s)${entry.replace('.', '\\.')}(\\s|$)`), `暂存清单要包含 ${entry}，实际：${stage[1].trim()}`);
   }
 });
+
+
+/**
+ * 这条来自「学生日常实测」：模型读全文时把**来源 URL**（甚至只是 URL 的路径片段）
+ * 当 path 传，被 400 挡掉，而它上一句已经说了"我把原文调出来看" —— 用户只等到一句空话。
+ * 用户看到的"出处"就是 URL，那 URL 就该能当 path 用。
+ */
+test('知识库：path 也接受来源 URL 与 URL 路径片段（用户看到的出处就该能用）', async () => {
+  const ctx = await startApp();
+  try {
+    const byUrl = await ctx.call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'knowledge', filters: { path: 'https://dean.xjtu.edu.cn/info/1033/8963.htm', limit: 1 } },
+      dryRun: true,
+    });
+    assert.equal(byUrl.status, 200, JSON.stringify(byUrl.body)?.slice(0, 240));
+    assert.match(String(byUrl.body.items[0].title), /转专业实施细则/);
+
+    const byFragment = await ctx.call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'knowledge', filters: { path: '/info/1033/8963.htm', limit: 1 } },
+      dryRun: true,
+    });
+    assert.equal(byFragment.status, 200, JSON.stringify(byFragment.body)?.slice(0, 240));
+    assert.equal(byFragment.body.items[0].path ?? byFragment.body.items[0].title, byFragment.body.items[0].path ?? byFragment.body.items[0].title);
+
+    // 语料相对路径仍然照旧（别为了新写法把老写法弄坏）
+    const byRelPath = await ctx.call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'knowledge', filters: { path: 'knowledge/dean/gzzd-jwgl/04-西安交通大学本科生转专业实施细则.md', limit: 1 } },
+      dryRun: true,
+    });
+    assert.equal(byRelPath.status, 200, JSON.stringify(byRelPath.body)?.slice(0, 240));
+
+    // 真不存在的，错误信息要教它怎么写
+    const missing = await ctx.call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'knowledge', filters: { path: '没有这一篇.md', limit: 1 } },
+      dryRun: true,
+    });
+    assert.equal(missing.status, 400);
+    assert.match(String(missing.body.error.message), /path 字段|url|filters\.q/);
+  } finally {
+    await ctx.close();
+  }
+});

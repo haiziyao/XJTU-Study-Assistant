@@ -369,10 +369,17 @@ export class KnowledgeService {
      * 然后被 400 挡掉、这一轮白跑（更糟的是它上一句已经说了"我把原文调出来看"，用户只等到一句空话）。
      * 用户看到的"来源"就是 URL，那 URL 就该能用。
      */
-    const byUrl = /^https?:\/\//i.test(String(requestedPath ?? ''))
-      ? (this.index?.documents ?? []).find((doc) => doc.url === requestedPath)
+    const asked = String(requestedPath ?? '').trim();
+    // 索引在服务里就是 `this.categories`（`categories[].items[]`，每项有 title/url/path）；
+    // 我第一版写成 `this.index.categories` 根本取不到，于是 URL 匹配静默失效 —— 探测才发现
+    const docs = (this.categories ?? this.index?.categories ?? []).flatMap((category) => category.items ?? []);
+    const byUrl = /^https?:\/\//i.test(asked) ? docs.find((doc) => doc.url === asked) : null;
+    // 只给"网址的路径片段"也认（模型实测发过 `/info/1033/1130.htm`）——
+    // 它对用户来说就是"这一篇的地址"，能对上就别让它白跑一轮
+    const bySuffix = !byUrl && !/^https?:/i.test(asked) && asked.includes('/')
+      ? docs.find((doc) => String(doc.url ?? '').endsWith(asked))
       : null;
-    const effectivePath = byUrl?.path ?? requestedPath;
+    const effectivePath = byUrl?.path ?? bySuffix?.path ?? requestedPath;
     const { item, absPath, outside } = this.#resolve(effectivePath);
     if (outside) throw HttpError.badRequest(`path 不在语料目录内：${requestedPath}`, { field: 'path' });
 
