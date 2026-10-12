@@ -22,22 +22,38 @@ export const LMS_DEFAULTS = Object.freeze({
   detailTimeoutMs: 25_000,
   /** 抓活动时最多并发几门课程，避免把学校服务器打崩。 */
   concurrency: 2,
+  /**
+   * 录播站点（课程回放的视频**不在 lms 上**）。
+   *
+   * 取一次回放的直链要跨两个域名三步：lms 的 `/api/lessons/{id}/player-url` 给一个带
+   * `token` 的播放地址 → 拿这个 token 去录播站换 `embed-token`（Bearer）
+   * → 再用 `replay_code` 去录播站要 `captures`，里面才有 `lesson_videos[].download_url`。
+   */
+  rmsBaseUrl: 'https://rms-v5.xjtu.edu.cn',
+  /** 回放下载目录；不传就用 `<dataDir>/downloads`。 */
+  downloadDir: null,
+  /** 单个视频的连接/响应头超时（秒）；下正文不限时，几百 MB 要慢慢来。 */
+  downloadTimeoutMs: 30_000,
 });
 
 /**
  * 解析配置。优先级：显式入参 > 环境变量 > 默认值。
- * 环境变量：PC_LMS_BASE_URL / PC_LMS_CAS_ORIGIN / PC_LMS_TIMEOUT_MS
+ * 环境变量：PC_LMS_BASE_URL / PC_LMS_CAS_ORIGIN / PC_LMS_TIMEOUT_MS /
+ *          PC_LMS_RMS_BASE_URL / PC_LMS_DOWNLOAD_DIR
  */
 export function resolveLmsConfig(overrides = {}, env = process.env) {
   const config = { ...LMS_DEFAULTS, ...overrides };
   if (!overrides.baseUrl && env.PC_LMS_BASE_URL) config.baseUrl = env.PC_LMS_BASE_URL;
   if (!overrides.casOrigin && env.PC_LMS_CAS_ORIGIN) config.casOrigin = env.PC_LMS_CAS_ORIGIN;
+  if (!overrides.rmsBaseUrl && env.PC_LMS_RMS_BASE_URL) config.rmsBaseUrl = env.PC_LMS_RMS_BASE_URL;
+  if (!overrides.downloadDir && env.PC_LMS_DOWNLOAD_DIR) config.downloadDir = env.PC_LMS_DOWNLOAD_DIR;
   if (!overrides.timeoutMs && env.PC_LMS_TIMEOUT_MS) {
     const parsed = Number(env.PC_LMS_TIMEOUT_MS);
     if (Number.isFinite(parsed) && parsed > 0) config.timeoutMs = parsed;
   }
   config.baseUrl = String(config.baseUrl).replace(/\/+$/, '');
   config.casOrigin = String(config.casOrigin).replace(/\/+$/, '');
+  config.rmsBaseUrl = String(config.rmsBaseUrl).replace(/\/+$/, '');
   return config;
 }
 

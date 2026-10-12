@@ -198,6 +198,47 @@ export function normalizeSubmission(raw) {
   };
 }
 
+/** 从地址里取一个查询参数（用来从播放地址里抠 `token` / `replay_code`）。 */
+export function queryParam(url, name) {
+  try {
+    return new URL(String(url)).searchParams.get(name);
+  } catch {
+    const match = new RegExp(`[?&]${name}=([^&]*)`).exec(String(url));
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+}
+
+/**
+ * 回放视频的标签。实测只有两个值：
+ *   `INSTRUCTOR` = 教室录像（拍老师和黑板），`ENCODER` = 电脑内录（投影/课件画面）。
+ * 两路通常都带音轨，`is_best_audio` 标出音质更好的那一路。
+ */
+export const REPLAY_VIDEO_LABELS = Object.freeze({
+  INSTRUCTOR: '教室录像',
+  ENCODER: '电脑内录',
+});
+
+/**
+ * 归一化录播站的 `lesson_videos[]` 一项。
+ * 下载优先用 `download_url` 直链，没有才退回播放地址（有些录制只有播放地址）。
+ */
+export function normalizeReplayVideo(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const label = String(raw.label ?? raw.video_type ?? raw.videoType ?? '').trim().toUpperCase();
+  const downloadUrl = str(raw.download_url ?? raw.downloadUrl);
+  const playUrl = str(raw.play_url ?? raw.playUrl ?? raw.url);
+  return {
+    label: label || 'VIDEO',
+    labelText: REPLAY_VIDEO_LABELS[label] ?? (label || '视频'),
+    downloadUrl,
+    playUrl,
+    url: downloadUrl ?? playUrl ?? null,
+    size: toIntOrNull(raw.size ?? raw.bytes ?? raw.file_size ?? raw.fileSize),
+    duration: toIntOrNull(raw.duration ?? raw.duration_seconds ?? raw.durationSeconds),
+    isBestAudio: Boolean(raw.is_best_audio ?? raw.isBestAudio),
+  };
+}
+
 export class LmsApi {
   constructor({ http, config }) {
     this.http = http;
@@ -268,6 +309,65 @@ export class LmsApi {
     const data = await this.#apiJson('GET', url);
     const list = Array.isArray(data?.submissions) ? data.submissions : Array.isArray(data?.list) ? data.list : [];
     return list.map(normalizeSubmission).filter(Boolean);
+  }
+
+  /**
+   * 取一次回放的视频直链。
+   *
+   * **课程回放的视频不在 lms 上**，要跨到录播站（RMS），三步：
+   *   1. `GET {lms}/api/lessons/{id}/player-url?from_page=course` → 一个带 `token` 的播放地址；
+   *   2. `GET {rms}/api/v1/auth/embed-token?token=…` → 录播站的 Bearer 票据；
+   *   3. `GET {rms}/api/embed/lesson-activities/captures/{replay_code}` → `lesson_videos[]`
+   *      （里面有 `download_url` 直链）。
+   *
+   * 注意：控制台日志里**不要**打这三个地址 —— 它们都带票据，等于把登录态写进日志。
+   *
+   * @param {object} activity 归一化后的活动（`lesson` 类型），至少要有 `id`
+   * @param {object} [options]
+   * @param {string|number} [options.lessonId] 显式指定 lesson id（默认用活动 id）
+   */
+  async replayVideos(activity, { lessonId } = {}) {
+    const id = lessonId ?? activity?.id;
+    if (id === null || id === undefined || id === '') {
+      throw new HttpError('这个活动没有 id，拿不到回放地址', { field: 'id' });
+    }
+
+    // 第一步：lms 给播放地址
+    const player = await this.#apiJson('GET', `/lessons/${encodeURIComponent(id)}/player-url?from_page=course`);
+    const body = player?.data && typeof player.data === 'object' ? player.data : player ?? {};
+    const playerUrl = str(body.player_url ?? body.playerUrl ?? body.url);
+    if (!playerUrl) {
+      throw new HttpError('学堂没有返回播放地址（这门课的回放可能还没生成或未开放）', { lessonId: id });
+    }
+
+    // 第二步：拿地址里的 token 去录播站换票据
+    const token = queryParam(playerUrl, 'token');
+    if (!token) {
+      throw new HttpError('播放地址里没有 token，无法换取录播站票据', { lessonId: id });
+    }
+    const rms = this.config.rmsBaseUrl;
+    const headers = { Referer: `${rms}/`, Accept: 'application/json, text/plain, */*' };
+    const embed = await this.http.json(`${rms}/api/v1/auth/embed-token?token=${encodeURIComponent(token)}`, { headers });
+    const bearer = str(embed?.token ?? embed?.data?.token ?? embed?.embed_token);
+    if (!bearer) {
+      throw new HttpError('录播站没有返回票据（token 可能已过期）', { rms });
+    }
+
+    // 第三步：拿 replay_code 要视频列表
+    const replayCode =
+      str(activity?.replayCode) ??
+      queryParam(playerUrl, 'replay_code') ??
+      str(body.replay_code ?? body.replayCode);
+    if (!replayCode) {
+      throw new HttpError('没有 replay_code，拿不到回放视频列表', { lessonId: id });
+    }
+    const captures = await this.http.json(
+      `${rms}/api/embed/lesson-activities/captures/${encodeURIComponent(replayCode)}`,
+      { headers: { ...headers, Authorization: `Bearer ${bearer}` } },
+    );
+    const raw = captures?.lesson_videos ?? captures?.data?.lesson_videos ?? [];
+    const videos = (Array.isArray(raw) ? raw : []).map(normalizeReplayVideo).filter(Boolean);
+    return { lessonId: id, replayCode, videos };
   }
 
   /**

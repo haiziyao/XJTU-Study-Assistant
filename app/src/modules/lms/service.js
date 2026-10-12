@@ -18,6 +18,7 @@ import { AUTH_STATUS } from './cas-auth.js';
 import { DEFAULT_SYNC_TYPES, activityTypesOf, resolveLmsConfig } from './config.js';
 import { JsonFile } from './secret-store.js';
 import { LmsApi } from './api.js';
+import { ReplayDownloader, humanSize } from './replay-download.js';
 import { applySyncPlan, buildSyncPlan } from './sync.js';
 import { parseLmsDate } from './time.js';
 
@@ -60,6 +61,17 @@ export class LmsService {
     this.http = auth.http;
     this.api = new LmsApi({ http: this.http, config: this.config });
     /** 同步元信息是普通业务数据 → 0644。会话票据由 auth 模块管，不再有 lms-session.json。 */
+    this.jar = new CookieJar();
+    this.http = new HttpClient({ userAgent: config.userAgent, timeoutMs: config.timeoutMs, jar: this.jar });
+    this.auth = new CasAuth({ http: this.http, config, visitorId: visitorId ?? generateVisitorId() });
+    // 回放下载：视频直链要带录播站票据 + 学堂 Cookie，只能在主进程下
+    this.downloads = new ReplayDownloader({
+      http: this.http,
+      downloadDir: this.config.downloadDir ?? path.join(this.dataDir, 'downloads'),
+      broadcast,
+      log: (message) => this.services?.log?.(message),
+    });
+    this.sessionFile = new JsonFile(path.join(this.dataDir, 'lms-session.json'));
     this.metaFile = new JsonFile(path.join(this.dataDir, 'lms-meta.json'), { mode: 0o644 });
     this.verified = false;
     this.restored = false;
@@ -329,6 +341,86 @@ export class LmsService {
     return { ...this.listActivities({ courseIds }), errors };
   }
 
+  /**
+   * 课程页数据：课程信息 + 这门课的活动按类型分组。
+   *
+   * 全部来自本地缓存（`POST /lms/activities/refresh` 负责刷新），
+   * 打开课程页不该再打一次学校接口 —— 那会让"点一下课程"变成几秒白屏。
+   */
+  coursePage(courseId) {
+    const record = this.store.lmsCourses.all().find((item) => Number(item.courseId) === Number(courseId));
+    if (!record) throw HttpError.notFound(`本地没有课程 ${courseId}（先刷新课程）`);
+    const course = courseView(record);
+    const items = this.listActivities({ courseIds: [courseId] }).items;
+    const groups = { replay: [], homework: [], material: [], live: [], other: [] };
+    for (const item of items) {
+      const bucket =
+        item.type === 'lesson'
+          ? 'replay'
+          : item.type === 'homework'
+            ? 'homework'
+            : item.type === 'material'
+              ? 'material'
+              : item.type === 'lecture_live'
+                ? 'live'
+                : 'other';
+      groups[bucket].push(item);
+    }
+    return {
+      course,
+      groups,
+      counts: Object.fromEntries(Object.entries(groups).map(([key, list]) => [key, list.length])),
+      fetchedAt: this.state.lastActivitiesAt,
+      loggedIn: this.state.status === 'ready',
+    };
+  }
+
+  /** 取某个回放活动的视频列表（需要联网换票据，所以是显式动作）。 */
+  async replayVideos(activityId) {
+    await this.#ensureReady();
+    const record = this.store.lmsActivities.get(activityRecordId(activityId));
+    if (!record) throw HttpError.notFound(`本地没有活动 ${activityId}（先刷新活动）`);
+    const activity = activityView(record);
+    const result = await this.#guard(
+      () => this.api.replayVideos(activity, { lessonId: activity.id }),
+      '获取回放地址失败',
+    );
+    return {
+      activityId: activity.id,
+      title: activity.title ?? null,
+      courseName: activity.courseName ?? null,
+      replayCode: result?.replayCode ?? null,
+      videos: (result?.videos ?? []).map((video) => ({ ...video, sizeText: humanSize(video.size) })),
+    };
+  }
+
+  /** 开始下载一个回放视频。`url`/`label` 由前端从 replayVideos 的结果里带过来。 */
+  startDownload({ activityId, video } = {}) {
+    const record = this.store.lmsActivities.get(activityRecordId(activityId));
+    if (!record) throw HttpError.notFound(`本地没有活动 ${activityId}（先刷新活动）`);
+    const activity = activityView(record);
+    return this.downloads.start({
+      video,
+      courseName: activity.courseName ?? null,
+      title: activity.title ?? null,
+      activityId: activity.id,
+    });
+  }
+
+  listDownloads() {
+    return { items: this.downloads.list(), active: this.downloads.activeCount, downloadDir: this.downloads.downloadDir };
+  }
+
+  cancelDownload(id) {
+    const job = this.downloads.cancel(id);
+    if (!job) throw HttpError.notFound(`没有下载任务 ${id}`);
+    return job;
+  }
+
+  clearDownloads() {
+    return { items: this.downloads.clearFinished() };
+  }
+
   async activityDetail(activityId) {
     await this.#ensureReady();
     const detail = await this.#guard(() => this.api.activityDetail(activityId), '拉取活动详情失败');
@@ -449,6 +541,7 @@ export class LmsService {
   }
 
   stopAutoSync() {
+    this.downloads?.cancelAll();
     if (this.autoSyncTimer) clearInterval(this.autoSyncTimer);
     this.autoSyncTimer = undefined;
     return this;
