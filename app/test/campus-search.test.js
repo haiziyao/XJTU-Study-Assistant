@@ -539,3 +539,72 @@ test('工具函数：base64(UTF-8) 与请求体形状（实测过的那些站点
   assert.equal(params.get('_lucenesearchtype'), '1');
   assert.equal(params.get('searchScope'), '0');
 });
+
+
+// ---------------------------------------------------------------------------
+// 排序：站内直搜的结果必须**按相关度**排，而不是按"哪个站点先被查"
+// ---------------------------------------------------------------------------
+
+/**
+ * 这条来自真机反馈，值得单独锁死：
+ * 用户问「最近有什么单位来访我们航空航天学院吗」，站内直搜其实**抓到了**航院那几条
+ * （"中国工程物理研究院…来访航天航空学院并做技术交流"），但 12 个站点共 113 条候选
+ * 是按站点顺序（教务处排第一）截前 10 条的 → 航院的结果全被教务处的竞赛/学籍通知挤掉，
+ * 模型看到的就是"只搜到教务处、跟来访无关"，于是它如实回答"搜不到"（那是产品的错，不是模型的错）。
+ */
+test('站内直搜结果按相关度排序：问"学院来访"时，航院的来访新闻要排在教务处通知前面', async () => {
+  const world = await startFakeServer(({ url, finish }) => {
+    if (url.pathname === '/dean/search.jsp') {
+      // 教务处：标题里只有"航天航空学院"这个限定词，讲的是竞赛与转专业 —— 与"来访"无关
+      return finish(
+        200,
+        vsbListPage({
+          keyword: '',
+          items: [
+            { title: '关于组织参加第十八届蓝桥杯全国大学生软件大赛的通知', url: DEAN_A, date: '2026-07-31' },
+            { title: '2021年航天航空学院本科生转专业工作实施方案', url: DEAN_B, date: '2021-06-01' },
+          ],
+        }),
+      );
+    }
+    if (url.pathname === '/sae/search.jsp') {
+      // 航院：真正在讲"来访/交流"的新闻
+      return finish(
+        200,
+        vsbListPage({
+          keyword: '来访',
+          items: [
+            { title: '厦门大学航空航天学院来院交流调研', url: 'https://sae.xjtu.edu.cn/info/1056/7457.htm', date: '2026-06-20' },
+            { title: '河南理工大学来访航天航空学院', url: 'https://sae.xjtu.edu.cn/info/1056/7458.htm', date: '2026-06-10' },
+          ],
+        }),
+      );
+    }
+    return finish(404, '<html>nope</html>');
+  });
+
+  const sites = [
+    { id: 'dean', label: '教务处（假）', host: 'dean.xjtu.edu.cn', origin: world.base, path: '/dean/search.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey' },
+    { id: 'sae', label: '航天航空学院（假）', host: 'sae.xjtu.edu.cn', origin: world.base, path: '/sae/search.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey' },
+  ];
+
+  try {
+    const out = await searchWebDetailed({
+      query: '航空航天学院 来访',
+      mode: 'campus',
+      limit: 4,
+      fetchImpl: localOnlyFetch(),
+      probeCampus: false,
+      config: { campusSites: sites, searchProvider: 'scrape', searchMaxPages: 8 },
+    });
+
+    assert.ok(out.results.length >= 3, `至少该带回几条：${JSON.stringify(out.results)}`);
+    const hosts = out.results.map((item) => new URL(item.url).hostname);
+    assert.equal(hosts[0], 'sae.xjtu.edu.cn', `第一条必须是讲来访的航院新闻，实际：${hosts.join(' | ')}`);
+    assert.equal(hosts[1], 'sae.xjtu.edu.cn', `第二条也该是航院，实际：${hosts.join(' | ')}`);
+    // 教务处的条目仍在（相关度低不等于没搜到），只是被排到后面
+    assert.ok(hosts.includes('dean.xjtu.edu.cn'), '相关度低的结果不该被丢掉，只是排在后面');
+  } finally {
+    await world.close();
+  }
+});

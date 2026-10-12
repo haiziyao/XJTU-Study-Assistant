@@ -1838,7 +1838,23 @@ export async function searchWebDetailed({
     for (const item of items ?? []) collected.push({ ...item, scope: task.scope });
   }
 
-  const deduped = dedupeResults(collected);
+  /**
+   * 按**相关度**排一次，而不是按"哪个站点先被查"。
+   *
+   * 这是真机反馈逼出来的：用户问「最近有什么单位来访我们航空航天学院吗」，
+   * 站内直搜其实**抓到了**航院那几条（"中国工程物理研究院流体物理研究所来访航天航空学院并做技术交流"），
+   * 但 12 个站点共 113 条候选是按 CAMPUS_SITE_SEARCH 的顺序（教务处排第一）截前 10 条的，
+   * 于是航院的结果全被教务处的竞赛/学籍通知挤出去 —— 模型看到的就是"只搜到教务处，跟来访无关"。
+   *
+   * 排序口径：相关度（标题命中权重更高，见 relevanceScore）降序 →
+   * 命中来源（站内 > 域名 > 文本提到本校）→ 原顺序（稳定，保证同分不抖）。
+   */
+  const terms = queryTerms(text);
+  const ranked = dedupeResults(collected)
+    .map((item, index) => ({ item, index, score: relevanceScore(terms, item) }))
+    .sort((a, b) => b.score - a.score || matchedByRank(a.item.matchedBy) - matchedByRank(b.item.matchedBy) || a.index - b.index)
+    .map((entry) => entry.item);
+  const deduped = ranked;
 
   /**
    * 校内档第 ③ 条通道（兜底分桶）：**把公网结果里真正提到本校的那些算作校内相关**。
