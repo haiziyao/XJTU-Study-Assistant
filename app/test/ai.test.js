@@ -1065,9 +1065,15 @@ test('AI：提示词讲清「笔记」的边界 —— 不否认它存在、不�
     // 注意这一条的措辞在 multi-round 那一轮改过：notes 模块**确实**声明了只读的 note 查询，
     // 所以现在禁的是 note 的**写入**草稿（create/update/delete），而不是 note 本身。
     assert.ok(system.includes('输出 target: "note" 的**写入**草稿'), '要明确禁止输出 note 的写入草稿');
-    // 可写的 target 只能来自各模块的领域说明：不能自己发明（note 写入、lms 之类都不许）
-    assert.ok(system.includes('**只能取各模块「领域说明」里声明过的**'), '协议里要收死 target 取值');
-    assert.ok(system.includes('todo / schedule / event / grade'), '要把当前声明过的 target 列出来（含学业成绩）');
+    // target 只能来自各模块声明：不能自己发明（note 写入、lms 之类都不许）。
+    // 措辞在 2026-10-13 改过：把"当前有哪些"从写死的一句改成分类清单 ——
+    // 那时新增了记忆/校规/三源检索/卡片/目标/周报，写死的清单立刻就过期了，
+    // 而模型看不到某个 target 就等于那个功能对它不存在。
+    assert.ok(system.includes('**只能取下面「领域说明」里真的出现过的那些**'), '协议里要收死 target 取值');
+    for (const target of ['`todo`', '`schedule`', '`event`', '`grade`', '`note`', '`search`', '`card`', '`goal`', '`weekly`', '`web`', '`memory`']) {
+      assert.ok(system.includes(target), `已声明的 target 要列进协议：${target}`);
+    }
+    assert.ok(system.includes('三源统一检索'), '要讲清 search 是干什么的（跨来源一次查完）');
   } finally {
     await app.close();
     await mock.close();
