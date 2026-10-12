@@ -214,6 +214,21 @@ ios/
 | App 打开闪退回桌面 | 免费证书 7 天过期了 | 重新用 Sideloadly 签一次 |
 | iOS 16+ 提示"需要开发者模式" | 系统要求 | 设置 → 隐私与安全性 → 开发者模式，打开并重启 |
 | 手机浏览器直接开电脑端 `/app` 连不上 | 那个页面自带的 CSP 只允许连 `127.0.0.1` | 走 PWA 那节的 `Web/` 副本（CSP 已放宽） |
+| 构建报 `Build input file cannot be found: …/PotatoStudy/Web` | 没先同步前端（`Web/` 不入库，干净检出里没有） | 先 `bash ios/sync-web.sh` 再构建 |
+| 构建报 `The app icon set "AppIcon" did not have any applicable content` | 图标目录格式与 Xcode 版本不合 | 应急：在工程里去掉 `Assets.xcassets` 引用与 `ASSETCATALOG_COMPILER_APPICON_NAME`，先出包（图标变灰），再回头补图标 |
+| 构建报 `No signing certificate` / `requires a development team` | 命令行漏了不签名参数 | 补上 `CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""` |
+
+### 如果 CI 红了，先看这两条
+
+1. **`error: Build input file cannot be found: …/ios/PotatoStudy/Web`** —— 前端没同步。
+   `Web/` 是构建中间物、不进 git，干净检出里没有这个目录；先跑 `bash ios/sync-web.sh`。
+   （工作流里已经在第一步跑了同步，所以这条一般出现在本地手敲 `xcodebuild` 的时候。）
+2. **签名相关报错**（`No signing certificate` / `requires a development team`）—— 命令行少了
+   `CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""`；三条缺一条，
+   xcodebuild 就会去找证书，而 CI 上没有证书。
+
+失败信息都在 Actions → 那次运行 → 变红那一步的日志里；本机没有 Xcode 时，
+`plutil -lint` / `sync-web.sh` / `verify-swift.sh` 这三样能提前挡掉大部分低级错误（见下一节）。
 
 ---
 
