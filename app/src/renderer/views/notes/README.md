@@ -1,6 +1,6 @@
 # 笔记系统前端挂载层
 
-本目录实现笔记入口、摘要展示、日历挂载和随手拍衔接。正文、Markdown、OCR、图片和附件由 AI 智学主程序持有，本模块不建立笔记后端集合。
+本目录实现笔记入口、摘要展示、独立 Markdown 编辑页、日历挂载和随手拍衔接。正文与附件由后端 `notes` 模块或外部 Provider 持有，浏览器摘要缓存不保存正文。
 
 ## 接入
 
@@ -51,3 +51,14 @@ const context = await notes.readForAI({ ids: ['note-id'], limit: 5 });
 返回项仅保留 `id、title、format、text、tags、anchor、updatedAt`。入口最多接收 20 个 ID、最多返回 20 条，每条正文最多 200,000 字符；Provider 应在这里完成当前用户授权检查和必要脱敏。调用结果只返回给本次 AI 上下文，不并入 `state.items`，也不进入 `localStorage`。未声明能力时调用会明确失败，防止 AI 默认读取全部私人笔记。
 
 当前仓库自带默认 Provider：进入笔记页时自动连接 `/api/v1/notes`，正文和附件由主程序的 `notes` 模块保存在 `app/data/notes.json`。AI 模块通过只读指令目标 `note` 查询正文；前端仍只缓存摘要。
+
+## 独立 Markdown 编辑页
+
+内置 Provider 声明 `edit: true` 并实现 `openNote(id)`；“新建笔记”和“编辑笔记”进入 `editor.html`，不再在摘要弹层中编辑。外部 Provider 沿用自己的 `openNote` 与创建流程。
+
+- 左侧编辑、右侧实时预览，复用 `PCRichText` 的 Markdown / LaTeX 子集；窄屏上下展示。
+- 新建使用 `POST /api/v1/notes`；已有笔记通过 `PATCH /api/v1/notes/:id` 保存，支持标题、正文、标签、格式及状态，携带 `expectedUpdatedAt` 检测冲突。
+- 原有附件、来源和日历关联保留；正文不进入浏览器缓存。
+- 紧凑顶栏直接编辑标题；标签、附件说明和外观选项收进“属性”，不占用常驻标题区。
+- 支持源码行号与配色、撤销 / 重做、分栏 / 阅读切换、Ctrl / Cmd + S、Tab 缩进、常用格式工具（含表格）、同步滚动、未保存提醒；失败后保留当前输入。
+- 主页面与编辑页共用白天 / 夜间 / 跟随系统偏好。
