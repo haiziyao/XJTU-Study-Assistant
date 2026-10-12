@@ -343,6 +343,117 @@
     push(card);
   }
 
+  /* ------------------------------------------------ 会话：打开历史 / 新建 / 续聊 */
+
+  /**
+   * 「对话」页要能**把历史对话打开到左侧聊天框**，所以这里把控制权做成一组函数，
+   * 通过 `PCModules.service('chat', ...)` 暴露出去 —— 视图不必知道消息怎么渲染、
+   * 更不必去点 DOM。判定标准是：切换会话必须同时改 `state.conversationId`，
+   * 否则界面上是 A 会话的内容、下一条消息却写进 B 会话（用户看到"串了"却查不出原因）。
+   */
+  const CONVERSATION_KEY = 'potato.conversation';
+  const DRAFT_KEY = 'potato.draft';
+
+  /** 换会话的唯一入口：内存与 localStorage 一起改，避免两处不同步。 */
+  function setConversationId(id) {
+    state.conversationId = id || null;
+    writeStored(CONVERSATION_KEY, state.conversationId ?? '');
+  }
+
+  /** 清空聊天栏。正在流式接收的那条也要断掉引用，否则迟到的分片会写进新会话的界面。 */
+  function clearChatLog() {
+    state.streaming = null;
+    state.reasoningNode = null;
+    dom.chatLog.textContent = '';
+  }
+
+  /**
+   * 把落库的一条消息画回气泡。
+   *
+   * 只重放正文与附件名：当时那些「确认卡 / 查询卡」的现场（待确认的草稿、查询结果）
+   * 已经过去了，历史里重建它们只会让人以为还能点确认。附件也只留名字 ——
+   * dataURL 不落库（省空间），历史里给不出缩略图，如实显示名字比给个坏图强。
+   */
+  function renderHistoryMessage(message) {
+    const role = message?.role === 'user' ? 'user' : 'bot';
+    const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+    const files = attachments.map((item) => ({ name: item?.name ?? '附件', type: item?.type ?? '', size: item?.size ?? 0 }));
+    const node = bubble(role, message?.content ?? '', files);
+    if (message?.createdAt) node.dataset.at = message.createdAt;
+    return node;
+  }
+
+  /** 历史对话的标题：没有标题就按第一条用户消息起头，跟「对话」页的列表口径保持一致。 */
+  function conversationTitle(conversation, messages = []) {
+    const explicit = String(conversation?.title ?? '').trim();
+    if (explicit) return explicit;
+    const first = messages.find((item) => item?.role === 'user' && String(item.content ?? '').trim());
+    const text = String(first?.content ?? '').trim().replace(/\s+/g, ' ');
+    return text ? `${text.slice(0, 24)}${text.length > 24 ? '…' : ''}` : '（空对话）';
+  }
+
+  /**
+   * 打开一条历史对话：拉详情 → 清空 → 按顺序重画 → 记住 id。
+   *
+   * @param {string} id
+   * @param {{ silent?: boolean }} [options] `silent` 用在启动恢复：失败时不弹失败卡，
+   *   而是安静地退回欢迎语（上次那条对话可能已经被用户在「对话」页删掉了，这不算错误）。
+   */
+  async function openConversation(id, options = {}) {
+    if (!id) {
+      newConversation();
+      return { ok: false, reason: 'no-id' };
+    }
+    const pending = options.silent ? null : systemNote('正在打开历史对话…', 'pending');
+    try {
+      const detail = await api(`/ai/conversations/${encodeURIComponent(id)}`);
+      const messages = Array.isArray(detail?.messages) ? detail.messages : [];
+      clearChatLog();
+      setConversationId(detail?.conversation?.id ?? id);
+      systemNote(`已打开「${conversationTitle(detail?.conversation, messages)}」 · ${messages.length} 条消息`, 'meta');
+      for (const message of messages) renderHistoryMessage(message);
+      if (!messages.length) systemNote('这个对话还没有消息，直接说话就行。', 'meta');
+      dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
+      pending?.remove();
+      return { ok: true, count: messages.length };
+    } catch (error) {
+      pending?.remove();
+      if (options.silent) {
+        // 对话可能已被删除：把失效的 id 清掉，下次启动不再白试一遍
+        setConversationId(null);
+        return { ok: false, error };
+      }
+      errorCard(error);
+      throw error;
+    }
+  }
+
+  /** 新对话：不落库（后端在下一条消息时才建会话），只把界面与 id 归零。 */
+  function newConversation() {
+    clearChatLog();
+    setConversationId(null);
+    welcome();
+    dom.chatInput?.focus();
+    return { ok: true };
+  }
+
+  /** 上次的对话：启动时用它续上；没有、或已被删，就回到欢迎语。 */
+  async function restoreConversation() {
+    const stored = readStored(CONVERSATION_KEY);
+    if (!stored) {
+      welcome();
+      return;
+    }
+    const result = await openConversation(stored, { silent: true });
+    if (!result.ok) welcome();
+  }
+
+  /** 草稿：关窗/刷新后输入框里的半截话还在（不然"刚写一半被打断"就得重打）。 */
+  function saveDraft(value) {
+    clearTimeout(saveDraft._timer);
+    saveDraft._timer = setTimeout(() => writeStored(DRAFT_KEY, String(value ?? '')), 250);
+  }
+
   function actionText(draft) {
     const target = TARGET_LABEL[draft.target] ?? draft.target ?? '';
     const action = ACTION_LABEL[draft.action] ?? draft.action ?? '';
@@ -552,10 +663,50 @@
   };
 
   /**
-   * 知识库结果的一行：标题（主）+ 栏目 · 日期（次）+ 来源 URL + 片段。
+   * 打开外部链接：交给系统浏览器。
    *
-   * URL 是**可读文本**，不做超链接：Electron 里没有 openExternal 通道，点了也打不开，
-   * 做成链接反而骗人；用户要核对原文可以自己复制（CSS 里已开 user-select）。
+   * 主进程装了 `setWindowOpenHandler` → `shell.openExternal`（src/main/main.cjs），
+   * 所以 `window.open` 在 Electron 里是**真的能打开**的；退化成普通浏览器访问时也一样。
+   * 这个能力是联网检索的前提：搜到的链接必须能点回去核对，否则等于让用户相信一段无法验证的话。
+   */
+  function openExternal(url) {
+    if (!url) return;
+    window.open(String(url), '_blank', 'noreferrer');
+  }
+
+  /**
+   * 联网检索结果的一行：标题 + 可点的链接 + 摘要 + 「有没有抓到正文」。
+   *
+   * 「没抓到正文」必须显式标出来：只有标题和摘要时，模型看到的和用户看到的是同一层信息，
+   * 卡片上不写清楚，用户会以为 AI"读过全文"。
+   */
+  function webRow(item) {
+    const row = mk('div', 'cc-list-row cc-web-row');
+    const head = mk('div', 'cc-web-head');
+    head.appendChild(mk('span', 'cc-web-title', item.title || item.url || '（无标题）'));
+    const open = mk('button', 'ghost-btn cc-web-open', '打开');
+    open.type = 'button';
+    open.addEventListener('click', () => openExternal(item.url));
+    head.appendChild(open);
+    row.appendChild(head);
+    if (item.url) row.appendChild(mk('div', 'cc-web-url', item.url));
+    const snippet = snippetText(item.snippet);
+    if (snippet) row.appendChild(mk('div', 'cc-web-snippet', snippet));
+    row.appendChild(
+      mk(
+        'div',
+        'cc-web-meta',
+        item.ok && item.text
+          ? `已读正文 ${String(item.text).length} 字`
+          : `只有标题与摘要${item.error ? `（${item.error}）` : ''}`,
+      ),
+    );
+    return row;
+  }
+
+  /**
+   * 知识库结果的一行：标题（主）+ 栏目 · 日期（次）+ 来源 URL + 片段。
+   * 链接同样可点（同 openExternal）：政策原文要能当着用户的面核对。
    */
   function knowledgeRow(item) {
     const row = mk('div', 'cc-list-row cc-kb-row');
@@ -574,6 +725,7 @@
   }
 
   /** 影响对象的列表（写入结果 / 查询结果共用一种行样式）。 */
+  const isWebResult = (item) => Boolean(item) && typeof item.url === 'string' && item.url !== '' && 'ok' in item;
   function itemList(items, { limit = 12 } = {}) {
     const list = mk('div', 'cc-list');
     for (const item of items.slice(0, limit)) {
@@ -582,6 +734,10 @@
         // 成绩项没有日期也没有 title：以前这里只显示一个 uuid，等于没显示。
         // 左边那栏改放学期（成绩的"时间维度"就是学期），右边是课程 + 学分/成绩/绩点。
         row.append(mk('span', 'cc-list-time', gradeTerm(item)), gradeText(item));
+      } else if (isWebResult(item)) {
+        // 联网检索的条目要四行（标题 + 可点链接 + 摘要 + 有没有读到正文），整行交给 webRow
+        list.appendChild(webRow(item));
+        continue;
       } else if (isKnowledge(item)) {
         // 知识条目要三行才说得清（标题 / 出处 / 片段），所以整行交给 knowledgeRow 自己排
         list.appendChild(knowledgeRow(item));
@@ -634,11 +790,29 @@
       // 不如把按钮改成「去设置里看知识库」→ 设置页的「知识库」区块里有语料概况、栏目表与自检。
       // 判据与上面 isGrade 的按 target 特判同一路子（条目本身带 url 也算数，防止 target 缺失）。
       const toKnowledge = result.target === 'knowledge' || items.some(isKnowledge);
-      const jump = mk('button', 'ghost-btn', toAcademic ? '在右侧看学业' : toKnowledge ? '去设置里看知识库' : '在右侧查看');
+      // 联网检索没有"右侧页面"可跳：结果本身就是一行行可点的链接（见 webRow），
+      // 所以给的是「去对话设置里看检索诊断」——那里能看到用了哪个后端、为什么某条没抓到正文。
+      const toWeb = result.target === 'web';
+      const jump = mk('button', 'ghost-btn', toAcademic
+        ? '在右侧看学业'
+        : toWeb
+          ? '去看检索诊断'
+          : toKnowledge
+            ? '去设置里看知识库'
+            : '在右侧查看');
       jump.type = 'button';
       jump.addEventListener('click', () => {
         if (toAcademic && typeof window.PC?.openView === 'function') {
           window.PC.openView('academic');
+          return;
+        }
+        if (toWeb) {
+          if (typeof window.PC?.openView === 'function') {
+            window.PC.openView('settings');
+            window.PC?.toast?.('联网检索的开关、密钥与「最大条数」都在「对话设置」里');
+            return;
+          }
+          window.PC?.toast?.('请打开左侧的「设置 → 对话设置」');
           return;
         }
         if (toKnowledge) {
@@ -777,7 +951,7 @@
           search: state.search,
         },
       });
-      state.conversationId = result.conversation?.id ?? state.conversationId;
+      setConversationId(result.conversation?.id ?? state.conversationId);
       streaming.done = true;
       textEl.classList.remove('streaming');
       setBubbleText(textEl, result.assistant?.content || '（模型没有返回内容）');
@@ -822,7 +996,7 @@
         state.reasoningNode = null;
       }
       const details = error?.payload?.error?.details ?? {};
-      if (details.conversationId) state.conversationId = details.conversationId;
+      if (details.conversationId) setConversationId(details.conversationId);
       errorCard(error, { retry: content });
       keepBodyLast(card);
     } finally {
@@ -1389,12 +1563,21 @@
     });
   }
 
+  /** 输入框自增高：上限与 shell.css 的 max-height 一致（180px），下限靠 CSS 的 min-height 兜。 */
+  function autoGrowInput() {
+    const input = dom.chatInput;
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(180, input.scrollHeight)}px`;
+  }
+
   function wireChat() {
     const input = dom.chatInput;
     const submit = () => {
       const text = input.value;
       input.value = '';
-      autoGrow();
+      autoGrowInput();
+      writeStored(DRAFT_KEY, ''); // 已经发出去了，草稿立刻清掉（不然重开又冒出这段话）
       send(text);
     };
     // 「+」→ 系统文件选择器；选完读进内存（图片给 dataURL，文本读正文）
@@ -1422,12 +1605,10 @@
         submit();
       }
     });
-    input.addEventListener('input', autoGrow);
-    function autoGrow() {
-      input.style.height = 'auto';
-      // 上限与 shell.css 的 max-height 保持一致；下限靠 CSS 的 min-height（58px）兜
-      input.style.height = `${Math.min(180, input.scrollHeight)}px`;
-    }
+    input.addEventListener('input', () => {
+      autoGrowInput();
+      saveDraft(input.value);
+    });
     dom.panelToggle.addEventListener('click', togglePanel);
   }
 
@@ -1652,6 +1833,17 @@
       keepScroll,
     };
 
+    // 「对话」页（views/chat-hub.js）靠它把历史对话打开到左边的聊天框。
+    // 只给这五个动作、不给 state：视图直接改 state.conversationId 会绕过持久化，
+    // 表现成"点了历史对话、界面也换了，下一条消息却进了旧会话"。
+    Modules.service('chat', {
+      openConversation,
+      newConversation,
+      currentId: () => state.conversationId,
+      sendMessage: (text) => send(text),
+      showWelcome: () => welcome(),
+    });
+
     buildNav();
     wireChat();
     // 先把持久化的档位读回来再画控件与提示 —— 否则首帧画的是默认值，
@@ -1678,7 +1870,13 @@
 
     dom.chatInput.focus();
     await loadMeta();
-    welcome();
+    // 关窗/刷新后续聊：还原上次那条对话与没发出去的草稿（对话已经被删了就安静退回欢迎语）
+    const storedDraft = readStored(DRAFT_KEY);
+    if (storedDraft) {
+      dom.chatInput.value = storedDraft;
+      autoGrowInput();
+    }
+    await restoreConversation();
     selectView(state.view);
     connectSocket();
   }

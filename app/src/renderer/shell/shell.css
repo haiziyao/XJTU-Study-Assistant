@@ -545,6 +545,52 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
   overflow-wrap: anywhere;
 }
 
+/* ---------------------------------------------------------------- 联网检索结果行 */
+/* 为什么与知识库行分开写：检索结果的"有没有读到正文"是用户判断可信度的关键信息，
+   而且链接必须可点（政策/通知要能当场核对），这两点知识库行都没有。 */
+
+.cc-web-row {
+  display: block;
+  padding: 6px 0;
+}
+.cc-web-row:hover { background: var(--bg-hover); }
+.cc-web-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.cc-web-title {
+  color: var(--fg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.cc-web-open {
+  flex: none;
+  margin-left: auto;
+  padding: 1px 8px;
+  font-size: 11px;
+}
+.cc-web-url {
+  color: var(--blue);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.cc-web-snippet {
+  margin-top: 2px;
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.cc-web-meta {
+  margin-top: 2px;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
 .cc-warnings {
   display: grid;
   gap: 3px;

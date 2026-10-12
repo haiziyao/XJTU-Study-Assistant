@@ -29,7 +29,7 @@ const ACTION_LABEL = {
 // grade 来自 academic 模块：不加这一条，查询卡头会显示「查看grade」
 // knowledge 来自 knowledge 模块（教务处政策语料）：查规卡头要显示「查看校规」，
 // 而且查询卡按这个 target 决定行里显示什么、按钮去哪（见 shell/app.js 的 queryCard）
-const TARGET_LABEL = { todo: '待办', schedule: '日程', event: '日历事件', grade: '成绩', knowledge: '校规' };
+const TARGET_LABEL = { todo: '待办', schedule: '日程', event: '日历事件', grade: '成绩', knowledge: '校规', web: '网页', memory: '记忆' };
 const SCHEDULE_CATEGORIES = ['class', 'study', 'meeting', 'exam', 'activity', 'other'];
 const EVENT_CATEGORIES = ['study', 'exam', 'holiday', 'anniversary', 'deadline', 'other'];
 const REPEAT_TYPES = [

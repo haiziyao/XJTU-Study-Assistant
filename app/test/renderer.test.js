@@ -117,10 +117,12 @@ test('视图注册表：顺序、插槽与跨模块服务符合外壳约定', as
     const main = ids('main');
     const bottom = ids('bottom');
 
-    // 左栏上部：日历 / 待办 / 思源学堂 / 学业 / 笔记系统 / 消息；随手拍已并入笔记系统
+    // 左栏上部：对话 / 日历 / 待办 / 思源学堂 / 学业 / 笔记系统 / 消息；随手拍已并入笔记系统
     // 「学业」原先是 `study` 占位页，已由 views/academic.js 以 id `academic` 正式实现
+    // 「对话」（id `chat`，order 1）是 AI 中枢：对话管理 / 记忆管理 / 知识库管理 / 定时唤醒，
+    // 刻意排在日历之前 —— AI 是这个程序的主入口，管理它的入口不该埋在设置里
     // 注意「网课」没有独立入口：直播 + 回放归到思源学堂视图里，左栏再出现 course 就是回归
-    assert.deepEqual(main, ['calendar', 'todo', 'lms', 'academic', 'notes', 'message']);
+    assert.deepEqual(main, ['chat', 'calendar', 'todo', 'lms', 'academic', 'notes', 'message']);
     // 左栏底部固定为设置
     assert.deepEqual(bottom, ['settings']);
 

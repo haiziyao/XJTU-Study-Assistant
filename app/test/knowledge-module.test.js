@@ -230,3 +230,18 @@ test('知识库：语料目录确实在仓库里（不是 data/）', () => {
   assert.ok(fs.existsSync(path.join(dir, 'index.json')), `${dir}/index.json 应该存在`);
   assert.ok(fs.existsSync(path.join(dir, 'README.md')), '语料目录要有 README（来源与更新方式）');
 });
+
+/**
+ * 这条是被真事逼出来的：Electron 测试窗口只把 `package.json src` 暂存进
+ * `ElectronTest.app/Contents/Resources/app`，语料不在 `data/` 下、也就没跟着走 ——
+ * 窗口里的知识库于是显示 0 篇，而单元测试全绿（测试直接读仓库路径，看不见打包）。
+ * 所以断言暂存清单里必须有 `knowledge`。
+ */
+test('知识库：Electron 暂存清单里带着 knowledge/（否则打包运行时 0 篇）', () => {
+  const script = fs.readFileSync(path.join(PACKAGE_ROOT, 'scripts', 'run-electron-macos.sh'), 'utf8');
+  const stage = script.match(/tar[\s\S]*?-cf -([^\n]*)/);
+  assert.ok(stage, '应该能在启动脚本里找到 tar 暂存行');
+  for (const entry of ['package.json', 'src', 'knowledge']) {
+    assert.match(stage[1], new RegExp(`(^|\\s)${entry.replace('.', '\\.')}(\\s|$)`), `暂存清单要包含 ${entry}，实际：${stage[1].trim()}`);
+  }
+});

@@ -38,11 +38,13 @@ fi
 APP_DIR="$BUNDLE/Contents/Resources/app"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/data"
-# 只同步运行所需文件，排除 node_modules / 本地数据 / 系统垃圾文件
+# 只同步运行所需文件，排除 node_modules / 本地数据 / 系统垃圾文件。
+# knowledge/ 是随仓库发布的语料（知识库模块的默认真源就在它下面），漏掉它时
+# 窗口里的「设置 → 知识库」会显示 0 篇 —— 语料不是在 data/ 里，别只拷 src。
 (
   cd "$ROOT"
   tar --exclude='./node_modules' --exclude='./data' --exclude='./.git' --exclude='.DS_Store' \
-    -cf - package.json src
+    -cf - package.json src knowledge
 ) | (cd "$APP_DIR" && tar -xf -)
 
 # 让打包进 .app 的测试窗口与项目共用同一份数据（主进程读取 data-dir.txt）

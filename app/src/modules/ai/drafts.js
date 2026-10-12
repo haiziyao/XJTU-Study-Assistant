@@ -99,6 +99,17 @@ function normalizeQueryFilters(draft) {
 }
 
 /**
+ * 「预校验不执行」的 target：这些查询**有副作用（真的会发网络请求、可能计费）**，
+ * 预校验只做形状检查、把执行留给多轮循环里那一次真正的调用。
+ *
+ * 为什么必须区分：`previewDrafts` 对其它 target 是"跑一次 dryRun 看结果"，只读查询
+ * 反正要在循环里执行一次 —— 但联网检索如果预校验跑一遍、执行再跑一遍，就是**同一句话搜两次**：
+ * 用户等两倍时间，搜索 API 也可能按次计费。所以这里声明"推迟执行"，
+ * 由 chat-service 的 #runWebQuery 在对的时机（且只在用户开了联网时）跑一次。
+ */
+const DEFERRED_TARGETS = new Set(['web']);
+
+/**
  * 逐条预校验：成功给 `preview`（dryRun 的返回），失败给 `error`。
  * 单条失败不影响其它草稿，也不影响这次聊天本身。
  */
@@ -109,6 +120,18 @@ export async function previewDrafts(commands, drafts = []) {
     try {
       if (normalized.ok === false) {
         results.push({ draft: normalized, preview: null, error: { code: 'PARSE_FAILED', message: normalized.warnings?.[0] ?? '模型表示无法确定' } });
+        continue;
+      }
+      if (DEFERRED_TARGETS.has(normalized.target)) {
+        // 形状照旧校验（query + 检索词非空），但不真的去搜；结果留空，explain 说明"待执行"
+        const query = String(normalized.fields?.query ?? normalized.filters?.q ?? '').trim();
+        results.push({
+          draft: normalized,
+          preview: query
+            ? { target: normalized.target, filters: { query, mode: normalized.fields?.mode ?? null }, count: 0, items: [], explain: '联网检索：待执行' }
+            : null,
+          error: query ? null : { code: 'PARSE_FAILED', message: '联网检索缺少检索词（fields.query）' },
+        });
         continue;
       }
       const preview = await commands.execute(normalized, { dryRun: true });

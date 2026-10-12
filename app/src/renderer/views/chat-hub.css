@@ -1,0 +1,314 @@
+/* 「对话」页（AI 中枢）的样式。
+   颜色一律用外壳主题令牌（--bg-* / --fg* / --line / --blue / --red / --green），
+   不新造主题色 —— 白天/夜间切换时这一页跟着变，不会出现"夜间模式下白底黑字"这种破绽。
+   类名统一 ch- 前缀（本视图独占）；按钮借用外壳的 .primary-btn / .ghost-btn。 */
+
+/* ---------------------------------------------------------------- 标签页 */
+
+.ch-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.ch-tab {
+  flex: 1;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.ch-tab:hover { background: var(--bg-hover); color: var(--fg); }
+.ch-tab.active {
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+/* ---------------------------------------------------------------- 顶部一行 */
+
+.ch-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.ch-head-left,
+.ch-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ch-head-right { margin-left: auto; }
+.ch-head-right .ch-input { width: 180px; }
+
+/* ---------------------------------------------------------------- 提示条 */
+
+.ch-alert {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.ch-alert.warn { border-color: var(--orange); }
+.ch-alert.fail { border-color: var(--red); }
+.ch-alert-title {
+  margin-bottom: 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.ch-alert.warn .ch-alert-title { color: var(--orange); }
+.ch-alert.fail .ch-alert-title { color: var(--red); }
+.ch-alert-msg {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+.ch-note {
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--fg-3);
+}
+
+.ch-empty {
+  padding: 18px 12px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--fg-3);
+  font-size: 12.5px;
+  line-height: 1.7;
+  text-align: center;
+}
+
+.ch-subtitle {
+  margin: 14px 0 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg-2);
+}
+
+/* ---------------------------------------------------------------- 列表行 */
+
+.ch-list { display: flex; flex-direction: column; gap: 8px; }
+
+.ch-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+.ch-row:hover { border-color: var(--border-hover); }
+.ch-row.current { border-color: var(--blue); }
+.ch-row.off { opacity: .62; }
+
+.ch-row-main { min-width: 0; flex: 1; }
+
+.ch-row-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 3px;
+}
+.ch-row-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.ch-row-meta {
+  font-size: 11.5px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.ch-row-text {
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+.ch-row-error {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--red);
+  overflow-wrap: anywhere;
+}
+
+.ch-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.ch-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+.ch-badge.on { border-color: var(--blue); color: var(--blue); }
+.ch-badge.pin { border-color: var(--orange); color: var(--orange); }
+.ch-badge.kind { border-color: var(--purple); color: var(--purple); }
+.ch-badge.key {
+  border-color: transparent;
+  color: var(--fg-3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+}
+
+/* 图标按钮：只有图标时线条风更安静，hover 才给底色 */
+.ch-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+}
+.ch-icon-btn:hover { background: var(--bg-hover); color: var(--fg); }
+.ch-icon-btn:disabled { opacity: .5; cursor: default; }
+
+/* ---------------------------------------------------------------- 表单 */
+
+.ch-form {
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.ch-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+.ch-field-label { font-size: 12px; color: var(--fg-2); }
+.ch-field-hint { font-size: 11px; color: var(--fg-3); line-height: 1.6; }
+
+.ch-input,
+.ch-select,
+.ch-textarea {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12.5px;
+}
+.ch-input:focus,
+.ch-select:focus,
+.ch-textarea:focus {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px rgba(99, 131, 230, .18);
+}
+.ch-textarea { resize: vertical; line-height: 1.7; }
+
+.ch-counter {
+  align-self: flex-end;
+  font-size: 11px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.ch-counter.over { color: var(--red); }
+
+.ch-form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ch-weekdays { display: flex; gap: 6px; flex-wrap: wrap; }
+.ch-chip {
+  min-width: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ch-chip:hover { border-color: var(--border-hover); color: var(--fg); }
+.ch-chip.on { border-color: var(--blue); color: var(--blue); }
+
+/* ---------------------------------------------------------------- 统计与检索 */
+
+.ch-stats {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.ch-stat {
+  min-width: 78px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.ch-stat-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.ch-stat-label { margin-top: 2px; font-size: 11px; color: var(--fg-3); }
+
+.ch-search {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+.ch-search .ch-input { flex: 1; }
+
+.ch-cats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 6px;
+}
+.ch-cat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+.ch-cat-name { font-size: 12.5px; color: var(--fg-2); overflow-wrap: anywhere; }
+.ch-cat-count { flex: none; font-size: 11px; color: var(--fg-3); font-variant-numeric: tabular-nums; }

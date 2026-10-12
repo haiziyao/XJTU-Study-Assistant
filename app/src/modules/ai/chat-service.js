@@ -27,9 +27,42 @@ import { todayKey } from '../../shared/time.js';
 import { maskAiConfig } from './config.js';
 import { extractDrafts, previewDrafts } from './drafts.js';
 import { buildChatSystemPrompt, buildCommandSystemPrompt } from './prompt.js';
+import {
+  readPages,
+  searchWeb,
+  searchWebDetailed,
+  SEARCH_LIMIT_DEFAULT,
+  normalizeSearchLimit,
+  WEB_SEARCH_MODES,
+} from './web-search.js';
 
 /** 给上下文注入留的默认预算（与接口文档 §10.7 一致）。 */
 const DEFAULT_MEMORY_BUDGET = Object.freeze({ maxItems: 8, maxChars: 600 });
+
+/**
+ * 每条网页回灌给模型的正文上限（字）。
+ *
+ * 「网络搜索最大条数」管的是**读几个网页**（5–30，用户可在设置里改）；单页正文还得单独截，
+ * 否则 30 页 × 4000 字 = 12 万字全塞进上下文，这一轮没被截断、下一轮就直接爆掉，
+ * 而模型会因为上下文里全是网页噪声而答得更差。2000 字足够覆盖一篇通知的要点。
+ */
+const WEB_TEXT_CHARS = 1_200;
+
+/** 联网检索在草稿里用的 target 名（模型输出 `{"action":"query","target":"web"}`）。 */
+const WEB_TARGET = 'web';
+
+/**
+ * 定时唤醒的执行策略。
+ *
+ * - `permission: 'manual'`：到点是**没有人看着**的时候，让模型自己把日程/待办写进库
+ *   太危险（用户第二天才发现多了几条莫名其妙的记录）。写操作一律留成待确认草稿，
+ *   等用户回到那个会话点确认；只读查询照常自动执行，所以"计划播报"这类任务依旧一次就出结果。
+ * - `search`：由任务自己声明（见 schedule 的 `search` 字段），默认沿用"不联网"，
+ *   用户明确要"每天搜一下最新通知"时才开 —— 后台悄悄联网不符合这个程序一贯的显式风格。
+ * - `context.view` 标成 `schedule`：让记忆注入按"定时任务"这个场景来挑（当前没有专门规则，
+ *   但视图名进上下文能让模型知道这次不是用户在实时对话）。
+ */
+export const SCHEDULE_RUN_OPTIONS = Object.freeze({ permission: 'manual', search: 'off', context: { view: 'schedule' } });
 
 /**
  * 「指令词触发绘图」：即使设置里关掉了作图，用户明说要画也照给 ——
@@ -136,6 +169,8 @@ export class AiChatService {
     domainBlocks = [],
     queryFields = {},
     queryLimits = {},
+    logger = null,
+    searchFetch = null,
   }) {
     this.store = store;
     this.broadcast = broadcast;
@@ -143,6 +178,17 @@ export class AiChatService {
     this.config = config;
     this.provider = provider;
     this.commands = commands;
+    /**
+     * 框架的 `log`（`log(level, message)`）。联网检索与定时唤醒会产生
+     * "用户看不见、排查时却必须有"的信息（反爬拦截、正文抓取失败、唤醒失败原因），
+     * 统一走它落进后端日志；没注入时错误级别退回 console，绝不因为没日志就抛。
+     */
+    this.logger = typeof logger === 'function' ? logger : null;
+    /**
+     * 检索用的 fetch。生产不传（用全局 fetch）；测试传一个指向本地假搜索引擎的实现，
+     * 这样"搜到 → 读正文 → 回灌模型 → 引用链接"整条链路可以在**完全不联网**的情况下验证。
+     */
+    this.searchFetch = typeof searchFetch === 'function' ? searchFetch : null;
     /** Files API 的本地账本（可为空：没有它就不上传，退回内联）。 */
     this.files = files;
     /** 配置变化后的回调（模块层用它决定是否把 provider 注册给 aiBridge）。 */
@@ -739,7 +785,10 @@ export class AiChatService {
         // 不拦的话 MAX_ROUNDS 会被重复查询烧光，最终答案永远出不来。
         // 「全部确认」档：连只读查询也要用户点确认，所以一条都不自动跑。
         const fresh = autoQuery
-          ? await this.#runReadOnlyQueries(previewed.filter((entry) => !this.#isRepeatQuery(entry, queried)))
+          ? await this.#runReadOnlyQueries(previewed.filter((entry) => !this.#isRepeatQuery(entry, queried)), {
+              // 联网档位是**这次请求**的属性，必须一路传进执行器（见 #runWebQuery）
+              searchMode,
+            })
           : [];
         queried.push(...fresh);
 
@@ -944,11 +993,18 @@ export class AiChatService {
    * 为什么必须自动执行：模型看不见数据，就会一直说"我拿不到/需要你确认"，
    * 而用户问的是"我明天有什么日程"——这种问题应该直接给答案。
    */
-  async #runReadOnlyQueries(previewed) {
+  async #runReadOnlyQueries(previewed, { searchMode = 'off' } = {}) {
     const out = [];
     for (const entry of previewed) {
-      if (entry.error || entry.draft?.action !== 'query') continue;
+      if (entry.draft?.action !== 'query') continue;
       if (out.length >= MAX_AUTO_QUERIES) break;
+      // 联网检索走自己的执行器：它要读**用户在界面上选的通道**（校外/校内/关），
+      // 而那个信息只存在于这一次请求里，命令服务那边看不到（理由见 #runWebQuery）。
+      if (entry.draft.target === WEB_TARGET) {
+        out.push(await this.#runWebQuery(entry, searchMode));
+        continue;
+      }
+      if (entry.error) continue;
       try {
         const result = await this.commands.execute(entry.draft, { dryRun: true });
         out.push({ draft: entry.draft, result: this.#compactQueryResult(entry.draft.target, result) });
@@ -957,6 +1013,140 @@ export class AiChatService {
       }
     }
     return out;
+  }
+
+  /** 后端日志出口：注入了框架 logger 就用它，否则只在错误级别退回 console（免得测试输出被刷屏）。 */
+  #log(level, message) {
+    if (this.logger) {
+      this.logger(level, message);
+      return;
+    }
+    if (level === 'error') console.error(`[ai] ${message}`);
+  }
+
+  /**
+   * 「设置 → 对话设置 → 试一下」用的检索自检：**和对话里走同一个适配器**，
+   * 所以这里能搜到，对话里就能搜到；这里搜不到，界面会直接把原因（后端选择、
+   * 校内探测结果、逐条抓取失败原因）摊开给用户看，而不是让人猜。
+   *
+   * 不写库、不进对话，纯只读的一次尝试。
+   */
+  async searchPreview({ query, mode = 'web', limit } = {}) {
+    const config = this.config.get() ?? {};
+    const scope = WEB_SEARCH_MODES.includes(mode) ? mode : 'web';
+    const configured = normalizeSearchLimit(config.searchMaxPages, { fallback: SEARCH_LIMIT_DEFAULT });
+    const max = normalizeSearchLimit(limit, { fallback: configured });
+    const log = (level, message) => this.#log(level, message);
+    const detailed = await searchWebDetailed({ query, mode: scope, limit: max, config, log, fetchImpl: this.searchFetch ?? undefined });
+    const pages = await readPages(detailed.results, { limit: max, log, fetchImpl: this.searchFetch ?? undefined });
+    const byUrl = new Map(pages.map((page) => [page.url, page]));
+    const items = detailed.results.map((item) => {
+      const page = byUrl.get(item.url) ?? {};
+      return {
+        title: item.title,
+        url: item.url,
+        snippet: item.snippet,
+        source: item.source,
+        ok: page.ok !== false,
+        error: page.error ?? null,
+        chars: String(page.text ?? '').length,
+        text: String(page.text ?? '').slice(0, WEB_TEXT_CHARS),
+      };
+    });
+    return {
+      query: detailed.query,
+      mode: detailed.mode,
+      limit: detailed.limit,
+      backend: detailed.backend,
+      campus: detailed.campus,
+      notes: detailed.notes,
+      count: items.length,
+      read: items.filter((item) => item.chars > 0).length,
+      items,
+    };
+  }
+
+  /**
+   * 联网检索：搜结果 → 读正文 → 合成一条只读查询结果。
+   *
+   * 为什么不在命令服务里注册一个 `web` handler（那样看着更"统一"）：命令 handler 的签名
+   * 只有草稿本身，看不到**这次请求的联网档位**（off / web / campus）—— 那是前端发消息时带上来的。
+   * 让 handler 去读全局状态，两个并发请求就会串档；所以这里显式把档位传进来。
+   *
+   * 「联网关掉了」的口径：不搜，并且**明确告诉模型原因**（它会照实转告用户），
+   * 而不是返回空结果让它以为"网上没有"。
+   */
+  async #runWebQuery(entry, searchMode) {
+    const draft = entry.draft;
+    const query = String(draft.fields?.query ?? draft.filters?.q ?? '').trim();
+    if (!query) {
+      return { draft, error: { code: 'BAD_REQUEST', message: '联网检索缺少检索词（fields.query）' } };
+    }
+    if (!WEB_SEARCH_MODES.includes(searchMode) || searchMode === 'off') {
+      return {
+        draft,
+        error: {
+          code: 'SEARCH_OFF',
+          message:
+            '联网搜索已关闭（输入框下面的地球图标选了「不联网」）。想让我搜，先把它切成「从校外网搜索」或「从校内网搜索」。',
+        },
+      };
+    }
+    // 通道以界面为准：界面选校外时，模型写 campus 也不越权（反过来同理）
+    const mode = searchMode;
+    const config = this.config.get() ?? {};
+    // 「网络搜索最大条数」在设置里（5–30，默认 8）：改了立刻生效，不必重启进程
+    const limit = normalizeSearchLimit(config.searchMaxPages, { fallback: SEARCH_LIMIT_DEFAULT });
+    const asked = normalizeSearchLimit(draft.fields?.limit, { fallback: limit });
+    const count = Math.max(1, Math.min(limit, asked));
+    const log = (level, message) => this.#log(level, message);
+    try {
+      const results = await searchWeb({ query, mode, limit: count, config, log, fetchImpl: this.searchFetch ?? undefined });
+      if (!results.length) {
+        return {
+          draft,
+          result: this.#compactQueryResult(WEB_TARGET, {
+            filters: { query, mode },
+            count: 0,
+            items: [],
+            explain:
+              mode === 'campus'
+                ? '校内检索没有返回结果（可能被反爬挡住，或校内站点里没有匹配）—— 如实告诉用户没搜到，不要编造'
+                : '检索没有返回结果（可能被搜索引擎拦截，或还没配置搜索 API 密钥）—— 如实告诉用户没搜到，不要编造',
+          }),
+        };
+      }
+      const pages = await readPages(results, { limit: count, log, fetchImpl: this.searchFetch ?? undefined });
+      const byUrl = new Map(pages.map((page) => [page.url, page]));
+      const items = results.slice(0, count).map((item) => {
+        const page = byUrl.get(item.url) ?? {};
+        return {
+          title: item.title,
+          url: item.url,
+          snippet: item.snippet,
+          source: item.source,
+          // 正文只在真抓到时才有：`ok:false` 的条目 text 为空、error 说明原因（列表页/PDF/要登录），
+          // 模型据此知道"这条只有摘要，别当成读过了"
+          text: String(page.text ?? '').slice(0, WEB_TEXT_CHARS),
+          // 真实字数单独留一份：界面要显示"读了 N 字"，用截断后的长度会说少
+          chars: String(page.text ?? '').length,
+          ok: page.ok !== false,
+          error: page.error ?? null,
+        };
+      });
+      const read = items.filter((item) => item.text).length;
+      return {
+        draft,
+        result: this.#compactQueryResult(WEB_TARGET, {
+          filters: { query, mode },
+          count: items.length,
+          items,
+          explain: `${mode === 'campus' ? '校内' : '校外'}检索「${query}」：搜到 ${results.length} 条，读到 ${read} 篇正文`,
+        }),
+      };
+    } catch (error) {
+      return { draft, error: { code: error.code ?? 'INTERNAL', message: `联网检索失败：${error.message}` } };
+    }
   }
 
   /**
@@ -987,12 +1177,18 @@ export class AiChatService {
       todo: ['id', 'title', 'deadline', 'completed', 'priority', 'estimatedHours'],
       schedule: ['id', 'title', 'date', 'startTime', 'endTime', 'location', 'category'],
       event: ['id', 'title', 'startDate', 'endDate', 'category'],
+      // 联网检索：**必须带上 text（正文）与 url** —— 只给标题，模型就只能凭标题猜，
+      // 回答会写得像"读过了"；`ok`/`error` 让它知道哪几条根本没抓到正文（如实说明）。
+      // 这条曾经漏掉过：items 里只剩 title，模型于是拿不到任何网页内容。
+      web: ['title', 'url', 'snippet', 'source', 'text', 'chars', 'ok', 'error'],
     };
     // 模块声明的投影表覆盖内置表（内置三张表保持原样，行为不变）
     const fields = this.queryFields?.[target] ?? FIELDS[target] ?? ['id', 'title'];
     // 条数上限按 target 可调：有些数据**整份才有意义**（成绩单被截到 20 条就没法算学分绩了），
     // 模块在自己的描述符里用 `aiQueryLimits` 声明该给多少；没声明的仍用内置上限。
-    const limit = this.queryLimits?.[target] ?? MAX_QUERY_ITEMS;
+    // web 的条数已经在 #runWebQuery 里按设置（5–30）切过了，这里不能再按 MAX_QUERY_ITEMS=20 砍一刀，
+    // 否则用户把「最大条数」调到 30 也只有 20 条能进上下文（设置看起来生效了、其实没有）
+    const limit = target === WEB_TARGET ? (result.items?.length ?? 0) : (this.queryLimits?.[target] ?? MAX_QUERY_ITEMS);
     const items = (result.items ?? []).slice(0, limit).map((item) => {
       const picked = {};
       for (const key of fields) if (item[key] !== undefined && item[key] !== null) picked[key] = item[key];
@@ -1023,6 +1219,16 @@ export class AiChatService {
    */
   #withQueryResults(messages, replyText, queried) {
     const usable = queried.filter((entry) => entry.result);
+    /**
+     * 失败/被拦下的查询也要回灌（只要它的原因）。
+     *
+     * 为什么必须带上：以前只回灌成功的结果，于是"用户选了不联网但让我搜"这种情况下，
+     * 模型看不到任何东西，只能说"我没搜到"或者干脆编一段 —— 而真正的原因
+     * （联网开关关着 / 被反爬 / 没配密钥）用户永远听不到。失败原因本身就是这次查询的结果。
+     */
+    const failed = queried
+      .filter((entry) => !entry.result && entry.error)
+      .map((entry) => ({ target: entry.draft?.target ?? null, reason: entry.error.message ?? String(entry.error) }));
     return [
       ...messages,
       { role: 'assistant', content: replyText || '（我发起了一次只读查询）' },
@@ -1032,7 +1238,11 @@ export class AiChatService {
           '[系统注入] 上面的只读查询已由系统执行完毕，结果如下（JSON）。请据此处理用户的问题：' +
           '如果还需要查别的，可以再输出一个 query 草稿；否则现在就用自然语言回答用户，不要再输出查询草稿。' +
           '不要再说"需要你确认""我拿不到数据"。\n' +
-          JSON.stringify(usable.map((entry) => entry.result)),
+          JSON.stringify(usable.map((entry) => entry.result)) +
+          (failed.length
+            ? '\n下面这些查询**没有执行成功**（把原因如实告诉用户，不要假装查过、也不要换个说法编内容）：\n' +
+              JSON.stringify(failed)
+            : ''),
       },
     ];
   }

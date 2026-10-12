@@ -1,0 +1,313 @@
+/**
+ * 「设置 → 对话设置」卡片：联网检索这一块的开关、服务、密钥与**最大条数**。
+ *
+ * 为什么单独一块而不是塞进「AI 接入」：
+ *   - 密钥是**接入**（能不能用模型），联网是**行为**（模型能不能出网、出去读多少东西）。
+ *     两者出问题时排查路径完全不同：密钥错了整段对话不可用，检索被反爬只有联网相关的回答会退化。
+ *   - 「网络搜索最大条数」是用户明确要的一个旋钮（5–30）：它直接决定一次问答读几个网页 ——
+ *     读得多结论更全但更慢、也更费 token，读得少快但可能漏。放在设置里让人自己权衡。
+ *
+ * 「试一下」是这一块最重要的按钮：联网检索最容易出现"看起来配好了、其实被拦了"的情况，
+ * 所以这里直接把**诊断信息**摊开（用了哪个后端、校内域名通不通、每条为什么没抓到正文），
+ * 而不是只回一句"没搜到"。它和对话里走同一个适配器，这里能搜到，对话里就能搜到。
+ *
+ * 约定与其它区块一致：文本一律 textContent，不写 inline style（CSP 会拦），颜色只用主题令牌。
+ */
+
+(function () {
+  const SECTION_ID = 'chat.settings';
+  const PROVIDER_LABEL = {
+    auto: '自动（有密钥就用 API，没有就解析结果页）',
+    scrape: '只用免密钥通道（解析 Bing / 百度结果页）',
+    tavily: 'Tavily',
+    brave: 'Brave Search',
+    serper: 'Serper（Google）',
+    bing: 'Bing Web Search',
+  };
+
+  const ui = {
+    mount: null,
+    config: null,
+    error: null,
+    busy: null,
+    /** 试搜：`{ query, mode, result, error }` */
+    probe: null,
+  };
+
+  function mk(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+
+  function notice(title, message, kind = 'warn') {
+    const box = mk('div', `kb-alert cs-alert ${kind}`);
+    box.appendChild(mk('div', 'kb-alert-title', title));
+    if (message) box.appendChild(mk('div', 'kb-alert-msg', message));
+    return box;
+  }
+
+  async function loadConfig() {
+    const data = await PC.api('/ai/config');
+    ui.config = data?.config ?? null;
+    return ui.config;
+  }
+
+  async function refresh() {
+    ui.error = null;
+    paint();
+    try {
+      await loadConfig();
+    } catch (error) {
+      ui.error = error;
+    } finally {
+      paint();
+    }
+  }
+
+  async function save(body) {
+    ui.busy = 'save';
+    ui.error = null;
+    paint();
+    try {
+      await PC.api('/ai/config', { method: 'POST', body });
+      await loadConfig();
+      PC.toast('已保存对话设置');
+      await PC.refreshAi?.();
+    } catch (error) {
+      ui.error = error;
+    } finally {
+      ui.busy = null;
+      paint();
+    }
+  }
+
+  function field(label, control, hint) {
+    const wrap = mk('label', 'cs-field');
+    wrap.appendChild(mk('span', 'cs-field-label', label));
+    wrap.appendChild(control);
+    if (hint) wrap.appendChild(mk('span', 'cs-field-hint', hint));
+    return wrap;
+  }
+
+  function paint() {
+    const mount = ui.mount;
+    if (!mount) return;
+    mount.textContent = '';
+
+    if (ui.error) mount.appendChild(notice('没能完成', ui.error.message ?? String(ui.error), 'fail'));
+
+    if (!ui.config) {
+      mount.appendChild(mk('div', 'cs-loading', '正在读取配置…'));
+      return;
+    }
+    const config = ui.config;
+
+    // ---------------------------------------------------------- 联网检索
+    mount.appendChild(mk('div', 'cs-group-title', '联网检索'));
+
+    const enabled = mk('input');
+    enabled.type = 'checkbox';
+    enabled.checked = config.searchEnabled !== false;
+    enabled.id = 'cs-search-enabled';
+    const enabledField = field('允许联网检索', enabled, '关掉后模型不会出网（也不会有"我搜了一下"这种话）');
+    mount.appendChild(enabledField);
+
+    const provider = mk('select', 'cs-select');
+    for (const [value, label] of Object.entries(PROVIDER_LABEL)) {
+      const option = mk('option', null, label);
+      option.value = value;
+      provider.appendChild(option);
+    }
+    provider.value = PROVIDER_LABEL[config.searchProvider] ? config.searchProvider : 'auto';
+    mount.appendChild(
+      field(
+        '搜索服务',
+        provider,
+        '不填密钥也能用：会自动解析 Bing / 百度 的结果页，只是结果更少、也可能被反爬挡住。',
+      ),
+    );
+
+    const key = mk('input', 'cs-input');
+    key.type = 'password';
+    key.autocomplete = 'off';
+    key.placeholder = config.searchApiKey
+      ? `已保存（${config.searchApiKey}），留空不改`
+      : 'API Key（Tavily / Brave / Serper / Bing 任一）';
+    mount.appendChild(
+      field(
+        '搜索 API 密钥',
+        key,
+        '填了就用官方 API（更稳、更准）；留空表示不改动，输入 - 表示清除已保存的密钥。',
+      ),
+    );
+
+    const pages = mk('input', 'cs-input cs-number');
+    pages.type = 'number';
+    pages.min = '5';
+    pages.max = '30';
+    pages.step = '1';
+    pages.value = String(config.searchMaxPages ?? 8);
+    const pagesHint = mk('span', 'cs-field-hint', '允许 AI 一次性读取的最大网页数量：5–30（默认 8）。读得越多结论越全，但更慢、更费 token。');
+    const pagesField = field('网络搜索最大条数', pages, null);
+    pagesField.appendChild(pagesHint);
+    mount.appendChild(pagesField);
+
+    const actions = mk('div', 'cs-actions');
+    const saveBtn = mk('button', 'primary-btn', ui.busy === 'save' ? '保存中…' : '保存');
+    saveBtn.type = 'button';
+    saveBtn.disabled = ui.busy === 'save';
+    saveBtn.addEventListener('click', () => {
+      const value = Number(pages.value);
+      if (!Number.isInteger(value) || value < 5 || value > 30) {
+        ui.error = new Error('网络搜索最大条数必须是 5–30 之间的整数');
+        paint();
+        return;
+      }
+      const body = {
+        searchEnabled: enabled.checked,
+        searchProvider: provider.value,
+        searchMaxPages: value,
+      };
+      const typed = key.value.trim();
+      if (typed === '-') body.searchApiKey = '';
+      else if (typed) body.searchApiKey = typed;
+      void save(body);
+    });
+    actions.appendChild(saveBtn);
+    mount.appendChild(actions);
+
+    // ---------------------------------------------------------- 试一下
+    mount.appendChild(mk('div', 'cs-group-title', '试一下'));
+
+    const probe = ui.probe ?? { query: '', mode: 'web' };
+    ui.probe = probe;
+    const row = mk('div', 'cs-probe');
+    const queryInput = mk('input', 'cs-input');
+    queryInput.type = 'text';
+    queryInput.placeholder = '例如：西安交通大学 转专业 条件';
+    queryInput.value = probe.query ?? '';
+    queryInput.addEventListener('input', () => {
+      probe.query = queryInput.value;
+    });
+    queryInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      void runProbe();
+    });
+    const modeSelect = mk('select', 'cs-select cs-mode');
+    for (const [value, label] of [
+      ['web', '从校外网搜索'],
+      ['campus', '从校内网搜索'],
+    ]) {
+      const option = mk('option', null, label);
+      option.value = value;
+      modeSelect.appendChild(option);
+    }
+    modeSelect.value = probe.mode ?? 'web';
+    modeSelect.addEventListener('change', () => {
+      probe.mode = modeSelect.value;
+    });
+    const probeBtn = mk('button', 'ghost-btn', ui.busy === 'probe' ? '检索中…' : '试检索');
+    probeBtn.type = 'button';
+    probeBtn.disabled = ui.busy === 'probe';
+    probeBtn.addEventListener('click', () => void runProbe());
+    row.append(queryInput, modeSelect, probeBtn);
+    mount.appendChild(row);
+
+    async function runProbe() {
+      const text = String(probe.query ?? '').trim();
+      if (!text) {
+        ui.error = new Error('先写一句要搜的内容');
+        paint();
+        return;
+      }
+      ui.busy = 'probe';
+      ui.error = null;
+      probe.result = null;
+      probe.error = null;
+      paint();
+      try {
+        probe.result = await PC.api('/ai/search/test', {
+          method: 'POST',
+          body: { query: text, mode: probe.mode ?? 'web' },
+        });
+      } catch (error) {
+        probe.error = error;
+      } finally {
+        ui.busy = null;
+        paint();
+      }
+    }
+
+    if (probe.error) {
+      mount.appendChild(notice('检索失败', probe.error.message ?? String(probe.error), 'fail'));
+    }
+    if (probe.result) mount.appendChild(renderProbe(probe.result));
+    if (!probe.result && !probe.error) {
+      mount.appendChild(
+        mk('div', 'cs-field-hint', '提示：这一步会真的联网。想验证"能不能搜到"就用它；结果与对话里完全一致。'),
+      );
+    }
+  }
+
+  function renderProbe(result) {
+    const box = mk('div', 'cs-probe-result');
+    const backend = result.backend ?? {};
+    const lines = [
+      `后端：${backend.kind === 'api' ? `API（${(backend.providers ?? []).join('、')}）` : '免密钥通道（解析结果页）'} · ${backend.reason ?? ''}`,
+      `上限：${result.limit} 个网页 · 搜到 ${result.count} 条 · 读到正文 ${result.read} 篇${result.mode === 'campus' ? ' · 校内通道' : ''}`,
+    ];
+    if (result.campus) {
+      lines.push(
+        `校内探测：${result.campus.onCampus ? '校内域名可达（已并走公网检索）' : '校内域名不可达（只做校内站点定向）'}`,
+      );
+    }
+    for (const line of lines) box.appendChild(mk('div', 'cs-probe-line', line));
+    for (const note of result.notes ?? []) box.appendChild(mk('div', 'cs-probe-note', `· ${note}`));
+
+    if (!result.count) {
+      box.appendChild(
+        mk(
+          'div',
+          'cs-probe-line warn',
+          '一条都没搜到。常见原因：没配密钥且结果页被反爬挡住 / 检索词太窄 / 网络不可达。换个说法再试，或填一个搜索 API 密钥。',
+        ),
+      );
+      return box;
+    }
+
+    const list = mk('div', 'cs-hits');
+    for (const item of result.items ?? []) {
+      const hit = mk('div', 'cs-hit');
+      hit.appendChild(mk('div', 'cs-hit-title', item.title || item.url));
+      hit.appendChild(mk('div', 'cs-hit-url', item.url));
+      if (item.snippet) hit.appendChild(mk('div', 'cs-hit-snippet', item.snippet));
+      hit.appendChild(
+        mk(
+          'div',
+          'cs-hit-meta',
+          item.ok && item.chars
+            ? `读到正文 ${item.chars} 字${item.chars > item.text.length ? `（回灌模型时截到 ${item.text.length} 字）` : ''}`
+            : `没抓到正文${item.error ? `：${item.error}` : ''}`,
+        ),
+      );
+      list.appendChild(hit);
+    }
+    box.appendChild(list);
+    return box;
+  }
+
+  window.PCModules.registerSettingsSection({
+    id: SECTION_ID,
+    title: '对话设置',
+    // 61：紧挨「知识库」（60）—— 两块都是"AI 能看到什么"的设置，放在一起才找得到
+    order: 61,
+    render(mount) {
+      ui.mount = mount;
+      paint();
+      void refresh();
+    },
+  });
+})();

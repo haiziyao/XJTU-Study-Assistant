@@ -1,0 +1,104 @@
+/* 「设置 → 对话设置」区块的样式。
+   外壳已经把内容包在 .card / .card-title / .card-body 里，这里只补卡片内部排布。
+   颜色只用主题令牌（--fg-2 / --fg-3 / --line / --blue / --red / --orange / --green），
+   不新造主题色 —— 白天/夜间切换时这一块跟着变。类名统一 cs- 前缀（本区块独占）。 */
+
+.cs-group-title {
+  margin: 14px 0 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg-2);
+}
+.cs-group-title:first-child { margin-top: 0; }
+
+.cs-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+.cs-field-label { font-size: 12px; color: var(--fg-2); }
+.cs-field-hint { font-size: 11px; line-height: 1.65; color: var(--fg-3); }
+
+.cs-input,
+.cs-select {
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12.5px;
+}
+.cs-input { width: 100%; }
+.cs-number { width: 110px; }
+.cs-input:focus,
+.cs-select:focus {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px rgba(99, 131, 230, .18);
+}
+
+.cs-actions { display: flex; gap: 8px; margin: 12px 0 4px; }
+
+.cs-loading { font-size: 12px; color: var(--fg-3); }
+
+/* 试一下：一行三件（检索词 / 通道 / 按钮） */
+.cs-probe {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.cs-probe .cs-input { flex: 1; min-width: 200px; }
+.cs-mode { flex: none; }
+
+.cs-probe-result {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.cs-probe-line {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--fg-2);
+}
+.cs-probe-line.warn { margin-top: 6px; color: var(--orange); }
+.cs-probe-note {
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+.cs-hits {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.cs-hit {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+.cs-hit-title { font-size: 12.5px; font-weight: 600; color: var(--fg); overflow-wrap: anywhere; }
+.cs-hit-url {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--blue);
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.cs-hit-snippet {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+.cs-hit-meta { margin-top: 4px; font-size: 11px; color: var(--fg-3); }

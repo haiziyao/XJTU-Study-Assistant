@@ -7,7 +7,28 @@
  * 会由那个模块自己声明，仍不需要改这里。
  */
 
+import { WEB_SEARCH_TOOL } from './web-search.js';
+
 export const AI_TOOL_SPECS = [
+  /**
+   * 联网检索：**在对话里**由模型输出 `target: "web"` 的只读草稿触发，
+   * 系统自动执行并把「真实链接 + 抓到的正文」回灌，然后模型才作答。
+   *
+   * 它出现在 `/ai/capabilities` 里，是为了让外部 Agent 知道这个能力存在、
+   * 以及它的上限（一次最多读几个网页由设置里的「网络搜索最大条数」决定，5–30）。
+   */
+  {
+    ...WEB_SEARCH_TOOL,
+    method: 'POST',
+    path: '/ai/chat',
+    requiresAuth: false,
+    params: {
+      mode: 'string（web=校外全网 / campus=校内站点定向；以界面上选择的通道为准）',
+      limit: 'number?（本次最多读几个网页，越界会收敛到 5–30，默认取设置里的值）',
+      query: 'string（检索关键词，不要整句口语）',
+    },
+    hint: '在对话框里直接问就行；这个工具不需要用户手动调用，模型会在需要时输出 target "web" 的查询草稿。',
+  },
   {
     name: 'ai_context_get',
     description:
