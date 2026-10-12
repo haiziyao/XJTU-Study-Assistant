@@ -55,10 +55,12 @@ async function startFakeWeb({ articleText = '这是教务处通知的正文：�
     }
     hits.push(url.search);
     // 结果条数故意给 6 条（超过最小上限 5），用来验证"读几个"确实由配置决定
+    // 标题与摘要**必须含查询词**：检索现在会按"查询词覆盖率"过滤（覆盖率 0 的条目直接丢），
+    // 而真实结果本来就会含查询词 —— 造假数据也得像真的，否则测的是"过滤器把垃圾丢了"而不是检索链路
     const items = [1, 2, 3, 4, 5, 6].map((n) => ({
       url: `http://127.0.0.1:${server.address().port}/doc${((n - 1) % 3) + 1}?i=${n}`,
-      title: `第 ${n} 条结果`,
-      snippet: `第 ${n} 条的摘要`,
+      title: `转专业 相关通知 第 ${n} 条`,
+      snippet: `教务处关于转专业申请的通知摘要（第 ${n} 条）`,
     }));
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(bingPage(items));
@@ -71,13 +73,23 @@ async function startFakeWeb({ articleText = '这是教务处通知的正文：�
    * 这样除了"搜索引擎"这一跳，其它代码路径（结果解析、正文抓取、清洗、截断、回灌）
    * 全都按生产逻辑跑 —— 测试才有效。
    */
+  /**
+   * 注入用 fetch：把**所有搜索引擎域名**改写到本地假引擎，其它非本地地址一律抛错。
+   *
+   * 两条都必须：
+   *   - 引擎清单是会变的（现在有 bing / 百度 / 搜狗 / 360，将来可能更多），只拦 bing/baidu
+   *     就会漏掉新引擎 → 测试偷偷打真网（曾实测到 6.3 秒的"慢"就是打真网超时）；
+   *   - 非本地地址**直接抛**，这样"测试不联网"是**强制**的，而不是靠自觉。
+   */
+  const ENGINE_HOSTS = /(^|\.)(bing\.com|baidu\.com|sogou\.com|so\.com|duckduckgo\.com|mojeek\.com)$/i;
   const fetchImpl = (input, init) => {
     const raw = typeof input === 'string' ? input : input?.url ?? String(input);
     const url = new URL(raw);
-    if (/bing\.com$|baidu\.com$|\.bing\.com$/.test(url.hostname) || url.hostname === 'cn.bing.com') {
+    if (ENGINE_HOSTS.test(url.hostname)) {
       return fetch(`${origin}/search?${url.searchParams.toString()}`, init);
     }
-    return fetch(raw, init);
+    if (url.hostname === '127.0.0.1' || url.hostname === 'localhost') return fetch(raw, init);
+    throw new Error(`测试不该访问外网：${raw}`);
   };
   return { origin, fetchImpl, hits, pages, close: () => new Promise((resolve) => server.close(resolve)) };
 }
@@ -173,7 +185,22 @@ test('联网检索：开着时搜一次、读正文并回灌 —— 预校验不
       stream: false,
     });
     assert.equal(sent.status, 200, JSON.stringify(sent.body));
-    assert.equal(web.hits.length, 1, '一次提问只该搜一次（预校验不执行，见 drafts.js）');
+    /**
+     * 「一次提问只该搜一次」的新语义：**同一条查询**最多试几个引擎（现在会按相关度换引擎，
+     * 见 web-search.js 的引擎选择），但绝不能因为"预校验 + 执行"把同一条查询跑两遍。
+     * 所以断言的是"请求用的都是同一个查询词，且次数不超过引擎上限（3）"。
+     */
+    assert.ok(web.hits.length >= 1 && web.hits.length <= 3, `同一查询最多试 3 个引擎，实际 ${web.hits.length}`);
+    // 各引擎的查询参数名不同（Bing/360 用 q、搜狗用 query、百度用 wd），所以三个都取一遍再比
+    const queries = new Set(
+      web.hits
+        .map((search) => {
+          const params = new URLSearchParams(search.replace(/^\?/, ''));
+          return params.get('q') ?? params.get('query') ?? params.get('wd') ?? '';
+        })
+        .filter(Boolean),
+    );
+    assert.equal(queries.size, 1, `不该出现两条不同的查询（说明同一条查询被重复执行了）：${[...queries].join(' | ')}`);
 
     const entry = (sent.body.queried ?? [])[0];
     assert.ok(entry?.result, `应该有一条检索结果：${JSON.stringify(sent.body.queried)}`);
