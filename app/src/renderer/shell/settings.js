@@ -101,7 +101,9 @@ function aiCard(ai) {
   drawBox.id = 'ai-draw-mode';
   drawBox.checked = true;
   const drawField = field('绘图', drawBox);
-  drawField.appendChild(mk('span', 'ai-hint', '允许用 ```svg 画函数图/示意图（关掉后说「画个图」也能临时触发）'));
+  drawField.appendChild(
+    mk('span', 'ai-hint', '允许用 ```svg 画函数图/示意图；也可以在对话输入框下面用画笔按钮随手切换（蓝=开，灰=关）。关掉后说「画个图」也能临时触发。'),
+  );
   form.append(
     field('密钥', keyInput),
     field('模型', modelInput),

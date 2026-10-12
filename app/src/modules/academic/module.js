@@ -29,6 +29,8 @@ const AI_PROMPT = `【学业成绩（教务系统）】
   可选 filters：term（学期代码，形如 "2025-2026-1"）、keyword（课程名关键词）、
   nature（"01"=必修，"02"=选修）、failedOnly（true 只看不及格）、
   included（true/false 只看已纳入/已排除的）
+  term **可以不给**：不给就返回整份成绩单（默认就是全部，界面会按学期分组展示）；
+  也可以给字符串 "current" 表示「这学期/本学期」，具体是哪一学期由系统按当天日期推断。
   query 是只读的，会直接返回结果，里面带 summary（gpa 学分绩、weightedAverage 加权平均分、
   totalCredits 参与计算的学分、earnedCredits 已获得学分），回答「我学分绩多少」直接用 summary。
 - 纳入/排除某门课：{"action":"include"|"exclude","target":"grade","filters":{...}}
@@ -44,6 +46,12 @@ const AI_PROMPT = `【学业成绩（教务系统）】
 - 每门课的**绩点由教务直接给出**（字段 XFJD），不要自己按分数换算；
 - 少数课程是**等级制**（优秀/良好这类），没有绩点也进不了学分绩，默认不纳入，
   在 needsAttention 里单独列出 —— 用户问起时要说明这一点，不要说成"缺数据"。
+
+拿到成绩明细以后这样答：
+- 先给一张**按学期分组**的简表（每学期列课程数/学分/学分绩），后面跟一两句**基于真实数据**的点评
+  （哪门在拖后腿、必修与选修对比、以及"学分绩只算已纳入的课程"这个前提）；
+- **不要**编排名、保研线、分数预测这类库里没有的信息；
+- **不要**替用户决定某门课"是否计入学分绩" —— 那是写操作，得用户自己点确认。
 
 注意与思源学堂的 lms_grades 区分：那是学堂里每门课的总分与各项得分（平时分、作业分），
 **不是**官方成绩单；学分、绩点、学分绩只由本模块的 grade 提供。`;
@@ -257,7 +265,32 @@ export default defineModule({
 
   /** 只读查询结果回灌给模型时保留这些字段（覆盖 ai 模块内置的投影表）。 */
   aiQueryFields: {
-    grade: ['id', 'courseName', 'credit', 'score', 'gradePoint', 'term', 'natureLabel', 'included'],
+    // termLabel 让模型能按「2025-2026 学年 · 第 1 学期」分组；levelGrade 与 passedLabel 是
+    // 等级制课程在对话里唯一的成绩来源（它们没有分数也没有绩点），缺了会显示成空分数。
+    grade: [
+      'id',
+      'courseName',
+      'credit',
+      'score',
+      'gradePoint',
+      'levelGrade',
+      'term',
+      'termLabel',
+      'natureLabel',
+      'included',
+      'passedLabel',
+    ],
+  },
+
+  /**
+   * 各 target 只读查询回灌给模型的条数上限（ai 模块默认 20 条）。
+   *
+   * 成绩单要能**整份**回灌：本地实测 44 门课，按默认 20 条会被腰斩一半，
+   * 模型据此给出的"按学期分组的简表"和点评本身就是残的，而它自己看不出来。
+   * 300 足够覆盖四年本科，也不至于让提示词失控。
+   */
+  aiQueryLimits: {
+    grade: 300,
   },
 });
 

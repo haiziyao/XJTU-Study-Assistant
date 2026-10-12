@@ -74,7 +74,7 @@
     wsUrl: null,
     socket: null,
     info: null,
-    ai: { available: false, provider: null, contractVersion: null },
+    ai: { available: false, provider: null, contractVersion: null, draw: null },
     /** 当前 AI 会话 id；`null` = 下一条消息开新会话（设置页的「新对话」会把它清空）。 */
     conversationId: null,
     /** 正在流式接收的那条回复：`{ messageId, text, node, done }`，供 WebSocket 增量更新。 */
@@ -83,8 +83,19 @@
     thinking: 'high',
     /** 正在流式接收的思维链节点（思考模式才有）。 */
     reasoningNode: null,
-    /** 写入权限：auto 自动审批 / manual 手动审批 / strict 全部确认。 */
+    /**
+     * 写入权限：auto 自动审批 / manual 手动审批 / strict 全部确认。
+     * 启动时会从 localStorage 读回（见 readStored），否则每次刷新都悄悄回落到「手动审批」，
+     * 用户会以为"范围授权"没生效。
+     */
     permission: 'manual',
+    /**
+     * 联网搜索通道：off 不联网 / web 从校外网搜索 / campus 从校内网搜索。
+     *
+     * 目前只是**状态位**：后端只把它写进提示词，检索通道还没接入（模型会如实说明），
+     * 界面上如实标出来，免得用户以为真的搜了网。也要持久化 —— 选"校内网"的人不会每次重开都重选。
+     */
+    search: 'off',
     /** 待发送的附件（只活在内存里；发送后只在消息上留元信息）。 */
     attachments: [],
     /** 模型选择器缓存的列表。 */
@@ -173,19 +184,79 @@
     for (const button of document.querySelectorAll('.nav-item')) {
       button.classList.toggle('active', button.dataset.view === view);
     }
-    renderPanel();
+    // 主动切视图要回到顶部：新视图是"新的一页"，沿用上一个视图的滚动位置会停在半空中。
+    // 这与「重画保住位置」是两回事，所以走参数而不是复制一份 renderPanel。
+    renderPanel({ keepScroll: false });
   }
 
-  function renderPanel() {
-    const view = Modules.get(state.view) ?? Modules.list()[0];
-    if (!view) {
-      dom.panelTitle.textContent = '无可用视图';
-      dom.panelBody.innerHTML = '';
-      return;
+  /**
+   * 重画右侧视图。
+   *
+   * @param {{ keepScroll?: boolean }} [options] 默认**保住**滚动位置：同一视图的重画
+   *   （折叠、拉数据、`data_changed` 广播）不该把用户弹回顶部；切换视图时传 `false`。
+   */
+  function renderPanel(options = {}) {
+    // 保住位置：默认行为。视图内部还会自己保一次（lms / academic 的 paint），
+    // 两层都按选择器记账、结果一致，叠在一起是幂等的。
+    const keep = options.keepScroll === false ? (fn) => fn() : window.PC?.keepScroll ?? ((fn) => fn());
+    keep(() => {
+      const view = Modules.get(state.view) ?? Modules.list()[0];
+      if (!view) {
+        dom.panelTitle.textContent = '无可用视图';
+        dom.panelBody.innerHTML = '';
+        return;
+      }
+      state.view = view.id;
+      dom.panelTitle.textContent = view.title;
+      view.render({ mount: dom.panelBody, api, state, toast, refresh });
+    });
+  }
+
+  /**
+   * 按选择器记下滚动位置，返回一个"还回去"的函数。
+   *
+   * 为什么按选择器记账：视图重画是 `mount.innerHTML = ''` 整体重建，**旧节点已经不在文档里**，
+   * 拿着旧节点写 `scrollTop` 只会改一个孤儿；只有重建后再按选择器查一次，才能拿到新节点。
+   * 覆盖两处：右侧视图的滚动容器 `.view-content`，以及中间对话列表 `.chat-log`
+   * （重画对话不该把正在看的那条顶走）。元素不存在就跳过 —— 视图结构本来就不保证有这两层。
+   */
+  function snapshotScroll() {
+    // 记的是**选择器 + 位置**，不是节点：视图重画会把旧节点整个丢掉（`mount.innerHTML = ''`），
+    // 拿旧节点写 `scrollTop` 只会改一个已经不在文档里的孤儿 —— 表现出来就是"照样弹回顶部"。
+    const saved = [];
+    for (const selector of ['#panel-body .view-content', '#panel-body .chat-log']) {
+      const node = document.querySelector(selector);
+      if (node && node.scrollTop) saved.push({ selector, top: node.scrollTop });
     }
-    state.view = view.id;
-    dom.panelTitle.textContent = view.title;
-    view.render({ mount: dom.panelBody, api, state, toast, refresh });
+    if (!saved.length) return () => {};
+    let restored = false;
+    const apply = () => {
+      for (const item of saved) {
+        const node = document.querySelector(item.selector);
+        if (node) node.scrollTop = item.top;
+      }
+    };
+    return () => {
+      // 嵌套调用（renderPanel 一层、视图自己的 paint 一层）只还原一次就够了，
+      // 两层都按选择器查新节点、写的也是同一个值，重复执行只是白干活
+      if (restored) return;
+      restored = true;
+      apply();
+      // ⚠️ 新内容刚挂上时可能**还没完成布局**：这时 scrollHeight 仍是 0，写进去的 scrollTop 会被
+      // 夹成 0，之后就再也回不来了（实测就是这个原因导致"照样跳回顶部"）。下一帧再写一次即可 ——
+      // 用户看不到这一帧的差别，位置却能稳稳留住。
+      requestAnimationFrame(apply);
+    };
+  }
+
+  /** `snapshotScroll()` + `fn()` + 还原，给调用方一行搞定。 */
+  function keepScroll(fn) {
+    const restore = snapshotScroll();
+    try {
+      return fn();
+    } finally {
+      restore();
+    }
   }
 
   function togglePanel() {
@@ -429,14 +500,57 @@
     return { card, box, body, toggle };
   }
 
+  /** 全局标签表（kit/labels.js 的 classic script 全局）；取不到就回落到字段原文。 */
+  function targetLabel(target) {
+    if (!target) return '';
+    try {
+      return TARGET_LABEL?.[target] ?? String(target);
+    } catch {
+      return String(target);
+    }
+  }
+
+  /** 成绩条目（来自 academic 模块的 target: 'grade'）：靠课程名 + 学分/成绩类字段认出来。 */
+  const isGrade = (item) =>
+    Boolean(item) && 'courseName' in item && ('credit' in item || 'score' in item || 'gradePoint' in item || 'levelGrade' in item);
+
+  /**
+   * 成绩行右边的正文。
+   *
+   * 字段都能缺（等级制没有分数、有的课没有绩点），所以按需拼、缺了不写，
+   * 而不是留一串「undefined」；`included === false` 是"用户手动排除、不计入 GPA"，
+   * 不标出来会被误读成算进去了。
+   */
+  function gradeText(item) {
+    const name = item.courseName ?? item.title ?? item.id ?? '';
+    const score = item.score ?? item.levelGrade; // 百分制给 score，等级制给 levelGrade（优 / 良 / 中）
+    const parts = [
+      item.credit === undefined || item.credit === null || item.credit === '' ? '' : `学分 ${item.credit}`,
+      score === undefined || score === null || score === '' ? '' : `成绩 ${score}`,
+      item.gradePoint === undefined || item.gradePoint === null || item.gradePoint === '' ? '' : `绩点 ${item.gradePoint}`,
+      item.included === false ? '未计入' : '',
+    ].filter(Boolean);
+    const head = String(name);
+    return parts.length ? `${head} · ${parts.join(' · ')}` : head;
+  }
+
+  /** 成绩的"时间维度"是学期（termLabel 是站点给的显示名，term 是原始编码）。 */
+  const gradeTerm = (item) => item.termLabel ?? item.term ?? '';
+
   /** 影响对象的列表（写入结果 / 查询结果共用一种行样式）。 */
   function itemList(items, { limit = 12 } = {}) {
     const list = mk('div', 'cc-list');
     for (const item of items.slice(0, limit)) {
-      const when = item.date ?? item.startDate ?? item.deadline ?? '';
-      const time = !item.startTime || item.allDay ? '' : ` ${item.startTime}${item.endTime ? `–${item.endTime}` : ''}`;
       const row = mk('div', 'cc-list-row');
-      row.append(mk('span', 'cc-list-time', `${when}${time}`.trim()), mk('span', null, item.title ?? item.id ?? ''));
+      if (isGrade(item)) {
+        // 成绩项没有日期也没有 title：以前这里只显示一个 uuid，等于没显示。
+        // 左边那栏改放学期（成绩的"时间维度"就是学期），右边是课程 + 学分/成绩/绩点。
+        row.append(mk('span', 'cc-list-time', gradeTerm(item)), gradeText(item));
+      } else {
+        const when = item.date ?? item.startDate ?? item.deadline ?? '';
+        const time = !item.startTime || item.allDay ? '' : ` ${item.startTime}${item.endTime ? `–${item.endTime}` : ''}`;
+        row.append(mk('span', 'cc-list-time', `${when}${time}`.trim()), mk('span', null, item.title ?? item.id ?? ''));
+      }
       list.appendChild(row);
     }
     if (items.length > limit) list.appendChild(mk('div', 'cc-list-row', `…还有 ${items.length - limit} 条`));
@@ -472,9 +586,15 @@
     else {
       details.push(itemList(items));
       const actions = mk('div', 'cc-actions');
-      const jump = mk('button', 'ghost-btn', '在右侧查看');
+      const toAcademic = result.target === 'grade';
+      // 成绩在**学业**视图里（成绩单 / 学分绩），不在日历上：跳日历只会看到一片空白
+      const jump = mk('button', 'ghost-btn', toAcademic ? '在右侧看学业' : '在右侧查看');
       jump.type = 'button';
       jump.addEventListener('click', () => {
+        if (toAcademic && typeof window.PC?.openView === 'function') {
+          window.PC.openView('academic');
+          return;
+        }
         state.view = 'calendar';
         state.calendar.mode = 'day';
         state.calendar.anchor = items[0]?.date ?? items[0]?.startDate ?? items[0]?.deadline ?? U.todayKey();
@@ -486,7 +606,7 @@
 
     opCard({
       kind,
-      chip: `查看${TARGET_LABEL[result.target] ?? result.target ?? '记录'}`,
+      chip: `查看${targetLabel(result.target) || '记录'}`,
       title: `${summary}${items.length ? ' · 点开看明细' : ''}`,
       details,
     });
@@ -597,6 +717,9 @@
           })),
           thinking: state.thinking,
           permission: state.permission,
+          // 联网通道（off / web / campus）：目前后端只拿它写提示词，让模型如实说明没接入检索，
+          // 但请求体先按最终形状带上，通道接进来时前端不用再改一次
+          search: state.search,
         },
       });
       state.conversationId = result.conversation?.id ?? state.conversationId;
@@ -765,28 +888,68 @@
    *
    * 菜单用绝对定位挂在按钮上方（CSS 的 `bottom: 100%`），**不参与布局** ——
    * 所以展开时输入框那一行不会跟着往上跳（这是明确要求）。
+   *
+   * 文字 chip（思考模式）与图标按钮（联网 / 权限 / 用量）共用这一份实现：
+   * ✓ 勾选、`hint` 脚注、点外部关闭这些行为只写一遍，不会两套菜单各长一样。
+   *
+   * @param {{ prefix?: string, value: string, options: Array, hint?: string, onChange?: Function,
+   *           icon?: string, control?: string, className?: string, title?: (label: string, value: string) => string,
+   *           buttonTitle?: string, buttonContent?: (button: HTMLButtonElement) => void }} config
+   *   - `prefix`：文字 chip 的前缀（如「思考模式」）；给 `icon` 时不要传，按钮里只有图标；
+   *   - `icon`：画成图标按钮（`compose-icon-btn`），与文字 chip 共用菜单；
+   *   - `control`：给图标按钮打 `data-control` 标记，供 `paintControlStates()` 认按钮（不按下标取）；
+   *   - `className`：追加到 `.compose-select` 上的类（右组用 `align-right` 让菜单靠右，别顶出面板）；
+   *   - `title(label, value)`：每次选中后重算 `title` / `aria-label`。图标按钮必须给 ——
+   *     图标本身说不出当前档位，这行提示是用户唯一能看到的说明；
+   *   - `buttonContent(button)`：调用方自己往按钮里塞节点（比如用量那个随请求更新的数字）。
    */
-  function composeSelect({ prefix, value, options, hint, onChange }) {
-    const wrap = mk('div', 'compose-select');
-    const button = mk('button');
+  function composeSelect({
+    prefix,
+    value,
+    options,
+    hint,
+    onChange,
+    icon,
+    control,
+    className,
+    title,
+    buttonTitle,
+    buttonContent,
+  }) {
+    const wrap = mk('div', `compose-select${className ? ` ${className}` : ''}`);
+    const button = mk('button', icon ? 'compose-icon-btn' : '');
     button.type = 'button';
-    const label = mk('span', 'cs-label', prefix);
-    const current = mk('span', 'cs-value');
-    const caret = mk('span', 'cs-caret', '▴');
-    button.append(label, current, caret);
+    if (control) button.dataset.control = control;
+    let current = null;
+    if (icon) {
+      // 图标只是装饰（PCIcons 生成的 svg 自带 aria-hidden），名字由 title / aria-label 给
+      button.appendChild(composeIcon(icon));
+    } else {
+      current = mk('span', 'cs-value');
+      button.append(mk('span', 'cs-label', prefix), current, mk('span', 'cs-caret', '▴'));
+    }
+    buttonContent?.(button);
 
     const menu = mk('div', 'compose-menu');
     const paint = () => {
       const found = options.find((item) => item.value === value) ?? options[0];
-      current.textContent = found.label;
+      if (current) current.textContent = found.label;
+      // 当前项**只靠这一处标出**：整行蓝色 + 淡蓝底（见 shell.css 的 .compose-menu button.active）。
+      // 以前还在行首放一个 ✓，结果是"空勾"那一行高度为 0、选中那一行是个 19px 的字，
+      // 行高在选中项上被撑出细微差别，看起来就是勾和高光没对齐 —— 索性去掉勾，只留高光。
       for (const node of menu.querySelectorAll('button')) node.classList.toggle('active', node.dataset.value === value);
+      const text = title ? title(found.label, value) : buttonTitle;
+      if (text) {
+        button.title = text;
+        button.setAttribute('aria-label', text);
+      }
     };
 
     for (const option of options) {
       const item = mk('button');
       item.type = 'button';
       item.dataset.value = option.value;
-      item.append(mk('span', 'cm-check', option.value === value ? '✓' : ''), mk('span', null, option.label));
+      item.append(mk('span', null, option.label));
       if (option.hint) item.title = option.hint;
       item.addEventListener('click', () => {
         value = option.value;
@@ -824,11 +987,76 @@
     { value: 'manual', label: '手动审批', hint: '只读查询自动跑，写操作点确认' },
     { value: 'strict', label: '全部确认', hint: '连查询也要点确认' },
   ];
+  /** 权限菜单的脚注（底部提示的兜底文案也用它，别写第二份）。 */
+  const PERMISSION_HINT = '「自动审批」会替你点确认，只建议在能撤得回来的场合用';
 
+  /**
+   * 联网搜索的三个选项。
+   *
+   * `hint` 里把「校内 / 校外」的区别说清楚：这两个通道走的是完全不同的入口（要不要登录、
+   * 能拿到什么），用户在菜单里就该看到，而不是选完再猜。
+   */
+  const SEARCH_OPTIONS = [
+    { value: 'off', label: '不联网', hint: '只用本地数据与模型已有知识' },
+    { value: 'web', label: '从校外网搜索', hint: '走公网检索（检索通道还没接入）' },
+    { value: 'campus', label: '从校内网搜索', hint: '走校内网络入口（检索通道还没接入）' },
+  ];
+
+  /* ------------------------------------------------------------ 本地小状态 */
+
+  /**
+   * 读回持久化的小状态（权限档位 / 联网通道）。
+   *
+   * 以前权限只活在内存里，刷新就回「手动审批」—— 用户会以为自己的选择没生效。
+   * 对 localStorage 全程兜底：隐私模式、配额满都可能抛异常，不能让它把启动带崩。
+   */
+  function readStored(key) {
+    try {
+      return window.localStorage?.getItem(key) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeStored(key, value) {
+    try {
+      window.localStorage?.setItem(key, value);
+    } catch {
+      /* 存不了就算了：本次会话内的行为不受影响 */
+    }
+  }
+
+  /** 绘图开关的语义：只有明确 `false` 才算关（老配置里没这个字段 = 新版默认开），与后端 `drawMode !== false` 对齐。 */
+  const drawOn = () => state.ai.draw !== false;
+
+  /**
+   * 输入框下面那一行：**左** = 联网搜索 + 思考模式（这一轮"怎么干活"），
+   * **右** = 权限 / 用量 / 绘图三个图标按钮。
+   *
+   * 右组用 `.spacer`（`margin-left: auto`）推开；菜单一律向上绝对定位，展开不会顶动这一行。
+   */
   function renderControls() {
     const host = dom.chatControls;
     if (!host) return;
     host.replaceChildren(
+      composeSelect({
+        icon: 'globe',
+        control: 'search',
+        value: state.search,
+        options: SEARCH_OPTIONS,
+        hint: '检索通道还没接入：选中的通道会写进提示词，模型会如实说明它没有真的搜网',
+        // title 用「刚选中的值」而不是 state.search：composeSelect 的 paint() 在 onChange 之前跑，
+        // 读全局状态会慢一拍（选完 title 还写着上一个通道）
+        title: (label, value) => searchTitle(value),
+        onChange: (value) => {
+          state.search = value;
+          // 持久化：选了「校内网」的人不会每次重开都重选一遍
+          writeStored('potato.search', value);
+          // 图标颜色就是状态：不重画的话，选完菜单颜色还停在旧通道
+          paintControlStates();
+          toast(`联网搜索：${SEARCH_OPTIONS.find((item) => item.value === value)?.label ?? value}`);
+        },
+      }),
       composeSelect({
         prefix: '思考模式',
         value: state.thinking,
@@ -838,17 +1066,93 @@
           state.thinking = value;
         },
       }),
+      mk('span', 'spacer'),
       composeSelect({
-        prefix: '权限',
+        icon: 'shield',
+        control: 'permission',
+        className: 'align-right',
         value: state.permission,
         options: PERMISSION_OPTIONS,
-        hint: '「自动审批」会替你点确认，只建议在能撤得回来的场合用',
+        hint: PERMISSION_HINT,
+        title: (label) => `权限：${label}`,
         onChange: (value) => {
           state.permission = value;
+          // 持久化：这是"这一轮允许模型做到哪一步"的授权，刷新就丢最容易出事
+          writeStored('potato.permission', value);
+          // 图标颜色就是状态：只有「自动审批」是蓝的
+          paintControlStates();
         },
       }),
       usageSelect(),
+      drawToggle(),
     );
+    paintControlStates();
+  }
+
+  /**
+   * 按 `data-control` 重画各图标按钮的 `on` 类（蓝 = 开着：联网 / 自动审批 / 绘图）。
+   *
+   * 用标记查找而不是按下标取：按钮的个数和顺序以后还会变，按下标一旦错位，
+   * 表现是"点 A 亮了 B"这种最难查的毛病。用量按钮不在这里 —— 它没有开关态。
+   */
+  function paintControlStates() {
+    const host = dom.chatControls;
+    if (!host) return;
+    const pick = (name) => host.querySelector(`.compose-icon-btn[data-control="${name}"]`);
+    pick('search')?.classList.toggle('on', state.search !== 'off');
+    pick('permission')?.classList.toggle('on', state.permission === 'auto');
+    pick('draw')?.classList.toggle('on', drawOn());
+  }
+
+  /**
+   * 「联网搜索」按钮的 title：**如实**写明当前通道与「检索还没接入」，别让人以为真的搜了网。
+   *
+   * @param {string} [value] 当前通道；默认取 `state.search`（菜单选中那一刻要传刚选的值，见 renderControls）
+   */
+  function searchTitle(value = state.search) {
+    const found = SEARCH_OPTIONS.find((item) => item.value === value) ?? SEARCH_OPTIONS[0];
+    const suffix =
+      value === 'off' ? '只用本地数据与模型已有知识' : `${found.label}（检索通道还没接入，模型会如实说明）`;
+    return `联网搜索：${suffix}`;
+  }
+
+  /**
+   * 「绘图」开关（蓝色 = 开 / 灰色 = 关）。
+   *
+   * 它**不是菜单**，所以没有 `.compose-menu`：点一下就把全局 `drawMode` 写回 `/ai/config`，
+   * 成功后才改本地状态并重画 —— 与设置页那个勾选框共用后端同一份配置，两边不会打架。
+   */
+  function drawToggle() {
+    const wrap = mk('div', 'compose-select');
+    const button = mk('button', 'compose-icon-btn');
+    button.type = 'button';
+    button.dataset.control = 'draw';
+    button.classList.toggle('on', drawOn());
+    const paintTitle = () => {
+      const text = drawOn()
+        ? '绘图：已开启（模型可以输出 ```svg 图）；点一下关掉'
+        : '绘图：已关闭；点一下开启（关着时说「画个图」仍可临时触发）';
+      button.title = text;
+      button.setAttribute('aria-label', text);
+    };
+    paintTitle();
+    button.appendChild(composeIcon('brush'));
+    button.addEventListener('click', async () => {
+      const next = !drawOn();
+      button.disabled = true;
+      try {
+        const result = await api('/ai/config', { method: 'POST', body: { drawMode: next } });
+        // 以后端返回的配置为准（设置页可能同时改过）；响应里没带就退回我们的期望值
+        state.ai.draw = result.config?.drawMode ?? next;
+        paintTitle();
+        renderControls(); // 重画整行：着色与 title 都由 state 推导，手改类名容易漏
+        toast(state.ai.draw === false ? '绘图已关闭' : '绘图已开启');
+      } catch (error) {
+        toast(`改绘图开关失败：${error.message}`);
+      }
+    });
+    wrap.appendChild(button);
+    return wrap;
   }
 
   /** 千分位（数字很长时可读性差别很大）。 */
@@ -859,12 +1163,26 @@
    *
    * 命中率按输入侧算：`prompt_cache_hit_tokens / (hit + miss)` —— 与官方 usage 字段一致。
    * 数字来自 `/ai/usage?conversationId=`（服务端对已落库的 usage 求和），点开时才去取。
+   *
+   * 按钮**只有图标**（三根柱子）：右侧要挤三个按钮，每个都带文字会把左边的思考模式挤没。
+   * 取数 / 渲染 / 静默刷新全部照旧，数字挪进 title 与菜单第一行。
    */
   function usageSelect() {
-    const wrap = mk('div', 'compose-select');
-    const button = mk('button');
+    const wrap = mk('div', 'compose-select align-right');
+    const button = mk('button', 'compose-icon-btn');
     button.type = 'button';
-    button.append(mk('span', 'cs-label', '用量'), mk('span', 'cs-value', '—'), mk('span', 'cs-caret', '▴'));
+    // 图标本身说不出数字，所以把口径写进 title：既报当前值，也说明点开能看到什么
+    const paintTitle = (data) => {
+      const text = `用量：${formatUsageValue(data)}（点开看 Token 明细，累计 ${groupDigits(data?.tokens?.total)} tok）`;
+      button.title = text;
+      button.setAttribute('aria-label', text);
+    };
+    paintTitle(state.usage);
+    // cs-value 仍在（hidden）：refreshUsageBadge() 的静默刷新按它定位，别改坏它
+    const value = mk('span', 'cs-value');
+    value.hidden = true;
+    value.textContent = formatUsageValue(state.usage);
+    button.append(value, composeIcon('bars'));
 
     const menu = mk('div', 'compose-menu usage-menu');
     wrap.append(button, menu);
@@ -890,6 +1208,8 @@
       menu.appendChild(
         mk('div', 'cm-hint', tokens.total ? '命中率 = 缓存读取 ÷（缓存读取 + 未缓存输入）' : '还没有产生用量：聊一句就有数据了'),
       );
+      value.textContent = formatUsageValue(data);
+      paintTitle(data);
     };
 
     const load = async () => {
@@ -898,7 +1218,6 @@
         const query = state.conversationId ? `?conversationId=${encodeURIComponent(state.conversationId)}` : '';
         const data = await api(`/ai/usage${query}`);
         state.usage = data;
-        button.querySelector('.cs-value').textContent = formatUsageValue(data);
         paint(data);
       } catch (error) {
         menu.replaceChildren(mk('div', 'cm-hint', `拿不到用量：${error.message}`));
@@ -914,6 +1233,14 @@
       await load();
     });
     return wrap;
+  }
+
+  /** 图标的统一挂法：取不到图标就留空，按钮仍然可用（与 navIcon() 的回退思路一致）。 */
+  function composeIcon(name) {
+    const box = mk('span', 'ci-icon');
+    // 19px：这一行没有外框了，图标太小会显得整排控件"缩"在一起（原来是 14px）
+    box.innerHTML = window.PCIcons?.svg?.(name, 19) ?? '';
+    return box;
   }
 
   /** 按钮上显示什么：有命中率就显示命中率，否则显示总 token。 */
@@ -961,8 +1288,9 @@
         item.type = 'button';
         item.dataset.value = model.id;
         const active = model.id === state.models?.current;
+        // 与输入区那几个下拉一致：**不放 ✓**，当前模型靠 `.active` 的蓝色高光标出
+        // （✓ 那一行会因为"有字/没字"撑出高度差，看起来就是勾和高光错位）
         item.append(
-          mk('span', 'cm-check', active ? '✓' : ''),
           mk('span', 'cm-model', model.id),
           model.source === 'builtin' ? mk('span', 'cm-tag', '候选') : null,
         );
@@ -1042,7 +1370,8 @@
     input.addEventListener('input', autoGrow);
     function autoGrow() {
       input.style.height = 'auto';
-      input.style.height = `${Math.min(140, input.scrollHeight)}px`;
+      // 上限与 shell.css 的 max-height 保持一致；下限靠 CSS 的 min-height（58px）兜
+      input.style.height = `${Math.min(180, input.scrollHeight)}px`;
     }
     dom.panelToggle.addEventListener('click', togglePanel);
   }
@@ -1068,6 +1397,9 @@
         provider: caps.provider ?? null,
         contractVersion: caps.contractVersion ?? null,
         model: aiStatus?.config?.model ?? null,
+        // 绘图全局开关（设置页也能改）：只有明确 false 才算关，配置里没这个字段=默认开。
+        // 放这里是为了让「设置页改完 → 对话行上的画笔跟着变」，而不是两处各记一份状态。
+        draw: aiStatus?.config?.drawMode !== false,
       };
       setStatus(
         `已连接 · 事件 ${health.counts?.events ?? 0} · 日程 ${health.counts?.schedules ?? 0}`,
@@ -1080,13 +1412,8 @@
       dom.aiBadge.textContent = state.ai.available ? `AI：${model ?? state.ai.provider}` : 'AI 未接入（规则解析）';
       dom.aiBadge.classList.toggle('badge-btn', true);
       dom.aiBadge.classList.toggle('on', state.ai.available);
-      // 底部提示跟着 AI 状态走：否则配置好密钥后，界面还在说"当前由本地规则解析"
-      const hint = document.querySelector('.chat-hint');
-      if (hint) {
-        hint.textContent = state.ai.available
-          ? `Enter 发送 · Shift + Enter 换行 · 由 ${state.ai.provider} 驱动，回复里的安排要点确认才落库`
-          : 'Enter 发送 · Shift + Enter 换行 · 当前由本地规则解析（在「设置 → AI 接入」里填密钥即可换成模型）';
-      }
+      // 绘图开关的状态来自后端，刚才那次请求可能把它刷新了：重画这一行，免得按钮颜色说谎
+      paintControlStates();
     } catch (error) {
       setStatus(`后端不可用：${error.message}`, 'error');
     }
@@ -1128,16 +1455,29 @@
       // `ai_message` 是定稿广播：当前窗口的正文由 /ai/chat 的响应负责（见 runAiChat），
       // 这里刻意不重复渲染，否则同一段回复会被画两遍。
       if (message.type === 'data_changed') {
+        // AI 配置（换模型 / 开关绘图 / 改密钥）和右侧那些业务视图**没有任何关系**：
+        // 以前它照样走 refresh()，于是每点一次画笔，右边栏就整体重建一次 —— 看起来就是"闪一下"。
+        // 这一路只需要刷新徽标与模型列表（loadMeta 里也会重画输入区那几个开关的状态）。
+        const configOnly = message.module === 'ai' && message.payload?.target === 'ai_config';
         clearTimeout(connectSocket._timer);
         connectSocket._timer = setTimeout(() => {
-          refresh();
+          if (!configOnly) refresh();
           loadMeta();
         }, 150);
       }
     };
   }
 
-  /** 流式增量：只认当前这条回复，且定稿后到达的迟到分片直接丢掉（否则会盖掉最终文本）。 */
+  /**
+   * 流式增量：只认当前这条回复，且定稿后到达的迟到分片直接丢掉（否则会盖掉最终文本）。
+   *
+   * 后端一轮 `send` 最多跑 5 轮上游调用（模型可以"先查一次 → 再查一次 → 写 → 回话"），
+   * 所以正文分片有两种语义：
+   *  - `payload.reset === true`（新一轮开始）：先把气泡**清空**再写 —— 上一轮那句"我查一下…"
+   *    是过程稿，留着会让用户以为它还在查；
+   *  - 否则：`payload.text` 就是**本轮**已累积的正文，直接覆盖，不再自己拼 delta。
+   *    后端只在轮内累积、不跨轮拼接，前端再累加一次就会把同一句话写两遍。
+   */
   function appendAiDelta(payload = {}) {
     const streaming = state.streaming;
     if (!streaming || streaming.done) return;
@@ -1157,7 +1497,9 @@
       return;
     }
 
-    streaming.text += payload.delta ?? '';
+    if (payload.reset === true) streaming.text = '';
+    // 以 payload.text 为准（本轮累积正文）；老端点只给 delta 时才退回累加
+    streaming.text = typeof payload.text === 'string' ? payload.text : streaming.text + (payload.delta ?? '');
     streaming.node.classList.add('streaming');
     setBubbleText(streaming.node, streaming.text);
     dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
@@ -1240,10 +1582,29 @@
     // openView 让模块能**引导用户去另一个视图**，而不必自己实现跳转或去点 DOM。
     // 目前只有一个用处：学堂/学业这些需要登录的页面，在未登录时给一个「去设置里登录」的按钮。
     // 它是 selectView 的直接暴露，没有额外语义 —— 纯函数引用，不引入模块间耦合。
-    window.PC = { state, api, refresh, refreshAi: loadMeta, toast, openEditor: Modules.getService('editor'), openView: selectView };
+    //
+    // snapshotScroll / keepScroll 给各视图的 paint() 用：视图整体重建 DOM 后自己把滚动位置
+    // 还回去（lms / academic 已经在调 PC.snapshotScroll），外壳的 renderPanel 复用同一对。
+    window.PC = {
+      state,
+      api,
+      refresh,
+      refreshAi: loadMeta,
+      toast,
+      openEditor: Modules.getService('editor'),
+      openView: selectView,
+      snapshotScroll,
+      keepScroll,
+    };
 
     buildNav();
     wireChat();
+    // 先把持久化的档位读回来再画控件与提示 —— 否则首帧画的是默认值，
+    // 用户会看到「手动审批」闪一下再跳成自己上次选的档位。
+    const storedPermission = readStored('potato.permission');
+    if (PERMISSION_OPTIONS.some((item) => item.value === storedPermission)) state.permission = storedPermission;
+    const storedSearch = readStored('potato.search');
+    if (SEARCH_OPTIONS.some((item) => item.value === storedSearch)) state.search = storedSearch;
     renderControls();
     renderAttachments();
     wireModelPicker();

@@ -26,7 +26,8 @@ const ACTION_LABEL = {
   rollover: '顺延',
 };
 // todo 是独立实体，漏了它确认卡与指令日志就会显示成「新增todo」
-const TARGET_LABEL = { todo: '待办', schedule: '日程', event: '日历事件' };
+// grade 来自 academic 模块：不加这一条，查询卡头会显示「查看grade」
+const TARGET_LABEL = { todo: '待办', schedule: '日程', event: '日历事件', grade: '成绩' };
 const SCHEDULE_CATEGORIES = ['class', 'study', 'meeting', 'exam', 'activity', 'other'];
 const EVENT_CATEGORIES = ['study', 'exam', 'holiday', 'anniversary', 'deadline', 'other'];
 const REPEAT_TYPES = [

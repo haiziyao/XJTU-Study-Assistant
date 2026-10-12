@@ -19,7 +19,7 @@ import { AUTH_STATUS } from '../lms/cas-auth.js';
 import { JsonFile } from '../lms/secret-store.js';
 import { AcademicApi, AcademicError, ACADEMIC_ERROR } from './api.js';
 import { analysisRequest, fingerprintOf, localAnalysis } from './analysis.js';
-import { resolveAcademicConfig } from './config.js';
+import { matchesNature, resolveAcademicConfig } from './config.js';
 import { computeStats, gradePointOf } from './gpa.js';
 
 /** 同步结果的计数口径。 */
@@ -477,7 +477,8 @@ export class AcademicService {
     let list = this.store.academicGrades.all();
     if (!includeStale) list = list.filter((item) => item.stale !== true);
     if (term) list = list.filter((item) => item.term === term);
-    if (nature) list = list.filter((item) => item.nature === nature);
+    // 性质不能精确比：真实教务是一位代码（"1"/"2"），接口参数与 AI 草稿是两位（"01"/"02"）
+    if (nature) list = list.filter((item) => matchesNature(item, nature));
     if (included !== undefined) list = list.filter((item) => (item.included !== false) === Boolean(included));
     return list
       .map((item) => ({ ...item, gradePointResolved: gradePointOf(item, this.config.gpaTable).point }))

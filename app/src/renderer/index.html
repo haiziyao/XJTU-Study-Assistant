@@ -44,17 +44,17 @@
           <button class="compose-plus" id="chat-attach" type="button" title="添加图片或文件">+</button>
           <textarea
             id="chat-input"
-            rows="1"
+            rows="2"
             placeholder="用一句话添加日程 / 待办，例如：明天 15:00-16:00 项目周会"
             autocomplete="off"
+            title="Enter 发送 · Shift + Enter 换行"
           ></textarea>
           <button class="primary-btn" id="chat-send" type="button">发送</button>
         </div>
         <div class="chat-attachments" id="chat-attachments" hidden></div>
-        <!-- 思考模式 / 权限：气泡向上展开（绝对定位，展开时输入框那一行不动） -->
+        <!-- 联网搜索 / 思考模式 / 权限 / 用量 / 绘图：菜单向上展开（绝对定位，展开时输入框那一行不动） -->
         <div class="chat-controls" id="chat-controls"></div>
         <input type="file" id="chat-files" multiple hidden />
-        <div class="chat-hint">Enter 发送 · Shift + Enter 换行 · 当前由本地规则解析（AI 接口已按契约预留）</div>
       </section>
 
       <!-- 右侧功能视图 -->
