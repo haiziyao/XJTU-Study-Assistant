@@ -1,0 +1,594 @@
+/* 「复习」页（复习卡片 / 目标 / 周报）的样式。
+   类名统一 rv- 前缀（本视图独占）；按钮借用外壳的 .primary-btn / .ghost-btn。
+
+   三条自我约束（与 views/chat-hub.css 同一套理由）：
+     1. 颜色只用外壳主题令牌（--bg-* / --fg* / --line / --blue / --red / --green / --orange / --purple），
+        不新造主题色 —— 白天/夜间切换时这一页跟着变，不会出现"夜间模式下白底黑字"这种破绽；
+     2. **不依赖 views/chat-hub.css 是否加载**：这里把用到的每个类都自己写一份，
+        哪怕 index.html 里 chat-hub.css 那行没加，这一页也照样是完整的（不串味、不掉样式）；
+     3. 因为 CSP 的 `style-src 'self'` 会拦行内 style，进度条高度、到期曲线柱高这类
+        "按数据变的值"一律用**类名分档**表达，不用 style 属性。 */
+
+/* ---------------------------------------------------------------- 标签页 */
+
+.rv-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  flex: none;
+}
+.rv-tab {
+  flex: 1;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.rv-tab:hover { background: var(--bg-hover); color: var(--fg); }
+.rv-tab.active {
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+/* ---------------------------------------------------------------- 顶部一行 */
+
+.rv-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.rv-head-left,
+.rv-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.rv-head-right { margin-left: auto; }
+.rv-head-right .rv-input { width: 190px; }
+.rv-head-note { font-size: 12px; color: var(--fg-3); }
+
+/* ---------------------------------------------------------------- 提示条 */
+
+.rv-alert {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.rv-alert.warn { border-color: var(--orange); }
+.rv-alert.fail { border-color: var(--red); }
+.rv-alert-title {
+  margin-bottom: 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.rv-alert.warn .rv-alert-title { color: var(--orange); }
+.rv-alert.fail .rv-alert-title { color: var(--red); }
+.rv-alert-msg {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+.rv-note {
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--fg-3);
+}
+
+.rv-empty {
+  padding: 18px 12px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--fg-3);
+  font-size: 12.5px;
+  line-height: 1.7;
+  text-align: center;
+}
+
+.rv-subtitle {
+  margin: 14px 0 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg-2);
+}
+
+.rv-hint { margin-top: 8px; font-size: 11.5px; color: var(--fg-3); line-height: 1.7; }
+
+/* ---------------------------------------------------------------- 统计条 */
+
+.rv-stats {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.rv-stat {
+  min-width: 84px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.rv-stat-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.rv-stat-label { margin-top: 2px; font-size: 11px; color: var(--fg-3); }
+
+/* ---------------------------------------------------------------- 快捷键 */
+
+.rv-keys {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  font-size: 11.5px;
+  color: var(--fg-3);
+}
+.rv-key { display: inline-flex; align-items: center; gap: 5px; }
+.rv-key kbd {
+  min-width: 20px;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  color: var(--fg-2);
+  font-family: inherit;
+  font-size: 11px;
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- 复习会话 */
+
+.rv-session {
+  margin-bottom: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+.rv-session-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.rv-session-head .ghost-btn { margin-left: auto; }
+.rv-session-progress {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+.rv-session-meta { font-size: 11.5px; color: var(--fg-3); }
+
+/* 正面：这一屏的主角，字号给到 18 才像"一道题"而不是一段说明文字 */
+.rv-card-front {
+  padding: 16px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--fg);
+  font-size: 18px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rv-card-back {
+  padding: 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--blue);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rv-card-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+
+.rv-grades {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 8px;
+}
+.rv-grade {
+  padding: 10px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.rv-grade:hover { border-color: var(--border-hover); }
+.rv-grade:disabled { opacity: .55; cursor: default; }
+/* 四档用四种主题色：忘了=红、有点难=橙、记得=蓝、太简单=绿 */
+.rv-g-again { border-color: var(--red); color: var(--red); }
+.rv-g-hard { border-color: var(--orange); color: var(--orange); }
+.rv-g-good { border-color: var(--blue); color: var(--blue); }
+.rv-g-easy { border-color: var(--green); color: var(--green); }
+
+.rv-done-title { font-size: 16px; font-weight: 600; color: var(--green); }
+.rv-done-summary { margin-top: 6px; font-size: 12.5px; color: var(--fg-2); }
+.rv-done-list { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.rv-done-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+}
+.rv-done-front {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rv-done-when { flex: none; font-size: 11px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------------- 到期曲线 */
+
+.rv-forecast {
+  margin: 4px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.rv-forecast-title { margin-bottom: 8px; font-size: 12px; color: var(--fg-2); }
+.rv-bars { display: flex; align-items: flex-end; gap: 8px; }
+.rv-bar-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+/* 柱高按类名分五档（0 档是一根细底线）：CSP 拦行内 style，所以不用 height 内联 */
+.rv-bar {
+  width: 100%;
+  max-width: 44px;
+  border-radius: 3px 3px 0 0;
+  background: var(--bg-hover);
+}
+.rv-bar-0 { height: 3px; background: var(--line); }
+.rv-bar-1 { height: 10px; background: var(--blue); opacity: .35; }
+.rv-bar-2 { height: 18px; background: var(--blue); opacity: .55; }
+.rv-bar-3 { height: 26px; background: var(--blue); opacity: .8; }
+.rv-bar-4 { height: 34px; background: var(--blue); }
+.rv-bar-value { font-size: 11px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.rv-bar-label { font-size: 10.5px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------------- 列表行 */
+
+.rv-list { display: flex; flex-direction: column; gap: 8px; }
+
+.rv-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+.rv-row:hover { border-color: var(--border-hover); }
+.rv-row.current { border-color: var(--blue); }
+.rv-row.off { opacity: .62; }
+/* 概览条目按 severity 给左侧色条：逾期=红、紧急=橙、临近=蓝、还早=灰 */
+.rv-row.sev-overdue { border-left: 3px solid var(--red); }
+.rv-row.sev-urgent { border-left: 3px solid var(--orange); }
+.rv-row.sev-soon { border-left: 3px solid var(--blue); }
+.rv-row.sev-later { border-left: 3px solid var(--line); }
+
+.rv-row-main { min-width: 0; flex: 1; }
+.rv-row-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 3px;
+}
+.rv-row-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.rv-row-meta {
+  font-size: 11.5px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.rv-row-meta.due { margin-top: 3px; color: var(--fg-2); }
+.rv-row-text {
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--fg-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rv-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* ---------------------------------------------------------------- 徽标 */
+
+.rv-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+.rv-badge.kind { border-color: var(--purple); color: var(--purple); }
+.rv-badge.pin { border-color: var(--orange); color: var(--orange); }
+.rv-badge.gpa { border-color: var(--blue); color: var(--blue); }
+.rv-badge.ok { border-color: var(--green); color: var(--green); }
+.rv-badge.fail { border-color: var(--red); color: var(--red); }
+.rv-badge.ext { border-style: dashed; }
+.rv-badge.src-goal { border-color: var(--purple); color: var(--purple); }
+.rv-badge.src-deadline { border-color: var(--orange); color: var(--orange); }
+.rv-badge.src-exam { border-color: var(--red); color: var(--red); }
+.rv-badge.g-again { border-color: var(--red); color: var(--red); }
+.rv-badge.g-hard { border-color: var(--orange); color: var(--orange); }
+.rv-badge.g-good { border-color: var(--blue); color: var(--blue); }
+.rv-badge.g-easy { border-color: var(--green); color: var(--green); }
+
+/* 图标按钮：只有图标时线条风更安静，hover 才给底色 */
+.rv-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+}
+.rv-icon-btn:hover { background: var(--bg-hover); color: var(--fg); }
+.rv-icon-btn:disabled { opacity: .5; cursor: default; }
+
+/* ---------------------------------------------------------------- 表单 */
+
+.rv-form {
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+/* 嵌在列表行里的编辑表单：不再套一层边框，免得框套框 */
+.rv-form-flat { margin: 8px 0 0; padding: 10px; }
+
+.rv-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+.rv-field-label { font-size: 12px; color: var(--fg-2); }
+.rv-field-hint { font-size: 11px; color: var(--fg-3); line-height: 1.6; }
+
+.rv-input,
+.rv-select,
+.rv-textarea {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12.5px;
+}
+.rv-input:focus,
+.rv-select:focus,
+.rv-textarea:focus {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px rgba(99, 131, 230, .18);
+}
+.rv-textarea { resize: vertical; line-height: 1.7; }
+.rv-number { width: 110px; }
+
+.rv-form-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.rv-form-actions .rv-input { flex: 1; min-width: 160px; }
+
+.rv-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+
+.rv-result {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--green);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+.rv-result-title { font-size: 12.5px; font-weight: 600; color: var(--fg); }
+.rv-result-line { margin-top: 4px; font-size: 12.5px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.rv-result-note { margin-top: 4px; font-size: 11.5px; color: var(--fg-3); line-height: 1.7; }
+
+/* ---------------------------------------------------------------- 目标页 */
+
+.rv-card {
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.rv-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.rv-card-title { font-size: 13px; font-weight: 600; color: var(--fg); }
+
+.rv-gpa { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+
+/* 免责声明：原样显示那句话，所以给它一个不显眼但读得清的样式，不做任何加工 */
+.rv-disclaimer {
+  margin-top: 4px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--line);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--fg-3);
+}
+
+/* 进度条：填充宽度按 10% 一档的类名表达（不用行内 style） */
+.rv-progress {
+  position: relative;
+  height: 16px;
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+.rv-progress-fill { height: 100%; background: var(--blue); opacity: .5; }
+.rv-progress-fill.lv-0 { width: 0; }
+.rv-progress-fill.lv-1 { width: 10%; }
+.rv-progress-fill.lv-2 { width: 20%; }
+.rv-progress-fill.lv-3 { width: 30%; }
+.rv-progress-fill.lv-4 { width: 40%; }
+.rv-progress-fill.lv-5 { width: 50%; }
+.rv-progress-fill.lv-6 { width: 60%; }
+.rv-progress-fill.lv-7 { width: 70%; }
+.rv-progress-fill.lv-8 { width: 80%; }
+.rv-progress-fill.lv-9 { width: 90%; }
+.rv-progress-fill.lv-10 { width: 100%; opacity: .75; }
+.rv-progress-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.rv-milestones { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+.rv-milestone-edit { display: flex; align-items: center; gap: 8px; }
+.rv-milestone-edit .rv-check { flex: 1; min-width: 0; }
+
+/* ---------------------------------------------------------------- 周报页 */
+
+.rv-report {
+  margin-top: 4px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+/* 富文本组件按 Markdown 段落渲染，段落间距由这里给（.bubble-text .rt-p 那套不适用本页） */
+.rv-report .rt-p { margin: 0 0 8px; white-space: pre-wrap; }
+.rv-report .rt-p:last-child { margin-bottom: 0; }
+
+.rv-table { display: flex; flex-direction: column; gap: 4px; }
+.rv-table-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: 12px;
+}
+.rv-table-row:last-child { border-bottom: 0; }
+.rv-table-key { flex: none; width: 84px; color: var(--fg-3); }
+.rv-table-value {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.rv-missing {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--orange);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.rv-missing-title { margin-bottom: 6px; font-size: 12px; font-weight: 600; color: var(--orange); }
+.rv-missing-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- 窄面板 */
+
+@media (max-width: 560px) {
+  .rv-head-right .rv-input { width: 100%; }
+  .rv-head-right { width: 100%; margin-left: 0; }
+  .rv-card-front { font-size: 16px; }
+}

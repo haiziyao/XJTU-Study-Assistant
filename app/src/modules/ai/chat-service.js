@@ -1134,6 +1134,7 @@ export class AiChatService {
         url: item.url,
         snippet: item.snippet,
         source: item.source,
+        scope: item.scope,
         ok: page.ok !== false,
         error: page.error ?? null,
         chars: String(page.text ?? '').length,
@@ -1205,13 +1206,22 @@ export class AiChatService {
       }
       const pages = await readPages(results, { limit: count, log, fetchImpl: this.searchFetch ?? undefined });
       const byUrl = new Map(pages.map((page) => [page.url, page]));
-      const items = results.slice(0, count).map((item) => {
+      /**
+       * 校内结果排前面。
+       *
+       * 实测过的问题：校内通道会并走一次公网检索，公网结果条数多、把校内结果挤到后面，
+       * 用户看到"校内搜索"返回的却是别的学校 —— 明明校内也有命中。所以这里按 scope 稳定排序，
+       * 并且每条都带上 `scope`，界面与模型都能标出"这条是校内站点 / 这条是公网"。
+       */
+      const ordered = [...results].sort((a, b) => Number(b.scope === 'campus') - Number(a.scope === 'campus'));
+      const items = ordered.slice(0, count).map((item) => {
         const page = byUrl.get(item.url) ?? {};
         return {
           title: item.title,
           url: item.url,
           snippet: item.snippet,
           source: item.source,
+          scope: item.scope,
           // 正文只在真抓到时才有：`ok:false` 的条目 text 为空、error 说明原因（列表页/PDF/要登录），
           // 模型据此知道"这条只有摘要，别当成读过了"
           text: String(page.text ?? '').slice(0, WEB_TEXT_CHARS),
@@ -1222,13 +1232,18 @@ export class AiChatService {
         };
       });
       const read = items.filter((item) => item.text).length;
+      const campusCount = items.filter((item) => item.scope === 'campus').length;
+      const explain = mode === 'campus'
+        ? `校内检索「${query}」：校内站点命中 ${campusCount} 条、公网结果 ${items.length - campusCount} 条，读到 ${read} 篇正文` +
+          (campusCount === 0 ? '（校内站点一条都没命中：免密钥通道对 site: 语法支持很差，已带上学校名重试；下面给的是公网结果，回答时要说明这一点）' : '')
+        : `校外检索「${query}」：搜到 ${results.length} 条，读到 ${read} 篇正文`;
       return {
         draft,
         result: this.#compactQueryResult(WEB_TARGET, {
           filters: { query, mode },
           count: items.length,
           items,
-          explain: `${mode === 'campus' ? '校内' : '校外'}检索「${query}」：搜到 ${results.length} 条，读到 ${read} 篇正文`,
+          explain,
         }),
       };
     } catch (error) {
@@ -1267,7 +1282,7 @@ export class AiChatService {
       // 联网检索：**必须带上 text（正文）与 url** —— 只给标题，模型就只能凭标题猜，
       // 回答会写得像"读过了"；`ok`/`error` 让它知道哪几条根本没抓到正文（如实说明）。
       // 这条曾经漏掉过：items 里只剩 title，模型于是拿不到任何网页内容。
-      web: ['title', 'url', 'snippet', 'source', 'text', 'chars', 'ok', 'error'],
+      web: ['title', 'url', 'snippet', 'source', 'scope', 'text', 'chars', 'ok', 'error'],
     };
     // 模块声明的投影表覆盖内置表（内置三张表保持原样，行为不变）
     const fields = this.queryFields?.[target] ?? FIELDS[target] ?? ['id', 'title'];

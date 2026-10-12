@@ -1,0 +1,398 @@
+/* 「传输」页（局域网直传）的样式。
+   约定与其它视图一致：颜色一律用外壳主题令牌（--bg-* / --fg* / --line / --blue / --red /
+   --green / --orange），类名统一 tf- 前缀，**不写 inline style**（CSP 的 style-src 'self' 会拦，
+   所以进度用文字而不是动态宽度的进度条）。 */
+
+/* ---------------------------------------------------------------- 顶部与卡片 */
+
+.tf-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tf-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.tf-device-input {
+  width: 180px;
+}
+
+.tf-alert {
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--blue);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.tf-alert.warn {
+  border-left-color: var(--orange);
+}
+.tf-alert.fail {
+  border-left-color: var(--red);
+  color: var(--fg);
+}
+.tf-alert-title {
+  color: var(--fg);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.tf-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-1);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tf-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tf-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.tf-card-note {
+  font-size: 12px;
+  color: var(--fg-3);
+  line-height: 1.6;
+}
+.tf-card-head .tf-card-note {
+  margin-left: auto;
+}
+
+/* ---------------------------------------------------------------- 配对码 */
+
+.tf-code-box {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.tf-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: 8px;
+  color: var(--fg);
+  padding: 6px 14px 6px 18px;
+  border: 1px dashed var(--border-hover);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  user-select: all;
+}
+.tf-code.expired {
+  color: var(--fg-3);
+  border-style: solid;
+}
+.tf-code-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.tf-code-meta strong {
+  color: var(--fg);
+}
+.tf-countdown.expired {
+  color: var(--orange);
+}
+.tf-countdown {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- 开关 */
+
+.tf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+.tf-switch {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  cursor: pointer;
+}
+.tf-switch input {
+  margin-top: 2px;
+}
+.tf-switch-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tf-switch-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.tf-switch-note {
+  font-size: 11px;
+  color: var(--fg-3);
+  line-height: 1.55;
+}
+
+/* ---------------------------------------------------------------- 附近设备 */
+
+.tf-peer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.tf-peer-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.tf-peer-name {
+  font-size: 13px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tf-peer-meta {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.tf-peer-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tf-peer-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border-hover);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  font-size: 12px;
+  color: var(--fg-2);
+  flex-wrap: wrap;
+}
+.tf-peer-form input {
+  width: 96px;
+}
+
+.tf-badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--fg-2);
+  background: var(--bg-elevated);
+  white-space: nowrap;
+}
+.tf-badge.ok {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 40%, var(--line));
+}
+.tf-badge.warn {
+  color: var(--orange);
+  border-color: color-mix(in srgb, var(--orange) 40%, var(--line));
+}
+.tf-badge.fail {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 40%, var(--line));
+}
+
+/* ---------------------------------------------------------------- 集合勾选 */
+
+.tf-collections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 6px;
+}
+.tf-collection {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  cursor: pointer;
+}
+.tf-collection input {
+  margin-top: 2px;
+}
+.tf-collection.disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+.tf-collection-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.tf-collection-label {
+  font-size: 12px;
+  color: var(--fg);
+}
+.tf-collection-note {
+  font-size: 11px;
+  color: var(--fg-3);
+  line-height: 1.5;
+}
+
+/* ---------------------------------------------------------------- 进度 / 结果 */
+
+.tf-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-2);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+.tf-progress-row:last-child {
+  border-bottom: 0;
+}
+.tf-progress-row strong {
+  color: var(--fg);
+}
+
+.tf-stats {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tf-stat {
+  min-width: 84px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tf-stat-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.tf-stat-label {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.tf-stat.ok .tf-stat-value {
+  color: var(--green);
+}
+.tf-stat.warn .tf-stat-value {
+  color: var(--orange);
+}
+.tf-stat.fail .tf-stat-value {
+  color: var(--red);
+}
+
+.tf-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tf-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.tf-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.tf-item-title {
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tf-item-meta {
+  font-size: 11px;
+  color: var(--fg-3);
+  word-break: break-all;
+}
+.tf-item-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* ---------------------------------------------------------------- 日志 */
+
+.tf-log-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  font-size: 12px;
+}
+.tf-log-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.tf-log-title {
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tf-log-meta {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.tf-log-row .tf-badge {
+  margin-left: auto;
+}
+
+.tf-empty {
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--fg-3);
+  font-size: 12px;
+  text-align: center;
+}

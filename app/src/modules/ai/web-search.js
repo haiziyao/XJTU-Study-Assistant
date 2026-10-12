@@ -18,8 +18,13 @@
  * 两种模式（`mode`）
  * ----------------
  *   - `web`    ：校外，全网检索；
- *   - `campus` ：①把检索收窄到校内站点（`*.xjtu.edu.cn`，见 `isCampusUrl`）；
- *                ②**校内域名探测可达时**再并走一次公网检索，两批结果合并去重。
+ *   - `campus` ：三条通道，**顺序就是优先级**（见 `searchWebDetailed` 里的执行注释）：
+ *                ① **站内直搜**（`searchCampusSites`）：直接打校内站点自己的检索接口，
+ *                   命中的才必然是"校内的东西"；
+ *                ② **公共结果页**：把检索词收窄到校内站点（`site:` + 校名，见 `campusScopedQuery`），
+ *                   覆盖站内直搜够不到的部分（新子站、没有搜索入口的站、需登录的站）；
+ *                ③ **mention 兜底分桶**：公网结果里标题/摘要提到本校的算作校内相关，并如实标注来源。
+ *                另外：**校内域名探测可达时**再并走一次不分域的公网检索（原来就有的一路）。
  *                注意：探测只能判断「校内域名可达」，**不能证明当前真的走了校园网**
  *                （校内站点也可能对公网开放），所以它只作为"是否并走公网"的启发式，
  *                并且在返回值里带 `caveat` 如实说明这一点。
@@ -74,6 +79,149 @@ export const CAMPUS_PROBE_CAVEAT =
   '探测只能说明「校内域名在当前离线环境下可达」，不能证明流量真的走了校园网：' +
   '校内站点也可能对公网开放，反之校园网内的 DNS/代理异常也会造成误判。';
 
+/**
+ * 校内站点直搜配置表（**逐条真机实测过**，不是照模板猜的）。
+ *
+ * 为什么要有这张表：校内站点绝大多数是同一套「博达 VSB（Visual SiteBuilder）站群」，
+ * 检索接口的形状完全一致，站点之间只差三件事 ——
+ *   ① 搜索页路径：各站自己起名，实测见过 `search.jsp` / `ssjgy.jsp` / `soso.jsp` / `soso_2.jsp` /
+ *      `ss.jsp` / `ssjg.jsp` / `sousuo.jsp`，**猜不得**，只能从首页的 `<form action=…>` 里取；
+ *   ② 关键词字段名：多数是 `lucenenewssearchkey`，研究生院是 `lucenenewssearchkeyword`（同一套
+ *      cms 的不同版本）。字段名弄错时服务端**不报错**，而是安静地返回一张没有检索结果的默认页 ——
+ *      实测「研究生院 + 推免/蓝桥杯/转专业」三个词返回的字节数一模一样，就是这么发现的；
+ *   ③ 结果的域名范围：多数站只搜自己（`dean.xjtu.edu.cn`…），门户 `www` 搜的是整个 `*.xjtu.edu.cn`
+ *      （实测能搜出 `news.xjtu.edu.cn` 的稿件），所以它多一条 `allowHosts`。
+ *
+ * 编码：所有实测站点都是 **base64(UTF-8)** 放进表单的隐藏字段，页面里
+ * `/system/resource/js/base64.js` 开头就写着「文字采用 UTF-8 方式进行 Base64 编码」。
+ * 另有"明文关键词"或"GBK base64"的老写法，但**这 20 个站点里一个都没出现**，所以这里不实现
+ * （零依赖环境下做 GBK 编码要自带码表，为一个没实测到的分支塞几百行常量不划算）。
+ *
+ * 表单还必须带 `_lucenesearchtype=1` 与 `searchScope=0`：实测去掉这两个参数后服务端照样 200，
+ * 但返回的是一张"没有检索结果"的默认页 —— 属于"看着成功、其实什么都没搜"的坑。
+ *
+ * 字段（`working: true` 的条目）：
+ *   - `host`      站点主机名，同时用作**结果域名白名单**（只留本站域名下的条目）
+ *   - `path`      搜索页路径（含 `wbtreeid`，VSB 用它区分站点/栏目）
+ *   - `keyField`  关键词字段名（`lucenenewssearchkey` 或 `lucenenewssearchkeyword`）
+ *   - `evidence`  实测日期 + 当时的结果条数（以后站点改版，先看这一行还成不成立）
+ *   - `origin`    可选，仅测试注入本地假站点时用；默认 `https://<host>`
+ * 字段（`working: false` 的条目）：只有 `id/label/host/reason`，运行时**不会发请求**；
+ * 留着是为了下次不用重复试 —— 都是 2026-10-13 实测确认打不通或没有检索入口的。
+ */
+export const CAMPUS_SITE_SEARCH = Object.freeze([
+  {
+    id: 'dean', label: '教务处', host: 'dean.xjtu.edu.cn',
+    path: '/search.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
+    evidence: '2026-10-13 实测「转专业」15 条、「通知」15 条',
+  },
+  {
+    id: 'gs', label: '研究生院', host: 'gs.xjtu.edu.cn',
+    path: '/ssjgy.jsp?wbtreeid=1111', keyField: 'lucenenewssearchkeyword', working: true,
+    evidence: '2026-10-13 实测「转专业」15 条、「通知」17 条（字段名是全表唯一的 keyword 版）',
+  },
+  {
+    id: 'www', label: '学校门户（覆盖整个 *.xjtu.edu.cn）', host: 'www.xjtu.edu.cn',
+    path: '/soso_2.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey',
+    allowHosts: ['xjtu.edu.cn'], working: true,
+    evidence: '2026-10-13 实测「转专业」10 条（含 news.xjtu.edu.cn 稿件）；无匹配时会返回一版默认推荐列表',
+  },
+  {
+    id: 'sae', label: '航天航空学院', host: 'sae.xjtu.edu.cn',
+    path: '/search.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
+    evidence: '2026-10-13 实测「转专业」15 条（标题在 <h3> 里，日期在 <a> 内的 .a-date 块）',
+  },
+  {
+    id: 'math', label: '数学与统计学院', host: 'math.xjtu.edu.cn',
+    path: '/ssjgy.jsp?wbtreeid=1213', keyField: 'lucenenewssearchkey', working: true,
+    evidence: '2026-10-13 实测「转专业」18 条、「通知」18 条',
+  },
+  {
+    id: 'news', label: '新闻网', host: 'news.xjtu.edu.cn',
+    path: '/xmb/ssjgg.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
+    evidence: '2026-10-13 实测「转专业」8 条（每条带摘要，链接是 ../info/… 相对路径）',
+  },
+  {
+    id: 'pksy', label: '彭康书院', host: 'pksy.xjtu.edu.cn',
+    path: '/search.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
+    evidence: '2026-10-13 实测「转专业」15 条（结果容器写成大写 <UL>）',
+  },
+  {
+    id: 'wen', label: '文治书院', host: 'wen.xjtu.edu.cn',
+    path: '/ssjg.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
+    evidence: '2026-10-13 实测「转专业」15 条（日期和标题挤在同一个 <a> 里）',
+  },
+  {
+    id: 'zlsy', label: '宗濂书院', host: 'zlsy.xjtu.edu.cn',
+    path: '/ss.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
+    evidence: '2026-10-13 实测「转专业」15 条',
+  },
+  {
+    id: 'nanyang', label: '南洋书院', host: 'nanyang.xjtu.edu.cn',
+    path: '/search.jsp?wbtreeid=1047', keyField: 'lucenenewssearchkey', working: true,
+    evidence: '2026-10-13 实测「转专业」15 条',
+  },
+  {
+    id: 'lizhi', label: '励志书院', host: 'lizhi.xjtu.edu.cn',
+    path: '/sousuo.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
+    evidence: '2026-10-13 实测「转专业」15 条',
+  },
+  {
+    id: 'bjb', label: '钱学森学院（拔尖计划）', host: 'bjb.xjtu.edu.cn',
+    path: '/soso.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
+    evidence: '2026-10-13 实测「转专业」15 条（钱学森书院的内容也在这里）',
+  },
+  // ---- 以下站点 2026-10-13 实测打不通/没有检索入口：运行时直接跳过，不做无谓请求 ----
+  {
+    id: 'library', label: '图书馆', host: 'library.xjtu.edu.cn', working: false,
+    reason: '域名能解析（202.117.24.24）但 http/https 都 20s 超时，疑似仅校园网内可达，本轮无法确认它有没有检索入口',
+  },
+  {
+    id: 'qianxuesen', label: '钱学森书院', host: 'qianxuesen.xjtu.edu.cn', working: false,
+    reason: '域名能解析（202.117.3.253）但连接 20s 超时；书院内容实测能从 www.xjtu.edu.cn/bksy/qxssy.htm 与 bjb.xjtu.edu.cn 搜到',
+  },
+  {
+    id: 'sei', label: '软件学院（sei）', host: 'sei.xjtu.edu.cn', working: false,
+    reason: '域名能解析（202.117.54.253）但连接 20s 超时，本轮不可达',
+  },
+  {
+    id: 'eie', label: '电子与信息学部', host: 'eie.xjtu.edu.cn', working: false,
+    reason: '首页是 JS 渲染的 VSB「AI 网站」模板（jQuery + home.js 往 #app 里注入正文），HTML 里没有搜索表单，直搜抓不到结果',
+  },
+  {
+    id: 'cssy', label: '崇实书院', host: 'cssy.xjtu.edu.cn', working: false,
+    reason: '站点可达（首页 40KB）但整页没有 <form>、也没有 base64.js，没有可调的站内检索接口',
+  },
+  {
+    id: 'lms', label: '思源学堂', host: 'lms.xjtu.edu.cn', working: false,
+    reason: '整站 302 到 jAccount 单点登录（identity1.xjtu.edu.cn），没有匿名可用的检索接口',
+  },
+  {
+    id: 'ehall', label: '师生服务大厅', host: 'ehall.xjtu.edu.cn', working: false,
+    reason: '跳转到 /new/index.html 的 JS 单页应用且需登录，匿名抓不到任何结果',
+  },
+]);
+
+/** 站内直搜的站点级并发上限：3。再高容易触发站群 WAF，收益也有限。 */
+export const CAMPUS_SEARCH_CONCURRENCY = 3;
+/** 单个校内站点检索的超时（比公共搜索短：站点自己的检索通常 1–4s 就有响应）。 */
+export const CAMPUS_SITE_TIMEOUT_MS = 6_000;
+
+/**
+ * 一条结果"凭什么算校内的"——数值越小越优先（campus 档按它排序）：
+ *   - `site`    站内站点自己的检索接口命中（最强：校方发布的内容页）
+ *   - `domain`  公共结果页给出的链接落在 `*.xjtu.edu.cn`（域名对，但页面可能是转载/跳板）
+ *   - `mention` 公网结果的标题/摘要里提到本校（最弱：只是"提到了"，页面本身在校外）
+ *   - `web`     其它公网结果（校内档里排在最后）
+ */
+export const MATCHED_BY_RANK = Object.freeze({ site: 0, domain: 1, mention: 2, web: 3 });
+
+/** 取一条结果的档位序号（没有 `matchedBy` 的当公网处理）。 */
+export function matchedByRank(item) {
+  if (!item || item.scope !== 'campus') return MATCHED_BY_RANK.web;
+  return MATCHED_BY_RANK[item.matchedBy ?? 'domain'] ?? MATCHED_BY_RANK.domain;
+}
+
 const DEFAULT_TIMEOUT_MS = 8_000;
 const READ_TIMEOUT_MS = 12_000;
 const PROBE_TIMEOUT_MS = 2_500;
@@ -83,13 +231,45 @@ const MAX_HTML_BYTES = 1_500_000;
 /**
  * 结果页解析必须伪装成浏览器：默认 UA（node）会被搜索引擎直接回验证码，
  * 这不是"绕过反爬"，而是拿回和普通浏览器一样的公开结果页 —— 真被拦时我们照样如实报空。
+ *
+ * **诚实说明**（2026-10-13 实测）：把 UA/Accept/Accept-Language 都换成浏览器那套之后，
+ * `baike.baidu.com` 与 `zhuanlan.zhihu.com` 依然回 **403**（裸头与浏览器头一模一样）——
+ * 那是对出口 IP 的风控，不是请求头能解决的。加头能改善的是"普通站点把 node 当爬虫"这一类。
+ * 另外：**不带 Cookie、不伪造登录态**，这是底线（要登录的内容不该靠抓）。
  */
 const BROWSER_HEADERS = Object.freeze({
   'User-Agent':
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
   Accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
+  // 浏览器做文档级导航时一定会带它；不带会显得比浏览器"更可疑"
+  'Upgrade-Insecure-Requests': '1',
+  'Cache-Control': 'no-cache',
+  Pragma: 'no-cache',
 });
+
+/**
+ * 搜索引擎的跳转链要带上来源站 Referer。
+ * 百度/搜狗/360 的自然结果 href 都是自家跳转链（`/link?url=…`、`/link?m=…`），
+ * 这类 URL 直接从别处点过去时对方偶尔会 403；带上来源站的 Referer 就正常了。
+ */
+const ENGINE_REFERERS = Object.freeze([
+  ['baidu.com', 'https://www.baidu.com/'],
+  ['sogou.com', 'https://www.sogou.com/'],
+  ['so.com', 'https://www.so.com/'],
+  ['bing.com', 'https://www.bing.com/'],
+]);
+
+/** 该 URL 该带哪个 Referer（不是跳转链就返回空串）。 */
+export function defaultReferer(raw) {
+  const url = parseUrl(raw);
+  if (!url) return '';
+  const host = url.hostname.toLowerCase();
+  for (const [suffix, referer] of ENGINE_REFERERS) {
+    if (host === suffix || host.endsWith(`.${suffix}`)) return referer;
+  }
+  return '';
+}
 
 /** 去重时要丢掉的跟踪参数（同一条结果带不带 utm_* 都是同一条）。 */
 const TRACKING_PARAMS = new Set(['fbclid', 'gclid', 'spm', 'from_source', 'ref', 'referer', 'source_from']);
@@ -287,11 +467,27 @@ function collapseInline(text) {
 /** 取第一段匹配并清理成纯文本。 */
 function firstText(html, regex) {
   const match = regex.exec(String(html ?? ''));
-  return match ? collapseInline(stripTags(match[1])) : '';
+  return match ? stripTitleTags(match[1]) : '';
 }
 
 function stripTags(html) {
   return decodeEntities(String(html ?? '').replace(/<[^>]*>/g, ' '));
+}
+
+/**
+ * 标题/摘要这类"要给人看的一行文本"：标签**直接删掉**，只有块级标签换成空格。
+ *
+ * 为什么不能统一用 `stripTags`：它把每个标签都换成空格，而检索结果页普遍会把命中关键词的
+ * 每个词单独包一层高亮标签（`<em>`、`<strong>`、`<span class="keywordfontcolor…">`），
+ * 于是"本科生转专业"会变成"本科生 转 专业"。真网实测：校内 12 个站点里 11 个的标题带高亮 span，
+ * 搜狗/360/Bing 也都用 `<em>` 高亮 —— 用错清洗函数会同时毁掉可读性与相关度计算。
+ */
+function stripTitleTags(html) {
+  const text = String(html ?? '')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<\/(?:p|div|li|tr|td|th|h[1-6]|section|article|ul|ol|table)\s*>/gi, ' ')
+    .replace(/<[^>]*>/g, '');
+  return collapseInline(decodeEntities(text));
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +497,9 @@ function stripTags(html) {
 /**
  * 统一的一次请求。**永远不 throw**：把失败折叠成 `{ ok:false, error }`，
  * 因为调用方（搜一批页 / 探测一批域名）必须能"一条失败不影响其余"。
+ *
+ * 请求头默认就是一套浏览器头（见 `BROWSER_HEADERS`）；`referer` 不传时会按 URL 自动判断
+ * （搜索引擎跳转链带上来源站，普通站点不带）。**不带 Cookie**，也不伪造登录态。
  */
 export async function requestText(fetchImpl, url, options = {}) {
   const {
@@ -309,16 +508,23 @@ export async function requestText(fetchImpl, url, options = {}) {
     body,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     accept = '*/*',
+    referer,
   } = options;
   const doFetch = typeof fetchImpl === 'function' ? fetchImpl : globalThis.fetch;
   if (typeof doFetch !== 'function') {
     return { ok: false, status: 0, url, error: '当前运行环境没有可用的 fetch（Node 版本过低？）' };
   }
+  const finalReferer = referer === undefined ? defaultReferer(url) : String(referer ?? '');
   const timer = withTimeout(timeoutMs);
   try {
     const response = await doFetch(url, {
       method,
-      headers: { ...BROWSER_HEADERS, Accept: accept, ...headers },
+      headers: {
+        ...BROWSER_HEADERS,
+        Accept: accept,
+        ...(finalReferer ? { Referer: finalReferer } : {}),
+        ...headers,
+      },
       body,
       redirect: 'follow',
       signal: timer.signal,
@@ -371,17 +577,35 @@ function splitBlocks(html, openRegex) {
 function firstAnchor(html) {
   const match = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i.exec(String(html ?? ''));
   if (!match) return null;
-  return { href: decodeEntities(match[1]).trim(), text: collapseInline(stripTags(match[2])) };
+  return { href: decodeEntities(match[1]).trim(), text: stripTitleTags(match[2]) };
 }
 
-function toResult(anchor, snippet, source) {
+/**
+ * href → 绝对 URL。
+ *
+ * **必须有这一步**：搜狗的自然结果 href 是站内相对路径（`/link?url=…`），
+ * 不解析就既过不了 `isJunkUrl`（相对 URL 拿不到 host，一律当垃圾），
+ * 也没法在 `readPages` 里 follow —— 实测里这一条会让搜狗"整个引擎一条结果都不剩"。
+ */
+function absolutize(href, baseUrl) {
+  const raw = decodeEntities(String(href ?? '')).trim();
+  if (!raw) return '';
+  try {
+    return new URL(raw, baseUrl || undefined).toString();
+  } catch {
+    return '';
+  }
+}
+
+function toResult(anchor, snippet, source, baseUrl = '') {
   if (!anchor?.href || !anchor.text) return null;
-  if (isJunkUrl(anchor.href)) return null;
-  return { title: anchor.text, url: anchor.href, snippet: collapseInline(snippet).slice(0, 400), source };
+  const href = baseUrl ? absolutize(anchor.href, baseUrl) : anchor.href;
+  if (!href || isJunkUrl(href)) return null;
+  return { title: anchor.text, url: href, snippet: collapseInline(snippet).slice(0, 400), source };
 }
 
 /** 解析 Bing 结果页（`<li class="b_algo">…</li>`）。结构变了就返回空数组，由调用方如实报错。 */
-export function parseBingResults(html) {
+export function parseBingResults(html, { baseUrl = '' } = {}) {
   const out = [];
   for (const block of splitBlocks(html, /<li[^>]*class=["'][^"']*\bb_algo\b[^"']*["'][^>]*>/gi)) {
     if (AD_MARKERS.test(block.header)) continue;
@@ -391,14 +615,14 @@ export function parseBingResults(html) {
       firstText(block.body, /<p\b[^>]*>([\s\S]*?)<\/p>/i) ||
       firstText(block.body, /<div[^>]*class=["'][^"']*b_caption[^"']*["'][^>]*>([\s\S]*?)<\/div>/i) ||
       firstText(block.body, /<div[^>]*class=["'][^"']*b_snippet[^"']*["'][^>]*>([\s\S]*?)<\/div>/i);
-    const result = toResult(anchor, snippet, 'bing-html');
+    const result = toResult(anchor, snippet, 'bing-html', baseUrl);
     if (result) out.push(result);
   }
   return out;
 }
 
 /** 解析百度结果页（`<div class="result c-container">…</div>`）。 */
-export function parseBaiduResults(html) {
+export function parseBaiduResults(html, { baseUrl = '' } = {}) {
   const out = [];
   for (const block of splitBlocks(html, /<div[^>]*class=["'][^"']*\bresult\b[^"']*["'][^>]*>/gi)) {
     if (AD_MARKERS.test(block.header)) continue;
@@ -408,14 +632,68 @@ export function parseBaiduResults(html) {
       firstText(block.body, /<div[^>]*class=["'][^"']*c-abstract[^"']*["'][^>]*>([\s\S]*?)<\/div>/i) ||
       firstText(block.body, /<span[^>]*class=["'][^"']*(?:content-right|c-color-text|abstract)[^"']*["'][^>]*>([\s\S]*?)<\/span>/i) ||
       firstText(block.body, /<div[^>]*class=["'][^"']*c-span-last[^"']*["'][^>]*>([\s\S]*?)<\/div>/i);
-    const result = toResult(anchor, snippet, 'baidu-html');
+    const result = toResult(anchor, snippet, 'baidu-html', baseUrl);
+    if (result) out.push(result);
+  }
+  return out;
+}
+
+/**
+ * 解析搜狗结果页（`<div class="vrwrap">…</div>`）。
+ *
+ * 真网实测（2026-10-13）结构：
+ *   `<div class="vrwrap" id="sogou_vr_30000000_wrap_1"><h3 class="vr-title"><a href="/link?url=…">标题</a></h3>
+ *    <div class="fz-mid space-txt base-ellipsis clamp2" id="cacheresult_summary_1">摘要</div>`
+ * 自然结果的 href 是**站内相对路径** `/link?url=…` 跳转链（和百度 `www.baidu.com/link?url=` 一个套路）：
+ * 这种链接必须先解析成绝对 URL 再保留 —— 相对链接过不了 `isJunkUrl`（拿不到 host，会被当成垃圾），
+ * `readPages` 也没法 follow 它。实测口径：这一步不做，搜狗会"整个引擎一条结果都不剩"。
+ */
+export function parseSogouResults(html, { baseUrl = '' } = {}) {
+  const out = [];
+  for (const block of splitBlocks(html, /<div[^>]*class=["'][^"']*\bvrwrap\b[^"']*["'][^>]*>/gi)) {
+    if (AD_MARKERS.test(block.header)) continue;
+    const heading = /<h3\b[^>]*>([\s\S]*?)<\/h3>/i.exec(block.body);
+    const anchor = firstAnchor(heading ? heading[1] : block.body);
+    const snippet =
+      firstText(block.body, /<div[^>]*class=["'][^"']*(?:space-txt|fz-mid|str_info|text-layout)[^"']*["'][^>]*>([\s\S]*?)<\/div>/i) ||
+      firstText(block.body, /<div[^>]*id=["']cacheresult_summary_\d+["'][^>]*>([\s\S]*?)<\/div>/i);
+    const result = toResult(anchor, snippet, 'sogou-html', baseUrl);
+    if (result) out.push(result);
+  }
+  return out;
+}
+
+/**
+ * 解析 360 搜索结果页（`<li class="res-list">…</li>`）。
+ *
+ * 真网实测（2026-10-13）结构：
+ *   `<li class="res-list referer-news-flow"><h3 class="res-title"><a href="https://www.so.com/link?m=…">标题</a></h3>
+ *    <p class="res-desc">摘要</p><p class="g-linkinfo"><cite>真实站点</cite></p></li>`
+ * 注意两点：① 自然结果是 `so.com/link?m=…` 跳转链（保留，同上）；
+ * ② 页面里还有"墨盒卡片"类结果（天气卡等，没有 `res-list` 类），按容器切块时天然不会混进来。
+ */
+export function parse360Results(html, { baseUrl = '' } = {}) {
+  const out = [];
+  for (const block of splitBlocks(html, /<li[^>]*class=["'][^"']*\bres-list\b[^"']*["'][^>]*>/gi)) {
+    if (AD_MARKERS.test(block.header)) continue;
+    const heading = /<h3\b[^>]*>([\s\S]*?)<\/h3>/i.exec(block.body);
+    const anchor = firstAnchor(heading ? heading[1] : block.body);
+    const snippet =
+      firstText(block.body, /<p[^>]*class=["'][^"']*res-desc[^"']*["'][^>]*>([\s\S]*?)<\/p>/i) ||
+      firstText(block.body, /<div[^>]*class=["'][^"']*res-desc[^"']*["'][^>]*>([\s\S]*?)<\/div>/i);
+    const result = toResult(anchor, snippet, '360-html', baseUrl);
     if (result) out.push(result);
   }
   return out;
 }
 
 /** 各引擎结果块的"结构指纹"：有它才算拿到了真结果页。 */
-const STRUCTURE_MARKERS = Object.freeze({ bing: /b_algo/i, baidu: /\bresult\b/i });
+const STRUCTURE_MARKERS = Object.freeze({
+  bing: /b_algo/i,
+  baidu: /\bresult\b/i,
+  sogou: /\bvrwrap\b/i,
+  so360: /\bres-list\b/i,
+});
 
 /**
  * 命中反爬/改版特征就返回原因文本，否则 null。
@@ -437,6 +715,102 @@ export function detectAntiBot(engine, status, body) {
   return `页面里没有 ${engine} 的结果块（响应 ${text.length} 字节，结构可能已改版或被风控页替换）`;
 }
 
+// ---------------------------------------------------------------------------
+// 相关度：判断"这一批结果到底有没有答在问题上"
+// ---------------------------------------------------------------------------
+
+/**
+ * 查询词里的功能词。它们出现在结果里不代表搜到了相关内容 ——
+ * 典型的坑是"最近有什么单位来访我们航空航天学院吗"里的"最近/什么/我们/吗"。
+ */
+const QUERY_STOPWORDS = new Set([
+  '的', '了', '是', '在', '和', '与', '及', '或', '有', '没', '不', '也', '都', '就', '还', '又',
+  '我', '我们', '你', '你们', '他', '他们', '她', '它', '这', '那', '这个', '那个', '这些', '那些',
+  '什么', '怎么', '怎样', '如何', '哪些', '哪个', '哪里', '为什么', '多少', '几', '吗', '呢', '吧',
+  '啊', '呀', '哦', '请问', '一下', '一个', '可以', '需要', '应该', '以及', '关于', '对于', '如果',
+  // 注意「今天 / 明天 / 今年」这类**不**算功能词：它们出现在结果里是实打实的信息
+  //（"西安天气预报**今天**"就靠它把无关的旅游攻略压下去），丢了反而降低区分度
+  '最近', '现在', '目前', '有没有', '是不是', '能不能', '怎么样',
+  'the', 'a', 'an', 'of', 'to', 'in', 'on', 'for', 'and', 'or', 'is', 'are', 'what', 'how', 'why',
+]);
+
+/**
+ * 把检索词切成"内容词"。
+ *
+ * 没有分词器（零依赖）时的取舍：
+ *   - 按空白/标点切成 token，丢掉整词都是功能词的 token；
+ *   - ASCII/数字 token 长度 ≥ 2 才要（单字母没信息量）；
+ *   - **中文长 token 再切成 2 字片段**：中文关键词常常整串写在一起（"航空航天学院"），
+ *     整串去比对一个字都不能差，切片段才能量出"覆盖了几成"。
+ *     片段会跨词边界（"空航"这种），但它是**所有引擎一起被扣分**，不影响引擎之间的比较。
+ *
+ * @returns {string[]} 去重后的词表（最多 16 个，够用且让 notes 不至于太长）
+ */
+export function queryTerms(query, { max = 16 } = {}) {
+  const tokens = String(query ?? '')
+    .toLowerCase()
+    // 检索语法（`site:xjtu.edu.cn` / `filetype:pdf` / `intitle:xx`）是**过滤器**，不是内容词。
+    // 不摘掉的话它们会变成 site/xjtu/edu/cn 这样的"查询词"，把覆盖率整体拉低 ——
+    // campus 档的检索词天生带 `site:xjtu.edu.cn`，实测会被这套算法误判成"引擎答非所问"。
+    .replace(/\b(?:site|filetype|inurl|intitle|inanchor|allintext|allintitle)\s*:\s*\S+/gi, ' ')
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+  const terms = new Set();
+  for (const token of tokens) {
+    if (QUERY_STOPWORDS.has(token)) continue;
+    if (/^[a-z0-9]+$/.test(token)) {
+      if (token.length >= 2) terms.add(token);
+      continue;
+    }
+    if (token.length <= 3) {
+      terms.add(token);
+      continue;
+    }
+    for (let i = 0; i + 2 <= token.length; i += 1) {
+      const gram = token.slice(i, i + 2);
+      if (!QUERY_STOPWORDS.has(gram)) terms.add(gram);
+    }
+  }
+  return [...terms].slice(0, max);
+}
+
+/**
+ * 一条结果对查询词的覆盖度 0–1。
+ *
+ * 权重口径：**命中在标题**里算满分（标题是这条结果在讲什么的最强信号），
+ * **只在摘要**里命中打 6 折（摘要常常只是顺带提到），完全没命中算 0 分。
+ * 于是"查询词 5 个只命中 1 个"≈0.2，能一眼看出这批结果答非所问。
+ */
+export function relevanceScore(terms, item = {}) {
+  const list = Array.isArray(terms) ? terms : [];
+  if (!list.length) return 1; // 查询词全是功能词（例如"最近怎么样"）→ 无从判断，不惩罚
+  const title = String(item.title ?? '').toLowerCase();
+  const snippet = String(item.snippet ?? '').toLowerCase();
+  let hit = 0;
+  for (const term of list) {
+    if (title.includes(term)) hit += 1;
+    else if (snippet.includes(term)) hit += 0.6;
+  }
+  return Math.min(1, hit / list.length);
+}
+
+/** 一批结果的平均覆盖度（**按解析出的全部条目算**，不是只算留下来的那些）。 */
+export function averageRelevance(terms, items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return 0;
+  const total = list.reduce((sum, item) => sum + relevanceScore(terms, item), 0);
+  return total / list.length;
+}
+
+/**
+ * 免密钥通道选引擎的口径：
+ *   - 单引擎平均覆盖度 **≥ 0.5** 就认为"答在问题上了"，立即采用、不再打后面的引擎；
+ *   - 低于 0.5 就接着试下一个（最多试 3 个），最后取平均覆盖度最高的那一批；
+ *   - 覆盖度为 0 的单条结果**直接丢**（"西安"这类单字命中就是把结果带跑的元凶）。
+ */
+export const SCRAPE_RELEVANCE_THRESHOLD = 0.5;
+export const SCRAPE_MAX_ENGINES = 3;
+
 /**
  * 把查询参数拼到端点上。
  *
@@ -452,8 +826,31 @@ function withParams(endpoint, params) {
   return url.toString();
 }
 
-/** 无 key 通道的引擎定义。 */
+/**
+ * 免密钥通道的引擎优先级（2026-10-13 真网实测）。
+ *
+ * 为什么把 Bing 从第一位挪到第三位：同一条网络下，Bing 的结果页对中文查询给的是**降级结果** ——
+ * 实测查询 `西安 天气预报 今天`：Bing（网页与 RSS 都是 10 条）返回的是"西安市_百度百科 / 西安旅游攻略 /
+ * 西安市政府 / 百度地图 geocoder"，**一条天气都没有**，而页面标题与搜索框都确认查询词完整送达；
+ * 同一时刻搜狗给出"西安天气预报一周,15天…"、360 给出"西安天气预报_15天_45天天气查询…"。
+ * 另一组查询"最近有什么单位来访我们航空航天学院吗"也是同样症状（"西安"把结果带跑）。
+ * 所以默认按 **搜狗 → 360 → Bing → 百度** 试，并且用相关度而不是固定顺序来决定信谁。
+ */
 const SCRAPE_ENGINES = Object.freeze([
+  {
+    id: 'sogou',
+    label: '搜狗',
+    origin: 'https://www.sogou.com/web',
+    params: (query, limit) => ({ query, num: limit }),
+    parse: parseSogouResults,
+  },
+  {
+    id: 'so360',
+    label: '360 搜索',
+    origin: 'https://www.so.com/s',
+    params: (query) => ({ q: query }),
+    parse: parse360Results,
+  },
   {
     id: 'bing',
     label: 'Bing',
@@ -470,43 +867,115 @@ const SCRAPE_ENGINES = Object.freeze([
   },
 ]);
 
+/** 免密钥通道会按顺序试哪些引擎（导出让调用方/界面能如实说明）。 */
+export const SCRAPE_ENGINE_IDS = Object.freeze(SCRAPE_ENGINES.map((engine) => engine.id));
+
 /**
- * 依次尝试 Bing → 百度。**只要有一个引擎给出结果就返回**；
- * 全部失败返回 `[]`，并且每一条失败原因都写进 `note`（调用方可直接回灌给模型/用户）。
+ * 按**相关度**在免密钥通道里选引擎，而不是赌固定顺序里的第一个。
+ *
+ * 规则（详见 `SCRAPE_RELEVANCE_THRESHOLD` 的注释）：
+ *   1. 依次试引擎，每个引擎解析完就按 `title + snippet` 算平均覆盖度；
+ *   2. 覆盖度 ≥ 阈值 → 立即采用（省掉后面的请求）；
+ *   3. 覆盖度 < 阈值 → 记一条"为什么换引擎"，继续试下一个；
+ *   4. 最多试 `SCRAPE_MAX_ENGINES` 个；**但如果这 3 个一条可用结果都没给出来**
+ *      （全被拦/全是 0 覆盖度），允许再补试剩下的引擎一次 —— "全空"比"多一次请求"糟得多；
+ *   5. 覆盖度为 0 的条目一律丢掉，最后返回平均覆盖度最高的那一批；
+ *   6. 最好的那批仍低于阈值时**照样返回**（毕竟是真的抓到的），但 notes 里必须写清相关度偏低，
+ *      让模型知道"这次没搜准"，而不是把无关结果当成答案。
  */
 async function scrapeSearch({ query, limit, fetchImpl, endpoints = {}, note }) {
-  for (const engine of SCRAPE_ENGINES) {
+  const terms = queryTerms(query);
+  const attempts = [];
+  let best = null;
+  let tried = 0;
+  /**
+   * 本次允许试几个引擎。正常是 `SCRAPE_MAX_ENGINES`（3）；
+   * 到上限时如果**一条可用结果都还没拿到**，就把预算放宽 1 —— "空手而归"比"多一次请求"糟得多。
+   * 注意放宽的判定放在每次尝试之后（不管这次是成功还是被拦），否则"三个引擎全被墙"这种
+   * 最需要兜底的情况反而轮不到第 4 个引擎。
+   */
+  let budget = Math.min(SCRAPE_MAX_ENGINES, SCRAPE_ENGINES.length);
+
+  while (tried < budget && tried < SCRAPE_ENGINES.length) {
+    const engine = SCRAPE_ENGINES[tried];
+    tried += 1;
     // 失败原因**立刻**记一条：如果后面的引擎成功了也不能把前面失败的事实吞掉
-    // （用户看到的"为什么只有百度的结果"必须能在日志里找到答案）
+    // （用户看到的"为什么最后用的是 360 的结果"必须能在日志里找到答案）
     const fail = (reason) => note(`免密钥通道失败：${reason}`, 'warn');
     const url = withParams(endpoints[engine.id] ?? engine.origin, engine.params(query, limit));
     const response = await requestText(fetchImpl, url, { timeoutMs: DEFAULT_TIMEOUT_MS, accept: 'text/html' });
     if (!response.ok) {
       fail(`${engine.label} 请求失败：${response.error ?? `HTTP ${response.status}`}`);
-      continue;
+    } else {
+      const blocked = detectAntiBot(engine.id, response.status, response.body);
+      if (blocked) {
+        fail(`${engine.label} 被反爬/改版挡住：${blocked}`);
+      } else {
+        let items = [];
+        try {
+          // baseUrl 传的是**响应最终 URL**：搜狗等引擎的结果 href 是相对路径，必须据此解析成绝对链接
+          items = engine.parse(response.body, { baseUrl: response.url || url }) ?? [];
+        } catch (error) {
+          fail(`${engine.label} 解析结果页时抛错：${error.message}`);
+          items = [];
+        }
+        if (!items.length) {
+          fail(`${engine.label} 解析出 0 条（页面结构可能已变化）`);
+        } else {
+          const scored = items.map((item) => ({ item, score: relevanceScore(terms, item) }));
+          const kept = scored.filter((entry) => entry.score > 0).map((entry) => entry.item);
+          const average = scored.reduce((sum, entry) => sum + entry.score, 0) / scored.length;
+          const dropped = items.length - kept.length;
+          const hits = terms.length ? `（查询词 ${terms.length} 个，平均覆盖率 ${average.toFixed(2)}）` : '';
+          const dropNote = dropped ? `，丢掉 ${dropped} 条覆盖率 0 的结果` : '';
+          attempts.push({
+            engine: engine.id,
+            label: engine.label,
+            count: items.length,
+            kept: kept.length,
+            relevance: Number(average.toFixed(2)),
+          });
+
+          if (average >= SCRAPE_RELEVANCE_THRESHOLD && kept.length) {
+            note(
+              `免密钥通道：结果页解析成功 —— ${engine.label} 给出 ${items.length} 条、平均相关度 ${average.toFixed(2)}${hits}`
+              + `${dropNote} → 达到阈值 ${SCRAPE_RELEVANCE_THRESHOLD}，采用它（未配置搜索 API 密钥，走免密钥通道）`,
+            );
+            return kept;
+          }
+          note(
+            `免密钥通道：${engine.label} 给出 ${items.length} 条，但平均相关度只有 ${average.toFixed(2)}${hits}${dropNote}`
+            + ` → 低于阈值 ${SCRAPE_RELEVANCE_THRESHOLD}，换下一个引擎试试`,
+            'warn',
+          );
+          if (!best || average > best.relevance) best = { engine, kept, relevance: average, count: items.length };
+        }
+      }
     }
-    const blocked = detectAntiBot(engine.id, response.status, response.body);
-    if (blocked) {
-      fail(`${engine.label} 被反爬/改版挡住：${blocked}`);
-      continue;
+    // 到预算了：已经有可用结果就收工，否则放宽 1 再试一个（只放宽一次）
+    if (tried >= budget && tried < SCRAPE_ENGINES.length) {
+      if (best && best.kept.length) break;
+      budget += 1;
+      note('免密钥通道：已试的引擎都没给出可用结果 → 再多试一个引擎（最后一搏）');
     }
-    let items = [];
-    try {
-      items = engine.parse(response.body) ?? [];
-    } catch (error) {
-      fail(`${engine.label} 解析结果页时抛错：${error.message}`);
-      continue;
-    }
-    if (!items.length) {
-      fail(`${engine.label} 解析出 0 条（页面结构可能已变化）`);
-      continue;
-    }
-    note(`结果页解析成功：${engine.label} 给出 ${items.length} 条候选（未配置搜索 API 密钥，走免密钥通道）`);
-    return items;
   }
+
+  if (best && best.kept.length) {
+    const perEngine = attempts.map((entry) => `${entry.label} ${entry.relevance.toFixed(2)}`).join(' / ');
+    note(
+      `免密钥通道：共试了 ${tried} 个引擎（各自相关度：${perEngine}），采用相关度最高的 ${best.engine.label}`
+      + `（${best.relevance.toFixed(2)}，共 ${best.count} 条、按相关度保留 ${best.kept.length} 条）。`
+      + `**相关度仍低于阈值 ${SCRAPE_RELEVANCE_THRESHOLD}**，这批结果可能答非所问：`
+      + '请如实告诉用户"这次没搜准"，可以换个说法再搜，不要硬当成答案。',
+      'warn',
+    );
+    return best.kept;
+  }
+
   note(
-    '已尝试全部免密钥通道（Bing → 百度）都没有取到结果 → 返回空数组。' +
-      '**这不是「搜到 0 条」，而是「没能取到搜索结果」**：可能被反爬拦截、结果页改版，或当前网络无法访问这些站点。',
+    `已尝试免密钥通道（${SCRAPE_ENGINES.slice(0, Math.max(tried, 1)).map((engine) => engine.label).join(' → ')}）都没有取到可用结果 → 返回空数组。`
+      + '**这不是「搜到 0 条」，而是「没能取到搜索结果」**：可能被反爬拦截、结果页改版、'
+      + '当前网络访问不到这些站点，或者引擎返回的内容与关键词完全对不上（相关度为 0）。',
   );
   return [];
 }
@@ -713,20 +1182,29 @@ async function callApiProvider(provider, { query, limit, key, fetchImpl, endpoin
 // 去重 / 过滤
 // ---------------------------------------------------------------------------
 
-/** 统一把一条候选收敛成 `{title,url,snippet,source,scope}`，垃圾直接丢掉。 */
+/**
+ * 统一把一条候选收敛成 `{title,url,snippet,source,scope}`，垃圾直接丢掉。
+ *
+ * `matchedBy`（'site' / 'domain' / 'mention'）与 `site`（站内直搜的来源站点 id）是可选字段：
+ * **原条目带了才写出去** —— 这两个字段已经在 `dedupeResults` 的既有用例里被
+ * `deepStrictEqual` 逐字段比对过，多写一个 `undefined` 键也会让那些断言挂掉。
+ */
 function normalizeResult(raw, scope) {
   if (!raw) return null;
   const url = String(raw.url ?? '').trim();
   if (!url || isJunkUrl(url)) return null;
   const title = collapseInline(raw.title ?? '');
   if (!title) return null;
-  return {
+  const out = {
     title,
     url,
     snippet: collapseInline(raw.snippet ?? '').slice(0, 400),
     source: String(raw.source ?? 'unknown'),
     scope,
   };
+  if (raw.matchedBy) out.matchedBy = String(raw.matchedBy);
+  if (raw.site) out.site = String(raw.site);
+  return out;
 }
 
 /** 去重（按 canonicalUrl）+ 过滤。campus 档只保留校内站点。 */
@@ -798,15 +1276,435 @@ export async function detectCampusNetwork({ fetchImpl, probes, timeoutMs = PROBE
 }
 
 // ---------------------------------------------------------------------------
+// 校内站点直搜（campus 档的第一条通道）
+// ---------------------------------------------------------------------------
+
+/**
+ * base64(UTF-8)。**零依赖**手写：不用 Buffer（这个模块要在只注入了 fetch 的环境里也能跑），
+ * 也不用 `btoa`（它吃 latin1，中文直接抛错）。VSB 前端那个 `base64.js` 干的正是这件事 ——
+ * 页面注释原文：「文字采用 UTF-8 方式进行 Base64 编码」。
+ */
+export function base64Utf8(text) {
+  const bytes = [];
+  for (const char of String(text ?? '')) {
+    const code = char.codePointAt(0);
+    if (code < 0x80) bytes.push(code);
+    else if (code < 0x800) bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+    else if (code < 0x10000) {
+      bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+    } else {
+      bytes.push(
+        0xf0 | (code >> 18),
+        0x80 | ((code >> 12) & 0x3f),
+        0x80 | ((code >> 6) & 0x3f),
+        0x80 | (code & 0x3f),
+      );
+    }
+  }
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i];
+    const b1 = bytes[i + 1];
+    const b2 = bytes[i + 2];
+    out += alphabet[b0 >> 2];
+    out += alphabet[((b0 & 3) << 4) | ((b1 ?? 0) >> 4)];
+    out += b1 === undefined ? '=' : alphabet[((b1 & 15) << 2) | ((b2 ?? 0) >> 6)];
+    out += b2 === undefined ? '=' : alphabet[b2 & 63];
+  }
+  return out;
+}
+
+/** VSB 命中关键词时会给标题里的关键词套一层高亮 —— 判断"这页到底有没有检索结果"最可靠的信号。 */
+const VSB_HIGHLIGHT_RE = /keywordfontcolor\s*\d*|color\s*:\s*#dd4b39/i;
+/** 发布日期：`2026-07-31` / `2013.05` / `2026年7月4日` 都认（VSB 各模板写得不一致）。 */
+const DATE_RE = /(\d{4})\s*[-/.年]\s*(\d{1,2})\s*(?:[-/.月]\s*(\d{1,2})\s*日?)?/;
+
+/** 站点允许出现的结果域名：默认只看自己；门户那种"搜全校"的站点用 `allowHosts` 放宽。 */
+function allowedHostsOf(site) {
+  const list = Array.isArray(site?.allowHosts) && site.allowHosts.length ? site.allowHosts : [site?.host];
+  return list.filter(Boolean).map((host) => String(host).toLowerCase().replace(/^\./, ''));
+}
+
+function hostAllowed(host, hosts) {
+  return hosts.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+}
+
+/**
+ * href → 绝对 URL，并且**必须是本站域名下的内容页**，否则返回 null。
+ *
+ * 丢掉 `.jsp` 链接是这里最要紧的一条经验：VSB 的导航/入口几乎都是 `xynr.jsp?urltype=…`、
+ * `index.jsp` 这类脚本页，而检索结果永远是发布出来的内容页（`info/1095/10422.htm`）。
+ * 真网实测：教务处那张"没有检索结果"的空页里有 **147 个 `<li>`**，全是导航 ——
+ * 不加这条闸门，"搜不到"会被解析成 147 条假结果。
+ */
+function resolveAllowedUrl(href, baseUrl, hosts) {
+  const raw = String(href ?? '').trim();
+  if (!raw || raw.startsWith('#') || /^javascript:/i.test(raw)) return null;
+  let url;
+  try {
+    url = new URL(decodeEntities(raw), baseUrl || undefined);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  if (!hostAllowed(url.hostname.toLowerCase(), hosts)) return null;
+  if (/\.jsp$/i.test(url.pathname)) return null;
+  // 静态资源（.xlsx/.pdf/.jpg…）与"搜索站自己的检索页"在这里一起丢掉，
+  // 与 dedupeResults 用的是同一套判据，免得两处口径不一致
+  if (isJunkUrl(url.toString())) return null;
+  return url.toString();
+}
+
+/**
+ * 锚文本（标题/摘要）走公共的 `stripTitleTags`（定义在小工具区）：
+ * 校内站点的标题同样会被高亮 span 切碎，和搜索引擎结果页是同一个坑。
+ */
+
+/** 取 `block` 里所有 `<a>`：href、class、以及**优先取 `<h3>/<h2>` 的锚文本**。 */
+function extractAnchors(block) {
+  const out = [];
+  for (const match of String(block ?? '').matchAll(/<a\b([^>]*)href=["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const attrs = `${match[1]} ${match[3]}`;
+    const cls = /class=["']([^"']*)["']/i.exec(attrs)?.[1] ?? '';
+    const inner = match[4];
+    // sae 的模板把日期块也塞在 <a> 里，标题必须取 <h3>，否则会读成"08 201 2012级本科生转专业通知"
+    const heading = /<h[1-4]\b[^>]*>([\s\S]*?)<\/h[1-4]>/i.exec(inner);
+    out.push({
+      href: match[2],
+      cls,
+      text: stripTitleTags(heading ? heading[1] : inner),
+    });
+  }
+  return out;
+}
+
+/** 结果标题：去掉模板塞进同一段文本里的日期（`2021-05-11 文治书院…` / `转专业指导 2018-11-17`）。 */
+function cleanResultTitle(text) {
+  const inline = collapseInline(text);
+  const stripped = inline
+    .replace(/^\s*\d{4}\s*[-/.年]\s*\d{1,2}\s*(?:[-/.月]\s*\d{1,2}\s*日?)?\s*/, '')
+    .replace(/\s*\d{4}\s*[-/.年]\s*\d{1,2}\s*(?:[-/.月]\s*\d{1,2}\s*日?)?\s*$/, '');
+  return stripped || inline;
+}
+
+/** 在一段**已经剥掉标签**的文本里找发布日期；`2013.05` 归一成 `2013-05`。 */
+function findDate(text) {
+  const match = DATE_RE.exec(String(text ?? ''));
+  if (!match) return '';
+  const [, year, month, day] = match;
+  const mm = String(month).padStart(2, '0');
+  return day ? `${year}-${mm}-${String(day).padStart(2, '0')}` : `${year}-${mm}`;
+}
+
+/** 页面上所有 `<ul>…</ul>`（大小写不敏感：彭康书院的结果容器就是大写 `<UL>`）。 */
+function listBlocks(html) {
+  const out = [];
+  const open = /<ul\b[^>]*>/gi;
+  const close = /<\/ul\s*>/gi;
+  for (const match of html.matchAll(open)) {
+    close.lastIndex = match.index + match[0].length;
+    const end = close.exec(html);
+    if (end) out.push(html.slice(match.index, end.index + end[0].length));
+  }
+  return out;
+}
+
+/** 高亮所在的 `<ul>`（大小写不敏感）；取不到返回 null。 */
+function enclosingList(html, index) {
+  const open = /<ul\b[^>]*>/gi;
+  let start = -1;
+  for (const match of html.matchAll(open)) {
+    if (match.index < index) start = match.index;
+    else break;
+  }
+  if (start < 0) return null;
+  const close = /<\/ul\s*>/gi;
+  close.lastIndex = index;
+  const end = close.exec(html);
+  return end ? html.slice(start, end.index + end[0].length) : null;
+}
+
+/**
+ * 找"结果列表"所在的那段 HTML。两步：
+ *   ① 页面里有关键词高亮 → 高亮所在的那个 `<ul>` 就是结果列表（实测 12 个站点全部成立）；
+ *   ② 没有高亮（关键词只命中正文，或模板关了高亮）→ 在整页 `<ul>` 里挑**带发布日期条目最多**
+ *      的那个。导航菜单不会给每个菜单项配发布日期，所以这条判据简单又稳；
+ *      一个都挑不到就返回 null —— 宁可这一站报 0 条，也不把导航菜单当结果交出去。
+ */
+function pickResultRegion(html) {
+  const hit = VSB_HIGHLIGHT_RE.exec(html);
+  if (hit) {
+    const region = enclosingList(html, hit.index);
+    if (region) return region;
+  }
+  let best = null;
+  let bestScore = 0;
+  for (const block of listBlocks(html)) {
+    let score = 0;
+    for (const match of block.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li\s*>/gi)) {
+      if (findDate(stripTags(match[1]))) score += 1;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = block;
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+/**
+ * 解析一张 VSB 检索结果页 → `[{title,url,snippet}]`。
+ *
+ * 无依赖、只看结构，所以**站点改版时它会安静地返回 0 条**（上层会如实记一笔"解析出 0 条"），
+ * 而不是编出别的东西来。已适配的模板形态（都是实测过的真页面）：
+ *   - `<li><a href="info/1092/10425.htm"><i>[综合通知] </i>标题</a><span>2026-07-31</span></li>`（教务处）
+ *   - `<li><span class="time">2026-07-31</span><a href="…">标题</a></li>`（研究生院/彭康/励志/数学院…）
+ *   - `<li><a href="…"><div class="a-date"><b>08</b><span>2013.05</span></div><div><h3>标题</h3></div></a></li>`（航天学院）
+ *   - `<li><div><a class="y">2026年07</a><a class="r">04</a></div><div><a class="bt">标题</a><a class="zy2">摘要…</a></div></li>`（新闻网，带摘要）
+ *
+ * @param {string} html 结果页 HTML
+ * @param {{baseUrl?:string, allowHosts?:string[]}} [options] `baseUrl` 把相对链接变成绝对链接；
+ *        `allowHosts` 是**只保留这些域名**的白名单（一般就是站点自己的 host）
+ */
+export function parseVsbSearchResults(html, { baseUrl = '', allowHosts = [] } = {}) {
+  const source = String(html ?? '');
+  const hosts = (Array.isArray(allowHosts) ? allowHosts : [allowHosts])
+    .filter(Boolean)
+    .map((host) => String(host).toLowerCase().replace(/^\./, ''));
+  if (!source || !hosts.length) return [];
+
+  const highlighted = VSB_HIGHLIGHT_RE.test(source);
+  const region = pickResultRegion(source);
+  if (!region) return [];
+
+  const out = [];
+  const seen = new Set();
+  for (const match of region.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li\s*>/gi)) {
+    const body = match[1];
+    const usable = extractAnchors(body)
+      .map((anchor) => ({ ...anchor, abs: resolveAllowedUrl(anchor.href, baseUrl, hosts) }))
+      .filter((anchor) => anchor.abs && anchor.text);
+    if (!usable.length) continue;
+
+    // 标题锚：优先 class 里带 bt/tit/title 的（新闻网的标题就是 class="bt"），
+    // 否则取文字最长的那个（日期锚总是短的）
+    const titleAnchor =
+      usable.find((anchor) => /(?:^|\s)(?:bt|tit|title)(?:\s|$)/i.test(anchor.cls))
+      ?? usable.reduce((best, anchor) => (anchor.text.length > best.text.length ? anchor : best));
+    const title = cleanResultTitle(titleAnchor.text);
+    if (title.length < 4) continue;
+
+    const date = findDate(stripTags(body));
+    // 证据不足就丢：既没有发布日期、整页又没有高亮命中 → 大概率是导航/侧栏，不是检索结果。
+    // 这条闸门专治"没搜到却返回一版默认列表"的模板（真网实测：门户 www 对垃圾词返回 10 条无关新闻）
+    if (!date && !highlighted) continue;
+
+    const summary = usable
+      .filter((anchor) => anchor !== titleAnchor)
+      .map((anchor) => collapseInline(anchor.text))
+      .filter((line) => line.length >= title.length + 8)
+      .sort((a, b) => b.length - a.length)[0];
+    const key = canonicalUrl(titleAnchor.abs);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      title,
+      url: titleAnchor.abs,
+      snippet: collapseInline(summary || (date ? `发布日期：${date}` : '')).slice(0, 400),
+    });
+  }
+  return out;
+}
+
+/** 一张站内检索请求的 body：`lucenenewssearchkey=base64(UTF-8)` + 两个必需参数。 */
+export function buildCampusSiteSearchBody(site, query) {
+  const params = new URLSearchParams();
+  params.set(site?.keyField ?? 'lucenenewssearchkey', base64Utf8(query));
+  // 实测：缺这两个参数时服务端照样 200，但返回"没有检索结果"的默认页（看着成功、其实没搜）
+  params.set('_lucenesearchtype', '1');
+  params.set('searchScope', '0');
+  return params.toString();
+}
+
+/** 某个站点的检索 URL（`origin` 只在测试注入本地假站点时覆盖）。 */
+export function buildCampusSiteSearchUrl(site) {
+  return new URL(site?.path ?? '/', site?.origin ?? `https://${site?.host}`).toString();
+}
+
+/** 查一个站点。**永远不 throw**：请求/解析失败折叠成 `{ok:false, error}`。 */
+async function searchOneCampusSite(site, { query, limit, fetchImpl, timeoutMs, log }) {
+  const url = buildCampusSiteSearchUrl(site);
+  const base = { id: site.id, label: site.label ?? site.host, host: site.host, url };
+  const response = await requestText(fetchImpl, url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: buildCampusSiteSearchBody(site, query),
+    timeoutMs,
+    accept: 'text/html',
+  });
+  if (!response.ok) {
+    const error = response.error ?? `HTTP ${response.status}`;
+    log(`站内直搜失败：${base.label}（${base.id}）→ ${error}`, 'warn');
+    return { ...base, ok: false, count: 0, items: [], error };
+  }
+  let parsed = [];
+  try {
+    parsed = parseVsbSearchResults(response.body, {
+      baseUrl: response.url || url,
+      allowHosts: allowedHostsOf(site),
+    });
+  } catch (error) {
+    const error2 = `解析结果页时抛错：${error?.message ?? error}`;
+    log(`站内直搜失败：${base.label}（${base.id}）→ ${error2}`, 'warn');
+    return { ...base, ok: false, count: 0, items: [], error: error2 };
+  }
+  // 最后一道域名闸门：解析器只保证"属于这个站点"，这里再确认它落在 *.xjtu.edu.cn 内
+  const items = parsed
+    .filter((item) => isCampusUrl(item.url))
+    .slice(0, limit)
+    .map((item) => ({ ...item, source: 'campus-site', scope: 'campus', matchedBy: 'site', site: site.id }));
+  if (!items.length) log(`站内直搜无结果：${base.label}（${base.id}）解析出 0 条`, 'warn');
+  return { ...base, ok: true, count: items.length, parsed: parsed.length, items, error: null };
+}
+
+/**
+ * 校内站点直搜：并发打一批校内站点自己的检索接口（campus 档的第一条通道）。
+ *
+ * - **站点之间并发、上限 3**（`CAMPUS_SEARCH_CONCURRENCY`）：既快又不容易被站群 WAF 拦；
+ * - **单站点失败完全隔离**：超时/500/解析不到只影响它自己，`sites[i].ok === false` + `error` 说原因；
+ * - 结果统一带 `scope:'campus'` + `matchedBy:'site'` + `site:'dean'`，一眼能看出这条是
+ *   "站内搜出来的"还是"公网结果里提到本校的"；
+ * - `working:false` 的站点（实测打不通/没有检索入口）**不发请求**，只记一笔跳过说明。
+ *
+ * @param {object} options
+ * @param {string} options.query 检索词
+ * @param {number} [options.limit] 每个站点最多取几条（收敛到 5–30）
+ * @param {Function} [options.fetchImpl] 注入的 fetch（测试用本地假站点）
+ * @param {Function|object} [options.log] 日志
+ * @param {Array} [options.sites] 覆盖站点表（测试用；形状同 `CAMPUS_SITE_SEARCH`）
+ * @param {number} [options.concurrency] 并发（收敛到 1–3）
+ * @param {number} [options.timeoutMs] 单站点超时
+ * @returns {Promise<{query:string, results:Array, sites:Array, notes:string[]}>}
+ */
+export async function searchCampusSites({
+  query,
+  limit,
+  fetchImpl,
+  log,
+  sites,
+  concurrency,
+  timeoutMs = CAMPUS_SITE_TIMEOUT_MS,
+} = {}) {
+  const warn = makeLogger(log);
+  const notes = [];
+  const note = (message, level = 'info') => {
+    notes.push(message);
+    warn(message, level);
+  };
+
+  const text = String(query ?? '').trim();
+  const list = (Array.isArray(sites) && sites.length ? sites : CAMPUS_SITE_SEARCH)
+    .filter((site) => site && site.id && site.host);
+  const usable = list.filter((site) => site.working !== false);
+  const skipped = list.filter((site) => site.working === false);
+
+  if (!text) {
+    note('站内直搜：检索词为空，未发起任何请求');
+    return { query: '', results: [], sites: [], notes };
+  }
+  if (!usable.length) {
+    note('站内直搜：配置里没有可用站点，本轮跳过（不代表校内没有内容）');
+    return { query: text, results: [], sites: [], notes };
+  }
+
+  const perSite = clamp(limit, 1, SEARCH_LIMIT_MAX, SEARCH_LIMIT_DEFAULT);
+  const pool = clamp(concurrency, 1, CAMPUS_SEARCH_CONCURRENCY, CAMPUS_SEARCH_CONCURRENCY);
+  const reports = new Array(usable.length);
+  let cursor = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= usable.length) return;
+      const site = usable[index];
+      try {
+        reports[index] = await searchOneCampusSite(site, {
+          query: text,
+          limit: perSite,
+          fetchImpl,
+          timeoutMs,
+          log: warn,
+        });
+      } catch (error) {
+        // searchOneCampusSite 已经吞了绝大多数异常；这里再兜一层，保证"一个站点绝不拖垮整批"
+        reports[index] = {
+          id: site.id,
+          label: site.label ?? site.host,
+          host: site.host,
+          url: buildCampusSiteSearchUrl(site),
+          ok: false,
+          count: 0,
+          items: [],
+          error: `检索时发生未预期错误：${error?.message ?? error}`,
+        };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(pool, usable.length) }, () => worker()));
+
+  const settled = reports.filter(Boolean);
+  const okSites = settled.filter((report) => report.ok);
+  const failed = settled.filter((report) => !report.ok);
+  const withHits = okSites.filter((report) => report.items.length);
+  const emptySites = okSites.filter((report) => !report.items.length);
+  const results = okSites.flatMap((report) => report.items);
+
+  if (results.length) {
+    note(`站内直搜命中 ${results.length} 条：${withHits.map((r) => `${r.id} ${r.count} 条`).join('、')}`);
+  } else {
+    note('站内直搜没有命中任何条目（站点可达但关键词没匹配上，或结果页模板已改版）');
+  }
+  if (emptySites.length) {
+    note(`站内直搜解析出 0 条的站点（可能确实没匹配，也可能模板改版）：${emptySites.map((r) => r.id).join('、')}`);
+  }
+  for (const report of failed) {
+    note(`站内直搜失败：${report.label}（${report.id}）→ ${report.error}`, 'warn');
+  }
+  if (skipped.length) {
+    note(
+      `站内直搜跳过 ${skipped.length} 个已知不可用的站点（${skipped.map((site) => site.id).join('、')}）：`
+      + '实测打不通或没有检索入口，原因写在 CAMPUS_SITE_SEARCH 表里',
+    );
+  }
+
+  return { query: text, results, sites: settled, notes };
+}
+
+// ---------------------------------------------------------------------------
 // 对外主函数
 // ---------------------------------------------------------------------------
 
 /** campus 档的检索词：加 `site:` 收窄到校内站点（已有 site: 就不重复加）。 */
-export function campusScopedQuery(query) {
+/**
+ * 校内通道的检索词。
+ *
+ * `site:xjtu.edu.cn` 是**请求**不是**保证** —— 实测（真网，免密钥通道）Bing 的结果页
+ * 对 `site:` 基本不认，返回的仍是各校教务处首页，被 `isCampusUrl` 一过滤就全没了，
+ * 于是"校内检索"一条校内结果都没有（而公网结果又混在里面，用户看到的是北大/北航）。
+ *
+ * 所以这里两手都用上：既带 `site:`（对认它的后端有用），也带学校名（对结果页有用，
+ * 让搜索引擎至少把西交大的页面排上来），最后仍由 `isCampusUrl` 做**域名级后置过滤**兜底。
+ */
+export function campusScopedQuery(query, { school = '西安交通大学' } = {}) {
   const text = String(query ?? '').trim();
   if (!text) return text;
+  // 调用方（模型/用户）自己写了 site: 就照它说的做，别擅自改词 —— 它可能就是想精确限定域名
   if (/\bsite\s*:/i.test(text)) return text;
-  return `${text} site:xjtu.edu.cn`;
+  // 只带 site: 在免密钥通道下实测拿不到校内结果（结果页基本不认这个语法），
+  // 所以补上学校名让搜索引擎至少把西交大的页面排上来；域名级过滤仍由 isCampusUrl 兜底
+  const withSchool = text.includes(school) ? text : `${text} ${school}`;
+  return `${withSchool} site:xjtu.edu.cn`;
 }
 
 /**
@@ -814,7 +1712,7 @@ export function campusScopedQuery(query) {
  *
  * @param {object} options
  * @param {string} options.query 检索词
- * @param {'web'|'campus'} [options.mode='web'] web=校外全网；campus=校内站点定向（可达时并走公网）
+ * @param {'web'|'campus'} [options.mode='web'] web=校外全网；campus=校内站点直搜优先（再公共结果页、最后 mention 兜底）
  * @param {number} [options.limit] 最多返回几条（收敛到 5–30，默认取 `config.searchMaxPages`）
  * @param {object} [options.config] AI 配置切片（searchEnabled/searchMaxPages/searchProvider/searchApiKey/searchApiKeys）
  * @param {Function} [options.fetchImpl] 注入的 fetch（测试用本地假服务器）
@@ -839,6 +1737,7 @@ export async function searchWebDetailed({
   log,
   endpoints,
   probes,
+  sites,
   probeCampus = true,
 } = {}) {
   const warn = makeLogger(log);
@@ -870,10 +1769,32 @@ export async function searchWebDetailed({
   const apiKeys = normalizeSearchKeys(config);
   const endpointMap = endpoints ?? config?.searchEndpoints ?? {};
   const campusProbeList = probes ?? config?.campusProbes;
+  const campusSiteList = sites ?? config?.campusSites;
 
-  // ---- 决定要跑哪几路检索 -------------------------------------------------
+  // ---- campus 档第 ① 条通道：站内直搜（三条通道的顺序就是优先级） ----------
+  // 为什么它排最前：这是唯一"命中了就必然是校内的东西"的通道 —— 结果直接来自校内站点
+  // 自己的检索接口，不可能像公共搜索引擎那样把北大/北航的教务处塞进来。
+  // 真网实测（2026-10-13）：12 个站点可直搜，单站 0.3–6.5s，站点级并发 3。
+  const collected = [];
+  let siteSearch = null;
+  if (scope === 'campus') {
+    siteSearch = await searchCampusSites({
+      query: text,
+      limit: max,
+      fetchImpl,
+      log: warn,
+      sites: campusSiteList,
+    });
+    // searchCampusSites 内部已经逐条 log 过，这里只把 notes 收进本轮结果，避免同一句话打两遍日志
+    notes.push(...siteSearch.notes);
+    collected.push(...siteSearch.results);
+  }
+
+  // ---- 决定还要跑哪几路公共检索 -------------------------------------------
   const tasks = [];
   if (scope === 'campus') {
+    // campus 档第 ② 条通道：公共结果页（`site:` 收窄 + 校名）。它是**覆盖补充** ——
+    // 新开的子站、没有检索入口的站、要登录才看得到的站，站内直搜都够不到，仍靠它兜一层。
     tasks.push({ scope: 'campus', query: campusScopedQuery(text) });
   } else {
     tasks.push({ scope: 'web', query: text });
@@ -891,7 +1812,6 @@ export async function searchWebDetailed({
   }
 
   // ---- 执行 ---------------------------------------------------------------
-  const collected = [];
   for (const task of tasks) {
     let items = [];
     if (backend.kind === 'api') {
@@ -919,16 +1839,56 @@ export async function searchWebDetailed({
   }
 
   const deduped = dedupeResults(collected);
-  const results = deduped.slice(0, max);
+
+  /**
+   * 校内档第 ③ 条通道（兜底分桶）：**把公网结果里真正提到本校的那些算作校内相关**。
+   *
+   * 真网实测过两次：免密钥通道下 `site:xjtu.edu.cn` 与"带学校名"都拦不住结果页 ——
+   * 查「教务处 通知」返回的是北大/北航/北理工的教务处首页，校内桶一条都没有，
+   * 而用户要的是"校内的东西"。所以这里按**标题/摘要里有没有出现学校名**再分一次桶：
+   *   - 命中的标成 `scope: 'campus'`（表示"与本校相关"），并如实说明它是从公网结果里认出来的；
+   *   - 没命中的仍留在 `scope: 'web'`，界面与模型都能分清。
+   * 这不是"假装校内命中"：站点级/域名级/文本级命中分别记在 `matchedBy` 里，
+   * 界面上会写清这条是怎么被认出来的。
+   */
+  const SCHOOL_RE = /(西安交通大学|西交大|xjtu)/i;
+  let results = deduped;
+  if (scope === 'campus') {
+    results = results.map((item) => {
+      if (item.scope === 'campus') return { ...item, matchedBy: item.matchedBy ?? 'domain' };
+      const haystack = `${item.title ?? ''} ${item.snippet ?? ''}`;
+      if (!SCHOOL_RE.test(haystack)) return item;
+      return { ...item, scope: 'campus', matchedBy: 'mention' };
+    });
+    // 排序：`matchedBy` site > domain > mention > web。`Array#sort` 是稳定的，
+    // 所以同一档内保持各通道产出的原有顺序（站内直搜 → 公共结果页 → 公网 mention → 其它公网）。
+    // 为什么 site 最优先：站内直搜命中的是校内站点自己发布的内容页；
+    // domain 只是"域名看着像校内的"，mention 更是"标题里提了校名" —— 证据强度依次递减。
+    results.sort((a, b) => matchedByRank(a) - matchedByRank(b));
+    const count = (name) => results.filter((item) => matchedByRank(item) === MATCHED_BY_RANK[name]).length;
+    note(
+      `校内档分桶（本次候选 ${results.length} 条）：站内直搜 ${count('site')} 条`
+      + ` / 公共结果页校内域名 ${count('domain')} 条`
+      + ` / 公网提到本校 ${count('mention')} 条`
+      + ` / 其它公网 ${count('web')} 条`,
+    );
+    if (count('mention')) {
+      note('其中"公网提到本校"那批是按标题/摘要文本认定的，不是站内页面，引用时要说清来源');
+    }
+  }
+  if (results.length > max) {
+    note(`候选共 ${results.length} 条，按本次上限 ${max} 条返回（余下未带回）`);
+  }
+  results = results.slice(0, max);
 
   if (scope === 'campus' && results.length === 0) {
-    note('校内档没有拿到任何结果：可能是校内站点检索被上游丢弃、关键词太窄，或免密钥通道被拦截；请如实告诉用户"没搜到"，不要编造校内链接');
+    note('校内档没有拿到任何结果：可能校内站点确实没有相关内容、关键词太窄，或免密钥通道被拦截；请如实告诉用户"没搜到"，不要编造校内链接');
   }
   if (results.length === 0 && collected.length > 0) {
     note(`原始候选 ${collected.length} 条，去重/过滤（广告、站内跳转、非 http 链接）后为空`);
   }
 
-  return { query: text, mode: scope, limit: max, backend, campus, results, notes };
+  return { query: text, mode: scope, limit: max, backend, campus, siteSearch, results, notes };
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,7 +2069,9 @@ export const WEB_SEARCH_TOOL = Object.freeze({
   title: '联网检索',
   description:
     '联网检索网页：先搜到候选结果（标题 / 真实链接 / 摘要），再抓取正文。'
-    + '两种模式：web=校外全网；campus=校内站点定向（收窄到 *.xjtu.edu.cn，校内域名可达时并走公网）。'
+    + '两种模式：web=校外全网（按相关度自动在搜狗/360/Bing/百度之间选引擎）；'
+    + 'campus=校内优先（先直搜校内站点自己的检索接口，再公共结果页，最后把提到本校的公网结果并入，'
+    + '每条都标 matchedBy=site|domain|mention）。'
     + '返回的都是**真实抓到的**内容；抓不到会明确报错，绝不能凭空写链接。',
   mutates: false,
   params: {
@@ -1139,8 +2101,11 @@ export const WEB_SEARCH_MODE_NOTES = Object.freeze({
   web: `${WEB_SEARCH_PROMPT}
 - 当前档位：**校外网（全网检索）**。`,
   campus: `${WEB_SEARCH_PROMPT}
-- 当前档位：**校内网（校内站点定向）**。检索词会自动收窄到 \`*.xjtu.edu.cn\`；
-  只有探测到校内域名可达时才会额外并走一次公网检索。**校内域名可达 ≠ 已登录校内系统、也不等于确认在校园网内**，
+- 当前档位：**校内网（校内优先）**。检索按三条通道依次做：① 直接打校内站点自己的检索接口
+  （教务处/研究生院/学院/书院等，命中的必然是校方页面）；② 公共结果页（\`site:\` + 校名收窄）；
+  ③ 把公网结果里提到本校的并入。每条结果的 \`matchedBy\` 会标明它是怎么被认出来的
+  （\`site\` 站内直搜 / \`domain\` 校内域名 / \`mention\` 只是提到了校名），引用时按这个如实说明来源。
+  **校内域名可达 ≠ 已登录校内系统、也不等于确认在校园网内**，
   涉及需要登录的成绩/作业/课表，仍然用本地已同步的数据回答。`,
 });
 
@@ -1150,6 +2115,12 @@ export default {
   searchAndRead,
   readPages,
   detectCampusNetwork,
+  searchCampusSites,
+  parseVsbSearchResults,
+  buildCampusSiteSearchBody,
+  buildCampusSiteSearchUrl,
+  base64Utf8,
+  matchedByRank,
   resolveSearchBackend,
   normalizeSearchLimit,
   isCampusUrl,
@@ -1162,9 +2133,20 @@ export default {
   truncateText,
   parseBingResults,
   parseBaiduResults,
+  parseSogouResults,
+  parse360Results,
+  queryTerms,
+  relevanceScore,
+  averageRelevance,
+  defaultReferer,
   detectAntiBot,
   requestText,
   campusScopedQuery,
+  CAMPUS_SITE_SEARCH,
+  MATCHED_BY_RANK,
+  SCRAPE_ENGINE_IDS,
+  SCRAPE_RELEVANCE_THRESHOLD,
+  SCRAPE_MAX_ENGINES,
   WEB_SEARCH_TOOL,
   WEB_SEARCH_PROMPT,
   WEB_SEARCH_MODE_NOTES,

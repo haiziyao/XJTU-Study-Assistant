@@ -19,11 +19,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+  SCRAPE_ENGINE_IDS,
+  SCRAPE_MAX_ENGINES,
+  SCRAPE_RELEVANCE_THRESHOLD,
   WEB_SEARCH_MODE_NOTES,
   WEB_SEARCH_PROMPT,
   WEB_SEARCH_TOOL,
   canonicalUrl,
   campusScopedQuery,
+  defaultReferer,
   dedupeResults,
   detectCampusNetwork,
   extractPageText,
@@ -31,9 +35,14 @@ import {
   isCampusUrl,
   isJunkUrl,
   normalizeSearchLimit,
+  parse360Results,
   parseBaiduResults,
   parseBingResults,
+  parseSogouResults,
+  queryTerms,
   readPages,
+  relevanceScore,
+  requestText,
   resolveSearchBackend,
   searchAndRead,
   searchWeb,
@@ -133,20 +142,26 @@ function baiduHtml(items) {
 
 const CAPTCHA_HTML = '<!doctype html><html><head><title>安全验证</title></head><body><div>请完成验证码后继续访问</div></body></html>';
 
-/** 一个"正常的搜索结果页"：Bing 命中 query 里带 site: 时只给校内结果。 */
+/**
+ * 一个"正常的搜索结果页"：Bing 命中 query 里带 site: 时只给校内结果。
+ *
+ * 注意标题/摘要都带上了查询词「选课」：免密钥通道现在会按**相关度**挑引擎，
+ * 假结果如果与查询词完全不沾边（覆盖率 0），会被当成"引擎答非所问"丢掉 ——
+ * 这正是 2026-10-13 实测 Bing 返回"西安市_百度百科"那个 bug 的防线，所以夹具必须"像真的搜到了"。
+ */
 function fakeBingResponse(url) {
   const query = url.searchParams.get('q') ?? '';
   if (/site:xjtu\.edu\.cn/i.test(query)) {
     return bingHtml([
       { title: '教务处：关于选课的通知', url: CAMPUS_A, snippet: '选课时间安排如下' },
-      // 故意塞一条校外结果：campus 档必须把它过滤掉（正式搜索也可能漏过来）
-      { title: '某培训机构', url: 'https://spam.example.net/ad', snippet: '保过班' },
-      { title: '研究生院：招生简章', url: CAMPUS_B, snippet: '招生简章正文' },
+      // 故意塞一条校外结果（它也"命中"了选课，确保它是被**域名过滤**挡掉的，而不是被相关度挡掉）
+      { title: '选课保过班（校外培训）', url: 'https://spam.example.net/ad', snippet: '选课保过' },
+      { title: '研究生院：选课与培养方案', url: CAMPUS_B, snippet: '选课说明' },
     ]);
   }
   return bingHtml([
-    { title: '全网结果一', url: PUBLIC_A, snippet: '全网摘要一' },
-    { title: '广告：买点什么', url: 'https://ads.example.com/x', snippet: '广告摘要', ad: true },
+    { title: '选课全网结果一', url: PUBLIC_A, snippet: '选课摘要一' },
+    { title: '选课广告：买点什么', url: 'https://ads.example.com/x', snippet: '广告摘要', ad: true },
     { title: '必应站内搜索', url: 'https://www.bing.com/search?q=more', snippet: '站内跳转' },
   ]);
 }
@@ -200,8 +215,8 @@ async function startFakeWorld() {
       return finish(
         200,
         baiduHtml([
-          { title: '百度结果一', url: 'http://www.baidu.com/link?url=abc123', snippet: '百度摘要一' },
-          { title: '百度结果二', url: 'https://public.example.cn/page', snippet: '百度摘要二' },
+          { title: '百度选课结果一', url: 'http://www.baidu.com/link?url=abc123', snippet: '百度选课摘要一' },
+          { title: '百度选课结果二', url: 'https://public.example.cn/page', snippet: '百度选课摘要二' },
         ]),
       );
     }
@@ -289,9 +304,9 @@ test('无 key：解析 Bing 结果页拿到 标题/链接/摘要/来源，广告
     });
     assert.equal(results.length, 1, '广告与 bing 站内跳转都应被过滤');
     assert.deepEqual(results[0], {
-      title: '全网结果一',
+      title: '选课全网结果一',
       url: PUBLIC_A,
-      snippet: '全网摘要一',
+      snippet: '选课摘要一',
       source: 'bing-html',
       scope: 'web',
     });
@@ -547,8 +562,14 @@ test('campus：校内域名可达时并走公网，两批结果合并去重并�
   }
 });
 
-test('campus：检索词已经带 site: 时不重复追加', () => {
-  assert.equal(campusScopedQuery('选课'), '选课 site:xjtu.edu.cn');
+test('campus：检索词带上学校名（实测只写 site: 拿不到校内结果），已写 site: 就照调用方说的做', () => {
+  // 这条期望值是被**真网实测**改过的：免密钥通道下只用 `site:xjtu.edu.cn`，
+  // Bing 的结果页基本不认这个语法，返回的全是各校教务处首页，被域名过滤一清就什么都不剩 ——
+  // 于是"校内检索"一条校内结果都没有。所以补上学校名，让结果页至少把西交大的页面排上来。
+  assert.equal(campusScopedQuery('选课'), '选课 西安交通大学 site:xjtu.edu.cn');
+  // 已经有校名就不重复堆
+  assert.equal(campusScopedQuery('西安交通大学 选课'), '西安交通大学 选课 site:xjtu.edu.cn');
+  // 调用方自己写了 site: 时别擅自加词：它可能就是想精确限定某个子域
   assert.equal(campusScopedQuery('选课 site:dean.xjtu.edu.cn'), '选课 site:dean.xjtu.edu.cn');
   assert.equal(campusScopedQuery('  '), '');
 });
@@ -749,9 +770,10 @@ test('去重：同 URL 只留一条（忽略 utm、末尾斜杠、www 与 hash�
   const world = await startFakeWorld();
   try {
     const html = bingHtml([
-      { title: '结果 A', url: 'https://news.example.com/post/1?utm_source=weibo', snippet: '摘要一' },
-      { title: '结果 A（重复）', url: 'https://www.news.example.com/post/1/#comments', snippet: '摘要一' },
-      { title: '结果 B', url: 'https://news.example.com/post/2', snippet: '摘要二' },
+      // 标题都带「选课」：不然会被相关度过滤（覆盖率 0）丢掉，测不到去重这件事
+      { title: '选课结果 A', url: 'https://news.example.com/post/1?utm_source=weibo', snippet: '选课摘要一' },
+      { title: '选课结果 A（重复）', url: 'https://www.news.example.com/post/1/#comments', snippet: '选课摘要一' },
+      { title: '选课结果 B', url: 'https://news.example.com/post/2', snippet: '选课摘要二' },
     ]);
     const fake = await startFakeServer(({ finish }) => finish(200, html));
     try {
@@ -762,8 +784,8 @@ test('去重：同 URL 只留一条（忽略 utm、末尾斜杠、www 与 hash�
         endpoints: { bing: `${fake.base}/bing` },
       });
       assert.equal(results.length, 2, '同一条结果的不同写法只能留一条');
-      assert.equal(results[0].title, '结果 A');
-      assert.equal(results[1].title, '结果 B');
+      assert.equal(results[0].title, '选课结果 A');
+      assert.equal(results[1].title, '选课结果 B');
     } finally {
       await fake.close();
     }
@@ -1149,4 +1171,272 @@ test('接口：POST /ai/config 对越界值回 400，合法值落库，密钥不
   } finally {
     await app.close();
   }
+});
+
+// ---------------------------------------------------------------------------
+// 9. 免密钥通道：引擎优先级 + 按相关度选引擎
+//    （2026-10-13 真网实测驱动：Bing 对中文查询返回"降级结果"，搜狗/360 是准的）
+// ---------------------------------------------------------------------------
+
+/** 搜狗结果页（照真页面结构：`div.vrwrap` + `h3.vr-title` + `div.space-txt`，标题里带 <em> 高亮）。 */
+function sogouHtml(items) {
+  return `<!doctype html><html><body>${items
+    .map(
+      (item) =>
+        `<div class="vrwrap" id="sogou_vr_30000000_wrap_1"><h3 class="vr-title"><a href="${item.url}">${item.title}</a></h3>`
+        + `<div class="fz-mid space-txt base-ellipsis clamp2" id="cacheresult_summary_1">${item.snippet}</div></div>`,
+    )
+    .join('')}</body></html>`;
+}
+
+/** 360 结果页（照真页面结构：`li.res-list` + `h3.res-title` + `p.res-desc`）。 */
+function so360Html(items) {
+  return `<!doctype html><html><body><ul>${items
+    .map(
+      (item) =>
+        `<li class="res-list referer-news-flow"><h3 class="res-title"><a href="${item.url}">${item.title}</a></h3>`
+        + `<p class="res-desc">${item.snippet}</p></li>`,
+    )
+    .join('')}</ul></body></html>`;
+}
+
+/** 四个假引擎的端点；`pages` 里没给的引擎返回 404（用来断言"这个引擎根本不该被请求"）。 */
+async function startEngineWorld(pages) {
+  const world = await startFakeServer(({ url, finish }) => {
+    const page = pages[url.pathname.slice(1)];
+    if (page === undefined) return finish(404, '<html>这个引擎不该被请求</html>');
+    if (typeof page === 'function') return page(url, finish);
+    return finish(200, page);
+  });
+  return {
+    ...world,
+    endpoints: {
+      sogou: `${world.base}/sogou`,
+      so360: `${world.base}/so360`,
+      bing: `${world.base}/bing`,
+      baidu: `${world.base}/baidu`,
+    },
+  };
+}
+
+test('引擎选择：搜狗答非所问就换 360，最终采用相关度高的那一批（不再赌固定顺序里的第一个）', async () => {
+  const world = await startEngineWorld({
+    // 搜狗只匹配上"西安"—— 这正是实测里 Bing 给的那种"降级结果"
+    sogou: sogouHtml([
+      { title: '西安市_百度百科', url: 'https://baike.baidu.com/item/西安市', snippet: '西安，简称"镐"，古称长安' },
+      { title: '西安旅游攻略', url: 'https://travel.example.com/xian', snippet: '西安必去景点与美食' },
+    ]),
+    so360: so360Html([
+      { title: '西安天气预报_15天_45天天气查询_全国天气网', url: 'https://tianqi.so.com/weather/101110101', snippet: '西安天气预报：今天 晴 16~25℃' },
+      { title: '西安天气预报今天的最新相关消息', url: 'https://news.example.com/weather', snippet: '西安 天气 预报 今天' },
+    ]),
+    bing: bingHtml([{ title: '西安天气预报 Bing 版', url: 'https://bing.example.com/1', snippet: '今天' }]),
+    baidu: baiduHtml([{ title: '西安天气预报 百度版', url: 'https://baidu.example.com/1', snippet: '今天' }]),
+  });
+  try {
+    const detail = await searchWebDetailed({
+      query: '西安 天气预报 今天',
+      config: {},
+      fetchImpl: localOnlyFetch(),
+      endpoints: world.endpoints,
+    });
+
+    assert.deepEqual(detail.results.map((item) => item.source), ['360-html', '360-html']);
+    assert.ok(detail.results.every((item) => item.url.includes('tianqi.so.com') || item.url.includes('news.example.com')));
+
+    // notes 要写清"哪个引擎、相关度多少、为什么换"
+    assert.ok(detail.notes.some((line) => line.includes('搜狗') && line.includes('低于阈值')), '要说清为什么换引擎');
+    assert.ok(detail.notes.some((line) => line.includes('结果页解析成功') && line.includes('360 搜索')));
+    assert.ok(detail.notes.some((line) => /平均相关度 \d\.\d\d/.test(line)), '相关度数字必须落在 notes 里');
+    assert.ok(detail.notes.some((line) => line.includes('平均覆盖率')), '覆盖率口径也要写出来');
+
+    // 够好了就停：Bing / 百度 一次都不该被请求（省请求，也让"为什么是 360"一目了然）
+    const requested = world.state.requests.map((request) => request.path);
+    assert.deepEqual(requested.filter((path) => path === '/bing' || path === '/baidu'), []);
+    assert.ok(requested.includes('/sogou') && requested.includes('/so360'));
+  } finally {
+    await world.close();
+  }
+});
+
+test('相关度：覆盖率 0 的条目直接丢掉（不相关的结果不许混进回答）', async () => {
+  const world = await startEngineWorld({
+    sogou: sogouHtml([
+      { title: '西安天气预报一周查询', url: 'https://tianqi.example.com/1', snippet: '西安天气预报今天 晴' },
+      { title: '成都旅游攻略_马蜂窝', url: 'https://travel.example.com/chengdu', snippet: '成都要去的十个地方' },
+    ]),
+  });
+  try {
+    const detail = await searchWebDetailed({
+      query: '西安 天气预报 今天',
+      config: {},
+      fetchImpl: localOnlyFetch(),
+      endpoints: world.endpoints,
+    });
+    assert.equal(detail.results.length, 1, '覆盖率 0 的那条必须被丢掉');
+    assert.equal(detail.results[0].url, 'https://tianqi.example.com/1');
+    assert.ok(
+      detail.notes.some((line) => line.includes('丢掉 1 条覆盖率 0')),
+      '丢了几条也要如实写进 notes',
+    );
+  } finally {
+    await world.close();
+  }
+});
+
+test('相关度：引擎都没答准（都低于阈值）时如实返回 + notes 说明，而不是装作搜到了', async () => {
+  const pages = {
+    sogou: sogouHtml([{ title: '西安旅游攻略', url: 'https://a.example.com/1', snippet: '西安美食' }]),
+    so360: so360Html([{ title: '西安市政府门户', url: 'https://b.example.com/1', snippet: '西安市人民政府' }]),
+    bing: bingHtml([{ title: '西安市_百度百科', url: 'https://c.example.com/1', snippet: '古称长安' }]),
+    baidu: baiduHtml([{ title: '西安交通大学', url: 'https://d.example.com/1', snippet: '西安交大' }]),
+  };
+  const world = await startEngineWorld(pages);
+  try {
+    const detail = await searchWebDetailed({
+      query: '西安 天气预报 今天',
+      config: {},
+      fetchImpl: localOnlyFetch(),
+      endpoints: world.endpoints,
+    });
+
+    assert.ok(detail.results.length > 0, '真抓到的条目照样返回（不是伪造，也不是空手而归）');
+    assert.ok(detail.results.every((item) => item.url.endsWith('/1')), '只返回覆盖率 > 0 的条目');
+    assert.ok(
+      detail.notes.some((line) => line.includes('相关度仍低于阈值') && line.includes('没搜准')),
+      '必须明说"这次没搜准"，让模型能如实解释',
+    );
+    assert.ok(detail.notes.some((line) => line.includes('各自相关度')), '每个引擎的相关度都要留痕');
+
+    // 引擎数量上限：已经拿到可用结果就停在 3 个，不许把 4 个引擎全跑一遍
+    assert.equal(world.state.requests.length, SCRAPE_MAX_ENGINES, `最多试 ${SCRAPE_MAX_ENGINES} 个引擎`);
+    assert.equal(SCRAPE_ENGINE_IDS.length, 4, '配置里一共有 4 个引擎，但默认只试前 3 个');
+  } finally {
+    await world.close();
+  }
+});
+
+test('引擎数量上限：前 3 个一个可用结果都没有时，才允许"最后一搏"多试一个', async () => {
+  const world = await startEngineWorld({
+    sogou: '<html><body>403 forbidden</body></html>',
+    so360: '<html><body>验证码</body></html>',
+    bing: '<html><body>我们改版啦</body></html>',
+    baidu: baiduHtml([{ title: '百度选课结果一', url: 'https://baidu.example.com/1', snippet: '选课' }]),
+  });
+  try {
+    const detail = await searchWebDetailed({
+      query: '选课',
+      config: {},
+      fetchImpl: localOnlyFetch(),
+      endpoints: world.endpoints,
+    });
+    assert.equal(world.state.requests.length, SCRAPE_MAX_ENGINES + 1, '三个都空 → 允许再补试一个');
+    assert.ok(detail.notes.some((line) => line.includes('最后一搏')));
+    assert.equal(detail.results.length, 1, '最后一搏拿到的结果照样采用');
+    assert.equal(detail.results[0].source, 'baidu-html');
+    assert.ok(detail.notes.some((line) => line.includes('命中风控页特征')), '被拦的原因要写清');
+  } finally {
+    await world.close();
+  }
+});
+
+test('请求头：默认带浏览器 UA / Accept-Language，搜索引擎跳转链带来源站 Referer', async () => {
+  assert.equal(defaultReferer('http://www.baidu.com/link?url=abc'), 'https://www.baidu.com/');
+  assert.equal(defaultReferer('https://www.sogou.com/link?url=abc'), 'https://www.sogou.com/');
+  assert.equal(defaultReferer('https://www.so.com/link?m=abc'), 'https://www.so.com/');
+  assert.equal(defaultReferer('https://dean.xjtu.edu.cn/info/1.htm'), '', '普通站点不带 Referer');
+
+  const world = await startEngineWorld({
+    sogou: sogouHtml([{ title: '选课通知', url: 'https://a.example.com/1', snippet: '选课安排' }]),
+  });
+  const record = [];
+  try {
+    await searchWebDetailed({
+      query: '选课',
+      config: {},
+      fetchImpl: localOnlyFetch(record),
+      endpoints: world.endpoints,
+    });
+    const headers = record[0].headers;
+    assert.match(headers['User-Agent'], /Mozilla\/5\.0.*Chrome/, '要带浏览器 UA');
+    assert.match(headers['Accept-Language'], /^zh-CN/, 'Accept-Language 要声明中文优先');
+    assert.match(headers.Accept, /text\/html/);
+    assert.equal(headers['Upgrade-Insecure-Requests'], '1', '浏览器做文档导航一定会带它');
+    assert.equal(headers.Cookie, undefined, '绝不带 Cookie（不伪造登录态）');
+  } finally {
+    await world.close();
+  }
+
+  // 跳转链的 Referer 是**按 URL 自动判断**的：这里用桩 fetch 打一个搜狗域名，
+  // 既能验证行为，又不用真的联网（真实域名在测试里是被 localOnlyFetch 禁掉的）
+  const calls = [];
+  const stubFetch = async (url, init) => {
+    calls.push({ url: String(url), headers: init.headers });
+    return new Response('<!doctype html><html><body>ok</body></html>', {
+      status: 200,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    });
+  };
+  await requestText(stubFetch, 'https://www.sogou.com/web?query=x', { accept: 'text/html' });
+  assert.equal(calls[0].headers.Referer, 'https://www.sogou.com/', '搜索引擎跳转链要自带来源站 Referer');
+  await requestText(stubFetch, 'https://dean.xjtu.edu.cn/info/1.htm', { accept: 'text/html' });
+  assert.equal(calls[1].headers.Referer, undefined, '普通站点不要硬塞 Referer');
+
+  // 显式 referer 也要能传下去（抓跳转链时用得到）
+  const fake = await startFakeServer(({ finish }) => finish(200, articleHtml({ title: '目标页' })));
+  const custom = [];
+  try {
+    await requestText(localOnlyFetch(custom), `${fake.base}/page/1`, {
+      accept: 'text/html',
+      referer: 'https://www.baidu.com/',
+    });
+    assert.equal(custom[0].headers.Referer, 'https://www.baidu.com/');
+  } finally {
+    await fake.close();
+  }
+});
+
+test('相关度算法：查询词切分、标题/摘要权重、覆盖率口径', () => {
+  assert.deepEqual(queryTerms('西安 天气预报 今天'), ['西安', '天气', '气预', '预报', '今天']);
+  assert.deepEqual(
+    queryTerms('最近有什么单位来访我们航空航天学院吗').filter((term) => ['最近', '什么', '我们', '吗'].includes(term)),
+    [],
+    '功能词不该进词表',
+  );
+  assert.ok(queryTerms('最近有什么单位来访我们航空航天学院吗').includes('航空'));
+  assert.deepEqual(queryTerms('   '), []);
+  assert.deepEqual(queryTerms('a 编译原理'), ['编译', '译原', '原理'], '单字母没信息量，中文长词切 2 字片段');
+
+  const terms = ['西安', '天气', '气预', '预报', '今天'];
+  // 标题命中算满分；只在摘要里命中打 6 折
+  assert.equal(relevanceScore(terms, { title: '西安天气预报今天', snippet: '' }), 1);
+  assert.equal(relevanceScore(terms, { title: '', snippet: '西安天气预报今天' }), 0.6);
+  assert.equal(relevanceScore(terms, { title: '西安旅游攻略', snippet: '' }), 0.2);
+  assert.equal(relevanceScore(terms, { title: '成都旅游攻略', snippet: '' }), 0);
+  assert.equal(relevanceScore([], { title: '随便什么' }), 1, '查询词全是功能词时不惩罚');
+  assert.equal(SCRAPE_RELEVANCE_THRESHOLD, 0.5);
+});
+
+test('解析器：搜狗与 360 的结果块能解析，相对跳转链会被解析成绝对 URL，高亮 <em> 不会被拆成空格', () => {
+  const sogou = parseSogouResults(
+    sogouHtml([
+      { title: '<em>西安天气预报</em>一周,15天', url: '/link?url=hedJjaC291N2Q4', snippet: '<em>西安</em>主要地区<em>天气预报</em>' },
+    ]),
+    { baseUrl: 'https://www.sogou.com/web?query=x' },
+  );
+  assert.equal(sogou.length, 1);
+  assert.equal(sogou[0].title, '西安天气预报一周,15天');
+  assert.equal(sogou[0].snippet, '西安主要地区天气预报');
+  // 搜狗的真实 href 是站内相对路径：必须带着 baseUrl 解析，否则 isJunkUrl 会把它整条丢掉
+  assert.equal(sogou[0].url, 'https://www.sogou.com/link?url=hedJjaC291N2Q4', '相对跳转链要变成绝对链接');
+
+  const so360 = parse360Results(
+    so360Html([
+      { title: '【<em>西安天气预报</em>】_15天', url: 'http://tianqi.so.com/weather/101110101', snippet: '<em>天气网</em>提供西安天气预报' },
+      { title: '无链接的卡片结果', url: '', snippet: '不该出现' },
+    ]),
+  );
+  assert.equal(so360.length, 1, '没有 href 的卡片结果不要');
+  assert.equal(so360[0].title, '【西安天气预报】_15天');
+  assert.equal(so360[0].source, '360-html');
 });
