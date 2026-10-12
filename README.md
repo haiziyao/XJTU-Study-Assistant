@@ -8,6 +8,7 @@
 | 目录 | 说明 |
 | --- | --- |
 | [`app/`](app/) | **应用本体**：框架（`src/core`）+ 功能模块（`src/modules`）+ 前端（`src/renderer`） |
+| [`ios/`](ios/) | **iOS 局域网传输版**：纯 WKWebView 壳（SwiftUI、零第三方依赖），界面离线内置、数据留在电脑上 |
 | [`参考/`](参考/) | 参考实现（dschat 2，Python），只读，不作为运行依赖 |
 
 ## 快速开始
@@ -24,6 +25,33 @@ npm install && npm run dev:app   # Electron 测试窗口（可选，需下载 ~1
 ```
 
 后端不需要 `npm install` 就能跑通全部接口与页面 —— Electron 只是可选的外壳。
+
+## iOS 局域网传输版（手机 ↔ 电脑直传）
+
+手机装上「智学」的壳：**界面离线内置**（打包在 app 里），数据全部留在电脑上，
+连同一个 Wi-Fi 就能互传 —— 不走任何服务器，也没有账号。
+
+先把电脑端放开给局域网（后端默认只监听 `127.0.0.1`，手机连不上）：
+
+```bash
+cd app && HOST=0.0.0.0 PORT=3210 npm run start:server
+```
+
+然后在 iPhone 上装壳，三条路任选（详细步骤见 [ios/README.md](ios/README.md)）：
+
+1. **CI 产物 + Sideloadly 自签**（推荐，本机不需要 Xcode）：推送 `ios` 分支或手动触发
+   [`.github/workflows/ios.yml`](.github/workflows/ios.yml)，在 Actions 的 Artifacts 里下载
+   `PotatoStudy-unsigned-ipa`，用 Sideloadly 选自己的免费 Apple ID 自签安装
+   （免费账号的限制：7 天有效、最多 3 个 App、需要在手机上信任证书）。
+2. **本机 Xcode 出包**：`bash ios/sync-web.sh` → `xcodebuild … CODE_SIGNING_ALLOWED=NO` →
+   把产物 `.app` 放进 `Payload/` 打成 zip，就是 `.ipa`。
+3. **PWA 免签**：`bash ios/sync-web.sh` 后用 `python3 -m http.server` 把 `ios/PotatoStudy/Web/`
+   发给手机，Safari 打开 → 添加到主屏幕（无需签名、不怕 7 天过期）。
+
+App 启动页填电脑端地址（默认 `http://127.0.0.1:3341`，可改成 `http://<电脑IP>:3210` 并记住）；
+第一次连接会弹「本地网络」权限（iOS 14+ 必须声明），点允许。
+
+这一版是**局域网传输版**：壳里没有账号体系、没有联网服务端逻辑（那一版留给后面的 `ios-online` 分支）。
 
 ## 加一个功能
 

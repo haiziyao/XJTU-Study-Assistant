@@ -1,0 +1,96 @@
+# 在 GitHub 的 macOS runner 上构建**未签名**的 iOS 包，产出 PotatoStudy-unsigned.ipa。
+#
+# 为什么这么设计：
+#   * 开发这个仓库的机器上只有 Command Line Tools（没有 Xcode），本机编不了 iOS App，
+#     所以"能不能编译"这件事交给 CI 来证明 —— 推送 ios 分支或手动触发就会跑一遍；
+#   * 只构建、不签名：签名要开发者证书，而使用者的场景是"下载后自己用 Sideloadly 自签"
+#     （免费 Apple ID 7 天有效那种），所以这里 CODE_SIGNING_ALLOWED=NO，产出未签名包；
+#   * 前端是 app 的内置界面，必须先跑 ios/sync-web.sh 同步进 ios/PotatoStudy/Web/
+#     （那个目录不入库，每个干净检出里都没有）。
+name: iOS 局域网版（未签名 ipa）
+
+on:
+  # 手动触发：Actions 页面点 "Run workflow"
+  workflow_dispatch:
+  # iOS 端的开发分支推送时自动跑
+  push:
+    branches:
+      - ios
+
+permissions:
+  contents: read
+
+jobs:
+  build-unsigned-ipa:
+    name: 构建未签名 ipa
+    # macos-14 起自带 Xcode 15，够 iOS 15 部署目标用；想更省心可以换成 macos-15
+    runs-on: macos-14
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 环境信息（出问题时便于对照）
+        run: |
+          xcodebuild -version
+          swift --version
+          sw_vers
+
+      - name: 同步内置前端（app/src/renderer → ios/PotatoStudy/Web）
+        run: bash ios/sync-web.sh
+
+      - name: 校验 Info.plist 与手写工程文件（便宜的自检放前面）
+        run: |
+          plutil -lint ios/PotatoStudy/Info.plist
+          plutil -lint ios/PotatoStudy.xcodeproj/project.pbxproj
+          plutil -p ios/PotatoStudy/Info.plist | grep -q NSLocalNetworkUsageDescription
+          plutil -p ios/PotatoStudy/Info.plist | grep -q NSAllowsLocalNetworking
+          # 图省事写 NSAllowsArbitraryLoads 是要拦下来的：局域网版不需要对全网放开明文
+          if plutil -p ios/PotatoStudy/Info.plist | grep -q NSAllowsArbitraryLoads; then
+            echo "Info.plist 里出现了 NSAllowsArbitraryLoads，请改成 NSAllowsLocalNetworking" >&2
+            exit 1
+          fi
+
+      - name: 确认 scheme / target 能被识别（比等到构建失败便宜）
+        run: xcodebuild -list -project ios/PotatoStudy.xcodeproj
+
+      - name: 构建（不签名）
+        run: |
+          xcodebuild \
+            -project ios/PotatoStudy.xcodeproj \
+            -scheme PotatoStudy \
+            -sdk iphoneos \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: 打包成 Payload/ + PotatoStudy-unsigned.ipa
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/PotatoStudy.app"
+          if [ ! -d "$APP" ]; then
+            echo "没找到 $APP —— 构建步骤应该已经失败了，先看上面的日志" >&2
+            exit 1
+          fi
+          # 内置前端必须真的进了 bundle：少了它装到手机上就是白屏（sync-web.sh 白跑了）
+          if [ ! -f "$APP/Web/index.html" ]; then
+            echo "$APP 里没有 Web/index.html —— 检查 sync-web.sh 与工程的文件夹引用" >&2
+            exit 1
+          fi
+          # .ipa 就是一个装着 Payload/ 目录的 zip（Sideloadly 要的正是这个结构）
+          rm -rf Payload PotatoStudy-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry PotatoStudy-unsigned.ipa Payload
+          rm -rf Payload
+          ls -lh PotatoStudy-unsigned.ipa
+          unzip -l PotatoStudy-unsigned.ipa | head -20
+
+      - name: 上传 ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: PotatoStudy-unsigned-ipa
+          path: PotatoStudy-unsigned.ipa
+          if-no-files-found: error

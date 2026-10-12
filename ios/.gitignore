@@ -1,0 +1,16 @@
+# 内置前端的同步产物：由 ios/sync-web.sh 从 app/src/renderer 拷出来（构建中间物，不入库）
+PotatoStudy/Web/
+
+# 本地出包产物（ios/README.md 的构建命令会在仓库根生成 build/ Payload/ *.ipa）
+build/
+DerivedData/
+Payload/
+*.ipa
+
+# Xcode 的本机状态：共享 scheme（xcshareddata）要提交，用户级状态不要
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# 系统
+.DS_Store

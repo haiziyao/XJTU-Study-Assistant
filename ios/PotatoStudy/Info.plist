@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  PotatoStudy（iOS 局域网传输版）的 Info.plist。
+
+  这一版是"壳"：界面是 app/src/renderer 的离线副本（由 ios/sync-web.sh 拷进 Web/），
+  数据全部留在电脑端后端（HTTP + WebSocket），所以下面几条权限声明都是"连电脑"需要的。
+
+  请用 `plutil -lint ios/PotatoStudy/Info.plist` 校验语法。
+-->
+<plist version="1.0">
+<dict>
+	<!-- 基础身份。$(...) 是 Xcode 构建设置，出包时会被替换掉。 -->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>智学</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+
+	<!-- 没有 storyboard 的 SwiftUI 应用：空字典 = 用系统默认启动画面，
+	     否则 iPhone 上会以 4 英寸的兼容分辨率拉伸（上下黑边）。 -->
+	<key>UILaunchScreen</key>
+	<dict/>
+
+	<!-- SwiftUI App 生命周期走 UIScene：声明单窗口场景。
+	     这一段就是 Xcode 的 SwiftUI 模板会生成的内容（GENERATE_INFOPLIST_FILE=YES
+	     时由 INFOPLIST_KEY_UIApplicationSceneManifest_Generation 自动补上）；
+	     手写 Info.plist 时漏掉它，某些系统版本上启动会停在空白界面。 -->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+
+	<!--
+	  本地网络权限（iOS 14+ 必须声明）：
+	  传输学习数据走的是"手机 ↔ 同一 Wi-Fi 下的电脑"这条链路（后端跑在电脑上，
+	  默认 http://<电脑IP>:3210）。不声明的话系统不会弹窗，请求会被直接掐掉，
+	  表现成"一直连不上后端"。第一次真正访问局域网地址时系统会弹窗，用户点"允许"即可。
+	-->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>用于在同一 Wi-Fi 下与你的电脑互传学习数据：日历、待办、笔记都存在电脑上，智学需要访问本地网络才能连上它。</string>
+
+	<!--
+	  传输层安全（ATS）：
+	  电脑端后端是局域网里的明文 HTTP（http://192.168.x.x:3210），ATS 默认会拦掉明文请求。
+	  这里只开 NSAllowsLocalNetworking —— 它只放开"本地网络"这一类目标
+	  （私有网段 IP、.local、不带点的主机名），公网域名仍然强制 HTTPS。
+
+	  刻意**不用** NSAllowsArbitraryLoads：那是对所有域名放开明文，
+	  等于为了连自己家的电脑把全网的安全阀都拆了；局域网传输版不需要这个口子。
+	-->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+
+	<!-- 可选：允许通过「文件」App / Finder 把 app 沙盒里的文档拷进拷出（方便手动备份）。 -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+
+	<!--
+	  下面两条是"随手拍/相册附件"用的（前端的对话附件、笔记图片）。
+	  系统只在真的用到相机/相册时才弹窗；提前写好是为了避免那一天直接闪退
+	  （iOS 对未声明用途的相机访问是**崩溃**而不是拒绝）。
+	-->
+	<key>NSCameraUsageDescription</key>
+	<string>用于「随手拍」把板书、讲义拍下来存进笔记；不使用拍照功能就不会弹窗。</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>用于从相册挑选图片作为笔记或对话的附件；不使用相册就不会弹窗。</string>
+</dict>
+</plist>
