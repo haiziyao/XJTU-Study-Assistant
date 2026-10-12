@@ -991,6 +991,16 @@
         if (card.parentNode) dom.chatLog.insertBefore(state.reasoningNode.card, card);
         state.reasoningNode = null;
       }
+      /**
+       * 检索轮数到上限：必须说出来。
+       *
+       * 实测过：问"缓考怎么申请"时模型连着查了 6 次，第 5 轮被上限截断，
+       * 界面上只留下一句"我再把原文读一遍…"—— 用户以为它没答完，其实它是**被系统掐断的**。
+       * 说清楚之后，用户知道"再问一句就能接着查"，而不是以为助手敷衍。
+       */
+      if (result.roundLimit) {
+        systemNote('这次的多轮检索到上限了（模型还想接着查）—— 再问一句「继续」就能接着往下查', 'meta');
+      }
       // 长对话被压缩过：说一句。用户有权知道"较早的内容只剩摘要"，
       // 否则某天发现助手忘了开头说过的话，只会以为它不靠谱
       if (result.compacted?.active && result.compacted?.covered) {
