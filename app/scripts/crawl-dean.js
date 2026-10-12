@@ -260,6 +260,10 @@ function htmlToMarkdown(html, baseUrl) {
     .replace(/<img[^>]*>/gi, (tag) => {
       const src = /src="([^"]+)"/i.exec(tag)?.[1];
       if (!src) return '';
+      // 内联的 base64 图片（教务处有几篇是**扫描件**，一张图几十 KB）不写进语料：
+      // 它对检索毫无价值（模型读不了），却会让语料凭空胖几十 KB。留一句如实说明，
+      // 读者知道"这一篇的正文是扫描图，要看就去原文链接"。
+      if (/^data:/i.test(src)) return '（正文是扫描图，请点原文链接查看）';
       const alt = stripTags(/alt="([^"]*)"/i.exec(tag)?.[1] ?? '') || '图片';
       try {
         return `![${alt}](${new URL(src, baseUrl).href})`;
@@ -439,7 +443,7 @@ function existingFetchedAt(file) {
 
 /* ------------------------------------------------------------------ 主流程 */
 
-async function crawlCategory(category, now) {
+async function crawlCategory(category, now, previousByUrl = new Map()) {
   const listingUrl = new URL(category.listing, BASE).href;
   const items = [];
   const links = [];
@@ -517,13 +521,14 @@ async function crawlCategory(category, now) {
   // 清掉上一次抓的、这次列表里已经没有的文件（政策下架了就别留在语料里）。
   // ⚠️ 只在**这次列表确实抓到了东西**时才清：列表页请求失败时 links 为空，
   // 这时候清等于"一次网络抖动删掉整个栏目"。
-  if (links.length) {
-    for (const old of fs.readdirSync(dir)) {
-      if (old.endsWith('.md')) fs.rmSync(path.join(dir, old), { force: true });
-    }
-  }
+  // ⚠️ 这里**不能**先删目录里的 .md 再重写。以前这么干，导致 `writeDoc` 永远看到
+  // "文件不存在"，于是每次重抓都把 148 篇全部重写一遍（`fetchedAt` 全变），
+  // README 里承诺的"内容没变就不动文件、重抓不刷 diff"从来没生效过。
+  // 正确做法：先写，再按"这次实际写了哪些文件"清理下架的（见函数末尾）。
+  const written = new Set();
 
   const writeDoc = (name, { title, url, publishedAt, body, kind }) => {
+    written.add(name);
     const file = path.join(dir, name);
     const relative = path.relative(ROOT, file).split(path.sep).join('/');
     const text = renderDoc({
@@ -592,7 +597,19 @@ async function crawlCategory(category, now) {
         await sleep(DELAY_MS);
       } catch (error) {
         errors.push({ url: link.url, title: link.title, error: error.message });
-        items.push({ title: link.title, url: link.url, path: null, publishedAt: null, chars: 0, sha256: null, error: error.message });
+        // 这次没抓到 ≠ 这篇没了：沿用上一次的索引条目（文件还在、哈希还对得上），
+        // 只挂一条 error 说明"本轮没刷新成功"。否则一次网络抖动就会让索引缺一片，
+        // 检索与 --check 都会跟着抖。
+        const previous = previousByUrl.get(link.url);
+        items.push(previous ? { ...previous, error: error.message } : {
+          title: link.title,
+          url: link.url,
+          path: null,
+          publishedAt: null,
+          chars: 0,
+          sha256: null,
+          error: error.message,
+        });
         continue;
       }
     }
@@ -608,6 +625,21 @@ async function crawlCategory(category, now) {
       sha256: sha256(content),
       ...(kind !== 'document' ? { kind } : {}),
     });
+  }
+
+  // 政策**下架**了才删文件 —— 判据必须是"这次列表页里还有没有这个 URL"，而**不是**
+  // "这次有没有抓成功"。两者差别很大：站点限流时 `fetch failed` 会让一大批篇目抓不到，
+  // 按后者清就会把语料删掉一半（实测发生过：148 篇掉到 91 篇）。
+  // 只有列表页确实抓到了、且它不再列这个 URL，才认定是下架。
+  if (links.length) {
+    const liveUrls = new Set([...links.map((link) => link.url), listingUrl]);
+    for (const old of fs.readdirSync(dir)) {
+      if (!old.endsWith('.md')) continue;
+      const file = path.join(dir, old);
+      if (written.has(old)) continue;
+      const url = /^url:\s*"?([^"\n]+)"?/m.exec(fs.readFileSync(file, 'utf8'))?.[1]?.trim() ?? '';
+      if (!url || !liveUrls.has(url)) fs.rmSync(file, { force: true });
+    }
   }
 
   return { category, items, errors, listingUrl };
@@ -726,9 +758,15 @@ async function main() {
       console.error(`--only 没匹配到任何栏目，可选：${CATEGORIES.map((item) => item.slug).join(', ')}`);
       process.exit(1);
     }
+    const previousIndex = fs.existsSync(path.join(OUT_DIR, 'index.json'))
+      ? JSON.parse(fs.readFileSync(path.join(OUT_DIR, 'index.json'), 'utf8'))
+      : null;
+    const previousByUrl = new Map(
+      (previousIndex?.categories ?? []).flatMap((item) => item.items ?? []).filter((item) => item.url).map((item) => [item.url, item]),
+    );
     const results = [];
     for (const category of chosen) {
-      const result = await crawlCategory(category, now);
+      const result = await crawlCategory(category, now, previousByUrl);
       results.push(result);
       const ok = result.items.filter((item) => item.path).length;
       console.log(`[dean] ${category.slug.padEnd(12)} ${String(ok).padStart(2)} 篇${result.errors.length ? `（失败 ${result.errors.length}）` : ''}`);
@@ -747,6 +785,18 @@ async function main() {
   }
 
   const indexFile = path.join(OUT_DIR, 'index.json');
+  // 索引也保持幂等：这次的内容与上一次完全一致时，沿用旧的 generatedAt ——
+  // 否则"什么都没变"的重抓也会在 git 里留下一行 diff（generatedAt 是给人判断语料新不新的，
+  // 不该因为一次空跑就谎报"刚生成过"）。
+  if (!indexOnly && fs.existsSync(indexFile)) {
+    try {
+      const previous = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+      const strip = (value) => JSON.stringify({ ...value, generatedAt: null });
+      if (strip(previous) === strip(index)) index.generatedAt = previous.generatedAt;
+    } catch {
+      /* 旧索引坏了就当没有，正常写新的 */
+    }
+  }
   if (args.includes('--check')) {
     if (!fs.existsSync(indexFile)) {
       console.error('[dean] 没有 index.json，先跑一次 node scripts/crawl-dean.js');

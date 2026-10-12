@@ -1,11 +1,11 @@
 {
   "source": "dean.xjtu.edu.cn",
   "generator": "scripts/crawl-dean.js",
-  "generatedAt": "2026-10-12T03:35:35.783Z",
+  "generatedAt": "2026-10-12T15:17:54.654Z",
   "counts": {
     "categories": 18,
     "documents": 148,
-    "chars": 115329
+    "chars": 111720
   },
   "categories": [
     {
@@ -394,17 +394,17 @@
           "title": "西安交通大学推荐优秀本科毕业生免试攻读研究生综合成绩评价指导意见",
           "url": "https://dean.xjtu.edu.cn/content.jsp?urltype=news.NewsContentUrl&wbtreeid=1033&wbnewsid=9389",
           "path": "knowledge/dean/gzzd-jwgl/01-西安交通大学推荐优秀本科毕业生免试攻读研究生综合成绩评价指导意见.md",
-          "publishedAt": "2025-11-24",
-          "chars": 997,
-          "sha256": "26feb65ce795aaea"
+          "publishedAt": null,
+          "chars": 97,
+          "sha256": "eda3d720dc5458b7"
         },
         {
           "title": "西安交通大学推荐优秀本科毕业生免试攻读研究生工作管理办法",
           "url": "https://dean.xjtu.edu.cn/content.jsp?urltype=news.NewsContentUrl&wbtreeid=1033&wbnewsid=9387",
           "path": "knowledge/dean/gzzd-jwgl/02-西安交通大学推荐优秀本科毕业生免试攻读研究生工作管理办法.md",
-          "publishedAt": "2025-11-24",
-          "chars": 2802,
-          "sha256": "92e3f96b8a30a708"
+          "publishedAt": null,
+          "chars": 93,
+          "sha256": "75574f8ffdcd77ba"
         },
         {
           "title": "西安交通大学本科课程考核管理实施细则",

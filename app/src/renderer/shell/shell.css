@@ -501,6 +501,50 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
   flex: none;
 }
 
+/* 知识库结果（target: 'knowledge'）的行：标题 / 出处 / 片段要分行说清楚，
+   所以不走 .cc-list-row 的"时间 + 一行文字"排法，改成上下三行的窄栏。
+   出处 URL 只作可读文本（Electron 里没有 openExternal 通道，做成链接也打不开），
+   但要能选中复制，所以开 user-select。 */
+.cc-kb-row {
+  display: block;
+  padding: 6px 0;
+}
+.cc-kb-row:hover {
+  background: var(--bg-hover);
+}
+.cc-kb-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.cc-kb-title {
+  color: var(--fg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.cc-kb-meta {
+  flex: none;
+  margin-left: auto;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.cc-kb-url {
+  color: var(--fg-3);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.cc-kb-snippet {
+  margin-top: 2px;
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
 .cc-warnings {
   display: grid;
   gap: 3px;

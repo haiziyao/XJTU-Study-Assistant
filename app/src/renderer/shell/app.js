@@ -538,6 +538,41 @@
   /** 成绩的"时间维度"是学期（termLabel 是站点给的显示名，term 是原始编码）。 */
   const gradeTerm = (item) => item.termLabel ?? item.term ?? '';
 
+  /**
+   * 知识库条目（来自 knowledge 模块的 target: 'knowledge'）：
+   * 政策语料每条都带 `url`（回答要能给用户点回去核对原文），日程/待办/成绩都没有这个字段。
+   */
+  const isKnowledge = (item) => Boolean(item) && typeof item.url === 'string' && item.url !== '';
+
+  /** snippet 是命中位置前后各约 120 字的片段，超了就在这里截断（卡片行不该被一段正文撑满）。 */
+  const SNIPPET_MAX = 120;
+  const snippetText = (text) => {
+    const value = String(text ?? '').trim();
+    return value.length > SNIPPET_MAX ? `${value.slice(0, SNIPPET_MAX)}…` : value;
+  };
+
+  /**
+   * 知识库结果的一行：标题（主）+ 栏目 · 日期（次）+ 来源 URL + 片段。
+   *
+   * URL 是**可读文本**，不做超链接：Electron 里没有 openExternal 通道，点了也打不开，
+   * 做成链接反而骗人；用户要核对原文可以自己复制（CSS 里已开 user-select）。
+   */
+  function knowledgeRow(item) {
+    const row = mk('div', 'cc-list-row cc-kb-row');
+
+    const head = mk('div', 'cc-kb-head');
+    head.appendChild(mk('span', 'cc-kb-title', item.title ?? item.path ?? '（无标题）'));
+    // 栏目来的是中文 label（category），categorySlug 是给过滤用的，不展示给用户
+    const meta = [item.category, item.publishedAt].filter(Boolean).join(' · ');
+    if (meta) head.appendChild(mk('span', 'cc-kb-meta', meta));
+    row.appendChild(head);
+
+    if (item.url) row.appendChild(mk('div', 'cc-kb-url', item.url));
+    const snippet = snippetText(item.snippet);
+    if (snippet) row.appendChild(mk('div', 'cc-kb-snippet', snippet));
+    return row;
+  }
+
   /** 影响对象的列表（写入结果 / 查询结果共用一种行样式）。 */
   function itemList(items, { limit = 12 } = {}) {
     const list = mk('div', 'cc-list');
@@ -547,6 +582,10 @@
         // 成绩项没有日期也没有 title：以前这里只显示一个 uuid，等于没显示。
         // 左边那栏改放学期（成绩的"时间维度"就是学期），右边是课程 + 学分/成绩/绩点。
         row.append(mk('span', 'cc-list-time', gradeTerm(item)), gradeText(item));
+      } else if (isKnowledge(item)) {
+        // 知识条目要三行才说得清（标题 / 出处 / 片段），所以整行交给 knowledgeRow 自己排
+        list.appendChild(knowledgeRow(item));
+        continue;
       } else {
         const when = item.date ?? item.startDate ?? item.deadline ?? '';
         const time = !item.startTime || item.allDay ? '' : ` ${item.startTime}${item.endTime ? `–${item.endTime}` : ''}`;
@@ -579,6 +618,9 @@
   /** 查询结果（只读）：默认折叠，配色按 target（日程橙 / 待办紫 / 事件蓝）。 */
   function queryCard(result) {
     const items = result.items ?? [];
+    // 知识库条目有自己的行样式与去处（.cc-kb-*），但沿用 op-write 的绿色底：
+    // 外壳的配色是按"作用对象"分的（日程橙 / 待办紫 / 事件蓝），没有也不该为一个新 target 新造主题色，
+    // 复用现成的一档比再塞一个色值进 shell.css 更稳。
     const kind = ['schedule', 'todo', 'event'].includes(result.target) ? result.target : 'write';
     const summary = result.explain ?? `共 ${result.count ?? items.length} 条`;
 
@@ -588,12 +630,24 @@
       details.push(itemList(items));
       const actions = mk('div', 'cc-actions');
       const toAcademic = result.target === 'grade';
-      // 成绩在**学业**视图里（成绩单 / 学分绩），不在日历上：跳日历只会看到一片空白
-      const jump = mk('button', 'ghost-btn', toAcademic ? '在右侧看学业' : '在右侧查看');
+      // knowledge 没有对应的右侧视图：与其照旧跳日历（那里一条政策都没有，点了等于没反应），
+      // 不如把按钮改成「去设置里看知识库」→ 设置页的「知识库」区块里有语料概况、栏目表与自检。
+      // 判据与上面 isGrade 的按 target 特判同一路子（条目本身带 url 也算数，防止 target 缺失）。
+      const toKnowledge = result.target === 'knowledge' || items.some(isKnowledge);
+      const jump = mk('button', 'ghost-btn', toAcademic ? '在右侧看学业' : toKnowledge ? '去设置里看知识库' : '在右侧查看');
       jump.type = 'button';
       jump.addEventListener('click', () => {
         if (toAcademic && typeof window.PC?.openView === 'function') {
           window.PC.openView('academic');
+          return;
+        }
+        if (toKnowledge) {
+          if (typeof window.PC?.openView === 'function') {
+            window.PC.openView('settings');
+            return;
+          }
+          // 外壳版本较旧、没有 openView：退化成文字指引，别让按钮点了没反应（同 academic / lms 的做法）
+          window.PC?.toast?.('请打开左侧的「设置」，在「知识库」区块里查看');
           return;
         }
         state.view = 'calendar';
