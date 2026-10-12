@@ -37,32 +37,11 @@
   word-break: break-word;
 }
 
+/* 未登录引导卡的文字块（登录表单已移到设置页，视图里不再有输入框） */
 .lms-form {
   display: grid;
   gap: 8px;
   max-width: 420px;
-}
-
-.lms-captcha {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.lms-captcha img {
-  height: 34px;
-  min-width: 96px;
-  border-radius: 6px;
-  border: 1px solid var(--line);
-  background: #fff;
-  object-fit: contain;
-  cursor: pointer;
-}
-
-.lms-captcha input {
-  width: 108px;
-  flex: none;
 }
 
 .lms-actions {
@@ -238,15 +217,7 @@
   min-width: 0;
 }
 
-/* 自动同步设置行（状态卡片内） */
-
-.lms-autosync-block {
-  margin-top: 10px;
-  display: grid;
-  gap: 4px;
-  padding-top: 8px;
-  border-top: 1px solid var(--line);
-}
+/* 自动同步小卡（学堂首页第一张卡） */
 
 .lms-autosync {
   display: flex;
@@ -275,6 +246,22 @@
 
 .lms-autosync-toggle:disabled {
   cursor: not-allowed;
+}
+
+/* 首页顶部状态提示：只在「还没读到登录态」或「读取失败」时出现 */
+.lms-status-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.lms-status-notice .lms-error {
+  margin-top: 0;
+}
+
+.lms-status-notice .ghost-btn {
+  flex: none;
 }
 
 /* ---------------------------------------------------------- 活动按课程分组 */
@@ -372,4 +359,122 @@
 
 .lms-group-l2 > .lms-group-head {
   background: color-mix(in srgb, var(--bg-elevated) 55%, var(--bg-base));
+}
+
+/* ---------------------------------------------------------- 课程页 */
+
+.lms-course {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+/* 顶部条：返回键在最左，课程名跟在后面 */
+.lms-course-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+}
+
+.lms-back {
+  flex: none;
+}
+
+/* 课程行可点进课程页 */
+.lms-row-clickable {
+  cursor: pointer;
+  transition: border-color var(--t), background var(--t);
+}
+
+.lms-row-clickable:hover {
+  border-color: var(--blue);
+  background: var(--bg-hover);
+}
+
+.lms-row-more {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--blue);
+}
+
+/* 课程信息：左边标签、右边值 */
+.lms-info {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-base);
+}
+
+.lms-info-row {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.lms-info-key {
+  flex: none;
+  width: 64px;
+  color: var(--fg-3);
+}
+
+.lms-info-val {
+  min-width: 0;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+/* 回放行右侧的动作按钮 */
+.lms-row-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* 取到的视频列表：挂在回放行下面 */
+.lms-replay-videos {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  padding-left: 8px;
+  border-left: 2px dotted color-mix(in srgb, var(--line) 80%, transparent);
+}
+
+.lms-replay-video {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+
+.lms-replay-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lms-download-status {
+  flex: none;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.lms-download-status.is-running {
+  color: var(--blue);
+}
+
+.lms-download-status.is-done {
+  color: var(--green);
+}
+
+.lms-download-status.is-failed {
+  color: var(--red);
 }

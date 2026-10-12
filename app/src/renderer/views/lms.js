@@ -1,5 +1,11 @@
 /**
- * 思源学堂视图：登录 / 验证码 / 短信与二次认证 / 课程与活动 / 同步预览与应用 / 自动同步设置。
+ * 思源学堂视图：首页（自动同步 + 课程）与课程页（课程信息 / 作业 / 课程回放下载 / 资料 / 直播）。
+ * 课程页的分节顺序是**作业在前、回放在后** —— 学生进课程页第一件事是看有什么要交的。
+ *
+ * **这里没有登录表单，也不展示账号信息**：登录已收敛到「设置 → 统一身份认证」，
+ * 学堂与学业用同一个学校账号，在设置里登录一次两边都会自动完成认证。
+ * 未登录 / 需要两步验证时本视图只给一张引导卡（见 lmsLoginCard），
+ * 学号、姓名、缓存统计、服务地址、上次同步这些登录信息一律不再重复展示。
  *
  * 视图内的会话状态只保存在本文件的闭包里（后端才是唯一数据源），
  * 所有类名以 `lms-` 为前缀，样式见同目录 lms.css。
@@ -10,66 +16,57 @@
  * 视图内的会话态。
  *
  * 刻意不写进 PC.state：学堂的登录态、课程、活动全部由后端持有，
- * 前端只需要记住「最近一次拿到的 status / 课程 / 活动 / 同步预览」这些渲染素材。
+ * 前端只需要记住「最近一次拿到的 status / 课程 / 活动」这些渲染素材。
  * 所有交互都只改这一份数据，再 lmsPaint() 整体重画，避免 DOM 与数据不一致。
- *
- * 注意：这里不保存密码。登录表单的失败分支全部原地更新（见 lmsLoginCard），
- * 只有登录态真正前进（已登录 / 需要两步验证）时才重画。
  */
 const lmsUi = {
   mount: null,
+  /** 当前页：`home`（首页：自动同步 + 课程） 或 `course`（课程页）。 */
+  page: 'home',
+  /** 课程页正在看哪门课。 */
+  courseId: null,
+  /** 课程页数据（课程信息 + 该课活动分组），来自 GET /lms/courses/:id。 */
+  coursePage: null,
+  courseBusy: false,
+  courseError: null,
   status: null,
+  /** 最近一次取到 status 的时间戳：用来判断快照是否过期（见 lmsMaybeLoad）。 */
+  statusAt: 0,
   statusLoading: false,
   statusError: null,
   courses: null,
   coursesBusy: false,
   coursesError: null,
+  /**
+   * 活动缓存。首页只用它算"这门课有多少作业/网课"（课程行下面那行分布），
+   * 课程页的内容走 `/lms/courses/:id`。
+   */
   activities: null,
   activitiesBusy: false,
   activitiesError: null,
-  activityType: '',
-  activityCourseId: '',
-  /** 学期筛选（空 = 全部学期） */
-  semesterFilter: '',
-  /**
-   * 分组折叠状态。三处各记一份，互不干扰：
-   *   semesterToggle       活动卡：学期层（key = 学期键）
-   *   groupToggle          活动卡：学期里的课程层（key = 课程键）
-   *   courseSemesterToggle 课程卡：学期层
-   * 没记录过的走"自适应默认"（见 lmsGroupExpandedIn）；`*All` 是「全部展开/收起」的覆盖。
-   */
-  semesterToggle: new Map(),
-  semestersAll: null,
-  groupToggle: new Map(),
-  groupsAll: null,
+  /** 课程卡的学期折叠：key → true/false；`courseSemestersAll` 是「全部展开/收起」的覆盖。 */
   courseSemesterToggle: new Map(),
   courseSemestersAll: null,
-  /** 只记住学号（方便切走再切回来），明文密码不留在内存里。 */
-  username: '',
-  loginError: null,
-  mfaSent: false,
-  mfaPhoneMasked: null,
-  mfaError: null,
-  /** 同步选项：默认值保持后端默认语义（见 lmsSyncBody 的注释）。 */
-  options: {
-    includePast: false,
-    includeSubmitted: false,
-    includeLesson: false,
-    includeCourseRange: false,
-    pruneStale: false,
-  },
-  preview: null,
-  previewBusy: false,
-  previewError: null,
-  selected: new Set(),
-  applyBusy: false,
-  applyResult: null,
-  applyError: null,
-  /** 自动同步设置（POST /lms/settings）的忙碌态与错误。 */
+  /** 自动同步小卡的忙碌态与错误。 */
   autoSyncBusy: false,
   autoSyncError: null,
-  /** 当前这一次渲染出来的节点，用于不重画的原地更新（勾选 / 计数 / 设置项）。 */
-  refs: { syncCount: null, syncButton: null, syncBoxes: [], autoSync: null },
+  /** 回放：已取到的视频列表（按活动 id 缓存）与展开/忙碌状态。 */
+  replays: new Map(),
+  replayOpen: null,
+  replayBusy: false,
+  replayError: null,
+  /** 课程页各分节的折叠状态（key = `${courseId}:${kind}`，默认展开）。 */
+  sectionToggle: new Map(),
+  /** 下载任务列表（轮询 GET /lms/downloads）、落盘目录、轮询定时器。 */
+  downloads: null,
+  downloadDir: null,
+  downloadTimer: null,
+  /** 这一屏渲染出来的下载状态节点（按任务 id），用于轮询时原地更新、不整屏重画。 */
+  downloadNodes: new Map(),
+  /** 上一次看到的任务状态，用来判断"刚跑完"要补一次重画。 */
+  downloadStatus: new Map(),
+  /** 当前这一次渲染出来的节点，用于不重画的原地更新（自动同步那一行）。 */
+  refs: { autoSync: null },
 };
 
 const LMS_STATUS_LABEL = {
@@ -93,6 +90,22 @@ const LMS_TYPE_TABS = [
   ['online', '网课'],
   ['material', '资料'],
 ];
+
+/**
+ * 分组默认全展开的阈值：这一层不超过 12 条就展开（小列表直接看内容），
+ * 超了就收起先看概览。课程卡的学期分组、课程页的分节都用它。
+ */
+const LMS_GROUP_AUTO_EXPAND = 12;
+
+/**
+ * 登录态快照的有效期（毫秒）。
+ *
+ * status 是「登录态 + 缓存统计」的快照，会因为在**设置页**登录 / 退出而失效：
+ * 切回本视图时快照太旧就必须重新取，否则会停在旧的登录态上（现象就是：
+ * 设置里明明登录了，学堂页还说未登录）。取一个很短的值当闸门，
+ * 既保证每次进入视图都拿到新状态，又不会 paint → load → paint 打转。
+ */
+const STATUS_TTL_MS = 1000;
 
 /** 页签值 -> 命中的底层类型；不在表里就按 type 精确匹配。 */
 const LMS_TYPE_MATCH = {
@@ -162,76 +175,16 @@ function lmsActionButton(label, busyLabel, busy, handler) {
   return button;
 }
 
-function lmsUserText(status) {
-  const user = status?.user;
-  if (!user) return '未登录';
-  const name = user.name || '（未获取到姓名）';
-  const no = user.userNo ? `（${user.userNo}）` : '';
-  return `${name}${no}${user.department ? ` · ${user.department}` : ''}`;
-}
-
 function lmsStatusPill(status) {
   const kind = status === 'ready' ? 'ready' : status === 'error' ? 'error' : status === 'anonymous' ? '' : 'warn';
   return mk('span', `lms-pill ${kind}`.trim(), LMS_STATUS_LABEL[status] ?? status ?? '未知');
-}
-
-/**
- * 载入图形验证码。
- *
- * Electron 用 file:// 载入页面时 CSP 的 `img-src 'self' data:` 不放行 http://127.0.0.1，
- * 所以 <img> 一旦加载失败就退回「fetch → data URL」（connect-src 与 img 的 data: 都是放行的）。
- */
-function lmsLoadCaptcha(img, note) {
-  const url = `${PC.state.apiBase}/lms/captcha?t=${Date.now()}`;
-  if (note) note.textContent = '';
-  img.onerror = () => {
-    img.onerror = null;
-    fetch(url)
-      .then((response) => {
-        if (!response.ok) throw new Error(`验证码接口返回 ${response.status}`);
-        return response.blob();
-      })
-      .then(
-        (blob) =>
-          new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.onerror = () => reject(new Error('验证码图片解码失败'));
-            reader.readAsDataURL(blob);
-          }),
-      )
-      .then((dataUrl) => {
-        img.src = String(dataUrl);
-      })
-      .catch((error) => {
-        if (note) note.textContent = `验证码加载失败：${error.message}`;
-      });
-  };
-  img.src = url;
-}
-
-/** 同步请求体：界面勾选项 ↔ 后端选项的唯一映射点。 */
-function lmsSyncBody(extra) {
-  const options = lmsUi.options;
-  return {
-    // 后端默认只关心作业 + 直播；勾选「导入课程回放」后再把 lesson 加进 types
-    types: ['homework', 'lecture_live'].concat(options.includeLesson ? ['lesson'] : []),
-    includePast: options.includePast,
-    // 后端语义：skipSubmitted=true 表示「已提交的作业不导入」，和界面上的勾选正好相反
-    skipSubmitted: !options.includeSubmitted,
-    // 后端默认把已提交的作业直接建成「已完成」，保持默认
-    markSubmittedDone: true,
-    includeCourseRange: options.includeCourseRange,
-    pruneStale: options.pruneStale,
-    ...extra,
-  };
 }
 
 /* --------------------------------------------------------------- 数据加载 */
 
 /**
  * 业务接口返回 401：学堂登录态已经失效（后端此时已清掉票据），
- * 顺手把状态刷新一次，界面就会退回登录表单，而不是停在一个已经不能用的页面上。
+ * 顺手把状态刷新一次，界面就会退回引导卡，而不是停在一个已经不能用的页面上。
  */
 function lmsCheckAuthLost(error) {
   if (error?.status === 401) void lmsLoadStatus();
@@ -242,11 +195,23 @@ async function lmsLoadStatus({ manual = false } = {}) {
   lmsUi.statusLoading = true;
   lmsUi.statusError = null;
   if (manual) lmsPaint();
+  const wasReady = lmsUi.status?.status === 'ready';
   try {
     lmsUi.status = await PC.api('/lms/status');
+    // 登录态翻转（在设置里登录 / 退出）时把课程缓存丢掉：否则会拿着上一份
+    // 登录态的数据继续渲染，看起来像"登录了但列表还是空的 / 退出了课程还在"。
+    if (wasReady !== (lmsUi.status?.status === 'ready')) {
+      lmsUi.courses = null;
+      lmsUi.activities = null;
+      lmsUi.coursePage = null;
+      lmsUi.replays = new Map();
+      lmsUi.replayOpen = null;
+    }
   } catch (error) {
     lmsUi.statusError = error.message;
   } finally {
+    // 成功失败都要记时间：否则下一次重画会立刻重试，失败时变成刷屏式请求
+    lmsUi.statusAt = Date.now();
     lmsUi.statusLoading = false;
     lmsPaint();
   }
@@ -288,9 +253,17 @@ async function lmsLoadActivities(refresh) {
   }
 }
 
-/** 重画后按需补数据：只有「还没拿过」才自动拉，避免反复请求。 */
+/**
+ * 重画后按需补数据。
+ *
+ * status 是「登录态 + 缓存统计」的**快照**，会因为在设置页登录 / 退出而失效：
+ * 切回本视图时快照太旧就必须重新取，否则会停在旧的登录态上
+ * （用户看到的现象就是：设置里明明登录了，学堂页还说未登录）。
+ * 用时间戳当闸门，避免 paint → load → paint 打转。
+ */
 function lmsMaybeLoad() {
-  if (!lmsUi.status) {
+  const stale = Date.now() - (lmsUi.statusAt || 0) > STATUS_TTL_MS;
+  if (!lmsUi.status || stale) {
     if (!lmsUi.statusLoading) void lmsLoadStatus();
     return;
   }
@@ -299,50 +272,11 @@ function lmsMaybeLoad() {
   if (lmsUi.activities === null && !lmsUi.activitiesBusy) void lmsLoadActivities(false);
 }
 
-/* --------------------------------------------------------------- 登录 / 验证 */
-
-function lmsOnLoggedIn() {
-  lmsUi.loginError = null;
-  lmsUi.mfaSent = false;
-  lmsUi.mfaPhoneMasked = null;
-  lmsUi.mfaError = null;
-  lmsUi.courses = null;
-  lmsUi.coursesError = null;
-  lmsUi.activities = null;
-  lmsUi.activitiesError = null;
-  lmsUi.preview = null;
-  lmsUi.selected = new Set();
-  lmsUi.applyResult = null;
-  lmsUi.applyError = null;
-  lmsUi.autoSyncError = null;
-  PC.toast('已登录思源学堂');
-  lmsPaint();
-}
-
-async function lmsLogout() {
-  try {
-    const status = await PC.api('/lms/logout', { method: 'POST', body: {} });
-    lmsUi.status = status;
-    lmsUi.courses = null;
-    lmsUi.activities = null;
-    lmsUi.preview = null;
-    lmsUi.selected = new Set();
-    lmsUi.applyResult = null;
-    lmsUi.loginError = null;
-    lmsUi.mfaSent = false;
-    lmsUi.mfaPhoneMasked = null;
-    lmsUi.mfaError = null;
-    lmsUi.autoSyncError = null;
-    PC.toast('已退出思源学堂');
-  } catch (error) {
-    lmsUi.statusError = error.message;
-  }
-  lmsPaint();
-}
+/* --------------------------------------------------------------- 自动同步 */
 
 /**
  * 保存自动同步设置：两个字段一起传（后端 updateSettings 也支持只传其中一个）。
- * 成功后用返回的 status 刷新状态卡片，失败（400 校验 / 401 未登录）走卡片里的错误条。
+ * 成功后用返回的 status 刷新小卡，失败（400 校验 / 401 未登录）走卡片里的错误条。
  */
 async function lmsSaveAutoSync(enabled, intervalHours) {
   lmsUi.autoSyncBusy = true;
@@ -368,517 +302,120 @@ async function lmsSaveAutoSync(enabled, intervalHours) {
   }
 }
 
-async function lmsSendMfa(button) {
-  const label = button.textContent;
-  button.disabled = true;
-  button.textContent = '发送中…';
-  lmsUi.mfaError = null;
-  try {
-    const result = await PC.api('/lms/mfa/send', { method: 'POST', body: {} });
-    if (result.status) lmsUi.status = result.status;
-    lmsUi.mfaSent = true;
-    lmsUi.mfaPhoneMasked = result.phoneMasked ?? lmsUi.mfaPhoneMasked;
-    PC.toast('验证码已发送');
-  } catch (error) {
-    lmsUi.mfaError = error.message;
-  }
-  if (button.isConnected) {
-    button.disabled = false;
-    button.textContent = label;
-  }
-  lmsPaint();
-}
-
-/** 登录卡片：失败分支全部原地更新，保住用户已经输入的密码。 */
+/**
+ * 未登录时的引导卡。
+ *
+ * 登录已收敛到「设置 → 统一身份认证」：学堂与学业用的是同一个学校账号，
+ * 在那里登录一次，两边都会自动完成各自的认证（共享 Cookie 罐里的 CAS 票据做单点登录）。
+ *
+ * 所以这里**刻意不再提供密码表单** —— 两个地方各输一次密码既多余，
+ * 也容易让人以为"要登录两次"。两步验证与图形验证码同样在设置里完成。
+ */
 function lmsLoginCard() {
-  const status = lmsUi.status;
   const card = mk('div', 'card');
 
   const head = mk('div', 'lms-head');
-  head.appendChild(mk('div', 'card-title', status?.status === 'need_captcha' ? '登录（需要图形验证码）' : '登录思源学堂'));
+  head.appendChild(mk('div', 'card-title', '需要登录'));
   head.appendChild(mk('div', 'spacer'));
-  head.appendChild(mk('span', 'lms-hint', '统一身份认证的学号 / 工号'));
+  head.appendChild(lmsStatusPill(lmsUi.status?.status));
   card.appendChild(head);
 
-  const form = mk('div', 'lms-form');
+  const body = mk('div', 'lms-form');
+  body.appendChild(
+    mk(
+      'div',
+      'lms-hint',
+      '思源学堂与学业情况用的是同一个学校账号，登录入口已统一到「设置 → 统一身份认证」：在那里登录一次，两个模块都会自动完成认证。',
+    ),
+  );
 
-  const username = mk('input');
-  username.type = 'text';
-  username.placeholder = '学号 / 用户名';
-  username.autocomplete = 'username';
-  username.value = lmsUi.username;
-  username.addEventListener('input', () => {
-    lmsUi.username = username.value;
-  });
-  form.appendChild(field('学号 / 用户名', username));
-
-  const password = mk('input');
-  password.type = 'password';
-  password.placeholder = '密码';
-  password.autocomplete = 'current-password';
-  form.appendChild(field('密码', password));
-
-  const captchaField = mk('div', 'field hidden');
-  captchaField.appendChild(mk('span', 'field-label', '图形验证码'));
-  const captchaRow = mk('div', 'lms-captcha');
-  const captchaInput = mk('input');
-  captchaInput.type = 'text';
-  captchaInput.placeholder = '验证码';
-  captchaInput.autocomplete = 'off';
-  const captchaImg = mk('img');
-  captchaImg.alt = '图形验证码';
-  captchaImg.title = '点击刷新验证码';
-  const captchaReload = mk('button', 'ghost-btn', '换一张');
-  captchaReload.type = 'button';
-  const captchaNote = mk('span', 'lms-hint', '');
-  captchaRow.append(captchaInput, captchaImg, captchaReload);
-  captchaField.append(captchaRow, captchaNote);
-  form.appendChild(captchaField);
-
-  const error = mk('div', 'lms-error');
-  const setError = (text) => {
-    lmsUi.loginError = text || null;
-    error.textContent = text || '';
-    error.classList.toggle('hidden', !text);
-  };
-  form.appendChild(error);
+  // 把"现在卡在哪一步"如实说出来，用户才知道去设置里要做什么
+  const step = lmsUi.status?.status;
+  if (step === 'need_mfa') {
+    body.appendChild(mk('div', 'lms-hint', '当前需要两步验证，请在设置里完成短信验证码校验。'));
+  } else if (step === 'need_captcha') {
+    body.appendChild(mk('div', 'lms-hint', '当前需要图形验证码，请在设置里输入。'));
+  } else if (step === 'error') {
+    body.appendChild(mk('div', 'lms-error', lmsUi.status?.error ?? '登录异常'));
+  }
 
   const actions = mk('div', 'lms-actions');
-  const submit = mk('button', 'primary-btn', '登录');
-  submit.type = 'button';
-  actions.append(submit, mk('span', 'lms-hint', '回车即可提交'));
-  form.appendChild(actions);
-  card.appendChild(form);
-
-  let captchaOn = Boolean(status?.captchaRequired) || status?.status === 'need_captcha';
-  const reloadCaptcha = () => lmsLoadCaptcha(captchaImg, captchaNote);
-  const showCaptcha = () => {
-    captchaOn = true;
-    captchaField.classList.remove('hidden');
-    reloadCaptcha();
-  };
-  captchaReload.addEventListener('click', reloadCaptcha);
-  captchaImg.addEventListener('click', reloadCaptcha);
-  if (captchaOn) showCaptcha();
-
-  setError(
-    status?.status === 'need_captcha'
-      ? status.error ?? '请输入图形验证码'
-      : status?.status === 'error'
-        ? status.error ?? '登录失败'
-        : lmsUi.loginError,
-  );
-
-  const doSubmit = async () => {
-    if (submit.disabled) return;
-    const name = username.value.trim();
-    const secret = password.value;
-    const code = captchaInput.value.trim();
-    if (!name) {
-      setError('请填写学号 / 用户名');
-      username.focus();
-      return;
-    }
-    if (!secret) {
-      setError('请填写密码');
-      password.focus();
-      return;
-    }
-    if (captchaOn && !code) {
-      setError('请填写图形验证码');
-      captchaInput.focus();
-      return;
-    }
-    setError(null);
-    submit.disabled = true;
-    submit.textContent = '登录中…';
-    try {
-      const next = await PC.api('/lms/login', {
-        method: 'POST',
-        body: { username: name, password: secret, captcha: captchaOn ? code : undefined },
-      });
-      lmsUi.status = next;
-      if (next.status === 'ready') {
-        lmsOnLoggedIn(); // 重画后本卡片会被替换，finally 里不再动 DOM
-        return;
-      }
-      if (next.status === 'need_mfa') {
-        lmsUi.mfaSent = Boolean(next.mfa?.sent);
-        lmsUi.mfaPhoneMasked = next.mfa?.phoneMasked ?? null;
-        lmsUi.mfaError = null;
-        lmsPaint();
-        return;
-      }
-      // 连续失败会要求图形验证码：原地把验证码行加出来，密码不用重输
-      if (next.captchaRequired && !captchaOn) showCaptcha();
-      if (next.status === 'need_captcha') {
-        reloadCaptcha();
-        captchaInput.value = '';
-      }
-      setError(next.error ?? '登录失败');
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      if (submit.isConnected) {
-        submit.disabled = false;
-        submit.textContent = '登录';
-      }
-    }
-  };
-
-  submit.addEventListener('click', () => void doSubmit());
-  for (const input of [username, password, captchaInput]) {
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        void doSubmit();
-      }
-    });
-  }
-  return card;
-}
-
-/** 两步验证卡片（短信验证码 / Safety Verify 二次认证共用）。 */
-function lmsMfaCard() {
-  const status = lmsUi.status;
-  const flow = status?.mfa?.flow === 'sec' ? 'sec' : 'mfa';
-  const sendLabel = flow === 'sec' ? '发送验证码' : '发送短信验证码';
-  const sent = lmsUi.mfaSent || Boolean(status?.mfa?.sent);
-  const phone = lmsUi.mfaPhoneMasked ?? status?.mfa?.phoneMasked ?? null;
-
-  const card = mk('div', 'card');
-  const head = mk('div', 'lms-head');
-  head.append(
-    mk('div', 'card-title', '两步验证'),
-    mk('div', 'spacer'),
-    mk('span', 'lms-pill warn', flow === 'sec' ? '二次认证' : '短信验证'),
-  );
-  card.appendChild(head);
-
-  const error = mk('div', 'lms-error');
-  const setError = (text) => {
-    lmsUi.mfaError = text || null;
-    error.textContent = text || '';
-    error.classList.toggle('hidden', !text);
-  };
-
-  if (!sent) {
-    card.appendChild(
-      mk(
-        'div',
-        'lms-hint',
-        flow === 'sec' ? '学校要求二次认证：先获取验证码，再输入收到的 6 位数字。' : '学校要求短信验证：先获取验证码，再输入收到的 6 位数字。',
-      ),
-    );
-    const actions = mk('div', 'lms-actions');
-    const send = mk('button', 'primary-btn', sendLabel);
-    send.type = 'button';
-    send.addEventListener('click', () => void lmsSendMfa(send));
-    actions.appendChild(send);
-    card.appendChild(actions);
-    setError(lmsUi.mfaError);
-    card.appendChild(error);
-    return card;
-  }
-
-  card.appendChild(mk('div', 'lms-hint', phone ? `验证码已发送至 ${phone}` : '验证码已发送，请查看手机'));
-  const form = mk('div', 'lms-form');
-  const code = mk('input');
-  code.type = 'text';
-  code.inputMode = 'numeric';
-  code.maxLength = 6;
-  code.placeholder = '6 位验证码';
-  code.autocomplete = 'one-time-code';
-  form.appendChild(field('验证码', code));
-
-  const actions = mk('div', 'lms-actions');
-  const verify = mk('button', 'primary-btn', '提交验证码');
-  verify.type = 'button';
-  const resend = mk('button', 'ghost-btn', '重新发送');
-  resend.type = 'button';
-  actions.append(verify, resend);
-  form.appendChild(actions);
-  form.appendChild(error);
-  setError(lmsUi.mfaError);
-  card.appendChild(form);
-
-  const doVerify = async () => {
-    const value = code.value.trim();
-    if (!/^\d{6}$/.test(value)) {
-      setError('请输入 6 位数字验证码');
-      code.focus();
-      return;
-    }
-    setError(null);
-    verify.disabled = true;
-    verify.textContent = '校验中…';
-    try {
-      const next = await PC.api('/lms/mfa/verify', { method: 'POST', body: { code: value } });
-      lmsUi.status = next;
-      if (next.status === 'ready') {
-        lmsOnLoggedIn();
-        return;
-      }
-      setError(next.error ?? '验证码校验失败');
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      if (verify.isConnected) {
-        verify.disabled = false;
-        verify.textContent = '提交验证码';
-      }
-    }
-  };
-  verify.addEventListener('click', () => void doVerify());
-  code.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      void doVerify();
-    }
+  const go = mk('button', 'primary-btn', '去设置里登录');
+  go.type = 'button';
+  go.addEventListener('click', () => {
+    // openView 由外壳提供（shell/app.js 把 selectView 暴露到 PC 上）。
+    // 万一外壳版本较旧没有它，退化成文字指引，不要让按钮点了没反应。
+    if (typeof PC.openView === 'function') PC.openView('settings');
+    else PC.toast?.('请打开左侧的「设置」，在「统一身份认证」里登录');
   });
-  resend.addEventListener('click', () => void lmsSendMfa(resend));
-  requestAnimationFrame(() => code.focus());
+  actions.appendChild(go);
+
+  const retry = mk('button', 'ghost-btn', '刷新状态');
+  retry.type = 'button';
+  retry.disabled = lmsUi.statusLoading;
+  retry.addEventListener('click', () => void lmsLoadStatus({ manual: true }));
+  actions.appendChild(retry);
+
+  body.appendChild(actions);
+  card.appendChild(body);
   return card;
-}
-
-/* --------------------------------------------------------------- 同步 */
-
-async function lmsPreviewSync() {
-  if (lmsUi.previewBusy) return;
-  lmsUi.previewBusy = true;
-  lmsUi.previewError = null;
-  lmsUi.applyResult = null;
-  lmsUi.applyError = null;
-  lmsPaint();
-  try {
-    const data = await PC.api('/lms/sync/preview', { method: 'POST', body: lmsSyncBody({}) });
-    lmsUi.preview = data;
-    // 默认只勾选会真正写库的条目，跳过/失效交给用户自己决定
-    lmsUi.selected = new Set(
-      (data.items ?? []).filter((item) => item.action === 'create' || item.action === 'update').map((item) => item.key),
-    );
-  } catch (error) {
-    lmsUi.previewError = error.message;
-    lmsUi.preview = null;
-    lmsUi.selected = new Set();
-    lmsCheckAuthLost(error);
-  } finally {
-    lmsUi.previewBusy = false;
-    lmsPaint();
-  }
-}
-
-async function lmsApplySync() {
-  if (lmsUi.applyBusy) return;
-  const keys = [...lmsUi.selected];
-  if (!keys.length) {
-    lmsUi.applyError = '请先勾选要同步的条目';
-    lmsPaint();
-    return;
-  }
-  lmsUi.applyBusy = true;
-  lmsUi.applyError = null;
-  lmsPaint();
-  try {
-    const result = await PC.api('/lms/sync/apply', { method: 'POST', body: lmsSyncBody({ keys }) });
-    lmsUi.applyResult = result;
-    lmsUi.preview = null; // 落库后旧的预览已经过期，清掉避免误点
-    lmsUi.selected = new Set();
-    PC.toast(`同步完成：新建 ${result.created ?? 0} · 更新 ${result.updated ?? 0}`);
-    try {
-      lmsUi.status = await PC.api('/lms/status'); // 刷新已同步条数 / 上次同步时间
-    } catch {
-      /* 状态刷新失败不影响同步结果展示 */
-    }
-  } catch (error) {
-    lmsUi.applyError = error.message;
-    lmsCheckAuthLost(error);
-  } finally {
-    lmsUi.applyBusy = false;
-    lmsPaint();
-  }
-}
-
-function lmsSelectAll(checked) {
-  lmsUi.selected = new Set();
-  if (checked) for (const item of lmsUi.preview?.items ?? []) lmsUi.selected.add(item.key);
-  for (const { input, key } of lmsUi.refs.syncBoxes) input.checked = lmsUi.selected.has(key);
-  lmsUpdateSyncFoot();
-}
-
-/** 只原地更新「已选 N 条 / 同步选中 N 条」，避免勾选时重画导致列表滚动位置丢失。 */
-function lmsUpdateSyncFoot() {
-  const count = lmsUi.selected.size;
-  const { syncButton, syncCount } = lmsUi.refs;
-  if (syncCount && syncCount.isConnected) syncCount.textContent = `已选 ${count} 条`;
-  if (syncButton && syncButton.isConnected) {
-    syncButton.textContent = lmsUi.applyBusy ? '同步中…' : `同步选中 ${count} 条`;
-    syncButton.disabled = lmsUi.applyBusy || count === 0;
-  }
-}
-
-/** 后端现在保证每条预览条目都带 kind（skip/stale 的 payload 为 null），这里再留一层兜底。 */
-function lmsItemKind(item) {
-  if (item.kind === 'event') return '日历事件';
-  if (item.kind === 'schedule') return '日程';
-  if (item.payload?.startDate !== undefined) return '日历事件';
-  if (item.payload?.date) return '日程';
-  return null;
-}
-
-function lmsItemWhen(item) {
-  const payload = item.payload;
-  if (payload) {
-    if (payload.date) {
-      const time = payload.allDay ? '全天' : `${payload.startTime ?? ''}${payload.endTime ? `–${payload.endTime}` : ''}`;
-      return `${payload.date} ${time}`.trim();
-    }
-    if (payload.startDate) {
-      const same = !payload.endDate || payload.endDate === payload.startDate;
-      return `${payload.startDate}${same ? '' : ` ~ ${payload.endDate}`} 全天`;
-    }
-  }
-  const start = lmsFormatTime(item.startTime);
-  const end = lmsFormatTime(item.endTime);
-  if (start || end) return [start, end].filter(Boolean).join(' → ');
-  return '';
-}
-
-function lmsSyncRow(item) {
-  const row = mk('label', 'lms-sync-row');
-  const box = mk('input');
-  box.type = 'checkbox';
-  box.checked = lmsUi.selected.has(item.key);
-  box.addEventListener('change', () => {
-    if (box.checked) lmsUi.selected.add(item.key);
-    else lmsUi.selected.delete(item.key);
-    lmsUpdateSyncFoot();
-  });
-  lmsUi.refs.syncBoxes.push({ input: box, key: item.key });
-
-  const main = mk('div', 'lms-sync-main');
-  const title = mk('div', 'lms-row-title');
-  title.append(
-    mk('span', `lms-badge ${item.action ?? ''}`.trim(), LMS_ACTION_LABEL[item.action] ?? item.action ?? '条目'),
-    mk('span', null, item.title ?? item.key),
-  );
-  main.appendChild(title);
-
-  const meta = [
-    item.courseName,
-    item.typeLabel ?? (item.type ? LMS_ACTIVITY_LABEL[item.type] ?? item.type : null),
-    lmsItemKind(item),
-    item.submitted ? '已提交' : null,
-  ]
-    .filter(Boolean)
-    .join(' · ');
-  if (meta) main.appendChild(mk('div', 'lms-row-meta', meta));
-
-  const when = lmsItemWhen(item);
-  if (when) main.appendChild(mk('div', 'lms-row-meta', when));
-
-  const detail = item.action === 'update' && item.changes?.length ? `变更：${item.changes.join('、')}` : item.reason;
-  if (detail) main.appendChild(mk('div', 'lms-row-meta', detail));
-
-  row.append(box, main);
-  return row;
 }
 
 /* --------------------------------------------------------------- 卡片 */
 
-function lmsStatusCard() {
-  const card = mk('div', 'card');
-  const status = lmsUi.status;
+/**
+ * 自动同步小卡（POST /lms/settings）。
+ *
+ * 学堂页只留「自动同步 + 课程」两块：登录态、账号、缓存统计、服务地址、退出登录
+ * 全部收在设置页的统一身份认证里，这里不再重复展示。
+ *
+ * 任何一次改动都把 autoSync 与 autoSyncIntervalHours 一起提交；成功后用返回的 status 刷新卡片。
+ */
+function lmsAutoSyncCard() {
+  const autoSync = lmsUi.status?.autoSync ?? {};
+  const interval = Number(autoSync.intervalHours) > 0 ? Number(autoSync.intervalHours) : 6;
 
+  const card = mk('div', 'card');
   const head = mk('div', 'lms-head');
-  head.appendChild(mk('div', 'card-title', '账号状态'));
-  head.appendChild(mk('div', 'spacer'));
-  if (status) head.appendChild(lmsStatusPill(status.status));
+  head.append(
+    mk('div', 'card-title', '自动同步'),
+    mk('div', 'spacer'),
+    mk('span', 'lms-hint', autoSync.enabled ? `已开启 · 每 ${interval} 小时` : '已关闭'),
+  );
   card.appendChild(head);
 
   const body = mk('div', 'card-body');
-  const kv = (key, value) => {
-    const row = mk('div', 'kv');
-    row.append(mk('span', 'kv-key', key), mk('span', 'kv-val', value ?? '—'));
-    body.appendChild(row);
-  };
-
-  if (!status) {
-    kv('状态', lmsUi.statusLoading ? '读取中…' : '未知');
-  } else {
-    kv('账号', lmsUserText(status));
-    if (status.status === 'need_mfa') {
-      kv('验证方式', status.mfa?.flow === 'sec' ? '二次认证（Safety Verify）' : '短信验证码');
-      kv('手机号', lmsUi.mfaPhoneMasked ?? status.mfa?.phoneMasked ?? '尚未发送');
-    }
-    kv('上次同步', status.lastSyncAt ? lmsFormatStamp(status.lastSyncAt) : '尚未同步');
-    kv('已同步', `日程 ${status.synced?.schedules ?? 0} 条 · 事件 ${status.synced?.events ?? 0} 条`);
-    kv('本地缓存', `课程 ${status.cache?.courses ?? 0} 门 · 活动 ${status.cache?.activities ?? 0} 条`);
-    kv(
-      '缓存时间',
-      `课程 ${status.cache?.lastCoursesAt ? lmsFormatStamp(status.cache.lastCoursesAt) : '—'}` +
-        ` · 活动 ${status.cache?.lastActivitiesAt ? lmsFormatStamp(status.cache.lastActivitiesAt) : '—'}`,
-    );
-    kv('服务地址', status.baseUrl ?? '—');
-    if (status.error) kv('最近错误', status.error);
-  }
-  card.appendChild(body);
-
-  if (lmsUi.statusError) card.appendChild(mk('div', 'lms-error', `状态读取失败：${lmsUi.statusError}`));
-  card.appendChild(lmsAutoSyncRow(status));
-
-  if (status && status.status !== 'anonymous') {
-    const actions = mk('div', 'lms-actions');
-    const out = mk('button', 'ghost-btn', '退出登录');
-    out.type = 'button';
-    out.addEventListener('click', () => void lmsLogout());
-    actions.append(mk('div', 'spacer'), out);
-    card.appendChild(actions);
-  }
-  return card;
-}
-
-/**
- * 自动同步设置行（POST /lms/settings）。
- *
- * 未登录时置灰而不是隐藏：设置本身是持久的，置灰能让用户知道它在哪、为什么不能用。
- * 任何一次改动都把 autoSync 与 autoSyncIntervalHours 一起提交；成功后用返回的 status 刷新卡片。
- */
-function lmsAutoSyncRow(status) {
-  const autoSync = status?.autoSync ?? {};
-  const ready = status?.status === 'ready';
-  const disabled = !ready || lmsUi.autoSyncBusy;
-
   const box = mk('div', 'lms-autosync');
   const toggleLabel = mk('label', 'check-field');
   const toggle = mk('input', 'lms-autosync-toggle');
   toggle.type = 'checkbox';
   toggle.checked = Boolean(autoSync.enabled);
-  toggle.disabled = disabled;
+  toggle.disabled = Boolean(lmsUi.autoSyncBusy);
   toggleLabel.append(toggle, mk('span', null, '自动同步'));
 
   const hoursWrap = mk('span', 'lms-hours');
-  const hours = mk('input', 'lms-autosync-hours');
-  hours.type = 'number';
-  hours.min = '1';
-  hours.max = '168';
-  hours.step = '1';
-  hours.title = '自动同步间隔（1~168 小时）';
-  hours.value = String(Number(autoSync.intervalHours) > 0 ? Number(autoSync.intervalHours) : 6);
-  hours.disabled = disabled;
-  hoursWrap.append(hours, mk('span', 'lms-hint', '小时'));
+  const hoursInput = mk('input', 'lms-autosync-hours');
+  hoursInput.type = 'number';
+  hoursInput.min = '1';
+  hoursInput.max = '168';
+  hoursInput.step = '1';
+  hoursInput.title = '自动同步间隔（1~168 小时）';
+  hoursInput.value = String(interval);
+  hoursInput.disabled = Boolean(lmsUi.autoSyncBusy);
+  hoursWrap.append(hoursInput, mk('span', 'lms-hint', '小时'));
 
   box.append(
     toggleLabel,
     hoursWrap,
     mk('span', 'lms-hint', `最近自动同步：${autoSync.lastRunAt ? lmsFormatStamp(autoSync.lastRunAt) : '尚未执行'}`),
-    mk('span', 'lms-hint', ready ? '改动即时生效 · 默认关闭' : '登录后可用 · 默认关闭'),
+    mk('span', 'lms-hint', '改动即时生效 · 默认关闭'),
   );
-  lmsUi.refs.autoSync = { toggle, hours };
+  lmsUi.refs.autoSync = { toggle, hours: hoursInput };
+  body.append(box, mk('div', 'lms-hint', '自动同步只新建与更新记录，不会删除任何日程（默认关闭）。'));
 
   const apply = () => {
-    if (disabled) return;
-    const raw = Number(hours.value);
+    if (lmsUi.autoSyncBusy) return;
+    const raw = Number(hoursInput.value);
     if (!Number.isFinite(raw) || raw < 1 || raw > 168) {
       lmsUi.autoSyncError = '自动同步间隔需为 1~168 小时';
       lmsPaint();
@@ -887,15 +424,33 @@ function lmsAutoSyncRow(status) {
     void lmsSaveAutoSync(toggle.checked, raw);
   };
   toggle.addEventListener('change', apply);
-  hours.addEventListener('change', apply);
+  hoursInput.addEventListener('change', apply);
 
-  const wrap = mk('div', 'lms-autosync-block');
-  wrap.appendChild(box);
-  wrap.appendChild(mk('div', 'lms-hint', '自动同步只新建与更新记录，不会删除任何日程（默认关闭）。'));
-  if (lmsUi.autoSyncError) wrap.appendChild(mk('div', 'lms-error', `自动同步设置失败：${lmsUi.autoSyncError}`));
-  return wrap;
+  if (lmsUi.autoSyncError) body.appendChild(mk('div', 'lms-error', `自动同步设置失败：${lmsUi.autoSyncError}`));
+  card.appendChild(body);
+  return card;
 }
 
+/**
+ * 首页顶部状态提示：只在「还没读到登录态」或「读取失败」时出现。
+ *
+ * 原来这里是一张「账号状态」卡（状态徽标 / 账号 / 上次同步 / 缓存 / 服务地址 / 退出登录）。
+ * 登录信息既然收在设置页，这里就只留一条读取进度和失败重试。
+ */
+function lmsStatusNotice() {
+  const row = mk('div', 'lms-status-notice');
+  if (lmsUi.statusError) {
+    row.appendChild(mk('span', 'lms-error', `状态读取失败：${lmsUi.statusError}`));
+    const retry = mk('button', 'ghost-btn', lmsUi.statusLoading ? '读取中…' : '重试');
+    retry.type = 'button';
+    retry.disabled = lmsUi.statusLoading;
+    retry.addEventListener('click', () => void lmsLoadStatus({ manual: true }));
+    row.appendChild(retry);
+  } else {
+    row.appendChild(mk('span', 'lms-hint', '正在读取学堂登录状态…'));
+  }
+  return row;
+}
 function lmsCoursesCard() {
   const card = mk('div', 'card');
   const items = lmsUi.courses?.items ?? [];
@@ -962,12 +517,25 @@ function lmsCourseSemesterSection(semester, isNewest, totalCourses) {
       lmsUi.courseSemestersAll = null;
       lmsPaint();
     },
-    render: () => semester.courses.map((course) => lmsCourseRow(course)),
+    render: () => semester.courses.map((course) => lmsCourseRow(course, { clickable: true })),
   });
 }
 
-function lmsCourseRow(course) {
-  const row = mk('div', 'lms-row');
+function lmsCourseRow(course, { clickable = false } = {}) {
+  const row = mk('div', clickable ? 'lms-row lms-row-clickable' : 'lms-row');
+  if (clickable) {
+    row.setAttribute('role', 'button');
+    row.setAttribute('tabindex', '0');
+    row.title = '打开课程页';
+    const open = () => lmsOpenCourse(course.id);
+    row.addEventListener('click', open);
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        open();
+      }
+    });
+  }
   const title = mk('div', 'lms-row-title');
   title.appendChild(mk('span', null, course.name ?? '（未命名课程）'));
   if (course.courseCode) title.appendChild(mk('span', 'tag', course.courseCode));
@@ -994,8 +562,25 @@ function lmsCourseRow(course) {
   // 课程列表也能一眼看出哪门课有东西待办
   const counts = lmsCourseActivityCounts(course.id);
   if (counts) row.appendChild(mk('div', 'lms-row-meta lms-course-counts', counts));
+  if (clickable) row.appendChild(mk('div', 'lms-row-more', '进入课程页 ›'));
 
   return row;
+}
+
+/**
+ * 作业的提交状态是不是"已知"。
+ *
+ * 活动列表接口**不返回**提交状态（`userSubmitCount`），它是补拉活动详情才有的字段，
+ * 而且一次预览最多补拉 40 条。所以"没有这个字段"≠"没提交" —— 是**还没查**。
+ * 两者必须分开：混在一起就是在骗用户。
+ */
+function lmsSubmitKnown(item) {
+  return item?.userSubmitCount !== undefined && item?.userSubmitCount !== null;
+}
+
+/** 明确未提交（查过了，确实是 0）。 */
+function lmsSubmitPending(item) {
+  return lmsSubmitKnown(item) && Number(item.userSubmitCount) === 0;
 }
 
 /** 某门课在活动缓存里的分布，形如「作业 3（未提交 2） · 网课 12 · 资料 5」。 */
@@ -1018,49 +603,6 @@ function lmsCourseActivityCounts(courseId) {
 }
 
 /** 活动列表：类型与课程都在前端过滤（后端 refresh 时不做类型过滤）。 */
-function lmsVisibleActivities() {
-  let items = lmsUi.activities?.items ?? [];
-  if (lmsUi.activityType) {
-    // 「网课」页签命中直播 + 回放两种类型，其余页签精确匹配
-    const types = LMS_TYPE_MATCH[lmsUi.activityType] ?? [lmsUi.activityType];
-    items = items.filter((item) => types.includes(item.type));
-  }
-  if (lmsUi.activityCourseId) {
-    items = items.filter((item) => String(item.courseId) === String(lmsUi.activityCourseId));
-  }
-  if (lmsUi.semesterFilter) {
-    // 活动本身不带学期，得从课程表查（查不到算「未知学期」，与分组口径一致）
-    const index = lmsCourseSemesterIndex();
-    items = items.filter((item) => (index.get(String(item.courseId))?.key ?? '__none__') === lmsUi.semesterFilter);
-  }
-  return items;
-}
-
-/** 筛选结果少于这么多条时，分组默认全部展开（小列表没必要再点一次）。 */
-const LMS_GROUP_AUTO_EXPAND = 12;
-
-/** 某条活动的排序用时间戳（取结束时间，没结束就用开始时间）。 */
-function lmsActivityStamp(item) {
-  const raw = String(item?.endTime || item?.startTime || '').trim();
-  return raw || '';
-}
-
-/**
- * 作业的提交状态是不是"已知"。
- *
- * 活动列表接口**不返回**提交状态（`userSubmitCount`），它是补拉活动详情才有的字段，
- * 而且一次预览最多补拉 40 条。所以"没有这个字段"≠"没提交" —— 是**还没查**。
- * 这里必须分开：把它们混成"未提交"就是在骗用户。
- */
-function lmsSubmitKnown(item) {
-  return item?.userSubmitCount !== undefined && item?.userSubmitCount !== null;
-}
-
-/** 明确未提交（查过了，确实是 0）。 */
-function lmsSubmitPending(item) {
-  return lmsSubmitKnown(item) && Number(item.userSubmitCount) === 0;
-}
-
 /* ------------------------------------------------------------------ 学期 */
 
 /** 学期的身份：优先 id，其次 code，最后 label（同一学期必须落到同一个键上）。 */
@@ -1138,64 +680,6 @@ function lmsSemesterOptions() {
 
 /* ------------------------------------------------------------------ 分组 */
 
-/** 一组活动的统计：明确未提交数、还没查过的条数、最近时间。 */
-function lmsActivityStats(items) {
-  let pending = 0;
-  let unknown = 0;
-  let latest = '';
-  for (const item of items) {
-    if (item.type === 'homework') {
-      if (lmsSubmitPending(item)) pending += 1;
-      else if (!lmsSubmitKnown(item)) unknown += 1;
-    }
-    const stamp = lmsActivityStamp(item);
-    if (stamp > latest) latest = stamp;
-  }
-  return { pending, unknown, latest };
-}
-
-/** 一组活动再按课程分一层（组内按"最近有活动"排前面）。 */
-function lmsActivityCourseGroups(items) {
-  const courses = new Map();
-  for (const item of items) {
-    const key = item.courseId != null && item.courseId !== '' ? String(item.courseId) : `name:${item.courseName ?? ''}`;
-    if (!courses.has(key)) courses.set(key, { key, name: item.courseName || '（未标注课程）', items: [] });
-    courses.get(key).items.push(item);
-  }
-  return [...courses.values()]
-    .map((group) => ({ ...group, ...lmsActivityStats(group.items) }))
-    .sort((a, b) => b.latest.localeCompare(a.latest) || a.name.localeCompare(b.name, 'zh'));
-}
-
-/**
- * 把当前筛选结果按 **学期 → 课程** 两级分组。
- *
- * 课程缓存里查不到的（比如课程刷新过、活动还是旧的）落到「未知学期」，
- * 不硬塞进某个学期 —— 分组错了比不分组更糟。
- */
-function lmsActivitySemesterGroups() {
-  const index = lmsCourseSemesterIndex();
-  const semesters = new Map();
-  for (const item of lmsVisibleActivities()) {
-    const found = index.get(String(item.courseId));
-    const key = found?.key ?? '__none__';
-    if (!semesters.has(key)) {
-      semesters.set(key, { key, label: found?.label ?? '未知学期', items: [], rank: '' });
-    }
-    semesters.get(key).items.push(item);
-  }
-  const list = [...semesters.values()];
-  for (const semester of list) {
-    semester.courses = lmsActivityCourseGroups(semester.items);
-    Object.assign(semester, lmsActivityStats(semester.items));
-    semester.rank = lmsSemesterRank(
-      semester.latest,
-      semester.courses.map((group) => ({ endDate: group.latest })),
-    );
-  }
-  return list.sort(lmsSemesterSort);
-}
-
 /**
  * 分组展开与否。三档优先：**手动点过 > 全部展开/收起 > 自适应默认**。
  *
@@ -1263,310 +747,433 @@ function lmsEverythingExpanded(override, total) {
   return total <= LMS_GROUP_AUTO_EXPAND;
 }
 
-/** 换页签 / 换过滤 / 整体展开收起时重置折叠状态（别把上一批的折叠继承过来）。 */
+/** 课程卡的「全部展开/收起」：清掉逐个点过的记录（`keep` 的那个覆盖值留着）。 */
 function lmsResetGroupState({ keep } = {}) {
-  if (keep !== 'semestersAll') lmsUi.semestersAll = null;
-  if (keep !== 'groupsAll') lmsUi.groupsAll = null;
   if (keep !== 'courseSemestersAll') lmsUi.courseSemestersAll = null;
-  lmsUi.semesterToggle = new Map();
-  lmsUi.groupToggle = new Map();
   lmsUi.courseSemesterToggle = new Map();
 }
 
-/** 活动卡：一个学期（里面是按课程分的组）。 */
-function lmsSemesterSection(semester, isNewest, totalItems) {
-  const expanded = lmsGroupExpandedIn(lmsUi.semesterToggle, lmsUi.semestersAll, semester.key, {
-    isNewest,
-    // 学期层看整批：14 条以上就只展开最新那个学期，先给概览
-    smallEnough: totalItems <= LMS_GROUP_AUTO_EXPAND,
-  });
+/* --------------------------------------------------------------- 课程页 */
+
+/** 打开某门课的课程页（首页课程行点一下走这里）。 */
+function lmsOpenCourse(courseId) {
+  lmsUi.page = 'course';
+  lmsUi.courseId = String(courseId);
+  lmsUi.coursePage = null;
+  lmsUi.courseError = null;
+  lmsUi.replayOpen = null;
+  lmsUi.replayError = null;
+  lmsUi.sectionToggle = new Map();
+  lmsPaint();
+}
+
+/** 回首页（课程页左上角返回键）。 */
+function lmsBackHome() {
+  lmsUi.page = 'home';
+  lmsUi.courseId = null;
+  lmsUi.coursePage = null;
+  lmsUi.courseError = null;
+  lmsStopDownloadPolling();
+  lmsPaint();
+}
+
+/** 课程页数据：后端 `GET /lms/courses/:id` 读本地缓存，`refresh=1` 时先拉这门课的活动。 */
+async function lmsLoadCoursePage({ refresh = false } = {}) {
+  if (!lmsUi.courseId || lmsUi.courseBusy) return;
+  lmsUi.courseBusy = true;
+  lmsUi.courseError = null;
+  if (refresh) lmsUi.coursePage = null;
+  lmsPaint();
+  try {
+    if (refresh) {
+      await PC.api('/lms/activities/refresh', { method: 'POST', body: { courseIds: [Number(lmsUi.courseId)] } });
+    }
+    lmsUi.coursePage = await PC.api(`/lms/courses/${encodeURIComponent(lmsUi.courseId)}`);
+  } catch (error) {
+    lmsUi.courseError = error.message ?? String(error);
+  } finally {
+    lmsUi.courseBusy = false;
+    lmsPaint();
+  }
+}
+
+/** 重画后按需补课程页数据。 */
+function lmsMaybeLoadCourse() {
+  if (lmsUi.coursePage === null && !lmsUi.courseBusy) void lmsLoadCoursePage();
+}
+
+/** 某个分节是否展开（默认展开 —— 课程页一共就几节，全收起反而要多点）。 */
+function lmsSectionExpanded(kind, fallback = true) {
+  const explicit = lmsUi.sectionToggle.get(`${lmsUi.courseId}:${kind}`);
+  return explicit === undefined ? fallback : explicit;
+}
+
+/** 课程页的一个分节（标题 + 计数 + 可折叠内容）。 */
+function lmsCourseSection({ kind, title, hint, items, renderItem, defaultExpanded = true }) {
   return lmsCollapsibleGroup({
-    label: semester.label,
+    label: title,
     level: 1,
-    tags: lmsGroupTags({
-      count: semester.items.length,
-      pending: semester.pending,
-      unknown: semester.unknown,
-      latest: semester.latest,
-    }),
-    expanded,
+    tags: [mk('span', 'lms-hint', `${items.length} 条${hint ? ` · ${hint}` : ''}`)],
+    expanded: lmsSectionExpanded(kind, defaultExpanded),
     onToggle: (next) => {
-      lmsUi.semesterToggle.set(semester.key, next);
-      lmsUi.semestersAll = null;
+      lmsUi.sectionToggle.set(`${lmsUi.courseId}:${kind}`, next);
       lmsPaint();
     },
-    render: () => semester.courses.map((course) => lmsCourseSection(course, semester)),
-  });
-}
-
-/** 活动卡：学期里的一个课程组。 */
-function lmsCourseSection(group, semester) {
-  const expanded = lmsGroupExpandedIn(lmsUi.groupToggle, lmsUi.groupsAll, group.key, {
-    smallEnough: semester.items.length <= LMS_GROUP_AUTO_EXPAND,
-  });
-  return lmsCollapsibleGroup({
-    label: group.name,
-    level: 2,
-    tags: lmsGroupTags({
-      count: group.items.length,
-      pending: group.pending,
-      unknown: group.unknown,
-      latest: group.latest,
-    }),
-    expanded,
-    onToggle: (next) => {
-      lmsUi.groupToggle.set(group.key, next);
-      lmsUi.groupsAll = null;
-      lmsPaint();
+    render: () => {
+      const list = mk('div', 'lms-list');
+      for (const item of items) list.appendChild(renderItem(item));
+      return [list];
     },
-    // 组内不再重复显示课程名（表头已经写了）
-    render: () => group.items.map((item) => lmsActivityRow(item, { showCourse: false })),
   });
 }
 
-function lmsActivitiesCard() {
-  const card = mk('div', 'card');
-  const visible = lmsVisibleActivities();
-  const semesters = lmsActivitySemesterGroups();
-  const courseCount = new Set(visible.map((item) => String(item.courseId ?? item.courseName))).size;
-
-  const head = mk('div', 'lms-head');
-  head.appendChild(mk('div', 'card-title', '活动'));
-  head.appendChild(mk('span', 'lms-hint', `${visible.length} 条 · ${semesters.length} 个学期 · ${courseCount} 门课`));
-  head.appendChild(mk('div', 'spacer'));
-  head.appendChild(lmsActionButton('刷新活动', '刷新中…', lmsUi.activitiesBusy, () => void lmsLoadActivities(true)));
-  card.appendChild(head);
-
-  const filters = mk('div', 'lms-filters');
-  const seg = mk('div', 'seg');
-  for (const [value, label] of LMS_TYPE_TABS) {
-    const button = mk('button', `seg-btn${lmsUi.activityType === value ? ' active' : ''}`, label);
-    button.type = 'button';
-    button.addEventListener('click', () => {
-      if (lmsUi.activityType === value) return;
-      lmsUi.activityType = value;
-      lmsResetGroupState();
-      lmsPaint();
-    });
-    seg.appendChild(button);
+/** 课程信息：教师 / 学分 / 学期 / 教学班 / 起止 / 必修。 */
+function lmsCourseInfoBody(course) {
+  const box = mk('div', 'lms-info');
+  const teachers = (course.instructors ?? []).map((item) => item?.name).filter(Boolean).join('、');
+  const semester = course.semester?.label || course.semester?.realName || course.semester?.name;
+  const rows = [
+    ['课程代码', course.courseCode],
+    ['教师', teachers],
+    ['学分', course.credit],
+    ['学期', semester],
+    ['教学班', course.teachingClassName || course.klass],
+    ['起止', course.startDate || course.endDate ? `${course.startDate ?? '?'} ~ ${course.endDate ?? '?'}` : null],
+    ['类型', course.compulsory ? '必修' : null],
+  ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '');
+  for (const [label, value] of rows) {
+    const line = mk('div', 'lms-info-row');
+    line.append(mk('span', 'lms-info-key', label), mk('span', 'lms-info-val', String(value)));
+    box.appendChild(line);
   }
-  filters.appendChild(seg);
-
-  // 学期筛选：课程多的时候这是主要的导航方式
-  const semesterSelect = mk('select');
-  semesterSelect.appendChild(option('', '全部学期', !lmsUi.semesterFilter));
-  for (const semester of lmsSemesterOptions()) {
-    semesterSelect.appendChild(option(semester.key, semester.label, semester.key === lmsUi.semesterFilter));
-  }
-  semesterSelect.addEventListener('change', () => {
-    lmsUi.semesterFilter = semesterSelect.value;
-    // 换了学期，原来选中的课程可能根本不在这个学期里
-    lmsUi.activityCourseId = '';
-    lmsResetGroupState();
-    lmsPaint();
-  });
-  filters.appendChild(semesterSelect);
-
-  // 只看课程：选项跟着学期筛选走，免得在几十门课里翻
-  const courseSelect = mk('select');
-  courseSelect.appendChild(option('', '只看课程：全部', !lmsUi.activityCourseId));
-  for (const course of lmsUi.courses?.items ?? []) {
-    if (lmsUi.semesterFilter && lmsSemesterKey(course.semester) !== lmsUi.semesterFilter) continue;
-    courseSelect.appendChild(
-      option(String(course.id), course.name ?? String(course.id), String(course.id) === String(lmsUi.activityCourseId)),
-    );
-  }
-  courseSelect.addEventListener('change', () => {
-    lmsUi.activityCourseId = courseSelect.value;
-    lmsResetGroupState();
-    lmsPaint();
-  });
-  filters.appendChild(courseSelect);
-
-  if (semesters.length > 1) {
-    filters.appendChild(
-      lmsAllToggleButton({
-        expanded: lmsEverythingExpanded(lmsUi.semestersAll, visible.length),
-        onClick: () => {
-          lmsUi.semestersAll = !lmsEverythingExpanded(lmsUi.semestersAll, visible.length);
-          lmsResetGroupState({ keep: 'semestersAll' });
-          lmsPaint();
-        },
-      }),
-    );
-  }
-  card.appendChild(filters);
-
-  if (lmsUi.activitiesError) card.appendChild(mk('div', 'lms-error', `活动加载失败：${lmsUi.activitiesError}`));
-
-  if (lmsUi.activities === null || (lmsUi.activitiesBusy && !(lmsUi.activities?.items ?? []).length)) {
-    card.appendChild(mk('div', 'loading', '加载中…'));
-    return card;
-  }
-  if (!visible.length) {
-    const any = (lmsUi.activities?.items ?? []).length > 0;
-    card.appendChild(emptyBox(any ? '当前筛选条件下没有活动。' : '还没有活动缓存，点「刷新活动」拉取。'));
-    return card;
-  }
-
-  // 传总数进去：学期层用**整批**条数判断"要不要默认全展开"，
-  // 课程层才用"这个学期自己的条数"—— 两层判据不同，见 lmsGroupExpandedIn 的注释
-  semesters.forEach((semester, index) =>
-    card.appendChild(lmsSemesterSection(semester, index === 0, visible.length)),
-  );
-  if (lmsUi.activities?.fetchedAt) {
-    card.appendChild(mk('div', 'lms-hint', `更新于 ${lmsFormatStamp(lmsUi.activities.fetchedAt)}`));
-  }
-  return card;
+  if (!rows.length) box.appendChild(mk('div', 'lms-hint', '学堂没有给出这门课的更多信息'));
+  return box;
 }
 
-function lmsActivityRow(item, { showCourse = true } = {}) {
+/** 活动行（作业/资料/直播共用）：标题 + 时间 + 提交状态。 */
+function lmsCourseActivityRow(item) {
   const row = mk('div', 'lms-row');
   const title = mk('div', 'lms-row-title');
   title.appendChild(mk('span', null, item.title ?? '（无标题）'));
   title.appendChild(mk('span', 'tag', LMS_ACTIVITY_LABEL[item.type] ?? item.type ?? '活动'));
-  // 只在"确实查到已提交"时打标；没查到就什么都不说（别把未知标成未提交，也别标成已提交）
   if (lmsSubmitKnown(item) && Number(item.userSubmitCount) > 0) title.appendChild(mk('span', 'tag submitted', '已提交'));
-  if (item.published === false) title.appendChild(mk('span', 'tag late', '未发布'));
+  if (lmsSubmitKnown(item) && Number(item.userSubmitCount) === 0) title.appendChild(mk('span', 'tag late', '未提交'));
+  if (item.published === false) title.appendChild(mk('span', 'tag', '未发布'));
   row.appendChild(title);
-
-  if (showCourse && item.courseName) row.appendChild(mk('div', 'lms-row-meta', item.courseName));
   const start = lmsFormatTime(item.startTime);
   const end = lmsFormatTime(item.endTime);
-  row.appendChild(
-    mk('div', 'lms-row-meta', start || end ? `开始 ${start || '—'} · 结束 ${end || '—'}` : '无时间信息'),
-  );
+  row.appendChild(mk('div', 'lms-row-meta', start || end ? `开始 ${start || '—'} · 结束 ${end || '—'}` : '无时间信息'));
   return row;
 }
 
-function lmsApplyResultBox(result) {
-  const box = mk('div', 'lms-result');
-  box.appendChild(mk('div', 'lms-row-title', '同步结果'));
-  box.appendChild(
-    mk(
-      'div',
-      'lms-row-meta',
-      `新建 ${result.created ?? 0} · 更新 ${result.updated ?? 0} · 删除 ${result.removed ?? 0}` +
-        ` · 跳过 ${result.skipped ?? 0} · 失败 ${(result.errors ?? []).length}`,
-    ),
+/** 体积文案（1024 进制），和后端 humanSize 保持一致的口径。 */
+function lmsSizeText(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  const digits = size >= 100 || unit === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(digits)}${units[unit]}`;
+}
+
+/** 找一个回放视频对应的下载任务（按 活动 + 标签 匹配）。 */
+function lmsJobFor(activityId, video) {
+  return (lmsUi.downloads?.items ?? []).find(
+    (job) => String(job.activityId ?? '') === String(activityId ?? '') && job.labelText === (video.labelText || '视频'),
   );
-  if (result.lastSyncAt) box.appendChild(mk('div', 'lms-row-meta', `最近同步：${lmsFormatStamp(result.lastSyncAt)}`));
-  for (const error of (result.errors ?? []).slice(0, 10)) {
-    const text = `${error.key ?? ''} ${error.message ?? ''}`.trim();
-    if (text) box.appendChild(mk('div', 'lms-error', text));
-  }
-  return box;
 }
 
-function lmsSyncCard(ready) {
-  const card = mk('div', 'card');
-  const head = mk('div', 'lms-head');
-  head.appendChild(mk('div', 'card-title', '同步到日历'));
-  head.appendChild(mk('div', 'spacer'));
-  head.appendChild(mk('span', 'lms-hint', '先预览，勾选后再写入'));
-  card.appendChild(head);
+function lmsDownloadText(job) {
+  if (job.status === 'running') {
+    const percent = job.percent === null || job.percent === undefined ? '…' : `${job.percent}%`;
+    const speed = job.speed ? ` · ${lmsSizeText(job.speed)}/s` : '';
+    return `下载中 ${percent}${speed}`;
+  }
+  if (job.status === 'done') return `已保存（${lmsSizeText(job.total ?? job.bytes)}）`;
+  if (job.status === 'cancelled') return '已取消';
+  return `失败：${job.error ?? '未知原因'}`;
+}
 
-  const checks = mk('div', 'lms-checks');
-  const optionRow = (key, label, hint) => {
-    const wrap = mk('label', 'check-field');
-    const input = mk('input');
-    input.type = 'checkbox';
-    input.checked = Boolean(lmsUi.options[key]);
-    input.addEventListener('change', () => {
-      lmsUi.options[key] = input.checked;
-    });
-    wrap.append(input, mk('span', null, hint ? `${label}（${hint}）` : label));
-    checks.appendChild(wrap);
-  };
-  optionRow('includePast', '包含过期内容');
-  optionRow('includeSubmitted', '包含已提交作业', '默认不导入');
-  optionRow('includeLesson', '导入网课回放');
-  optionRow('includeCourseRange', '整学期课程做成日历事件', '整段日期内都会显示');
-  optionRow('pruneStale', '同步时清理失效记录', '删除学堂已下架的条目');
-  card.appendChild(checks);
+/** 下载状态节点（渲染时记进 downloadNodes，轮询时原地改文字，不整屏重画）。 */
+function lmsDownloadStatus(job) {
+  const node = mk('span', `lms-download-status is-${job.status}`, lmsDownloadText(job));
+  if (job.path) node.title = job.path;
+  lmsUi.downloadNodes.set(job.id, node);
+  lmsUi.downloadStatus.set(job.id, job.status);
+  return node;
+}
 
-  const actions = mk('div', 'lms-actions');
-  const preview = mk('button', 'primary-btn', lmsUi.previewBusy ? '预览中…' : '预览同步');
-  preview.type = 'button';
-  preview.disabled = !ready || lmsUi.previewBusy;
-  preview.addEventListener('click', () => void lmsPreviewSync());
-  actions.appendChild(preview);
-  if (!ready) actions.appendChild(mk('span', 'lms-hint', '登录后才能预览与同步'));
-  card.appendChild(actions);
+/** 回放分节里的一行：一个回放活动 + 取到的视频 + 下载按钮/进度。 */
+function lmsReplayRow(item) {
+  const row = mk('div', 'lms-row');
+  const title = mk('div', 'lms-row-title');
+  title.appendChild(mk('span', null, item.title ?? '（无标题）'));
+  title.appendChild(mk('span', 'tag', '课程回放'));
+  row.appendChild(title);
 
-  if (lmsUi.previewError) card.appendChild(mk('div', 'lms-error', `预览失败：${lmsUi.previewError}`));
+  const start = lmsFormatTime(item.startTime);
+  const end = lmsFormatTime(item.endTime);
+  row.appendChild(mk('div', 'lms-row-meta', start || end ? `开始 ${start || '—'} · 结束 ${end || '—'}` : '无时间信息'));
 
-  const summary = lmsUi.preview?.summary;
-  if (lmsUi.preview) {
-    const sum = mk('div', 'lms-summary');
-    for (const [key, label] of [
-      ['create', '新建'],
-      ['update', '更新'],
-      ['skip', '跳过'],
-      ['stale', '失效'],
-    ]) {
-      sum.appendChild(statPill(label, summary?.[key] ?? 0));
+  const actions = mk('div', 'lms-row-actions');
+  const busy = lmsUi.replayBusy && String(lmsUi.replayOpen) === String(item.id);
+  const button = mk('button', 'ghost-btn', busy ? '取视频…' : lmsUi.replays.has(String(item.id)) ? '重新取视频' : '取视频');
+  button.type = 'button';
+  button.disabled = busy;
+  button.addEventListener('click', () => void lmsLoadReplays(item));
+  actions.appendChild(button);
+  row.appendChild(actions);
+
+  const videos = lmsUi.replays.get(String(item.id));
+  if (videos) {
+    const list = mk('div', 'lms-replay-videos');
+    if (!videos.length) list.appendChild(mk('div', 'lms-hint', '这次回放没有可下载的视频'));
+    for (const video of videos) {
+      const line = mk('div', 'lms-replay-video');
+      line.appendChild(mk('span', 'lms-replay-name', `${video.labelText}${video.sizeText ? ` · ${video.sizeText}` : ''}`));
+      if (video.isBestAudio) line.appendChild(mk('span', 'tag', '音质更好'));
+      const job = lmsJobFor(item.id, video);
+      if (job) {
+        line.appendChild(lmsDownloadStatus(job));
+        if (job.status === 'running') {
+          const cancel = mk('button', 'ghost-btn', '取消');
+          cancel.type = 'button';
+          cancel.addEventListener('click', () => void lmsCancelDownload(job.id));
+          line.appendChild(cancel);
+        }
+      } else {
+        const download = mk('button', 'ghost-btn', '下载');
+        download.type = 'button';
+        download.addEventListener('click', () => void lmsStartDownload(item, video));
+        line.appendChild(download);
+      }
+      list.appendChild(line);
     }
-    sum.appendChild(mk('span', 'lms-hint', `共 ${summary?.total ?? (lmsUi.preview.items ?? []).length} 条`));
-    card.appendChild(sum);
-
-    const list = mk('div', 'lms-sync-list');
-    const items = lmsUi.preview.items ?? [];
-    if (!items.length) list.appendChild(emptyBox('没有需要同步的条目。'));
-    for (const item of items) list.appendChild(lmsSyncRow(item));
-    card.appendChild(list);
-
-    const foot = mk('div', 'lms-actions');
-    const all = mk('button', 'ghost-btn', '全选');
-    all.type = 'button';
-    const none = mk('button', 'ghost-btn', '全不选');
-    none.type = 'button';
-    all.addEventListener('click', () => lmsSelectAll(true));
-    none.addEventListener('click', () => lmsSelectAll(false));
-    const count = mk('span', 'lms-hint', `已选 ${lmsUi.selected.size} 条`);
-    const apply = mk('button', 'primary-btn', lmsUi.applyBusy ? '同步中…' : `同步选中 ${lmsUi.selected.size} 条`);
-    apply.type = 'button';
-    apply.disabled = lmsUi.applyBusy || lmsUi.selected.size === 0;
-    apply.addEventListener('click', () => void lmsApplySync());
-    lmsUi.refs.syncCount = count;
-    lmsUi.refs.syncButton = apply;
-    foot.append(all, none, mk('div', 'spacer'), count, apply);
-    card.appendChild(foot);
+    row.appendChild(list);
   }
-
-  if (lmsUi.applyError) card.appendChild(mk('div', 'lms-error', `同步失败：${lmsUi.applyError}`));
-  if (lmsUi.applyResult) card.appendChild(lmsApplyResultBox(lmsUi.applyResult));
-  return card;
+  if (lmsUi.replayError && String(lmsUi.replayOpen) === String(item.id)) {
+    row.appendChild(mk('div', 'lms-error', lmsUi.replayError));
+  }
+  return row;
 }
 
-/** 整体重画：所有文本都经 textContent 写入（等价于 escapeHtml），不使用 innerHTML 拼接。 */
+/** 取一次回放的视频列表（后端去学堂与录播站换票据，注意别把地址打日志）。 */
+async function lmsLoadReplays(item) {
+  if (lmsUi.replayBusy) return;
+  lmsUi.replayBusy = true;
+  lmsUi.replayOpen = item.id;
+  lmsUi.replayError = null;
+  lmsPaint();
+  try {
+    const data = await PC.api(`/lms/activities/${encodeURIComponent(item.id)}/replays`);
+    lmsUi.replays.set(String(item.id), data.videos ?? []);
+  } catch (error) {
+    lmsUi.replayError = error.message ?? String(error);
+  } finally {
+    lmsUi.replayBusy = false;
+    lmsPaint();
+  }
+}
+
+async function lmsStartDownload(item, video) {
+  try {
+    await PC.api('/lms/downloads', {
+      method: 'POST',
+      body: {
+        activityId: item.id,
+        video: {
+          downloadUrl: video.downloadUrl,
+          playUrl: video.playUrl,
+          label: video.label,
+          labelText: video.labelText,
+          size: video.size,
+        },
+      },
+    });
+    PC.toast?.(`开始下载：${item.title ?? '回放'}`);
+    await lmsRefreshDownloads();
+    lmsStartDownloadPolling();
+  } catch (error) {
+    lmsUi.replayError = error.message ?? String(error);
+  }
+  lmsPaint();
+}
+
+async function lmsCancelDownload(id) {
+  try {
+    await PC.api(`/lms/downloads/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+  } catch (error) {
+    PC.toast?.(`取消失败：${error.message}`);
+  }
+  await lmsRefreshDownloads();
+  lmsPaint();
+}
+
+async function lmsRefreshDownloads() {
+  try {
+    const data = await PC.api('/lms/downloads');
+    lmsUi.downloads = data;
+    lmsUi.downloadDir = data.downloadDir ?? lmsUi.downloadDir;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 下载进度轮询：只在有任务在跑时开着。
+ *
+ * 更新策略：**原地改文字**（节点在渲染时记进 `downloadNodes`）。否则每 800ms 整屏重画，
+ * 列表会闪、折叠状态和滚动位置也保不住。任务从"跑着"变成终态时补一次重画 ——
+ * 那一刻按钮要从「取消」变回「下载」。
+ */
+function lmsStartDownloadPolling() {
+  if (lmsUi.downloadTimer) return;
+  lmsUi.downloadTimer = setInterval(async () => {
+    const data = await lmsRefreshDownloads();
+    if (!data) return;
+    let finished = false;
+    for (const job of data.items) {
+      if (lmsUi.downloadStatus.get(job.id) === 'running' && job.status !== 'running') finished = true;
+      lmsUi.downloadStatus.set(job.id, job.status);
+      const node = lmsUi.downloadNodes.get(job.id);
+      if (node) {
+        node.textContent = lmsDownloadText(job);
+        node.className = `lms-download-status is-${job.status}`;
+      }
+    }
+    if (!data.active) {
+      lmsStopDownloadPolling();
+      if (finished) lmsPaint();
+    }
+  }, 800);
+}
+
+function lmsStopDownloadPolling() {
+  if (lmsUi.downloadTimer) {
+    clearInterval(lmsUi.downloadTimer);
+    lmsUi.downloadTimer = null;
+  }
+}
+
+/** 课程页整屏：返回键 + 课程信息 + 回放（可下载）+ 作业/资料/直播。 */
+function lmsCourseView() {
+  const wrap = mk('div', 'lms-course');
+  const page = lmsUi.coursePage;
+  const course = page?.course;
+
+  const bar = mk('div', 'lms-course-bar');
+  const back = mk('button', 'ghost-btn lms-back', '← 返回');
+  back.type = 'button';
+  back.addEventListener('click', lmsBackHome);
+  bar.appendChild(back);
+  bar.appendChild(mk('div', 'card-title', course?.name ?? '课程'));
+  if (course?.courseCode) bar.appendChild(mk('span', 'tag', course.courseCode));
+  if (course?.compulsory) bar.appendChild(mk('span', 'tag', '必修'));
+  bar.appendChild(mk('div', 'spacer'));
+  if (lmsUi.downloadDir) bar.appendChild(mk('span', 'lms-hint', `下载到 ${lmsUi.downloadDir}`));
+  bar.appendChild(
+    lmsActionButton('刷新本课活动', '刷新中…', lmsUi.activitiesBusy, () => void lmsLoadCoursePage({ refresh: true })),
+  );
+  wrap.appendChild(bar);
+
+  if (lmsUi.courseError) wrap.appendChild(mk('div', 'lms-error', `课程页加载失败：${lmsUi.courseError}`));
+  if (!page) {
+    wrap.appendChild(mk('div', 'loading', lmsUi.courseBusy ? '加载中…' : '没有数据，点「刷新本课活动」'));
+    return wrap;
+  }
+
+  // 1) 课程信息
+  wrap.appendChild(
+    lmsCollapsibleGroup({
+      label: '课程信息',
+      level: 1,
+      tags: [mk('span', 'lms-hint', course?.semester?.label || course?.semester?.name || '')],
+      expanded: lmsSectionExpanded('info'),
+      onToggle: (next) => {
+        lmsUi.sectionToggle.set(`${lmsUi.courseId}:info`, next);
+        lmsPaint();
+      },
+      render: () => [lmsCourseInfoBody(course)],
+    }),
+  );
+
+  // 2) 作业（进课程页第一件事是看有什么要交的）
+  const homework = page.groups?.homework ?? [];
+  if (homework.length) {
+    wrap.appendChild(lmsCourseSection({ kind: 'homework', title: '作业', items: homework, renderItem: lmsCourseActivityRow }));
+  }
+
+  // 3) 课程回放（可下载）
+  const replays = page.groups?.replay ?? [];
+  if (replays.length) {
+    wrap.appendChild(
+      lmsCourseSection({ kind: 'replay', title: '课程回放', items: replays, renderItem: lmsReplayRow, hint: '可下载' }),
+    );
+  }
+
+  // 4) 资料 / 直播 / 其它
+  const sections = [
+    ['material', '资料', page.groups?.material ?? []],
+    ['live', '直播', page.groups?.live ?? []],
+    ['other', '其它', page.groups?.other ?? []],
+  ];
+  for (const [kind, title, items] of sections) {
+    if (!items.length) continue;
+    wrap.appendChild(lmsCourseSection({ kind, title, items, renderItem: lmsCourseActivityRow }));
+  }
+  if (!replays.length && !sections.some(([, , items]) => items.length)) {
+    wrap.appendChild(emptyBox('这门课在本地缓存里还没有活动，点「刷新本课活动」拉一次。'));
+  }
+  return wrap;
+}
+
+/**
+ * 整体重画：所有文本都经 textContent 写入（等价于 escapeHtml），不使用 innerHTML 拼接。
+ *
+ * 顶栏刻意不再有工具条：登录信息收在设置页，这一屏只有「自动同步 + 课程」两张卡。
+ *
+ * 外面这层还负责**保住滚动位置**：这个视图每拉一次数据、点一次折叠都会整体重建 DOM，
+ * 而真正滚动的是里面的 `.view-content`，一重建 scrollTop 就归零 ——
+ * 用户看到的是「每刷新一次就跳回页面顶部」（在几十门课的列表里尤其烦）。
+ */
 function lmsPaint() {
+  const restoreScroll = PC.snapshotScroll?.();
+  try {
+    lmsPaintInner();
+  } finally {
+    restoreScroll?.();
+  }
+}
+
+function lmsPaintInner() {
   const mount = lmsUi.mount;
   if (!mount) return;
   mount.innerHTML = '';
-  lmsUi.refs = { syncCount: null, syncButton: null, syncBoxes: [], autoSync: null };
-
-  const bar = mk('div', 'toolbar');
-  bar.appendChild(mk('div', 'toolbar-title', '账号与同步'));
-  bar.appendChild(mk('div', 'spacer'));
-  const reload = mk('button', 'ghost-btn', lmsUi.statusLoading ? '刷新中…' : '刷新状态');
-  reload.type = 'button';
-  reload.disabled = lmsUi.statusLoading;
-  reload.addEventListener('click', () => void lmsLoadStatus({ manual: true }));
-  bar.appendChild(reload);
-  mount.appendChild(bar);
+  lmsUi.refs = { autoSync: null };
 
   const content = mk('div', 'view-content');
   mount.appendChild(content);
 
   const ready = lmsUi.status?.status === 'ready';
-  content.appendChild(lmsStatusCard());
-  if (lmsUi.status && !ready) content.appendChild(lmsUi.status.status === 'need_mfa' ? lmsMfaCard() : lmsLoginCard());
-  if (ready) {
-    content.appendChild(lmsCoursesCard());
-    content.appendChild(lmsActivitiesCard());
+  // 退出登录后不该还停在课程页（那是上一个登录态下的页面）
+  if (!ready && lmsUi.page === 'course') lmsUi.page = 'home';
+
+  if (!lmsUi.status || lmsUi.statusError) content.appendChild(lmsStatusNotice());
+  if (ready && lmsUi.page === 'course') {
+    // 课程页：单独一屏，左上角返回首页
+    content.appendChild(lmsCourseView());
+    lmsMaybeLoadCourse();
+    return;
   }
-  if (lmsUi.status) content.appendChild(lmsSyncCard(ready));
+  if (ready) content.appendChild(lmsAutoSyncCard());
+  else if (lmsUi.status) content.appendChild(lmsLoginCard());
+  if (ready) content.appendChild(lmsCoursesCard());
 
   lmsMaybeLoad();
 }

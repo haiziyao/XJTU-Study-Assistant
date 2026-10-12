@@ -128,11 +128,27 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
     throw HttpError.notImplemented(`${summary}：接口已预置、尚未实现`, { planned: true, contract });
   };
 
-  /** 某门课的详情（教师、学分、学期、教学班、起止、课件数）。 */
-  router.get(
-    `${P}/courses/:id`,
-    planned('课程详情', { params: { id: 'string' }, returns: { id: 'string', name: 'string', instructors: 'array', credit: 'number', semester: 'object', startDate: 'string', endDate: 'string', materialCount: 'number' } }),
-  );
+  /**
+   * 课程页：课程信息 + 这门课的活动（按 回放/作业/资料/直播 分组）。
+   * 全部走本地缓存，点开课程页不会再打一次学校接口。
+   */
+  router.get(`${P}/courses/:id`, ({ params }) => lms.coursePage(params.id));
+
+  /** 某个回放的视频列表（要联网换录播站票据，所以是显式动作）。 */
+  router.get(`${P}/activities/:id/replays`, ({ params }) => lms.replayVideos(params.id));
+
+  /* ------------------------------------------------------------ 回放下载 */
+
+  /** 开始下载：`{ activityId, video: { downloadUrl|playUrl, label, labelText, size } }`。 */
+  router.post(`${P}/downloads`, ({ body }) => lms.startDownload({ activityId: body?.activityId, video: body?.video }));
+
+  /** 下载任务列表（前端轮询进度用）+ 落盘目录。 */
+  router.get(`${P}/downloads`, () => lms.listDownloads());
+
+  router.post(`${P}/downloads/:id/cancel`, ({ params }) => lms.cancelDownload(params.id));
+
+  /** 清掉已结束的任务记录（不删文件）。 */
+  router.post(`${P}/downloads/clear`, () => lms.clearDownloads());
 
   /** 某门课的课件/资料清单。 */
   router.get(

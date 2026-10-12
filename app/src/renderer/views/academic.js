@@ -21,8 +21,6 @@
     loading: false,
     busy: null,
     error: null,
-    /** 登录表单的临时输入 */
-    login: { username: '', password: '', visible: false },
     status: null,
     grades: [],
     stats: null,
@@ -64,8 +62,9 @@
   /**
    * 有成绩却没有分析时，自动补一段。
    *
-   * 为什么需要这一步：**登录本身也会同步**（`/academic/login` 顺手拉一次成绩），
-   * 但那条路径不会生成分析，于是"第一次进来什么都没有、必须手动点一次同步"
+   * 为什么需要这一步：**登录本身也会同步成绩**（走设置页登录时由
+   * `academic/service.js` 的自动同步负责，走 `/academic/login` 时由那条路由负责），
+   * 但同步本身不生成分析，于是"第一次进来什么都没有、必须手动点一次同步"
    * —— 而用户刚登录完，最想看到的恰恰就是那段点评。
    * 这里以"有没有成绩"为准而不是"刚才有没有点同步"，所以无论数据是被谁、
    * 通过哪条路径同步进来的，进来都能看到分析。
@@ -123,21 +122,6 @@
       paint();
     }
   }
-
-  const doLogin = () =>
-    withBusy('login', async () => {
-      const result = await PC.api('/academic/login', {
-        method: 'POST',
-        body: { username: ui.login.username.trim(), password: ui.login.password },
-      });
-      ui.login.password = '';
-      if (result?.status !== 'ready') {
-        ui.error = new Error(result?.error ?? '登录未完成，请检查账号与密码');
-        return;
-      }
-      ui.login.visible = false;
-      await loadAll();
-    });
 
   const doSync = () =>
     withBusy('sync', async () => {
@@ -204,7 +188,25 @@
        按钮放 `.toolbar`（固定在顶部，不随内容滚走）。
      直接把内容 append 到 mount 上，就会表现为「贴边 + 不能滚」。 */
 
+  /**
+   * 重画。
+   *
+   * 外面这层只做一件事：**保住滚动位置**。这个视图每次都 `mount.innerHTML = ''` 整体重建，
+   * 而真正滚动的是里面的 `.view-content`（`flex:1; overflow:auto`）——
+   * 勾一门课的「计入」、同步一次成绩、或者收到一次 `data_changed`，DOM 一换 scrollTop 就归零，
+   * 用户看到的就是「每刷新一次都跳回页面顶部」，一门一门勾的时候尤其难受。
+   * `PC.snapshotScroll()` 按选择器记住位置、重画完再还回去（外壳提供；拿不到就退化成原行为）。
+   */
   function paint() {
+    const restoreScroll = PC.snapshotScroll?.();
+    try {
+      paintInner();
+    } finally {
+      restoreScroll?.();
+    }
+  }
+
+  function paintInner() {
     const mount = ui.mount;
     if (!mount) return;
     mount.innerHTML = '';
@@ -256,48 +258,53 @@
     return head;
   }
 
+  /**
+   * 未登录时的引导卡。
+   *
+   * 登录已收敛到「设置 → 统一身份认证」：教务与思源学堂用的是同一个学校账号，
+   * 在那里登录一次，两边都会自动完成各自的认证（共享 Cookie 罐里的 CAS 票据做单点登录）。
+   *
+   * 所以这里**刻意不再提供密码表单** —— 两个地方各输一次密码既多余，
+   * 也容易让人以为"要登录两次"。与学堂视图的做法保持一致。
+   */
   function loginCard() {
     const card = mk('section', 'ac-card');
-    card.appendChild(mk('h3', 'ac-card-title', '先登录教务系统'));
+    card.appendChild(mk('h3', 'ac-card-title', '需要登录'));
     card.appendChild(
-      mk('p', 'ac-muted', '登录用的是学校统一身份认证，账号密码只发往学校，本程序不保存。'),
+      mk(
+        'p',
+        'ac-muted',
+        '教务与思源学堂用的是同一个学校账号，登录入口已统一到「设置 → 统一身份认证」：在那里登录一次，两个模块都会自动完成认证，成绩也会自动同步。',
+      ),
     );
-    if (ui.status?.captchaRequired) {
-      card.appendChild(mk('p', 'ac-warn-inline', '登录失败次数较多，需要图形验证码（稍后版本支持）。'));
+
+    // 把"现在卡在哪一步"如实说出来，用户才知道去设置里要做什么
+    const step = ui.status?.status;
+    if (step === 'need_mfa') {
+      card.appendChild(mk('p', 'ac-warn-inline', '当前需要两步验证，请在设置里完成短信验证码校验。'));
+    } else if (step === 'need_captcha' || ui.status?.captchaRequired) {
+      card.appendChild(mk('p', 'ac-warn-inline', '当前需要图形验证码，请在设置里输入。'));
     }
 
-    const form = mk('div', 'ac-form');
-    const user = mk('input', 'ac-input');
-    user.type = 'text';
-    user.placeholder = '学号';
-    user.autocomplete = 'username';
-    user.value = ui.login.username;
-    user.addEventListener('input', () => {
-      ui.login.username = user.value;
+    // 复用已有的 `.ac-form`：它本来就是「一行 flex，gap 8，可换行」的按钮/输入行
+    const actions = mk('div', 'ac-form');
+    const go = mk('button', 'primary-btn', '去设置里登录');
+    go.type = 'button';
+    go.addEventListener('click', () => {
+      // openView 由外壳提供（shell/app.js 把 selectView 暴露到 PC 上）。
+      // 万一外壳版本较旧没有它，退化成文字指引，不要让按钮点了没反应。
+      if (typeof PC.openView === 'function') PC.openView('settings');
+      else PC.toast?.('请打开左侧的「设置」，在「统一身份认证」里登录');
     });
+    actions.appendChild(go);
 
-    const pass = mk('input', 'ac-input');
-    pass.type = 'password';
-    pass.placeholder = '密码';
-    pass.autocomplete = 'current-password';
-    pass.value = ui.login.password;
-    pass.addEventListener('input', () => {
-      ui.login.password = pass.value;
-    });
-    pass.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') void doLogin();
-    });
+    const retry = mk('button', 'ghost-btn', '刷新状态');
+    retry.type = 'button';
+    retry.disabled = Boolean(ui.busy);
+    retry.addEventListener('click', () => void loadAll());
+    actions.appendChild(retry);
 
-    form.appendChild(user);
-    form.appendChild(pass);
-
-    const submit = mk('button', 'primary-btn', ui.busy === 'login' ? '登录中…' : '登录并同步');
-    submit.type = 'button';
-    submit.disabled = ui.busy === 'login' || !ui.login.username.trim() || !ui.login.password;
-    submit.addEventListener('click', () => void doLogin());
-    form.appendChild(submit);
-
-    card.appendChild(form);
+    card.appendChild(actions);
     return card;
   }
 
@@ -307,9 +314,18 @@
     const title = mk('div', 'toolbar-title', '学业');
     bar.appendChild(title);
 
-    const sync = mk('button', 'primary-btn', ui.busy === 'sync' ? '同步中…' : '同步成绩');
+    /**
+     * 同步按钮。
+     *
+     * 注意 `ui.status.syncing`：登录成功后后端会**自动补一次同步**（见
+     * academic/service.js 的 #autoSyncIfEmpty）。那一次不是用户点的，
+     * `ui.busy` 不会变 —— 不看这个标志的话，用户登录完切过来只看到一片空白，
+     * 会以为登录没生效，然后又点一次同步（撞上 409）。
+     */
+    const autoSyncing = Boolean(ui.status?.syncing) && ui.busy !== 'sync';
+    const sync = mk('button', 'primary-btn', ui.busy === 'sync' || autoSyncing ? '同步中…' : '同步成绩');
     sync.type = 'button';
-    sync.disabled = Boolean(ui.busy);
+    sync.disabled = Boolean(ui.busy) || autoSyncing;
     sync.addEventListener('click', () => void doSync());
     bar.appendChild(sync);
 
@@ -498,6 +514,7 @@
       const includedCount = group.grades.filter((item) => item.included !== false).length;
       if (includedCount !== group.grades.length) chips.push(`已计入 ${includedCount} 门`);
       termHead.appendChild(mk('span', 'ac-term-meta', chips.join(' · ')));
+      termHead.appendChild(termAllToggle(group, includedCount));
 
       termCell.appendChild(termHead);
       termRow.appendChild(termCell);
@@ -518,6 +535,29 @@
     return list.reduce((sum, item) => sum + (typeof item.credit === 'number' ? item.credit : 0), 0);
   }
 
+  /**
+   * 学期级的「整学期计入 / 整学期屏蔽」开关（三态）。
+   *
+   * 为什么放在学期行上：一门一门点 44 次太蠢，而「这学期都是选修，先全屏蔽」是很常见的动作。
+   * 为什么用三态勾选框而不是两个按钮：混合状态（部分计入）最常见，`indeterminate` 能一眼看出来，
+   * 点一下＝全计入，再点一下＝全屏蔽，比摆两个按钮省地方。
+   *
+   * 提交用 `ids` 而不是 `term`：学期行是按 `term` 代码分组的，但「未标注学期」那组的 term 是空串，
+   * 按 term 提交会打到别的记录上；直接给这一组课程的 id 最准（后端 bulk 本来就支持 `ids`）。
+   */
+  function termAllToggle(group, includedCount) {
+    const label = mk('label', 'ac-term-check');
+    label.title = '一键把本学期的课全部计入或全部屏蔽（学分绩只统计计入的课）';
+    const box = mk('input');
+    box.type = 'checkbox';
+    box.checked = includedCount > 0;
+    box.indeterminate = includedCount > 0 && includedCount < group.grades.length;
+    box.disabled = Boolean(ui.busy);
+    box.addEventListener('change', () => void bulk({ ids: group.grades.map((item) => item.id), included: box.checked }));
+    label.append(box, mk('span', null, '整学期计入'));
+    return label;
+  }
+
   /** 单门课的一行。 */
   function gradeRow(grade) {
     const row = mk('tr', grade.included === false ? 'ac-row-off' : '');
@@ -528,6 +568,9 @@
     check.type = 'checkbox';
     check.checked = grade.included !== false;
     check.disabled = ui.busy === `row:${grade.id}`;
+    // 稳定的钩子：这一行到底改哪门课。渲染测试与排查都靠它 ——
+    // 只按"第 N 个 checkbox"找会因为学期行那个三态框插进来而错位（测试就是这么挂过一次）。
+    check.dataset.gradeId = grade.id;
     check.addEventListener('change', () => void toggleOne(grade.id, check.checked));
     checkCell.appendChild(check);
     row.appendChild(checkCell);

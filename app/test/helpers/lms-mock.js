@@ -133,6 +133,10 @@ export async function startMockLms(options = {}) {
     requests: [],
     /** 每个接口收到过的 Content-Type，用来验证「该用表单的用了表单、该用 JSON 的用了 JSON」。 */
     contentTypes: {},
+    /** 回放三步链路的调用痕迹（验证真的走了三步，而不是某一步被跳过）。 */
+    playerUrlFetched: [],
+    embedTokenFetched: [],
+    capturesFetched: [],
   };
 
   let origin = '';
@@ -258,6 +262,52 @@ export async function startMockLms(options = {}) {
       }
       return html(res, 200, homeHtml(dataset.user));
     }
+    // ---------------------------------------------------------------- 录播站（RMS）
+    if (path === '/rms/api/v1/auth/embed-token') {
+      const token = url.searchParams.get('token') ?? '';
+      if (!token.startsWith('tk-')) return json(res, 401, { message: 'bad token' });
+      state.embedTokenFetched.push(token);
+      return json(res, 200, { token: `bearer-${token}` });
+    }
+    const capturesMatch = path.match(/^\/rms\/api\/embed\/lesson-activities\/captures\/([\w-]+)$/);
+    if (capturesMatch) {
+      if (!String(req.headers.authorization ?? '').startsWith('Bearer bearer-')) {
+        return json(res, 401, { message: 'missing bearer' });
+      }
+      const code = capturesMatch[1];
+      state.capturesFetched.push(code);
+      const video = options.replayVideo ?? {
+        label: 'INSTRUCTOR',
+        size: 1024,
+        download_url: `${origin}/rms/media/${code}-instructor.mp4`,
+      };
+      return json(res, 200, {
+        lesson_videos: [
+          { ...video, is_best_audio: true },
+          {
+            label: 'ENCODER',
+            size: 512,
+            download_url: `${origin}/rms/media/${code}-encoder.mp4`,
+          },
+        ],
+      });
+    }
+    // 视频本体：真实可下（内容可预测，测试里断言字节）
+    const mediaMatch = path.match(/^\/rms\/media\/([\w-]+)\.mp4$/);
+    if (mediaMatch) {
+      const payload = Buffer.alloc(Number(options.mediaBytes ?? 64), mediaMatch[1].includes('encoder') ? 0x45 : 0x49);
+      res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': payload.length });
+      // 慢速模式：先发个头再慢慢发正文字节，用来测"下载中"的进度/取消/去重
+      const delay = Number(options.mediaDelayMs ?? 0);
+      if (delay > 0) {
+        const half = Math.floor(payload.length / 2);
+        res.write(payload.subarray(0, half));
+        setTimeout(() => res.end(payload.subarray(half)), delay);
+        return undefined;
+      }
+      return res.end(payload);
+    }
+
     if (path.startsWith('/api/')) {
       if (!loggedIn(req)) return json(res, 401, { message: 'Unauthenticated.' });
       if (path === '/api/my-courses') return json(res, 200, { courses: dataset.courses });
@@ -276,6 +326,22 @@ export async function startMockLms(options = {}) {
       }
       const submissionsMatch = path.match(/^\/api\/activities\/(\d+)\/(students|groups)\/(\d+)\/submission_list$/);
       if (submissionsMatch) return json(res, 200, { submissions: [{ id: 1, score: 95, status: 'marked', submitted_at: '2026-10-06T20:00:00+08:00' }] });
+
+      // 回放第一步：lms 给一个带 token 的播放地址（回放的视频不在 lms 上）
+      const playerMatch = path.match(/^\/api\/lessons\/(\d+)\/player-url$/);
+      if (playerMatch) {
+        const lessonId = Number(playerMatch[1]);
+        const activity = findActivity(dataset, lessonId);
+        if (!activity) return json(res, 404, { message: 'not found' });
+        // 只有回放（lesson）才有播放地址；拿作业去换应该 404
+        if (activity.type !== 'lesson') return json(res, 404, { message: 'not a lesson' });
+        state.playerUrlFetched.push(lessonId);
+        const replayCode = activity.replay_code ?? `rc-${lessonId}`;
+        // 走 rmsBaseUrl（测试里指向同一个 mock 的 /rms 前缀）
+        return json(res, 200, {
+          player_url: `${origin}/rms/embed?token=tk-${lessonId}&replay_code=${replayCode}&from_page=course`,
+        });
+      }
       return json(res, 404, { message: `未知接口 ${path}` });
     }
 

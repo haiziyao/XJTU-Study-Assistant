@@ -543,15 +543,12 @@ body.panel-collapsed .panel {
 .chat-compose textarea {
   flex: 1;
   resize: none;
-  max-height: 140px;
+  /* 输入框加高：单行输入挤在一条细缝里看不清自己写了什么。
+     min-height 管首屏高度，max-height 是自动增高的封顶（见 app.js 的 autoGrow）。 */
+  min-height: 58px;
+  max-height: 180px;
+  line-height: 1.5;
   background: var(--bg-base);
-}
-
-.chat-hint {
-  padding: 0 14px 10px;
-  font-size: 11px;
-  color: var(--fg-3);
-  background: var(--bg-surface);
 }
 
 /* --------------------------------------------------------- 右：功能视图 */
@@ -1720,6 +1717,51 @@ body.panel-collapsed .panel {
   padding: 0 14px 6px;
   background: var(--bg-surface);
 }
+/* 左侧是"这一轮怎么干活"（联网搜索 + 思考模式），右侧是三个小图标（权限 / 用量 / 绘图）。
+   用 auto 边距把右组推到最右边，中间不摆东西。 */
+.chat-controls .spacer {
+  margin-left: auto;
+}
+/* 输入框下面那一行的图标按钮：只有图标、没有外框，比文字 chip 略大一点（手指点得到）。
+   **颜色就是状态**：蓝 = 开着（联网 / 自动审批 / 绘图），灰 = 关着。 */
+.compose-icon-btn,
+.compose-select > button.compose-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 30px;
+  padding: 0;
+  /* 没有边框、没有底色：**图标本身的颜色就是状态**（灰=关，蓝=开）。
+     外框会和旁边的文字 chip 抢注意力，也让这一行显得像一排按钮。 */
+  color: var(--fg-3);
+  background: none;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.compose-icon-btn:hover,
+.compose-select > button.compose-icon-btn:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.06);
+}
+.compose-icon-btn.on,
+.compose-select > button.compose-icon-btn.on {
+  color: var(--blue);
+  background: rgba(108, 140, 255, 0.1);
+}
+.compose-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.compose-icon-btn svg {
+  display: block;
+}
+/* 右组的菜单要靠右对齐，否则贴着屏幕右侧的按钮会把菜单顶出面板 */
+.compose-select.align-right .compose-menu {
+  left: auto;
+  right: 0;
+}
 .compose-select {
   position: relative;
 }
@@ -1770,12 +1812,16 @@ body.panel-collapsed .panel {
   align-items: center;
   gap: 8px;
   width: 100%;
+  /* 固定行高：菜单里不再有 ✓ 这种"有的行有、有的行没有"的元素，
+     所有行等高，高光（.active）才不会看起来错位 */
+  min-height: 30px;
   padding: 6px 8px;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: var(--fg-2);
   font-size: 12px;
+  line-height: 1.4;
   text-align: left;
   cursor: pointer;
 }
@@ -1783,12 +1829,13 @@ body.panel-collapsed .panel {
   background: var(--bg-hover);
   color: var(--fg);
 }
+/* 当前选中项：整行淡蓝底 + 蓝字。**这是唯一的选中标记**（原来的 ✓ 已经删掉） */
 .compose-menu button.active {
   color: var(--blue);
+  background: rgba(108, 140, 255, 0.12);
 }
-.compose-menu .cm-check {
-  width: 12px;
-  color: var(--blue);
+.compose-menu button.active:hover {
+  background: rgba(108, 140, 255, 0.18);
 }
 .compose-menu .cm-hint {
   padding: 4px 8px 6px;

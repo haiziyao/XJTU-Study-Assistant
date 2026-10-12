@@ -1,0 +1,97 @@
+/* 「设置 → 统一身份认证」卡片的样式。
+   外壳已经把内容包在 .card / .card-title / .card-body 里，这里只补卡片内部的排布。 */
+
+.auth-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.auth-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--line, #2a2f3a);
+}
+.auth-badge.is-ok { border-color: #3fa96b; color: #6fd39a; }
+.auth-badge.is-off { border-color: #8a8f98; color: #a9aeb6; }
+
+.auth-user { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.auth-count { font-size: 12px; color: var(--muted, #8a8f98); }
+.auth-summary .ghost-btn { margin-left: auto; }
+
+/* ---------------------------------------------------------------- 站点列表 */
+
+.auth-sites {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.auth-site {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 8px;
+  background: var(--input-bg, #14171d);
+  flex-wrap: wrap;
+}
+
+/* 状态圆点：不依赖颜色也能看懂（旁边永远有文字说明） */
+.auth-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: #8a8f98;
+}
+.auth-dot.is-ok { background: #3fa96b; }
+.auth-dot.is-off { background: #8a8f98; }
+
+.auth-site-name { font-size: 13px; font-weight: 600; }
+.auth-site-state {
+  font-size: 12px;
+  color: var(--muted, #8a8f98);
+  overflow-wrap: anywhere;
+}
+.auth-site .ghost-btn { margin-left: auto; }
+
+/* ---------------------------------------------------------------- 表单 */
+
+.auth-form { display: flex; flex-direction: column; gap: 10px; }
+.auth-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--input-bg, #14171d);
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 8px;
+  color: inherit;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.auth-captcha { display: flex; align-items: center; gap: 10px; }
+.auth-captcha-img {
+  height: 34px;
+  border-radius: 6px;
+  border: 1px solid var(--line, #2a2f3a);
+  cursor: pointer;
+  background: #fff;
+}
+
+.auth-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.auth-note {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted, #8a8f98);
+}
+
+.ghost-btn.small { padding: 4px 9px; font-size: 12px; }

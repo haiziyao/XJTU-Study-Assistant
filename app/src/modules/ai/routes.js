@@ -94,6 +94,9 @@ export function registerAiRoutes(router, { ai, files, apiPrefix }) {
       // 这里**不能**兜成 'none'，否则"没传"会变成"关掉思考"，和官方语义相反。
       thinking: typeof body?.thinking === 'string' ? body.thinking : undefined,
       permission: typeof body?.permission === 'string' ? body.permission : 'manual',
+      // 联网搜索：off / web（校外网）/ campus（校内网）。目前只是状态位，
+      // 服务层会把它写进提示词，让模型**如实说明检索还没接入**，而不是编造搜到的内容。
+      search: typeof body?.search === 'string' ? body.search : 'off',
     });
   });
 }

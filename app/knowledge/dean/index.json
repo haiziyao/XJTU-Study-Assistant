@@ -1,0 +1,1345 @@
+{
+  "source": "dean.xjtu.edu.cn",
+  "generator": "scripts/crawl-dean.js",
+  "generatedAt": "2026-10-12T03:35:35.783Z",
+  "counts": {
+    "categories": 18,
+    "documents": 148,
+    "chars": 115329
+  },
+  "categories": [
+    {
+      "slug": "xssw-xjgl",
+      "label": "学生事务 / 学籍管理",
+      "listingUrl": "https://dean.xjtu.edu.cn/xssw/xjgl.htm",
+      "count": 8,
+      "items": [
+        {
+          "title": "学生转专业流程",
+          "url": "https://dean.xjtu.edu.cn/info/1022/4751.htm",
+          "path": "knowledge/dean/xssw-xjgl/01-学生转专业流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 104,
+          "sha256": "caafcea60a22961c"
+        },
+        {
+          "title": "学生退学流程",
+          "url": "https://dean.xjtu.edu.cn/info/1022/4768.htm",
+          "path": "knowledge/dean/xssw-xjgl/02-学生退学流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 200,
+          "sha256": "30a637739de40931"
+        },
+        {
+          "title": "学生学籍（转学手续）管理工作流程",
+          "url": "https://dean.xjtu.edu.cn/info/1022/4776.htm",
+          "path": "knowledge/dean/xssw-xjgl/03-学生学籍（转学手续）管理工作流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 113,
+          "sha256": "7e9d856f9a80e7c8"
+        },
+        {
+          "title": "学生保留学籍流程",
+          "url": "https://dean.xjtu.edu.cn/info/1022/4781.htm",
+          "path": "knowledge/dean/xssw-xjgl/04-学生保留学籍流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 105,
+          "sha256": "df43d919bad524b8"
+        },
+        {
+          "title": "学生休学流程",
+          "url": "https://dean.xjtu.edu.cn/info/1022/4766.htm",
+          "path": "knowledge/dean/xssw-xjgl/05-学生休学流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 103,
+          "sha256": "6998ab5403bfc7bf"
+        },
+        {
+          "title": "学生复学流程",
+          "url": "https://dean.xjtu.edu.cn/info/1022/4782.htm",
+          "path": "knowledge/dean/xssw-xjgl/06-学生复学流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 203,
+          "sha256": "45cf63a52ed155ff"
+        },
+        {
+          "title": "学生取消学籍流程",
+          "url": "https://dean.xjtu.edu.cn/info/1022/4756.htm",
+          "path": "knowledge/dean/xssw-xjgl/07-学生取消学籍流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 105,
+          "sha256": "16838a24333bd893"
+        },
+        {
+          "title": "学生专业选择工作流程",
+          "url": "https://dean.xjtu.edu.cn/info/1022/4755.htm",
+          "path": "knowledge/dean/xssw-xjgl/08-学生专业选择工作流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 107,
+          "sha256": "abd3aad5cf451e79"
+        }
+      ]
+    },
+    {
+      "slug": "xssw-kcks",
+      "label": "学生事务 / 课程考试",
+      "listingUrl": "https://dean.xjtu.edu.cn/xssw/kcks.htm",
+      "count": 7,
+      "items": [
+        {
+          "title": "学生课程补考流程",
+          "url": "https://dean.xjtu.edu.cn/info/1023/4759.htm",
+          "path": "knowledge/dean/xssw-kcks/01-学生课程补考流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 105,
+          "sha256": "c4c5cd6c250be478"
+        },
+        {
+          "title": "学生自修课程申请流程",
+          "url": "https://dean.xjtu.edu.cn/info/1023/4752.htm",
+          "path": "knowledge/dean/xssw-kcks/02-学生自修课程申请流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 107,
+          "sha256": "473505b199e6acf4"
+        },
+        {
+          "title": "学生课程缓考申请流程",
+          "url": "https://dean.xjtu.edu.cn/info/1023/4769.htm",
+          "path": "knowledge/dean/xssw-kcks/03-学生课程缓考申请流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 107,
+          "sha256": "605ea74e131092e9"
+        },
+        {
+          "title": "大学外语四、六级考试成绩证明补办流程及注意事项",
+          "url": "https://dean.xjtu.edu.cn/info/1023/4786.htm",
+          "path": "knowledge/dean/xssw-kcks/04-大学外语四、六级考试成绩证明补办流程及注意事项.md",
+          "publishedAt": "2013-11-26",
+          "chars": 201,
+          "sha256": "ac30ea3875a30916"
+        },
+        {
+          "title": "少年班学生申请免修课程流程",
+          "url": "https://dean.xjtu.edu.cn/info/1023/4760.htm",
+          "path": "knowledge/dean/xssw-kcks/05-少年班学生申请免修课程流程.md",
+          "publishedAt": "2013-11-25",
+          "chars": 146,
+          "sha256": "dfd82cc17005a2d4"
+        },
+        {
+          "title": "重修流程",
+          "url": "https://dean.xjtu.edu.cn/info/1023/4787.htm",
+          "path": "knowledge/dean/xssw-kcks/06-重修流程.md",
+          "publishedAt": "2013-11-20",
+          "chars": 291,
+          "sha256": "b0a84679678af097"
+        },
+        {
+          "title": "申请课程缓修工程流程",
+          "url": "https://dean.xjtu.edu.cn/info/1023/4772.htm",
+          "path": "knowledge/dean/xssw-kcks/07-申请课程缓修工程流程.md",
+          "publishedAt": "2009-12-24",
+          "chars": 113,
+          "sha256": "c3876430bed99e60"
+        }
+      ]
+    },
+    {
+      "slug": "xssw-byxw",
+      "label": "学生事务 / 毕业学位",
+      "listingUrl": "https://dean.xjtu.edu.cn/xssw/byxw.htm",
+      "count": 9,
+      "items": [
+        {
+          "title": "学业指导手册（2025版）",
+          "url": "https://dean.xjtu.edu.cn/info/1024/9246.htm",
+          "path": "knowledge/dean/xssw-byxw/01-学业指导手册（2025版）.md",
+          "publishedAt": "2025-07-30",
+          "chars": 635,
+          "sha256": "d6222de49d834bb1"
+        },
+        {
+          "title": "本科生电子成绩单和证明业务操作手册",
+          "url": "https://dean.xjtu.edu.cn/info/1024/7881.htm",
+          "path": "knowledge/dean/xssw-byxw/02-本科生电子成绩单和证明业务操作手册.md",
+          "publishedAt": "2023-12-26",
+          "chars": 669,
+          "sha256": "267cc4ebd4244565"
+        },
+        {
+          "title": "本科中英文成绩单、在读证明、学历学位证明办理须知(暂行)",
+          "url": "https://dean.xjtu.edu.cn/info/1024/7871.htm",
+          "path": "knowledge/dean/xssw-byxw/03-本科中英文成绩单、在读证明、学历学位证明办理须知(暂行).md",
+          "publishedAt": "2023-12-22",
+          "chars": 2411,
+          "sha256": "b8cc688d5bb6dd2d"
+        },
+        {
+          "title": "学信网学历学位认证流程",
+          "url": "https://dean.xjtu.edu.cn/info/1024/4765.htm",
+          "path": "knowledge/dean/xssw-byxw/04-学信网学历学位认证流程.md",
+          "publishedAt": "2023-07-05",
+          "chars": 1284,
+          "sha256": "9b0a270d3071a11b"
+        },
+        {
+          "title": "结业证换毕业证申请流程",
+          "url": "https://dean.xjtu.edu.cn/info/1024/4771.htm",
+          "path": "knowledge/dean/xssw-byxw/05-结业证换毕业证申请流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 191,
+          "sha256": "e94fc3e2ffee8f82"
+        },
+        {
+          "title": "本科中英文成绩单、在读证明、学历学位证明办理流程",
+          "url": "https://dean.xjtu.edu.cn/info/1024/4767.htm",
+          "path": "knowledge/dean/xssw-byxw/06-本科中英文成绩单、在读证明、学历学位证明办理流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 121,
+          "sha256": "77981c8a6941ea9f"
+        },
+        {
+          "title": "学生在读证明申请流程",
+          "url": "https://dean.xjtu.edu.cn/info/1024/4785.htm",
+          "path": "knowledge/dean/xssw-byxw/07-学生在读证明申请流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 107,
+          "sha256": "d98ea9f6d0a28609"
+        },
+        {
+          "title": "毕业生学历信息勘误流程",
+          "url": "https://dean.xjtu.edu.cn/info/1024/4783.htm",
+          "path": "knowledge/dean/xssw-byxw/08-毕业生学历信息勘误流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 927,
+          "sha256": "19de62b26f956e30"
+        },
+        {
+          "title": "毕业证明书、学位证明书补办流程",
+          "url": "https://dean.xjtu.edu.cn/info/1024/4777.htm",
+          "path": "knowledge/dean/xssw-byxw/09-毕业证明书、学位证明书补办流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 211,
+          "sha256": "028b03c4b766ce82"
+        }
+      ]
+    },
+    {
+      "slug": "xssw-jljh",
+      "label": "学生事务 / 交流交换",
+      "listingUrl": "https://dean.xjtu.edu.cn/xssw/jljh.htm",
+      "count": 8,
+      "items": [
+        {
+          "title": "钱学森学院各类试验班学生出国（境）交流项目选拔及资助流程",
+          "url": "https://dean.xjtu.edu.cn/info/1025/4775.htm",
+          "path": "knowledge/dean/xssw-jljh/01-钱学森学院各类试验班学生出国（境）交流项目选拔及资助流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 125,
+          "sha256": "a342c60c700dd4a7"
+        },
+        {
+          "title": "国内校际交流生选拔流程",
+          "url": "https://dean.xjtu.edu.cn/info/1025/4774.htm",
+          "path": "knowledge/dean/xssw-jljh/02-国内校际交流生选拔流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 108,
+          "sha256": "e7a4eb7452aec52a"
+        },
+        {
+          "title": "本科生受资助赴国外交流学习考核流程",
+          "url": "https://dean.xjtu.edu.cn/info/1025/4789.htm",
+          "path": "knowledge/dean/xssw-jljh/03-本科生受资助赴国外交流学习考核流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 114,
+          "sha256": "76aa1c7d6cfbf90a"
+        },
+        {
+          "title": "本科生赴国（境）外长期交流项目选拔流程",
+          "url": "https://dean.xjtu.edu.cn/info/1025/4784.htm",
+          "path": "knowledge/dean/xssw-jljh/04-本科生赴国（境）外长期交流项目选拔流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 116,
+          "sha256": "77553da472ce9f19"
+        },
+        {
+          "title": "本科生赴国（境）外交流因公出访审批流程",
+          "url": "https://dean.xjtu.edu.cn/info/1025/4773.htm",
+          "path": "knowledge/dean/xssw-jljh/05-本科生赴国（境）外交流因公出访审批流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 116,
+          "sha256": "96341c8c723b4d98"
+        },
+        {
+          "title": "工科试验班（钱学森班）学生赴国外交流学习资助、借款、报销流程",
+          "url": "https://dean.xjtu.edu.cn/info/1025/4762.htm",
+          "path": "knowledge/dean/xssw-jljh/06-工科试验班（钱学森班）学生赴国外交流学习资助、借款、报销流程.md",
+          "publishedAt": "2017-05-15",
+          "chars": 127,
+          "sha256": "0cb2c1cab920d8ba"
+        },
+        {
+          "title": "本科生赴国外交流学习资助、借款及报销流程",
+          "url": "https://dean.xjtu.edu.cn/info/1025/4778.htm",
+          "path": "knowledge/dean/xssw-jljh/07-本科生赴国外交流学习资助、借款及报销流程.md",
+          "publishedAt": "2014-11-28",
+          "chars": 364,
+          "sha256": "8d23384cb4cd0404"
+        },
+        {
+          "title": "国家留学基金委（CSC）优本项目申报及候选人选拔、派出流程",
+          "url": "https://dean.xjtu.edu.cn/info/1025/4753.htm",
+          "path": "knowledge/dean/xssw-jljh/08-国家留学基金委（CSC）优本项目申报及候选人选拔、派出流程.md",
+          "publishedAt": "2014-11-28",
+          "chars": 133,
+          "sha256": "6457df4246daf5c5"
+        }
+      ]
+    },
+    {
+      "slug": "xssw-zhyw",
+      "label": "学生事务 / 综合业务",
+      "listingUrl": "https://dean.xjtu.edu.cn/xssw/zhyw.htm",
+      "count": 10,
+      "items": [
+        {
+          "title": "关于举行无界学堂-西交•通全球暑期学校（XJTISS）项目申报的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1021/10212.htm",
+          "path": "knowledge/dean/xssw-zhyw/01-关于举行无界学堂-西交•通全球暑期学校（XJTISS）项目申报的通知.md",
+          "publishedAt": "2026-05-22",
+          "chars": 1193,
+          "sha256": "e9c8924cf14b7981"
+        },
+        {
+          "title": "第五届“建行金融科技菁英班”辅修专业招生选拔通知",
+          "url": "https://dean.xjtu.edu.cn/info/1021/7955.htm",
+          "path": "knowledge/dean/xssw-zhyw/02-第五届“建行金融科技菁英班”辅修专业招生选拔通知.md",
+          "publishedAt": "2024-02-28",
+          "chars": 3072,
+          "sha256": "7700ab74debc01d6"
+        },
+        {
+          "title": "“我最喜爱的老师”评选流程",
+          "url": "https://dean.xjtu.edu.cn/info/1021/4764.htm",
+          "path": "knowledge/dean/xssw-zhyw/03-“我最喜爱的老师”评选流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 110,
+          "sha256": "4b5230b7b2339cdd"
+        },
+        {
+          "title": "教务处用印流程",
+          "url": "https://dean.xjtu.edu.cn/info/1021/4770.htm",
+          "path": "knowledge/dean/xssw-zhyw/04-教务处用印流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 104,
+          "sha256": "8f1618ce49791bdf"
+        },
+        {
+          "title": "学生延长学习时间管理工作流程",
+          "url": "https://dean.xjtu.edu.cn/info/1021/4758.htm",
+          "path": "knowledge/dean/xssw-zhyw/05-学生延长学习时间管理工作流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 111,
+          "sha256": "b09451ee20f73f24"
+        },
+        {
+          "title": "教室借用申请流程",
+          "url": "https://dean.xjtu.edu.cn/info/1021/4788.htm",
+          "path": "knowledge/dean/xssw-zhyw/06-教室借用申请流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 105,
+          "sha256": "a5fc897a371ef444"
+        },
+        {
+          "title": "少年班专业选择及试验班选拔流程",
+          "url": "https://dean.xjtu.edu.cn/info/1021/4757.htm",
+          "path": "knowledge/dean/xssw-zhyw/07-少年班专业选择及试验班选拔流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 112,
+          "sha256": "89fabbc45213a9dd"
+        },
+        {
+          "title": "学生证和火车票优惠卡的办理",
+          "url": "https://dean.xjtu.edu.cn/info/1021/4779.htm",
+          "path": "knowledge/dean/xssw-zhyw/08-学生证和火车票优惠卡的办理.md",
+          "publishedAt": "2023-03-02",
+          "chars": 207,
+          "sha256": "17839edab03e4469"
+        },
+        {
+          "title": "学生证补办流程",
+          "url": "https://dean.xjtu.edu.cn/info/1021/4780.htm",
+          "path": "knowledge/dean/xssw-zhyw/09-学生证补办流程.md",
+          "publishedAt": "2019-05-08",
+          "chars": 104,
+          "sha256": "77127e013449dacc"
+        },
+        {
+          "title": "基础学科拔尖学生培养理科试验班新生选拔流程",
+          "url": "https://dean.xjtu.edu.cn/info/1021/4761.htm",
+          "path": "knowledge/dean/xssw-zhyw/10-基础学科拔尖学生培养理科试验班新生选拔流程.md",
+          "publishedAt": "2013-11-25",
+          "chars": 130,
+          "sha256": "9ae15ab3de7c771f"
+        }
+      ]
+    },
+    {
+      "slug": "gzzd-jwgl",
+      "label": "规章制度 / 教务管理",
+      "listingUrl": "https://dean.xjtu.edu.cn/gzzd/jwgl.htm",
+      "count": 19,
+      "items": [
+        {
+          "title": "西安交通大学推荐优秀本科毕业生免试攻读研究生综合成绩评价指导意见",
+          "url": "https://dean.xjtu.edu.cn/content.jsp?urltype=news.NewsContentUrl&wbtreeid=1033&wbnewsid=9389",
+          "path": "knowledge/dean/gzzd-jwgl/01-西安交通大学推荐优秀本科毕业生免试攻读研究生综合成绩评价指导意见.md",
+          "publishedAt": "2025-11-24",
+          "chars": 997,
+          "sha256": "26feb65ce795aaea"
+        },
+        {
+          "title": "西安交通大学推荐优秀本科毕业生免试攻读研究生工作管理办法",
+          "url": "https://dean.xjtu.edu.cn/content.jsp?urltype=news.NewsContentUrl&wbtreeid=1033&wbnewsid=9387",
+          "path": "knowledge/dean/gzzd-jwgl/02-西安交通大学推荐优秀本科毕业生免试攻读研究生工作管理办法.md",
+          "publishedAt": "2025-11-24",
+          "chars": 2802,
+          "sha256": "92e3f96b8a30a708"
+        },
+        {
+          "title": "西安交通大学本科课程考核管理实施细则",
+          "url": "https://dean.xjtu.edu.cn/info/1033/9008.htm",
+          "path": "knowledge/dean/gzzd-jwgl/03-西安交通大学本科课程考核管理实施细则.md",
+          "publishedAt": "2025-05-13",
+          "chars": 4972,
+          "sha256": "205f0cc0a3294ea6"
+        },
+        {
+          "title": "西安交通大学本科生转专业实施细则",
+          "url": "https://dean.xjtu.edu.cn/info/1033/8963.htm",
+          "path": "knowledge/dean/gzzd-jwgl/04-西安交通大学本科生转专业实施细则.md",
+          "publishedAt": "2025-04-14",
+          "chars": 2141,
+          "sha256": "2e73d5de795a59a5"
+        },
+        {
+          "title": "西安交通大学学士学位授权专业自主审核办法（试行）",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1145.htm",
+          "path": "knowledge/dean/gzzd-jwgl/05-西安交通大学学士学位授权专业自主审核办法（试行）.md",
+          "publishedAt": "2023-04-24",
+          "chars": 1354,
+          "sha256": "3003e1631f12216d"
+        },
+        {
+          "title": "西安交通大学本科生学业预警与学籍处理实施细则（试行）",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1130.htm",
+          "path": "knowledge/dean/gzzd-jwgl/06-西安交通大学本科生学业预警与学籍处理实施细则（试行）.md",
+          "publishedAt": "2022-11-13",
+          "chars": 2199,
+          "sha256": "ad7f6af3c293f74c"
+        },
+        {
+          "title": "西安交通大学加强新时代美育工作实施方案",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1156.htm",
+          "path": "knowledge/dean/gzzd-jwgl/07-西安交通大学加强新时代美育工作实施方案.md",
+          "publishedAt": "2022-10-11",
+          "chars": 253,
+          "sha256": "e8574f9a0c5c2c0f"
+        },
+        {
+          "title": "西安交通大学基础通识类课程建设方案",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1148.htm",
+          "path": "knowledge/dean/gzzd-jwgl/08-西安交通大学基础通识类课程建设方案.md",
+          "publishedAt": "2022-10-11",
+          "chars": 237,
+          "sha256": "1987910079d03526"
+        },
+        {
+          "title": "西安交通大学全面深化课程思政建设实施方案",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1147.htm",
+          "path": "knowledge/dean/gzzd-jwgl/09-西安交通大学全面深化课程思政建设实施方案.md",
+          "publishedAt": "2022-10-11",
+          "chars": 257,
+          "sha256": "1de2b9638e50c56d"
+        },
+        {
+          "title": "西安交通大学本科生导师管理办法",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1133.htm",
+          "path": "knowledge/dean/gzzd-jwgl/10-西安交通大学本科生导师管理办法.md",
+          "publishedAt": "2022-10-11",
+          "chars": 239,
+          "sha256": "84c80371cec75f7e"
+        },
+        {
+          "title": "西安交通大学本科生专业选择与转专业管理办法",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1140.htm",
+          "path": "knowledge/dean/gzzd-jwgl/11-西安交通大学本科生专业选择与转专业管理办法.md",
+          "publishedAt": "2022-10-11",
+          "chars": 2250,
+          "sha256": "f330dc94b4e8cffd"
+        },
+        {
+          "title": "西安交通大学本科生导师工作实施细则",
+          "url": "https://dean.xjtu.edu.cn/info/1033/10488.htm",
+          "path": "knowledge/dean/gzzd-jwgl/12-西安交通大学本科生导师工作实施细则.md",
+          "publishedAt": "2022-09-28",
+          "chars": 206,
+          "sha256": "fdb1d3d6351db290"
+        },
+        {
+          "title": "西安交通大学本科生学籍管理与学位授予规定（2017）",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1149.htm",
+          "path": "knowledge/dean/gzzd-jwgl/13-西安交通大学本科生学籍管理与学位授予规定（2017）.md",
+          "publishedAt": "2017-08-18",
+          "chars": 8243,
+          "sha256": "4692533393c0c113"
+        },
+        {
+          "title": "西安交通大学2015年招收推荐免试研究生章程",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1152.htm",
+          "path": "knowledge/dean/gzzd-jwgl/14-西安交通大学2015年招收推荐免试研究生章程.md",
+          "publishedAt": "2014-09-16",
+          "chars": 2082,
+          "sha256": "3f26f13609ebc313"
+        },
+        {
+          "title": "西安交通大学校徽、学生证管理办法",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1151.htm",
+          "path": "knowledge/dean/gzzd-jwgl/15-西安交通大学校徽、学生证管理办法.md",
+          "publishedAt": "2010-09-30",
+          "chars": 823,
+          "sha256": "8d50cc94c988573d"
+        },
+        {
+          "title": "普通高等学校学生管理规定（全文）",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1146.htm",
+          "path": "knowledge/dean/gzzd-jwgl/16-普通高等学校学生管理规定（全文）.md",
+          "publishedAt": "2010-09-30",
+          "chars": 6386,
+          "sha256": "7d44f5569bb83812"
+        },
+        {
+          "title": "西安交通大学课表管理规定",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1143.htm",
+          "path": "knowledge/dean/gzzd-jwgl/17-西安交通大学课表管理规定.md",
+          "publishedAt": "2010-09-30",
+          "chars": 817,
+          "sha256": "2d3a8ff150b7a377"
+        },
+        {
+          "title": "本科生延长学制的申请及学籍管理办法",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1136.htm",
+          "path": "knowledge/dean/gzzd-jwgl/18-本科生延长学制的申请及学籍管理办法.md",
+          "publishedAt": "2010-09-30",
+          "chars": 702,
+          "sha256": "452897ebd5cff79b"
+        },
+        {
+          "title": "西安交通大学课堂规则",
+          "url": "https://dean.xjtu.edu.cn/info/1033/1135.htm",
+          "path": "knowledge/dean/gzzd-jwgl/19-西安交通大学课堂规则.md",
+          "publishedAt": "2010-09-30",
+          "chars": 466,
+          "sha256": "1c38d02f130897b6"
+        }
+      ]
+    },
+    {
+      "slug": "gzzd-jxyj",
+      "label": "规章制度 / 教学研究",
+      "listingUrl": "https://dean.xjtu.edu.cn/gzzd/jxyj.htm",
+      "count": 12,
+      "items": [
+        {
+          "title": "西安交通大学本科课程教学质量保障工作规范",
+          "url": "https://dean.xjtu.edu.cn/info/1034/10482.htm",
+          "path": "knowledge/dean/gzzd-jxyj/01-西安交通大学本科课程教学质量保障工作规范.md",
+          "publishedAt": "2021-09-28",
+          "chars": 223,
+          "sha256": "b1b430ae45808907"
+        },
+        {
+          "title": "西安交通大学教材建设与选用管理办法",
+          "url": "https://dean.xjtu.edu.cn/info/1034/1158.htm",
+          "path": "knowledge/dean/gzzd-jxyj/02-西安交通大学教材建设与选用管理办法.md",
+          "publishedAt": "2020-09-16",
+          "chars": 190,
+          "sha256": "5ce7e73c3b71f693"
+        },
+        {
+          "title": "西安交通大学教学事故认定与处理办法",
+          "url": "https://dean.xjtu.edu.cn/info/1034/1169.htm",
+          "path": "knowledge/dean/gzzd-jxyj/03-西安交通大学教学事故认定与处理办法.md",
+          "publishedAt": "2020-07-07",
+          "chars": 185,
+          "sha256": "a1031a480c781ce2",
+          "kind": "attachments"
+        },
+        {
+          "title": "西安交通大学基础通识类课程建设管理办法",
+          "url": "https://dean.xjtu.edu.cn/info/1034/1160.htm",
+          "path": "knowledge/dean/gzzd-jxyj/04-西安交通大学基础通识类课程建设管理办法.md",
+          "publishedAt": "2017-04-20",
+          "chars": 195,
+          "sha256": "b046a977b0b21336"
+        },
+        {
+          "title": "西安交通大学新任教师授课资格认定办法",
+          "url": "https://dean.xjtu.edu.cn/info/1034/1159.htm",
+          "path": "knowledge/dean/gzzd-jxyj/05-西安交通大学新任教师授课资格认定办法.md",
+          "publishedAt": "2016-11-30",
+          "chars": 363,
+          "sha256": "a4c57157f3d45b82"
+        },
+        {
+          "title": "关于公布《西安交通大学课程责任教授聘任及管理办法》的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1034/1163.htm",
+          "path": "knowledge/dean/gzzd-jxyj/06-关于公布《西安交通大学课程责任教授聘任及管理办法》的通知.md",
+          "publishedAt": "2014-10-31",
+          "chars": 1658,
+          "sha256": "1741a2a19e00691f"
+        },
+        {
+          "title": "关于公布《西安交通大学本科教学改革研究项目专项经费管理暂行办法》的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1034/1161.htm",
+          "path": "knowledge/dean/gzzd-jxyj/07-关于公布《西安交通大学本科教学改革研究项目专项经费管理暂行办法》的通知.md",
+          "publishedAt": "2014-07-17",
+          "chars": 1571,
+          "sha256": "979d9c47184729f0"
+        },
+        {
+          "title": "西安交通大学教育教学改革研究项目管理办法",
+          "url": "https://dean.xjtu.edu.cn/info/1034/1164.htm",
+          "path": "knowledge/dean/gzzd-jxyj/08-西安交通大学教育教学改革研究项目管理办法.md",
+          "publishedAt": "2013-12-27",
+          "chars": 1768,
+          "sha256": "bf9512c7560a5c99"
+        },
+        {
+          "title": "西安交通大学通识类核心课选课及学分管理暂行办法",
+          "url": "https://dean.xjtu.edu.cn/info/1034/1166.htm",
+          "path": "knowledge/dean/gzzd-jxyj/09-西安交通大学通识类核心课选课及学分管理暂行办法.md",
+          "publishedAt": "2013-03-13",
+          "chars": 483,
+          "sha256": "9728121722f48bf0"
+        },
+        {
+          "title": "西安交通大学辅修专业及辅修双学位管理办法",
+          "url": "https://dean.xjtu.edu.cn/info/1034/1167.htm",
+          "path": "knowledge/dean/gzzd-jxyj/10-西安交通大学辅修专业及辅修双学位管理办法.md",
+          "publishedAt": "2010-11-30",
+          "chars": 2171,
+          "sha256": "2a467809c1af8726"
+        },
+        {
+          "title": "西安交通大学教育教学改革研究项目管理办法",
+          "url": "https://dean.xjtu.edu.cn/info/1034/1162.htm",
+          "path": "knowledge/dean/gzzd-jxyj/11-西安交通大学教育教学改革研究项目管理办法.md",
+          "publishedAt": "2010-09-30",
+          "chars": 1681,
+          "sha256": "072ae3bdb2456f24"
+        },
+        {
+          "title": "西安交通大学本科专业设置暂行办法",
+          "url": "https://dean.xjtu.edu.cn/info/1034/1168.htm",
+          "path": "knowledge/dean/gzzd-jxyj/12-西安交通大学本科专业设置暂行办法.md",
+          "publishedAt": "2005-12-06",
+          "chars": 2406,
+          "sha256": "5b979df0565ee8a1"
+        }
+      ]
+    },
+    {
+      "slug": "gzzd-hzjl",
+      "label": "规章制度 / 合作交流",
+      "listingUrl": "https://dean.xjtu.edu.cn/gzzd/hzjl.htm",
+      "count": 5,
+      "items": [
+        {
+          "title": "西安交通大学关于加快提升本科生国际交流能力培养的实施意见",
+          "url": "https://dean.xjtu.edu.cn/info/1035/10487.htm",
+          "path": "knowledge/dean/gzzd-hzjl/01-西安交通大学关于加快提升本科生国际交流能力培养的实施意见.md",
+          "publishedAt": "2024-09-28",
+          "chars": 239,
+          "sha256": "cfdac8b5ae4608f4"
+        },
+        {
+          "title": "西安交通大学本科港澳台学生教学管理实施细则",
+          "url": "https://dean.xjtu.edu.cn/info/1035/10485.htm",
+          "path": "knowledge/dean/gzzd-hzjl/02-西安交通大学本科港澳台学生教学管理实施细则.md",
+          "publishedAt": "2022-09-28",
+          "chars": 219,
+          "sha256": "ba9d42737f840b53"
+        },
+        {
+          "title": "西安交通大学接收本科交流生管理办法",
+          "url": "https://dean.xjtu.edu.cn/info/1035/10486.htm",
+          "path": "knowledge/dean/gzzd-hzjl/03-西安交通大学接收本科交流生管理办法.md",
+          "publishedAt": "2022-09-28",
+          "chars": 206,
+          "sha256": "568e0fd1b5b8f0ae"
+        },
+        {
+          "title": "西安交通大学资助本科生赴国（境）外交流学习专项资金管理办法",
+          "url": "https://dean.xjtu.edu.cn/info/1035/10484.htm",
+          "path": "knowledge/dean/gzzd-hzjl/04-西安交通大学资助本科生赴国（境）外交流学习专项资金管理办法.md",
+          "publishedAt": "2019-09-28",
+          "chars": 243,
+          "sha256": "43de41f4fed69335"
+        },
+        {
+          "title": "西安交通大学本科生赴境内外交流学习管理办法（2019年1月）",
+          "url": "https://dean.xjtu.edu.cn/info/1035/1172.htm",
+          "path": "knowledge/dean/gzzd-hzjl/05-西安交通大学本科生赴境内外交流学习管理办法（2019年1月）.md",
+          "publishedAt": "2019-03-22",
+          "chars": 3417,
+          "sha256": "d26f6c0968d03eb5"
+        }
+      ]
+    },
+    {
+      "slug": "gzzd-zhsw",
+      "label": "规章制度 / 综合事务",
+      "listingUrl": "https://dean.xjtu.edu.cn/gzzd/zhsw.htm",
+      "count": 9,
+      "items": [
+        {
+          "title": "教师效率手册-2026秋",
+          "url": "https://dean.xjtu.edu.cn/info/1036/10498.htm",
+          "path": "knowledge/dean/gzzd-zhsw/01-教师效率手册-2026秋.md",
+          "publishedAt": "2026-10-08",
+          "chars": 258,
+          "sha256": "5f5ff7d174b585ad"
+        },
+        {
+          "title": "教师效率手册（2025版）",
+          "url": "https://dean.xjtu.edu.cn/info/1036/9230.htm",
+          "path": "knowledge/dean/gzzd-zhsw/02-教师效率手册（2025版）.md",
+          "publishedAt": "2025-07-23",
+          "chars": 252,
+          "sha256": "a69a5c834baa0a04"
+        },
+        {
+          "title": "教师效率手册（2024版）",
+          "url": "https://dean.xjtu.edu.cn/info/1036/8377.htm",
+          "path": "knowledge/dean/gzzd-zhsw/03-教师效率手册（2024版）.md",
+          "publishedAt": "2024-09-13",
+          "chars": 260,
+          "sha256": "839b1732a3e7805d"
+        },
+        {
+          "title": "本科生学业指导手册（2024）",
+          "url": "https://dean.xjtu.edu.cn/info/1036/8352.htm",
+          "path": "knowledge/dean/gzzd-zhsw/04-本科生学业指导手册（2024）.md",
+          "publishedAt": "2024-08-21",
+          "chars": 214,
+          "sha256": "5583aac7647473f1"
+        },
+        {
+          "title": "西安交通大学课程调整申请表",
+          "url": "https://dean.xjtu.edu.cn/info/1036/7970.htm",
+          "path": "knowledge/dean/gzzd-zhsw/05-西安交通大学课程调整申请表.md",
+          "publishedAt": "2024-03-06",
+          "chars": 180,
+          "sha256": "6d9340ea984c76d9",
+          "kind": "attachments"
+        },
+        {
+          "title": "监考必读（2023版）",
+          "url": "https://dean.xjtu.edu.cn/info/1036/7922.htm",
+          "path": "knowledge/dean/gzzd-zhsw/06-监考必读（2023版）.md",
+          "publishedAt": "2024-01-10",
+          "chars": 252,
+          "sha256": "9efcc63e6147a30c"
+        },
+        {
+          "title": "西安交通大学新生请假申请表",
+          "url": "https://dean.xjtu.edu.cn/info/1036/1026.htm",
+          "path": "knowledge/dean/gzzd-zhsw/07-西安交通大学新生请假申请表.md",
+          "publishedAt": "2023-06-17",
+          "chars": 186,
+          "sha256": "d15bc129d042a862"
+        },
+        {
+          "title": "关于本科生实行电子考勤的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1036/1150.htm",
+          "path": "knowledge/dean/gzzd-zhsw/08-关于本科生实行电子考勤的通知.md",
+          "publishedAt": "2017-03-17",
+          "chars": 1828,
+          "sha256": "feafa92e842acab1"
+        },
+        {
+          "title": "西安交通大学本科生请假办法",
+          "url": "https://dean.xjtu.edu.cn/info/1036/1144.htm",
+          "path": "knowledge/dean/gzzd-zhsw/09-西安交通大学本科生请假办法.md",
+          "publishedAt": "2016-07-01",
+          "chars": 1007,
+          "sha256": "e6744148fa65ccfa"
+        }
+      ]
+    },
+    {
+      "slug": "jsjx-kcgl",
+      "label": "教学业务 / 课程管理",
+      "listingUrl": "https://dean.xjtu.edu.cn/jsjx/kcgl.htm",
+      "count": 10,
+      "items": [
+        {
+          "title": "关于面向全校征集“公益与慈善”通识实践课程的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1027/8695.htm",
+          "path": "knowledge/dean/jsjx-kcgl/01-关于面向全校征集“公益与慈善”通识实践课程的通知.md",
+          "publishedAt": "2025-02-27",
+          "chars": 1469,
+          "sha256": "2229470cabf0b367"
+        },
+        {
+          "title": "课程库管理流程",
+          "url": "https://dean.xjtu.edu.cn/info/1027/4793.htm",
+          "path": "knowledge/dean/jsjx-kcgl/02-课程库管理流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 104,
+          "sha256": "b1421f50246a583d"
+        },
+        {
+          "title": "课程停开流程",
+          "url": "https://dean.xjtu.edu.cn/info/1027/4802.htm",
+          "path": "knowledge/dean/jsjx-kcgl/03-课程停开流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 103,
+          "sha256": "d178920cfa061fc2"
+        },
+        {
+          "title": "课程调整流程",
+          "url": "https://dean.xjtu.edu.cn/info/1027/4804.htm",
+          "path": "knowledge/dean/jsjx-kcgl/04-课程调整流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 103,
+          "sha256": "fb7efe15b04673ea"
+        },
+        {
+          "title": "外聘、非在编教师开课流程",
+          "url": "https://dean.xjtu.edu.cn/info/1027/4803.htm",
+          "path": "knowledge/dean/jsjx-kcgl/05-外聘、非在编教师开课流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 109,
+          "sha256": "71763e4c7f46eb96"
+        },
+        {
+          "title": "网络教学平台开课申请流程",
+          "url": "https://dean.xjtu.edu.cn/info/1027/4799.htm",
+          "path": "knowledge/dean/jsjx-kcgl/06-网络教学平台开课申请流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 109,
+          "sha256": "64cf0dada0a10651"
+        },
+        {
+          "title": "新开课程审批流程",
+          "url": "https://dean.xjtu.edu.cn/info/1027/4796.htm",
+          "path": "knowledge/dean/jsjx-kcgl/07-新开课程审批流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 105,
+          "sha256": "b0daaf5935eb83f8"
+        },
+        {
+          "title": "课程成绩录入延期申请流程",
+          "url": "https://dean.xjtu.edu.cn/info/1027/4798.htm",
+          "path": "knowledge/dean/jsjx-kcgl/08-课程成绩录入延期申请流程.md",
+          "publishedAt": "2021-10-26",
+          "chars": 110,
+          "sha256": "ff6e1636976a6990"
+        },
+        {
+          "title": "课程成绩修正流程",
+          "url": "https://dean.xjtu.edu.cn/info/1027/4809.htm",
+          "path": "knowledge/dean/jsjx-kcgl/09-课程成绩修正流程.md",
+          "publishedAt": "2021-10-26",
+          "chars": 106,
+          "sha256": "b19c9402dc863bbc"
+        },
+        {
+          "title": "新增通识课程申报流程",
+          "url": "https://dean.xjtu.edu.cn/info/1027/4814.htm",
+          "path": "knowledge/dean/jsjx-kcgl/10-新增通识课程申报流程.md",
+          "publishedAt": "2021-10-26",
+          "chars": 107,
+          "sha256": "9712c6901bac75e1"
+        }
+      ]
+    },
+    {
+      "slug": "jsjx-jwgl",
+      "label": "教学业务 / 教务管理",
+      "listingUrl": "https://dean.xjtu.edu.cn/jsjx/jwgl.htm",
+      "count": 5,
+      "items": [
+        {
+          "title": "本科生期末试卷审核记录表",
+          "url": "https://dean.xjtu.edu.cn/info/1031/9410.htm",
+          "path": "knowledge/dean/jsjx-jwgl/01-本科生期末试卷审核记录表.md",
+          "publishedAt": "2025-12-04",
+          "chars": 184,
+          "sha256": "ccb2bae1485b2c80"
+        },
+        {
+          "title": "教室借用申请流程",
+          "url": "https://dean.xjtu.edu.cn/info/1031/4791.htm",
+          "path": "knowledge/dean/jsjx-jwgl/02-教室借用申请流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 105,
+          "sha256": "dd1e40821076a657"
+        },
+        {
+          "title": "教学信息系统授权流程",
+          "url": "https://dean.xjtu.edu.cn/info/1031/4812.htm",
+          "path": "knowledge/dean/jsjx-jwgl/03-教学信息系统授权流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 107,
+          "sha256": "0ab74bfb42c6b5b1"
+        },
+        {
+          "title": "本科生试题印刷流程",
+          "url": "https://dean.xjtu.edu.cn/info/1031/4790.htm",
+          "path": "knowledge/dean/jsjx-jwgl/04-本科生试题印刷流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 884,
+          "sha256": "cb76f434e6013314"
+        },
+        {
+          "title": "生产实习经费借款及报销工作流程",
+          "url": "https://dean.xjtu.edu.cn/info/1031/4806.htm",
+          "path": "knowledge/dean/jsjx-jwgl/05-生产实习经费借款及报销工作流程.md",
+          "publishedAt": "2013-10-24",
+          "chars": 493,
+          "sha256": "2761de98b0f2f58b"
+        }
+      ]
+    },
+    {
+      "slug": "jsjx-jxyw",
+      "label": "教学业务 / 教学业务",
+      "listingUrl": "https://dean.xjtu.edu.cn/jsjx/jxyw.htm",
+      "count": 9,
+      "items": [
+        {
+          "title": "实验教学基本信息统计工作流程图",
+          "url": "https://dean.xjtu.edu.cn/info/1028/7876.htm",
+          "path": "knowledge/dean/jsjx-jxyw/01-实验教学基本信息统计工作流程图.md",
+          "publishedAt": "2023-12-22",
+          "chars": 119,
+          "sha256": "9cc3e63f6ab0c091"
+        },
+        {
+          "title": "新教师授课资格认证办理流程",
+          "url": "https://dean.xjtu.edu.cn/info/1028/7875.htm",
+          "path": "knowledge/dean/jsjx-jxyw/02-新教师授课资格认证办理流程.md",
+          "publishedAt": "2023-12-22",
+          "chars": 117,
+          "sha256": "54aebdb30c28ec7f"
+        },
+        {
+          "title": "本科新专业申报流程",
+          "url": "https://dean.xjtu.edu.cn/info/1028/7873.htm",
+          "path": "knowledge/dean/jsjx-jxyw/03-本科新专业申报流程.md",
+          "publishedAt": "2023-12-22",
+          "chars": 113,
+          "sha256": "82931ce12a007a2a"
+        },
+        {
+          "title": "教学事故处理流程",
+          "url": "https://dean.xjtu.edu.cn/info/1028/7872.htm",
+          "path": "knowledge/dean/jsjx-jxyw/04-教学事故处理流程.md",
+          "publishedAt": "2023-12-22",
+          "chars": 112,
+          "sha256": "2848f2fc8067d503"
+        },
+        {
+          "title": "教学任务审批流程",
+          "url": "https://dean.xjtu.edu.cn/info/1028/4805.htm",
+          "path": "knowledge/dean/jsjx-jxyw/05-教学任务审批流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 105,
+          "sha256": "29f2eb40eecf1e73"
+        },
+        {
+          "title": "指导性教学计划审批流程",
+          "url": "https://dean.xjtu.edu.cn/info/1028/4813.htm",
+          "path": "knowledge/dean/jsjx-jxyw/06-指导性教学计划审批流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 108,
+          "sha256": "af598c0bbfb54a1e"
+        },
+        {
+          "title": "培养方案修订流程",
+          "url": "https://dean.xjtu.edu.cn/info/1028/4816.htm",
+          "path": "knowledge/dean/jsjx-jxyw/07-培养方案修订流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 105,
+          "sha256": "8ba43cb098bcc476"
+        },
+        {
+          "title": "教材选用工作流程",
+          "url": "https://dean.xjtu.edu.cn/info/1028/4795.htm",
+          "path": "knowledge/dean/jsjx-jxyw/08-教材选用工作流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 105,
+          "sha256": "c81b43c807465b4f"
+        },
+        {
+          "title": "教学改革相关项目管理流程",
+          "url": "https://dean.xjtu.edu.cn/info/1028/4792.htm",
+          "path": "knowledge/dean/jsjx-jxyw/09-教学改革相关项目管理流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 109,
+          "sha256": "5ea6f466a343ff2e"
+        }
+      ]
+    },
+    {
+      "slug": "jsjx-jxsb",
+      "label": "教学业务 / 奖项申报",
+      "listingUrl": "https://dean.xjtu.edu.cn/jsjx/jxsb.htm",
+      "count": 6,
+      "items": [
+        {
+          "title": "关于2023-2024学年西安交通大学优秀本科生导师评选结果的公示",
+          "url": "https://dean.xjtu.edu.cn/info/1029/8616.htm",
+          "path": "knowledge/dean/jsjx-jxsb/01-关于2023-2024学年西安交通大学优秀本科生导师评选结果的公示.md",
+          "publishedAt": "2025-01-09",
+          "chars": 527,
+          "sha256": "3906d666c3c0463c"
+        },
+        {
+          "title": "教学成果奖评选流程",
+          "url": "https://dean.xjtu.edu.cn/info/1029/4794.htm",
+          "path": "knowledge/dean/jsjx-jxsb/02-教学成果奖评选流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 106,
+          "sha256": "1aae7b7ca044bfe1"
+        },
+        {
+          "title": "“名课程”（校级金课）评选流程",
+          "url": "https://dean.xjtu.edu.cn/info/1029/4811.htm",
+          "path": "knowledge/dean/jsjx-jxsb/03-“名课程”（校级金课）评选流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 112,
+          "sha256": "e3b676700d01daaa"
+        },
+        {
+          "title": "国家级、省级一流课程遴选申报流程",
+          "url": "https://dean.xjtu.edu.cn/info/1029/4801.htm",
+          "path": "knowledge/dean/jsjx-jxsb/04-国家级、省级一流课程遴选申报流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 113,
+          "sha256": "cf3400a276a3b782"
+        },
+        {
+          "title": "教学名师申报遴选流程",
+          "url": "https://dean.xjtu.edu.cn/info/1029/4815.htm",
+          "path": "knowledge/dean/jsjx-jxsb/05-教学名师申报遴选流程.md",
+          "publishedAt": "2021-10-26",
+          "chars": 108,
+          "sha256": "f881666ff118bbca"
+        },
+        {
+          "title": "教学三大奖评选流程",
+          "url": "https://dean.xjtu.edu.cn/info/1029/4797.htm",
+          "path": "knowledge/dean/jsjx-jxsb/06-教学三大奖评选流程.md",
+          "publishedAt": "2021-10-26",
+          "chars": 106,
+          "sha256": "d27b6edbca7ad983"
+        }
+      ]
+    },
+    {
+      "slug": "jsjx-zhsw",
+      "label": "教学业务 / 综合事务",
+      "listingUrl": "https://dean.xjtu.edu.cn/jsjx/zhsw.htm",
+      "count": 3,
+      "items": [
+        {
+          "title": "校外接待流程",
+          "url": "https://dean.xjtu.edu.cn/info/1030/4810.htm",
+          "path": "knowledge/dean/jsjx-zhsw/01-校外接待流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 103,
+          "sha256": "a51ef2fef76d009d"
+        },
+        {
+          "title": "教务处用印流程",
+          "url": "https://dean.xjtu.edu.cn/info/1030/4808.htm",
+          "path": "knowledge/dean/jsjx-zhsw/02-教务处用印流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 104,
+          "sha256": "64f321fd133192c0"
+        },
+        {
+          "title": "进修教师培养办理流程",
+          "url": "https://dean.xjtu.edu.cn/info/1030/4800.htm",
+          "path": "knowledge/dean/jsjx-zhsw/03-进修教师培养办理流程.md",
+          "publishedAt": "2023-03-02",
+          "chars": 260,
+          "sha256": "ccf2dcd52059be57"
+        }
+      ]
+    },
+    {
+      "slug": "xxfw-xl",
+      "label": "信息服务 / 校历",
+      "listingUrl": "https://dean.xjtu.edu.cn/xxfw/xl.htm",
+      "count": 1,
+      "items": [
+        {
+          "title": "校历",
+          "url": "https://dean.xjtu.edu.cn/xxfw/xl.htm",
+          "path": "knowledge/dean/xxfw-xl/01-校历.md",
+          "publishedAt": null,
+          "chars": 2588,
+          "sha256": "111f7ab4696c7828",
+          "kind": "portal"
+        }
+      ]
+    },
+    {
+      "slug": "xxfw-zxsj",
+      "label": "信息服务 / 作息时间",
+      "listingUrl": "https://dean.xjtu.edu.cn/xxfw/zxsj.htm",
+      "count": 1,
+      "items": [
+        {
+          "title": "作息时间",
+          "url": "https://dean.xjtu.edu.cn/xxfw/zxsj.htm",
+          "path": "knowledge/dean/xxfw-zxsj/01-作息时间.md",
+          "publishedAt": null,
+          "chars": 771,
+          "sha256": "07c844d90d3cf7f2",
+          "kind": "portal"
+        }
+      ]
+    },
+    {
+      "slug": "xxfw-qa",
+      "label": "信息服务 / Q&A",
+      "listingUrl": "https://dean.xjtu.edu.cn/xxfw/Q_A.htm",
+      "count": 5,
+      "items": [
+        {
+          "title": "信息服务 / Q&A：站外入口清单",
+          "url": "https://dean.xjtu.edu.cn/xxfw/Q_A.htm",
+          "path": "knowledge/dean/xxfw-qa/00-站外入口.md",
+          "publishedAt": null,
+          "chars": 338,
+          "sha256": "e157a3c602069597",
+          "kind": "external-links"
+        },
+        {
+          "title": "教室自动化直播录播平台",
+          "url": "https://dean.xjtu.edu.cn/info/1070/1081.htm",
+          "path": "knowledge/dean/xxfw-qa/01-教室自动化直播录播平台.md",
+          "publishedAt": "2022-05-24",
+          "chars": 260,
+          "sha256": "6657517ffd9398f0"
+        },
+        {
+          "title": "在线教学常见问题及解答(2020年2月25日更新)",
+          "url": "https://dean.xjtu.edu.cn/info/1070/1080.htm",
+          "path": "knowledge/dean/xxfw-qa/02-在线教学常见问题及解答(2020年2月25日更新).md",
+          "publishedAt": "2020-02-20",
+          "chars": 349,
+          "sha256": "1031237530e526ae"
+        },
+        {
+          "title": "MeTeL教学资源数据库使用指南",
+          "url": "https://dean.xjtu.edu.cn/info/1070/1082.htm",
+          "path": "knowledge/dean/xxfw-qa/03-MeTeL教学资源数据库使用指南.md",
+          "publishedAt": "2018-12-18",
+          "chars": 1000,
+          "sha256": "469626e8f1a98999"
+        },
+        {
+          "title": "智能教室考勤服务平台使用指南",
+          "url": "https://dean.xjtu.edu.cn/info/1070/1085.htm",
+          "path": "knowledge/dean/xxfw-qa/04-智能教室考勤服务平台使用指南.md",
+          "publishedAt": "2018-03-09",
+          "chars": 335,
+          "sha256": "78853247f44946dd"
+        }
+      ]
+    },
+    {
+      "slug": "jxxx-pyfa",
+      "label": "教学信息 / 培养方案",
+      "listingUrl": "https://dean.xjtu.edu.cn/jxxx/pyfa.htm",
+      "count": 21,
+      "items": [
+        {
+          "title": "关于核对确认2023-2024学年第二学期教学计划的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1841.htm",
+          "path": "knowledge/dean/jxxx-pyfa/01-关于核对确认2023-2024学年第二学期教学计划的通知.md",
+          "publishedAt": "2023-09-08",
+          "chars": 890,
+          "sha256": "09843382ced4aa76"
+        },
+        {
+          "title": "关于2023版本科培养方案答辩论证会议安排的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1830.htm",
+          "path": "knowledge/dean/jxxx-pyfa/02-关于2023版本科培养方案答辩论证会议安排的通知.md",
+          "publishedAt": "2023-07-11",
+          "chars": 1268,
+          "sha256": "47f1a3b01259f230"
+        },
+        {
+          "title": "关于核对确认2023-2024学年第一学期教学计划的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1832.htm",
+          "path": "knowledge/dean/jxxx-pyfa/03-关于核对确认2023-2024学年第一学期教学计划的通知.md",
+          "publishedAt": "2023-03-06",
+          "chars": 807,
+          "sha256": "c4ce279f91d3aa82"
+        },
+        {
+          "title": "关于开展2023版本科生培养方案修订工作的预通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1831.htm",
+          "path": "knowledge/dean/jxxx-pyfa/04-关于开展2023版本科生培养方案修订工作的预通知.md",
+          "publishedAt": "2022-11-15",
+          "chars": 2688,
+          "sha256": "6a4bc20888ea56e8"
+        },
+        {
+          "title": "关于做好2021级西交利物浦大学交流生课程体系录入工作的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1849.htm",
+          "path": "knowledge/dean/jxxx-pyfa/05-关于做好2021级西交利物浦大学交流生课程体系录入工作的通知.md",
+          "publishedAt": "2022-07-20",
+          "chars": 599,
+          "sha256": "51ffd3ca8df5b452"
+        },
+        {
+          "title": "关于落实2022—2023学年2022级教学日历的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1851.htm",
+          "path": "knowledge/dean/jxxx-pyfa/06-关于落实2022—2023学年2022级教学日历的通知.md",
+          "publishedAt": "2022-07-01",
+          "chars": 1038,
+          "sha256": "3fb0cae7a759a86f"
+        },
+        {
+          "title": "关于落实2022—2023学年教学日历的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1848.htm",
+          "path": "knowledge/dean/jxxx-pyfa/07-关于落实2022—2023学年教学日历的通知.md",
+          "publishedAt": "2022-04-08",
+          "chars": 1014,
+          "sha256": "25911a1bfba63c1a"
+        },
+        {
+          "title": "关于核对确认2022-2023学年第一学期教学计划的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1846.htm",
+          "path": "knowledge/dean/jxxx-pyfa/08-关于核对确认2022-2023学年第一学期教学计划的通知.md",
+          "publishedAt": "2022-03-09",
+          "chars": 905,
+          "sha256": "d771bf55a457cbf6"
+        },
+        {
+          "title": "关于核对确认2021-2022学年第二学期教学计划的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1840.htm",
+          "path": "knowledge/dean/jxxx-pyfa/09-关于核对确认2021-2022学年第二学期教学计划的通知.md",
+          "publishedAt": "2021-09-22",
+          "chars": 910,
+          "sha256": "0bdfe6e4dad4f838"
+        },
+        {
+          "title": "关于核对确认2021-2022学年第一学期教学计划的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1847.htm",
+          "path": "knowledge/dean/jxxx-pyfa/10-关于核对确认2021-2022学年第一学期教学计划的通知.md",
+          "publishedAt": "2021-03-22",
+          "chars": 905,
+          "sha256": "edfdfa1da7064f02"
+        },
+        {
+          "title": "关于核对确认2020-2021学年第二学期教学计划的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1850.htm",
+          "path": "knowledge/dean/jxxx-pyfa/11-关于核对确认2020-2021学年第二学期教学计划的通知.md",
+          "publishedAt": "2020-09-04",
+          "chars": 729,
+          "sha256": "abcc7166e693cb19"
+        },
+        {
+          "title": "关于更新2019版本科生培养方案课程教学大纲的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1833.htm",
+          "path": "knowledge/dean/jxxx-pyfa/12-关于更新2019版本科生培养方案课程教学大纲的通知.md",
+          "publishedAt": "2019-09-20",
+          "chars": 569,
+          "sha256": "a295edc420e3883f"
+        },
+        {
+          "title": "关于2019版本科培养方案答辩论证具体安排的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1843.htm",
+          "path": "knowledge/dean/jxxx-pyfa/13-关于2019版本科培养方案答辩论证具体安排的通知.md",
+          "publishedAt": "2019-05-15",
+          "chars": 1218,
+          "sha256": "ae2beadc04dafabe"
+        },
+        {
+          "title": "“越杰计划”培养方案答辩论证通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1836.htm",
+          "path": "knowledge/dean/jxxx-pyfa/14-“越杰计划”培养方案答辩论证通知.md",
+          "publishedAt": "2018-07-17",
+          "chars": 747,
+          "sha256": "c8e4ff2e8138c538"
+        },
+        {
+          "title": "关于“越杰计划”本科生培养方案修改及答辩论证工作的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1838.htm",
+          "path": "knowledge/dean/jxxx-pyfa/15-关于“越杰计划”本科生培养方案修改及答辩论证工作的通知.md",
+          "publishedAt": "2018-07-05",
+          "chars": 1758,
+          "sha256": "6f3a5fa526722a26"
+        },
+        {
+          "title": "关于新版培养方案专业核心课程认定及英文版修订工作的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1842.htm",
+          "path": "knowledge/dean/jxxx-pyfa/16-关于新版培养方案专业核心课程认定及英文版修订工作的通知.md",
+          "publishedAt": "2017-03-03",
+          "chars": 1318,
+          "sha256": "8ea26ed379649991"
+        },
+        {
+          "title": "西安交通大学2015版本科培养方案集中实践教学环节指导性意见",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1844.htm",
+          "path": "knowledge/dean/jxxx-pyfa/17-西安交通大学2015版本科培养方案集中实践教学环节指导性意见.md",
+          "publishedAt": "2016-05-06",
+          "chars": 3717,
+          "sha256": "ae8681fb30b75616"
+        },
+        {
+          "title": "关于确定2015版本科生培养方案终稿的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1837.htm",
+          "path": "knowledge/dean/jxxx-pyfa/18-关于确定2015版本科生培养方案终稿的通知.md",
+          "publishedAt": "2016-03-22",
+          "chars": 2114,
+          "sha256": "e2ea8886a4b86865"
+        },
+        {
+          "title": "关于2015版本科生培养方案答辩论证具体安排的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1835.htm",
+          "path": "knowledge/dean/jxxx-pyfa/19-关于2015版本科生培养方案答辩论证具体安排的通知.md",
+          "publishedAt": "2016-01-15",
+          "chars": 2395,
+          "sha256": "cb9bf9e9b412ae8b"
+        },
+        {
+          "title": "关于2015版本科生培养方案答辩论证的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1834.htm",
+          "path": "knowledge/dean/jxxx-pyfa/20-关于2015版本科生培养方案答辩论证的通知.md",
+          "publishedAt": "2016-01-08",
+          "chars": 752,
+          "sha256": "c67201d4d62d564e"
+        },
+        {
+          "title": "关于培养方案模板略作调整的通知",
+          "url": "https://dean.xjtu.edu.cn/info/1121/1845.htm",
+          "path": "knowledge/dean/jxxx-pyfa/21-关于培养方案模板略作调整的通知.md",
+          "publishedAt": "2015-09-07",
+          "chars": 2419,
+          "sha256": "bad2738f33bf1c94"
+        }
+      ]
+    }
+  ]
+}

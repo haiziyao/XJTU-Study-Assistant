@@ -194,3 +194,24 @@ export function absolute(config, pathOrUrl) {
   if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
   return `${config.baseUrl}${pathOrUrl}`;
 }
+
+/**
+ * 课程性质（必修 / 选修）代码归一。
+ *
+ * 为什么需要它：`KCXZDM` 在**真实教务**里是一位数字（库里 44 条实测是 `"1"` 必修 38 门 / `"2"` 选修 6 门），
+ * 而接口文档、AI 提示词与测试 mock 用的是两位（`"01"` / `"02"`）。任何一处做 `nature === wanted`
+ * 的精确比较，都会在真实数据上 0 命中 —— 表现出来就是"本地有成绩数据，但没有符合这些条件的课程"，
+ * 或者前端筛「选修」时一片空白。所以统一在这里去掉前导零；中文标签（"必修"/"选修"）原样保留，
+ * 三种写法（`1` / `01` / `必修`）都能对上。
+ */
+export function normalizeNature(value) {
+  const text = String(value ?? '').trim().toLowerCase();
+  return /^\d+$/.test(text) ? text.replace(/^0+(?=\d)/, '') : text;
+}
+
+/** 记录的性质是否匹配查询条件（空条件＝不筛）。 */
+export function matchesNature(record, nature) {
+  const wanted = normalizeNature(nature);
+  if (!wanted) return true;
+  return [record?.nature, record?.natureLabel].filter(Boolean).map(normalizeNature).includes(wanted);
+}

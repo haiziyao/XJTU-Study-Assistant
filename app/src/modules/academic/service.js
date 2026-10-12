@@ -15,37 +15,39 @@
 
 import path from 'node:path';
 
-import { CookieJar, HttpClient } from '../lms/http-client.js';
-import { AUTH_STATUS, CasAuth, generateVisitorId } from '../lms/cas-auth.js';
+import { AUTH_STATUS } from '../lms/cas-auth.js';
 import { JsonFile } from '../lms/secret-store.js';
 import { AcademicApi, AcademicError, ACADEMIC_ERROR } from './api.js';
 import { analysisRequest, fingerprintOf, localAnalysis } from './analysis.js';
-import { resolveAcademicConfig } from './config.js';
+import { matchesNature, resolveAcademicConfig } from './config.js';
 import { computeStats, gradePointOf } from './gpa.js';
 
 /** 同步结果的计数口径。 */
 const emptyCounts = () => ({ inserted: 0, updated: 0, unchanged: 0, stale: 0, skipped: 0 });
 
 export class AcademicService {
-  constructor({ store, services, broadcast = () => {}, config = {}, dataDir, visitorId } = {}) {
+  /**
+   * @param {object} options
+   * @param {object} options.auth **共享的全局认证服务**（`services.auth`，order=5）。
+   *   教务与思源学堂用的是同一个学校账号，登录已收敛到 auth 模块。
+   */
+  constructor({ store, services, broadcast = () => {}, config = {}, dataDir, auth } = {}) {
+    if (!auth) {
+      throw new Error('academic 模块需要 auth 模块（order=5）：请确保它被一起装配（见 src/modules/auth/module.js）');
+    }
     this.store = store;
     this.broadcast = broadcast;
     this.dataDir = dataDir ?? '.';
     this.services = services ?? {};
     this.config = resolveAcademicConfig(config ?? {});
 
-    this.jar = new CookieJar();
-    this.http = new HttpClient({
-      userAgent: this.config.userAgent,
-      timeoutMs: this.config.timeoutMs,
-      jar: this.jar,
-    });
-    this.auth = new CasAuth({ http: this.http, config: this.config, visitorId: visitorId ?? generateVisitorId() });
+    /** 共享认证：jar/http 都从它来，共享罐里的 CAS 票据正是免密登录教务的依据。 */
+    this.sharedAuth = auth;
+    this.jar = auth.jar;
+    this.http = auth.http;
     this.api = new AcademicApi({ http: this.http, config: this.config });
 
-    /** 会话票据是凭据 → 单独文件 + 0600。 */
-    this.sessionFile = new JsonFile(path.join(this.dataDir, 'academic-session.json'));
-    /** 同步元信息是普通业务数据 → 0644。 */
+    /** 同步元信息是普通业务数据 → 0644。会话票据由 auth 模块管，不再有 academic-session.json。 */
     this.metaFile = new JsonFile(path.join(this.dataDir, 'academic-meta.json'), { mode: 0o644 });
     /** 学情分析结果 → 普通业务数据，0644（不是凭据）。 */
     this.analysisFile = new JsonFile(path.join(this.dataDir, 'academic-analysis.json'), { mode: 0o644 });
@@ -60,20 +62,104 @@ export class AcademicService {
     };
     this.syncing = false;
     this.restored = false;
+    /**
+     * 本模块自己的 `login()` 正在执行。
+     *
+     * 为什么需要这个标志：`/academic/login` 在登录成功后会**显式**同步一次
+     * （它要把成绩直接放进登录响应里，让界面一次请求就能显示，见 routes.js）。
+     * 而登录成功会让共享认证发出 `site-ready`，订阅者也会顺手起一次同步 ——
+     * 两者撞在一起时，显式那一次会拿到 409「同步正在进行中」。
+     *
+     * 规则：**知道自己要同步的那一方先声明，另一方让路。**
+     * 走共享认证登录（设置页）时不经过这个标志，订阅者就会接手。
+     */
+    this.ownLoginInFlight = false;
+
+    /**
+     * 订阅共享认证：教务这个站点**刚变成可用**时就自动补一次同步。
+     *
+     * 为什么需要：用户在设置页登录完，切到学业页看到的是一片空白 ——
+     * 那很像"登录没生效"，还得自己找到同步按钮点一下才知道其实成功了。
+     * 登录成功 → 数据就该在。
+     *
+     * 只听 `site-ready`（它只在 false→true 那一次触发），所以不会反复触发；
+     * 而且只在**本地一条成绩都没有**时才真的去请求学校（见 #autoSyncIfEmpty）。
+     */
+    this.sharedAuth.onChange((event) => {
+      if (event.type !== 'site-ready' || event.siteId !== 'academic') return;
+      void this.#autoSyncIfEmpty('登录后本地还没有成绩');
+    });
+  }
+
+  /**
+   * 本地一条成绩都没有时，自动同步一次。
+   *
+   * **只在为空时触发**：已经有数据就不去打扰学校服务器，
+   * 刷新是用户的显式动作（界面上那个「同步」按钮）。
+   * 失败也不抛给调用方 —— 自动同步是锦上添花，不该让登录看起来失败；
+   * 原因会留在 `lastError` 里，界面照常显示。
+   */
+  async #autoSyncIfEmpty(reason) {
+    if (this.syncing) return;
+    // 本模块自己的登录流程会显式同步（并要把结果放进响应里），别跟它抢
+    if (this.ownLoginInFlight) return;
+    if (this.store.academicGrades.all().length > 0) return;
+    try {
+      await this.sync({});
+      console.log(`[academic] ${reason}，已自动同步一次`);
+    } catch (error) {
+      console.warn(`[academic] ${reason}，但自动同步失败：${error.message}`);
+    }
   }
 
   // ---------------------------------------------------------------- 状态
 
+  /**
+   * 把共享认证里「学业情况」这个站点的状态投影到本模块。
+   *
+   * 登录态的唯一真相在 auth 模块：用户在**设置页**登录时更新的是它，
+   * 本模块的 `state` 不会自己变，不投影就会出现「设置里已登录、学业页还说未登录」。
+   *
+   * 只在两个方向上动：auth 就绪 → 跟着就绪；本模块曾声称已登录而 auth 不可用 → 降级。
+   * 刻意不碰 `need_mfa` / `need_captcha` / `error`（登录进行中的状态）。
+   */
+  #syncAuthState() {
+    const site = this.sharedAuth.siteStatus('academic');
+    if (site?.ready) {
+      if (this.state.status !== 'ready') {
+        this.state.status = 'ready';
+        this.state.error = null;
+        this.state.mfa = null;
+      }
+      return;
+    }
+    if (this.state.status === 'ready') {
+      this.state.status = 'anonymous';
+      this.state.mfa = null;
+      return;
+    }
+    // 登录正在**设置页**进行中（需要两步验证 / 图形验证码）：跟着显示，
+    // 否则用户会在设置页输验证码、切到学业页却看到"未登录"。
+    const global = this.sharedAuth.status();
+    if (global.status === 'need_mfa' || global.status === 'need_captcha') {
+      this.state.status = global.status;
+      this.state.mfa = global.mfa ?? null;
+    }
+  }
+
   /** 给 `/academic/status` 与界面用。 */
   status() {
+    this.#syncAuthState();
     const grades = this.store.academicGrades.all();
     const active = grades.filter((item) => item.active !== false);
     const stats = computeStats(active, { table: this.config.gpaTable });
     return {
       status: this.state.status,
       loggedIn: this.state.status === 'ready',
+      /** 是否有同步正在进行（可能是登录后自动触发的，界面据此显示"正在同步"）。 */
+      syncing: this.syncing,
       mfa: this.state.mfa,
-      captchaRequired: Boolean(this.auth?.captchaRequired),
+      captchaRequired: Boolean(this.sharedAuth.status().captchaRequired || this.state.captchaRequired),
       error: this.state.error,
       /** 握手诊断：403 时用户/开发者最需要看的就是这里 */
       handshake: this.api.handshake,
@@ -96,60 +182,76 @@ export class AcademicService {
 
   // ---------------------------------------------------------------- 登录
 
-  /** 进程启动时调用：恢复上次会话。失败不抛，退化成未登录。 */
+  /**
+   * 进程启动时调用：恢复上次状态。失败不抛，退化成未登录。
+   *
+   * **不再读会话文件** —— 票据归 `auth` 统一持有（它 order=5，先于本模块 restore）。
+   * 这里只恢复自己的元信息，并按共享认证里本站点是否就绪来投影登录态。
+   */
   async restore() {
     this.restored = true;
-    const saved = await this.sessionFile.read();
     const meta = await this.metaFile.read();
     if (meta) {
       this.state.lastSyncAt = meta.lastSyncAt ?? null;
       this.state.lastSyncCounts = meta.lastSyncCounts ?? emptyCounts();
     }
-    if (!saved?.cookies?.length) return false;
-    try {
-      this.jar = CookieJar.fromJSON(saved.cookies);
-      this.http.jar = this.jar;
-      this.auth.hasLogin = true;
+    const site = this.sharedAuth.siteStatus('academic');
+    if (site?.ready) {
+      // 会话可能是过期的，先乐观认定：真正发请求时若失效再打回（走 invalidate 重验）
       this.state.status = 'ready';
-      // 会话可能是过期的，标记成"待验证"：真正发请求时若 401 再清掉
+      // 已登录但本地一条成绩都没有（上次登录后还没同步过、或数据被清过）→ 补一次。
+      // **不 await**：装配层是 await restore() 的，一次网络请求不该把整个启动拖住。
+      void this.#autoSyncIfEmpty('启动时本地没有成绩');
       return true;
-    } catch {
-      await this.#clearSession();
-      return false;
     }
+    return false;
   }
 
   async login({ username, password, captcha, trustAgent = true } = {}) {
     if (!username || !password) {
       throw new AcademicError('需要学号与密码', { code: ACADEMIC_ERROR.NOT_LOGGED_IN, status: 400 });
     }
-    // 复用思源学堂那套状态机：同样的 CAS OAuth2 四跳，RSA 加密密码，MFA 与验证码都支持
-    const begun = await this.auth.begin(this.config.loginUrl);
-    const result = await this.auth.login({ username, password, captcha, trustAgent });
-    return this.#handleAuthResult(result, begun);
+    // 声明"这次的同步由调用方负责"：路由会在 login 返回后自己同步一次，
+    // 把成绩直接放进登录响应里（见上面的 ownLoginInFlight 说明）。
+    this.ownLoginInFlight = true;
+    try {
+      // 委托给共享认证：同一个 CAS 状态机（OAuth2 四跳、RSA 密码、MFA 与验证码都支持），
+      // 并且票据进的是**共享罐**，所以登录一次学堂那边也能用。
+      const result = await this.sharedAuth.login({ username, password, captcha, trustAgent, siteId: 'academic' });
+      return this.#handleAuthResult(result);
+    } finally {
+      this.ownLoginInFlight = false;
+    }
   }
 
   async sendMfaCode() {
-    const result = await this.auth.sendMfaCode();
+    const result = await this.sharedAuth.sendMfaCode();
     this.state.mfa = { ...(this.state.mfa ?? {}), ...result, sent: true };
     return this.state.mfa;
   }
 
   async verifyMfaCode(code) {
-    const result = await this.auth.verifyMfaCode(code);
-    return this.#handleAuthResult(result, 'verify');
+    const result = await this.sharedAuth.verifyMfaCode(code);
+    return this.#handleAuthResult(result);
   }
 
   captcha() {
-    return this.auth.fetchCaptcha();
+    return this.sharedAuth.captcha();
   }
 
+  /**
+   * 退出登录。
+   *
+   * ⚠️ 与学堂同理：单点登录下"只退出教务"没有意义（TGC 还在共享罐里，
+   * 下次访问会被静默重新认证）。所以这里执行的是**全局退出**。
+   */
   async logout() {
-    await this.#clearSession();
+    await this.sharedAuth.logout();
+    this.#onAuthFailure();
     return this.status();
   }
 
-  #handleAuthResult(result, begun) {
+  #handleAuthResult(result) {
     if (result?.status === AUTH_STATUS.READY) {
       this.state.status = 'ready';
       this.state.mfa = null;
@@ -159,28 +261,23 @@ export class AcademicService {
     }
     if (result?.status === AUTH_STATUS.NEED_MFA) {
       this.state.status = 'need_mfa';
-      this.state.mfa = { phone: result.phone ?? null, sent: false };
-      return { status: this.state.status, mfa: this.state.mfa, begun };
+      // 原样保留 flow（'mfa' 短信 / 'sec' 二次认证），界面靠它选引导流程
+      this.state.mfa = { flow: 'mfa', required: true, phoneMasked: null, sent: false, ...(result.mfa ?? {}) };
+      return { status: this.state.status, mfa: this.state.mfa };
     }
     if (result?.status === AUTH_STATUS.NEED_CAPTCHA) {
       this.state.status = 'need_captcha';
-      return { status: this.state.status, captchaRequired: true, begun };
+      return { status: this.state.status, captchaRequired: true };
     }
     this.state.status = 'error';
-    this.state.error = result?.message ?? '登录失败';
-    return { status: this.state.status, error: this.state.error, begun };
+    // AuthService 用 error 字段；旧 CasAuth 用 message —— 两个都认
+    this.state.error = result?.error ?? result?.message ?? '登录失败';
+    return { status: this.state.status, error: this.state.error };
   }
 
   async #finishLogin() {
-    await this.#persistSession();
+    await this.sharedAuth.persist();
     return this.status();
-  }
-
-  async #persistSession() {
-    await this.sessionFile.write({
-      savedAt: new Date().toISOString(),
-      cookies: this.jar.toJSON(),
-    });
   }
 
   async #persistMeta() {
@@ -190,25 +287,36 @@ export class AcademicService {
     });
   }
 
-  async #clearSession() {
-    this.jar = new CookieJar();
-    this.http.jar = this.jar;
-    this.auth.reset();
+  /**
+   * 把本模块打回未登录，并让共享认证下次重新验证教务这个站点。
+   * **不动共享票据** —— 那是全程序共用的，清掉会连带把学堂踢下线。
+   */
+  #onAuthFailure(reason = null) {
     this.api.reset();
     this.state.status = 'anonymous';
     this.state.mfa = null;
     this.state.error = null;
-    await this.sessionFile.remove();
+    this.sharedAuth.invalidate('academic', reason);
   }
 
-  /** 业务请求前确认登录态；失败时清票据并抛 401。 */
+  /**
+   * 业务请求前确认登录态。
+   *
+   * 以前是自己看票据；现在问共享认证一句「教务这个站点能用吗」——
+   * 学堂登录过一次的情况下，它会用 TGC 静默完成教务的 OAuth2 认证（含四步授权握手）。
+   */
   async #ensureReady() {
     if (this.state.status === 'ready') return;
-    if (this.restored && this.jar.toJSON().length) {
+    const outcome = await this.sharedAuth.ensure('academic');
+    if (outcome.ok) {
       this.state.status = 'ready';
       return;
     }
-    throw new AcademicError('尚未登录教务系统，请先登录', { code: ACADEMIC_ERROR.NOT_LOGGED_IN, status: 401 });
+    this.#onAuthFailure(outcome.reason ?? null);
+    throw new AcademicError(
+      `尚未登录教务系统，请重新登录（${outcome.reason ?? '需要登录'}）`,
+      { code: ACADEMIC_ERROR.NOT_LOGGED_IN, status: 401 },
+    );
   }
 
   // ---------------------------------------------------------------- 同步
@@ -224,8 +332,16 @@ export class AcademicService {
     if (this.syncing) {
       throw new AcademicError('同步正在进行中，请稍候', { code: ACADEMIC_ERROR.BUSINESS_ERROR, status: 409 });
     }
-    await this.#ensureReady();
+    // 标志要在 await 之前置位：`#ensureReady()` 里有网络往返，
+    // 放在它后面的话，两个并发的 sync 会双双通过上面的检查（登录后的自动同步
+    // 与用户手点同步很容易撞在一起）。
     this.syncing = true;
+    try {
+      await this.#ensureReady();
+    } catch (error) {
+      this.syncing = false;
+      throw error;
+    }
     try {
       const { rows, handshake } = await this.api.fetchGrades();
       const counts = dryRun ? this.#previewCounts(rows) : await this.#upsert(rows);
@@ -236,15 +352,16 @@ export class AcademicService {
         this.state.lastSyncAt = new Date().toISOString();
         this.state.lastSyncCounts = counts;
         this.state.lastError = null;
-        await this.#persistSession(); // 会话可能已被刷新
+        await this.sharedAuth.persist(); // 会话可能已被刷新（四步握手会更新 _WEU 等票据）
         await this.#persistMeta();
         this.broadcast({ type: 'data_changed', module: 'academic', reason: 'sync' });
       }
       return { ok: true, counts, stats, handshake };
     } catch (error) {
       this.state.lastError = { code: error.code ?? 'UNKNOWN', message: error.message, at: new Date().toISOString() };
-      // 登录态失效时顺手清掉本地票据，避免下次还拿过期会话去撞
-      if (error.code === ACADEMIC_ERROR.NOT_LOGGED_IN) await this.#clearSession();
+      // 登录态失效时把自己打回未登录（并让共享认证下次重验本站点），
+      // 但**不清共享票据** —— 那会连带把学堂踢下线。
+      if (error.code === ACADEMIC_ERROR.NOT_LOGGED_IN) this.#onAuthFailure(error.message);
       throw error;
     } finally {
       this.syncing = false;
@@ -360,7 +477,8 @@ export class AcademicService {
     let list = this.store.academicGrades.all();
     if (!includeStale) list = list.filter((item) => item.stale !== true);
     if (term) list = list.filter((item) => item.term === term);
-    if (nature) list = list.filter((item) => item.nature === nature);
+    // 性质不能精确比：真实教务是一位代码（"1"/"2"），接口参数与 AI 草稿是两位（"01"/"02"）
+    if (nature) list = list.filter((item) => matchesNature(item, nature));
     if (included !== undefined) list = list.filter((item) => (item.included !== false) === Boolean(included));
     return list
       .map((item) => ({ ...item, gradePointResolved: gradePointOf(item, this.config.gpaTable).point }))

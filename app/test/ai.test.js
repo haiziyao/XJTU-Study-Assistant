@@ -1048,3 +1048,28 @@ test('AI：老配置里的旧模型名会被迁移（但只对官方端点，免
     await app.close();
   }
 });
+
+test('AI：提示词讲清「笔记」的边界 —— 不否认它存在、不擅自塞进待办、也不许编 note target', async () => {
+  const mock = await startMockAi({ apiKey: KEY, reply: '好' });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+  try {
+    await call('POST', '/ai/chat', { text: '随便聊聊' });
+    const system = mock.state.bodies[0].messages.find((message) => message.role === 'system').content;
+
+    // 界面上确实有笔记系统，AI 不能再说"没有笔记这个类型"
+    assert.ok(system.includes('笔记 Note'), '提示词要提到笔记');
+    assert.ok(system.includes('笔记系统还没接入'), '要说清写入通道还没接');
+    // 但也别让它自作主张把笔记落成待办 —— 那正是用户抱怨的行为
+    assert.ok(system.includes('不要**擅自**把它落成待办'), '要明确禁止擅自降级成待办');
+    // 关键：不能让它编一个还不存在的 target。
+    // 注意这一条的措辞在 multi-round 那一轮改过：notes 模块**确实**声明了只读的 note 查询，
+    // 所以现在禁的是 note 的**写入**草稿（create/update/delete），而不是 note 本身。
+    assert.ok(system.includes('输出 target: "note" 的**写入**草稿'), '要明确禁止输出 note 的写入草稿');
+    // 可写的 target 只能来自各模块的领域说明：不能自己发明（note 写入、lms 之类都不许）
+    assert.ok(system.includes('**只能取各模块「领域说明」里声明过的**'), '协议里要收死 target 取值');
+    assert.ok(system.includes('todo / schedule / event / grade'), '要把当前声明过的 target 列出来（含学业成绩）');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});

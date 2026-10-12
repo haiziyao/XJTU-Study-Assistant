@@ -10,8 +10,12 @@
  *   2. 组装 system（含判定表 + 记忆注入）+ 最近 N 轮历史；
  *   3. **先插一条 assistant 占位消息**（`status: "streaming"`）拿到稳定的 messageId，
  *      流式的 delta 才能带着它广播出去；
- *   4. 调上游 → 抽草稿 → dryRun 预校验 → 更新这条消息为 `done`；
- *   5. 失败则把这条消息标成 `failed` 并带上错误（不删，用户能看到"刚才那次没成"）。
+ *   4. **循环**调上游（最多 `MAX_ROUNDS` 轮，一轮 = 一次 `provider.chat`，**每轮都流式**）：
+ *      抽草稿 → dryRun 预校验 → 只读查询自动执行（`auto` 档连写操作一起执行）→
+ *      把查询结果回灌进上下文再进下一轮；某一轮没查出**新**查询，就说明它在作答，循环结束；
+ *   5. 用**最后一轮**的正文把占位消息更新成 `done`（`rounds` / `roundLimit` / `usageRounds` 一起记下）；
+ *   6. 失败：第一轮就失败 → 整条标 `failed` 并带上错误（不删，用户能看到"刚才那次没成"）；
+ *      第二轮及以后的"总结失败" → 只记 `PARTIAL`，已经查到的数据照常返回。
  *
  * 本服务**不直接写业务数据**：草稿只做 dryRun 预览，真正落库由用户确认后走 `/commands/execute`。
  */
@@ -37,6 +41,16 @@ const DRAW_KEYWORDS = /画|绘制|作图|图形|图表|函数图|示意图|流�
 const MAX_AUTO_QUERIES = 3;
 /** 回灌给模型的单次查询条数上限（只读；多了只会让提示词变贵、让它跑偏）。 */
 const MAX_QUERY_ITEMS = 20;
+
+/**
+ * 一次 `send` 最多让模型调几轮（一轮 = 一次上游调用）。
+ *
+ * 以前这里**只有一轮回灌**：模型查完一次就再没有机会动第二次，于是"先查冲突、再写"
+ * 这种最常见的两步动作永远走不完，用户看到的就是"调用完工具，对话也结束了"。
+ * 现在是真正的循环：每轮都能查，查到没有新查询为止（或到上限为止）。
+ * 5 轮足够覆盖"查日程 → 查待办 → 写一条 → 回话"，再多就是模型在打转。
+ */
+const MAX_ROUNDS = 5;
 
 /**
  * 思考强度 → 官方 `reasoning_effort`。
@@ -69,6 +83,32 @@ const IMAGE_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image
  */
 const PERMISSIONS = Object.freeze(['auto', 'manual', 'strict']);
 
+/**
+ * 联网检索档位（UI 上的「关闭 / 校外网 / 校内网」）。
+ *
+ * 目前**还没有真正的检索实现**：这个值只是原样交给提示词（`context.search`），
+ * 让模型如实说明"检索还没接入"，而不是编造几条"搜到的"内容 —— 后者比不搜更糟。
+ */
+const SEARCH_MODES = Object.freeze(['off', 'web', 'campus']);
+
+/**
+ * 历史摘要里给写操作用的动词（见 `#history`）。
+ * 不认识的 action 原样显示 —— 宁可显示 `update`，也不要猜成"已删除"。
+ */
+const ACTION_LABELS = Object.freeze({
+  create: '新建',
+  update: '修改',
+  delete: '删除',
+  complete: '完成',
+  rollover: '顺延',
+});
+
+/**
+ * 一行历史摘要最多多少字（见 `#historySummary`）。
+ * 它是补充说明，不能喧宾夺主：里面全是条数与标题，200 字足够说清"上一轮干了什么"。
+ */
+const HISTORY_SUMMARY_MAX = 200;
+
 /** 附件上限：图片走多模态直传，文本文件内联进提示词，其余只登记名字。 */
 const MAX_ATTACHMENTS = 8;
 const MAX_IMAGES = 4;
@@ -84,7 +124,19 @@ const EMPTY_MEMORY = (maxItems = DEFAULT_MEMORY_BUDGET.maxItems, maxChars = DEFA
 });
 
 export class AiChatService {
-  constructor({ store, broadcast, services, config, provider, commands, files, onConfigChange, domainBlocks = [], queryFields = {} }) {
+  constructor({
+    store,
+    broadcast,
+    services,
+    config,
+    provider,
+    commands,
+    files,
+    onConfigChange,
+    domainBlocks = [],
+    queryFields = {},
+    queryLimits = {},
+  }) {
     this.store = store;
     this.broadcast = broadcast;
     this.services = services;
@@ -105,6 +157,12 @@ export class AiChatService {
      * 来自各模块的 `aiQueryFields`，**覆盖**下面 #compactQueryResult 里的内置表。
      */
     this.queryFields = queryFields;
+    /**
+     * 每个 target 回灌时最多保留多少条：`{ [target]: number }`，来自各模块的 `aiQueryLimits`。
+     * 有些数据**整份才有意义**（成绩单被截到 20 条就没法算学分绩了），模块自己最清楚该给多少。
+     * 没声明的 target 仍用 MAX_QUERY_ITEMS。
+     */
+    this.queryLimits = queryLimits;
   }
 
   // ---------------------------------------------------------------- 状态 / 配置
@@ -146,9 +204,25 @@ export class AiChatService {
 
     const sum = { prompt: 0, completion: 0, total: 0, cached: 0, uncached: 0, reasoning: 0 };
     let calls = 0;
-    // 一条回复可能对应**两次**上游调用（只读查询回灌那一次），两次都是真花钱的，都要算
+    // 一条回复可能是**多次**上游调用（只读查询一轮一轮地回灌），每次都是真花钱的，都要算。
+    //
+    // 统计口径（保证**同一轮只算一次**，且对字段的任意组合都成立）：
+    //   - 第 1 轮取 `usage ?? usageRounds[0]`、第 2 轮取 `usageFollowup ?? usageRounds[1]`，
+    //     第 3 轮起才从 `usageRounds` 里取 —— 新代码这三个字段都落，所以不会重复计；
+    //   - **老消息**只有 usage + usageFollowup（没有 usageRounds），照旧全都计入；
+    //   - 直接改库的写法（测试里就是只覆写 usage / usageFollowup）也照旧生效，
+    //     不会被一个陈旧的 usageRounds 顶掉；3 轮以上同样一个不落；
+    //   - 下面还有 `if (!raw) continue;`，所以某轮没有 usage 时不会虚增 calls。
     for (const message of messages) {
-      for (const raw of [message.usage, message.usageFollowup]) {
+      const rounds =
+        Array.isArray(message.usageRounds) && message.usageRounds.length
+          ? [
+              message.usage ?? message.usageRounds[0],
+              message.usageFollowup ?? message.usageRounds[1],
+              ...message.usageRounds.slice(2),
+            ]
+          : [message.usage, message.usageFollowup];
+      for (const raw of rounds) {
         if (!raw) continue;
         calls += 1;
         const completion = Number(raw.completion_tokens) || 0;
@@ -170,7 +244,7 @@ export class AiChatService {
       ok: true,
       conversationId: conversationId ?? null,
       replies: messages.length,
-      /** 计入口径：一条回复可能是 1 次调用，也可能是 2 次（查询回灌） */
+      /** 计入口径：一条回复可能是 1 次调用，也可能是多次（每轮只读查询回灌各算一次） */
       calls,
       tokens: {
         total: sum.total,
@@ -402,13 +476,28 @@ export class AiChatService {
 
   /**
    * 发一条消息。
+   *
+   * 内部是**多轮循环**（最多 `MAX_ROUNDS` 轮）：每轮都流式，抽草稿 → 执行只读查询
+   * （`auto` 档连写操作一起执行）→ 把结果回灌进上下文再进下一轮，直到某一轮没查出新查询。
+   *
    * @param {object} input
    * @param {string} input.text 用户输入
    * @param {string} [input.conversationId] 不传则新建会话
    * @param {object} [input.context] `{ view, module, courseId }`
    * @param {boolean} [input.stream] 是否边生成边通过 WebSocket 广播
+   * @param {string} [input.permission] 写入权限：`auto|manual|strict`，非法值回落 `manual`
+   * @param {string} [input.search] 联网档位：`off|web|campus`，非法值回落 `off`
    */
-  async send({ text, conversationId, context = {}, stream = false, attachments = [], thinking = 'high', permission = 'manual' } = {}) {
+  async send({
+    text,
+    conversationId,
+    context = {},
+    stream = false,
+    attachments = [],
+    thinking = 'high',
+    permission = 'manual',
+    search = 'off',
+  } = {}) {
     const trimmed = String(text ?? '').trim();
     const files = normalizeAttachments(attachments);
     const model = this.config.get().model;
@@ -435,6 +524,8 @@ export class AiChatService {
     if (!trimmed && !files.length) throw HttpError.badRequest('text 不能为空');
     const effort = THINKING_LEVELS[thinking] ?? 'high';
     const mode = PERMISSIONS.includes(permission) ? permission : 'manual';
+    // 联网档位非法就回落 `off`：它只影响提示词，**不能**因为前端传了个没见过的值就整次对话失败
+    const searchMode = SEARCH_MODES.includes(search) ? search : 'off';
     if (!this.provider.configured()) {
       throw new HttpError(501, ERROR_CODES.AI_UNAVAILABLE, 'AI 尚未配置密钥，无法对话', {
         hint: '在设置里填 API Key，或 POST /api/v1/ai/config {"apiKey":"sk-…"}。',
@@ -453,6 +544,8 @@ export class AiChatService {
       attachments: files.map((file) => ({ name: file.name, type: file.type, size: file.size, fileId: file.fileId ?? null })),
       thinking,
       permission: mode,
+      // 联网档位跟着消息落库：事后排查"它当时是不是以为自己能联网"要看这个
+      search: searchMode,
     });
 
     const enriched = await this.buildContext(context);
@@ -461,7 +554,20 @@ export class AiChatService {
     const history = this.#history(conversation.id);
     // #history 里最后一条就是刚存的用户正文，这里换成"正文 + 附件"的多模态版本
     const messages = [
-      { role: 'system', content: buildChatSystemPrompt({ ...enriched, ...context, draw, domainBlocks: this.domainBlocks }) },
+      {
+        role: 'system',
+        content: buildChatSystemPrompt({
+          ...enriched,
+          ...context,
+          draw,
+          domainBlocks: this.domainBlocks,
+          // 档位与联网开关也要进提示词：模型据此知道"能不能直接动手、要不要先问一句"，
+          // 以及"检索其实还没接入，别编搜到的内容"（prompt.js 读 context.permission / context.search）。
+          // 放在展开之后，免得请求体里的 context 把这轮的选择覆盖掉。
+          permission: mode,
+          search: searchMode,
+        }),
+      },
       ...history.slice(0, -1),
       { role: 'user', content: buildUserContent(trimmed, files) },
     ];
@@ -476,105 +582,215 @@ export class AiChatService {
       provider: this.config.get().provider,
       thinking,
       permission: mode,
+      // 占位消息就把联网档位写上：万一这次调用半路失败，记录里也留得住"当时是什么档位"
+      search: searchMode,
     });
 
-    let partial = '';
-    let partialReasoning = '';
+    // 一次 send 里所有"跨轮"的状态都提到循环外面 —— 它们最终要一起落库/回显
+    let partial = '';            // 本轮已流出的正文（第一轮就失败时，这就是能留住的那半句）
+    let reasoningAll = '';       // 思维链：**跨轮累积**，一张「思考过程」卡里看得到全部轮
+    const usageRounds = [];      // 每轮的 usage（/ai/usage 按它算多次调用）
+    const queried = [];          // 只读查询结果：跨轮累积
+    const executed = [];         // 自动执行的写操作：跨轮累积
+    let drafts = [];             // 留给用户确认的草稿（没执行的，含校验不过的）
+    let content = '';            // 被采纳的那一轮正文（每轮都会被下一轮覆盖）
+    let lastRaw = null;          // 最近一轮"抽草稿前"的原文
+    let lastModel = model;
+    let lastFinishReason = null;
+    let queryError = null;
+    let hitRoundLimit = false;
+    let rounds = 0;
     try {
-      const result = await this.provider.chat({
-        messages,
-        stream: Boolean(stream),
-        reasoningEffort: effort,
-        onDelta: stream
-          ? (delta) => {
-              partial += delta;
-              this.broadcast?.({
-                type: 'ai_delta',
-                module: 'ai',
-                payload: { conversationId: conversation.id, messageId: assistant.id, delta, text: partial },
-              });
-            }
-          : undefined,
-        // 思维链单独一条通道：前端把它放进默认折叠的「思考过程」卡里，不和正文混在一起
-        onReasoning: stream
-          ? (delta) => {
-              partialReasoning += delta;
-              this.broadcast?.({
-                type: 'ai_delta',
-                module: 'ai',
-                payload: {
-                  conversationId: conversation.id,
-                  messageId: assistant.id,
-                  channel: 'reasoning',
-                  delta,
-                  text: partialReasoning,
-                },
-              });
-            }
-          : undefined,
-      });
-
-      const extracted = extractDrafts(result.text ?? partial);
-      const previewed = await previewDrafts(this.commands, extracted.drafts);
-
-      // 只读查询**自动执行**：查询不改数据，让用户为"我明天有什么课"点一次确认毫无意义，
-      // 更关键的是模型看不到结果就只能说"我拿不到数据"（实测它真的会这么说）。
-      // 执行结果回灌给模型，它再用自然语言回答 —— 这是"只读工具先放开"的最小实现。
-      // 「全部确认」：连只读查询也要用户点确认，所以不自动执行
-      const autoQuery = mode !== 'strict';
-      const queried = autoQuery ? await this.#runReadOnlyQueries(previewed) : [];
-      let content = extracted.text;
-      let drafts = autoQuery
-        ? previewed.filter((entry) => entry.draft?.action !== 'query' || entry.error)
-        : previewed;
-      // 「自动审批」：写操作也直接执行（先过 dryRun 校验，再真执行）
-      const executed = mode === 'auto' ? await this.#autoExecuteWrites(drafts) : [];
-      if (executed.length) drafts = drafts.filter((entry) => !executed.some((item) => item.entry === entry));
-      let followupUsage = null;
-      let queryError = null;
-
-      if (queried.length) {
+      // 上下文逐轮追加（回灌 = 追加一条 assistant 草稿 + 一条注入结果的 user），
+      // 所以下一轮**看得到**前面所有轮查过什么，不会把同一条查询再问一遍。
+      let turnMessages = messages;
+      for (let round = 1; round <= MAX_ROUNDS; round += 1) {
+        // "实际调用轮数"按发出去了几次算：最后一轮哪怕上游报错，它也确实被调过
+        rounds = round;
+        // 本轮状态清零。reset 之后前端渲染的就是"这一轮"从零长出来的正文，
+        // 详见下面 onDelta 里的说明。
+        partial = '';
+        let roundReasoning = '';
+        let started = false;
+        let result;
         try {
-          const followup = await this.provider.chat({
-            messages: this.#withQueryResults(messages, extracted.text, queried),
+          result = await this.provider.chat({
+            messages: turnMessages,
+            // **每一轮都流式**：回灌之后的轮次以前是静默的（界面几秒不动，用户以为断了），
+            // 现在"我查一下 → 拿到数据 → 回答"整个过程都有增量可看。
+            stream: Boolean(stream),
             reasoningEffort: effort,
+            onDelta: stream
+              ? (delta) => {
+                  if (!started) {
+                    started = true;
+                    // 每轮的第一块 delta 先广播一条 reset，让前端清空气泡。
+                    // 不 reset 的话"我查一下……"会和最终答案粘在同一段里，用户看到的是一段
+                    // 自相矛盾的半成品；而模型每轮说的话都是**独立**的一段，渲染层只有收到
+                    // reset 才知道该翻页。（delta/text 都给空串，前端不必特判 undefined。）
+                    this.broadcast?.({
+                      type: 'ai_delta',
+                      module: 'ai',
+                      payload: {
+                        conversationId: conversation.id,
+                        messageId: assistant.id,
+                        reset: true,
+                        delta: '',
+                        text: '',
+                        round,
+                      },
+                    });
+                  }
+                  partial += delta;
+                  this.broadcast?.({
+                    type: 'ai_delta',
+                    module: 'ai',
+                    payload: {
+                      conversationId: conversation.id,
+                      messageId: assistant.id,
+                      delta,
+                      // text 是**本轮**的累计正文（不是各轮拼起来），前端照着覆盖气泡即可
+                      text: partial,
+                      round,
+                    },
+                  });
+                }
+              : undefined,
+            // 思维链单独一条通道：前端把它放进默认折叠的「思考过程」卡里，不和正文混在一起。
+            // 这里累积的是**全部轮**的思考，用户顺着它就能看出"先查了什么、又想写什么"。
+            onReasoning: stream
+              ? (delta) => {
+                  roundReasoning += delta;
+                  reasoningAll += delta;
+                  this.broadcast?.({
+                    type: 'ai_delta',
+                    module: 'ai',
+                    payload: {
+                      conversationId: conversation.id,
+                      messageId: assistant.id,
+                      channel: 'reasoning',
+                      delta,
+                      text: reasoningAll,
+                      round,
+                    },
+                  });
+                }
+              : undefined,
           });
-          const answer = extractDrafts(followup.text);
-          content = answer.text || followup.text;
-          followupUsage = followup.usage ?? null;
-          // 第二次回复里的写操作草稿照样要渲染出来（"顺手把那条推迟到明天"）
-          const extra = await previewDrafts(this.commands, answer.drafts.filter((item) => item.action !== 'query'));
-          drafts = [...drafts, ...extra];
         } catch (error) {
-          // 总结这一步失败不影响"已经查到了"：正文仍然给用户，数据靠下面的 queried 卡片呈现
+          // 第一轮就失败 = 这条回复彻底没成，照旧往上抛（外层把消息标 failed）
+          if (round === 1) throw error;
+          // 后面几轮失败只是"总结这一步没成"：已经查到的数据必须照常返回给用户，
+          // 所以只记 PARTIAL 然后收尾（数据靠 queried 卡片呈现）。
           queryError = error?.message ?? '查询结果总结失败';
+          break;
         }
+
+        usageRounds.push(result.usage ?? null);
+        // 模型名与结束原因取**最后一轮**：多轮里只有最后那轮说的话是给用户看的
+        lastModel = result.model ?? this.config.get().model;
+        lastFinishReason = result.finishReason ?? null;
+        // 非流式时思考链只在 result 里；流式时 result.reasoning 与 onReasoning 收到的是同一份
+        // 增量（上面已经累积过），这里判一下别拼两遍 —— 也兼容"只在最终结果里给思考"的 provider
+        if (!roundReasoning) reasoningAll += String(result.reasoning ?? '');
+
+        const extracted = extractDrafts(result.text ?? partial);
+        const previewed = await previewDrafts(this.commands, extracted.drafts);
+        // 抽掉草稿后的正文：本轮它就是"当前的最终答案"（下一轮会把它覆盖掉）
+        content = extracted.text;
+        // 原文只在"这轮确实抽出了草稿"时更新：排查"模型到底说了啥"时只有这里有，
+        // 而纯自然语言那一轮（content 就等于原文）留着也是重复。
+        if (extracted.drafts.length) lastRaw = result.text ?? partial ?? '';
+
+        // ── 写操作 ──────────────────────────────────────────────────────────
+        // 「自动审批」**每一轮**都要跑：以前只在第一轮回灌前执行一次，于是"先查一次、再照着写"
+        // 这条最常见的路径里，第二轮才冒出来的写草稿再也无人执行 —— 这正是用户说的
+        // "自动审批没啥用"。没执行的（校验不过的、非 auto 档的）留在 drafts 里走人工确认卡。
+        const autoQuery = mode !== 'strict';
+        let roundDrafts = autoQuery
+          ? previewed.filter((entry) => entry.draft?.action !== 'query' || entry.error)
+          : previewed;
+        // 同一条写操作被模型在多轮里重复输出时**只能执行一次** —— auto 档尤其致命：
+        // 它会落两条一模一样的记录。模型看不到自己上一轮输出过的 ```command 块（回灌时草稿已经
+        // 被抽掉了），只看到"我准备加一条待办"的正文，所以它在后面某一轮把同一件事再说一遍很常见。
+        const doneKeys = new Set(executed.map((item) => this.#draftKey(item.entry)));
+        const freshWrites = roundDrafts.filter((entry) => !doneKeys.has(this.#draftKey(entry)));
+        const executedNow = mode === 'auto' ? await this.#autoExecuteWrites(freshWrites) : [];
+        if (executedNow.length) {
+          roundDrafts = freshWrites.filter((entry) => !executedNow.some((item) => item.entry === entry));
+          executed.push(...executedNow);
+        } else {
+          roundDrafts = freshWrites;
+        }
+        // 同一条草稿被模型在多轮里重复输出时只留第一张确认卡：
+        // 否则用户会看到两张一模一样的按钮，不知道该点哪个。
+        const seenDrafts = new Set(drafts.map((entry) => this.#draftKey(entry)));
+        for (const entry of roundDrafts) {
+          const key = this.#draftKey(entry);
+          if (seenDrafts.has(key)) continue;
+          seenDrafts.add(key);
+          drafts.push(entry);
+        }
+
+        // ── 只读查询 ────────────────────────────────────────────────────────
+        // 只读查询**自动执行**：查询不改数据，让用户为"我明天有什么课"点一次确认毫无意义，
+        // 更关键的是模型看不到结果就只能说"我拿不到数据"（实测它真的会这么说）。
+        // 先按草稿去重再执行：模型拿到结果后很容易把同一条查询原样再发一遍（想"再确认一次"），
+        // 不拦的话 MAX_ROUNDS 会被重复查询烧光，最终答案永远出不来。
+        // 「全部确认」档：连只读查询也要用户点确认，所以一条都不自动跑。
+        const fresh = autoQuery
+          ? await this.#runReadOnlyQueries(previewed.filter((entry) => !this.#isRepeatQuery(entry, queried)))
+          : [];
+        queried.push(...fresh);
+
+        // **循环终止条件**：这一轮没有查出任何"新"查询 = 模型这轮是在直接回答用户，
+        // 它就是最终回答，收尾。这条判断同时覆盖两种正常结束：纯聊天（压根没草稿）、
+        // 以及查完之后开始作答（模型不再发查询草稿）。
+        if (!fresh.length) break;
+        // 还有新查询、但轮数已经用光（模型想查第六次）：记下来，调用方据此知道
+        // "答案是被上限截断的"，而不是以为模型就答了这么点。
+        if (round >= MAX_ROUNDS) {
+          hitRoundLimit = true;
+          break;
+        }
+        // 把这一轮的结果回灌进上下文，进入下一轮 —— 这才是真正的工具循环
+        turnMessages = this.#withQueryResults(turnMessages, extracted.text, fresh);
       }
 
       const saved = await this.store.aiMessages.update(assistant.id, {
-        content: content || (queried.length ? '已经查到数据。' : ''),
+        // 正文 = **最后一轮**抽掉草稿后的话；它为空时按"这一刻的事实"兜底：
+        // 查过数据就说查到了、自动执行过写操作就说处理好了（细节另有数据卡片/回执卡）。
+        content: content || (queried.length ? '已经查到数据。' : executed.length ? '已经照你说的处理好了。' : ''),
+        // 草稿 / 已执行 / 查询都是**跨轮累积**：用户看到的应该是整次交互的全貌
         drafts,
         executed,
         thinking,
         permission: mode,
+        search: searchMode,
         // 思维链最多留 2 万字：它是给人看/排查的，不是数据
-        reasoning: String(result.reasoning ?? partialReasoning ?? '').slice(0, 20_000) || null,
+        reasoning: reasoningAll.slice(0, 20_000) || null,
         // 只读查询的原始结果：前端据此画数据卡片，也方便排查"模型到底看到了什么"
         queried,
         status: 'done',
-        model: result.model ?? this.config.get().model,
-        usage: result.usage ?? null,
-        usageFollowup: followupUsage,
-        finishReason: result.finishReason ?? null,
+        model: lastModel,
+        usage: usageRounds[0] ?? null,
+        usageFollowup: usageRounds[1] ?? null,
+        // 每轮 usage 都留着：一次回复可能是好几次上游调用，token 统计不能只算前两次
+        usageRounds,
+        // 实际调了几轮、是不是撞上了上限（撞上 = "它还想查，但轮数用完了"）
+        rounds,
+        roundLimit: hitRoundLimit,
+        finishReason: lastFinishReason,
         // 抽掉草稿前的原文留着：排查"模型到底说了啥"时只有这里有
-        raw: extracted.drafts.length ? result.text : null,
+        raw: drafts.length || executed.length ? lastRaw : null,
+        // 只有"总结失败"这一种部分失败：已经查到的数据本身照常返回
         error: queryError ? { code: 'PARTIAL', message: queryError } : null,
       });
       await this.#touchConversation(conversation.id, trimmed);
       this.broadcast?.({
         type: 'ai_message',
         module: 'ai',
-        payload: { conversationId: conversation.id, message: saved, drafts, queried },
+        payload: { conversationId: conversation.id, message: saved, drafts, queried, rounds, roundLimit: hitRoundLimit },
       });
       return {
         ok: true,
@@ -584,9 +800,13 @@ export class AiChatService {
         drafts,
         queried,
         executed,
-        // 把这一轮的选择回显给调用方：前端据此在气泡上标注"自动执行/思考强度"
+        // 把这一轮的选择回显给调用方：前端据此在气泡上标注"自动执行/思考强度/联网"
         thinking,
         permission: mode,
+        search: searchMode,
+        // 调了几轮、是否撞上轮次上限
+        rounds,
+        roundLimit: hitRoundLimit,
         warnings: uploadWarnings,
       };
     } catch (error) {
@@ -621,6 +841,14 @@ export class AiChatService {
   /**
    * 送进模型的历史：最近 N 轮（一轮 = 一问一答）。
    * 只带 role + content —— 草稿、usage 这些是给人看的，进提示词只会浪费 token。
+   * 唯一的附加内容是 assistant 正文末尾那一行**紧凑摘要**（见 #historySummary）：
+   * "上一轮查到了什么 / 自动执行了什么"对**下一句用户发言**必须可见，否则用户说"那明天呢"
+   * 时模型是从零开始的（它只看得到一句光秃秃的回复）。
+   *
+   * 摘要**拼进 content**（`\n\n` 分隔）而不是再插一条 `role: "user"` 的注入消息，理由：
+   *   1. history 是要原样发上去的，user/assistant 严格交替最稳 —— 各家 OpenAI 兼容端点
+   *      对连续两条同角色消息的容忍度不一样；
+   *   2. 不改变"最近 N 轮"的截断口径：多一条消息就会占掉窗口里的位置，把最早那轮挤出去。
    */
   #history(conversationId) {
     const turns = this.config.get().historyTurns ?? 0;
@@ -628,7 +856,71 @@ export class AiChatService {
     const all = this.#messagesOf(conversationId).filter(
       (item) => (item.role === 'user' || item.role === 'assistant') && item.status !== 'failed' && item.content,
     );
-    return all.slice(-turns * 2).map((item) => ({ role: item.role, content: item.content }));
+    // 截断逻辑**不变**：仍然是最后 turns 轮（一问一答算一条消息，所以是 turns * 2）
+    return all.slice(-turns * 2).map((item) => {
+      if (item.role !== 'assistant') return { role: item.role, content: item.content };
+      const summary = this.#historySummary(item);
+      return { role: 'assistant', content: summary ? `${item.content}\n\n${summary}` : item.content };
+    });
+  }
+
+  /**
+   * 上一轮"实际发生了什么"的一行摘要（给 `#history` 用）。
+   *
+   * 数据全部来自消息上**已经落库**的字段，不重新查库、不塞原始 JSON：
+   *   - `queried`：这一轮跑过的只读查询（`draft.target` + `result.count` / `result.items`）；
+   *   - `executed`：自动审批真正执行掉的写操作（`draft` + `result`）。
+   * 这两样原本只给人看（数据卡片 / 回执卡），模型一无所知 —— 于是"那明天呢"接不上。
+   *
+   * 宁缺勿滥：两者都空就返回 null（这种消息一个 token 都不多花），整体也压到 200 字以内。
+   * 只保留条数与名字，**不带查询结果本身**：原始数据在回灌那一轮已经进过上下文，
+   * 历史里再铺一遍既贵又会把更早的对话挤掉。
+   */
+  #historySummary(message) {
+    /** 查询范围压成 `（2026-10-12）` / `（起~止）`；没有范围就是空串。 */
+    const range = (filters) => {
+      const from = filters?.from ?? null;
+      const to = filters?.to ?? null;
+      if (!from && !to) return '';
+      return from && to && from !== to ? `（${from}~${to}）` : `（${from ?? to}）`;
+    };
+
+    const parts = [];
+    const queried = Array.isArray(message?.queried) ? message.queried : [];
+    if (queried.length) {
+      const items = queried.map((entry) => {
+        const target = entry?.draft?.target ?? '数据';
+        // 查失败也要说：否则模型会以为"查过了，就是没有"，理直气壮地回答"你没有日程"
+        if (entry?.error) return `${target}（没查成）`;
+        const count = entry?.result?.count ?? entry?.result?.items?.length ?? 0;
+        return `${target} ${count} 条${range(entry?.draft?.filters)}`;
+      });
+      parts.push(`已查 ${items.join('、')}`);
+    }
+
+    const executed = Array.isArray(message?.executed) ? message.executed : [];
+    if (executed.length) {
+      const items = executed.map((entry) => {
+        const draft = entry?.draft ?? {};
+        const verb = ACTION_LABELS[draft.action] ?? draft.action ?? '操作';
+        // 写操作的"名字"各家返回得不完全一样：create 给 item，update/delete 给 affected
+        const name =
+          entry?.result?.item?.title ??
+          entry?.result?.item?.id ??
+          entry?.result?.affected?.[0]?.title ??
+          draft.fields?.title ??
+          draft.filters?.keyword ??
+          '';
+        // 连名字都拿不到时至少说清动的是哪张表，别写成光秃秃一个"删除"
+        const label = `${verb}${name ? `「${name}」` : draft.target ? ` ${draft.target}` : ''}`;
+        return entry?.error ? `${label}（没成）` : label;
+      });
+      parts.push(`已自动执行 ${items.join('、')}`);
+    }
+
+    if (!parts.length) return null;
+    const line = `[上一轮：${parts.join('；')}]`;
+    return line.length > HISTORY_SUMMARY_MAX ? `${line.slice(0, HISTORY_SUMMARY_MAX - 1)}…` : line;
   }
 
   async #appendMessage(data) {
@@ -698,7 +990,10 @@ export class AiChatService {
     };
     // 模块声明的投影表覆盖内置表（内置三张表保持原样，行为不变）
     const fields = this.queryFields?.[target] ?? FIELDS[target] ?? ['id', 'title'];
-    const items = (result.items ?? []).slice(0, MAX_QUERY_ITEMS).map((item) => {
+    // 条数上限按 target 可调：有些数据**整份才有意义**（成绩单被截到 20 条就没法算学分绩了），
+    // 模块在自己的描述符里用 `aiQueryLimits` 声明该给多少；没声明的仍用内置上限。
+    const limit = this.queryLimits?.[target] ?? MAX_QUERY_ITEMS;
+    const items = (result.items ?? []).slice(0, limit).map((item) => {
       const picked = {};
       for (const key of fields) if (item[key] !== undefined && item[key] !== null) picked[key] = item[key];
       return picked;
@@ -717,10 +1012,14 @@ export class AiChatService {
   }
 
   /**
-   * 把查询结果回灌进对话（第二次模型调用）。
+   * 把这一轮查到的只读结果回灌进对话（**每轮**都回灌，不是固定的"第二次调用"）。
    *
    * 用一条 `role: "user"` 的显式标注消息而不是 `role: "tool"`：我们没走函数调用协议，
    * 各家 OpenAI 兼容端点对 `tool` 消息的校验不一致，而带标注的 user 消息到处都能跑。
+   *
+   * 文案刻意留了"还可以再查"的口子：多轮循环靠它继续下去（查日程 → 查待办 → 写一条 → 回话）。
+   * 以前这里写死"不要再输出查询草稿"，等于把模型的手绑住 —— 它只能拿第一轮的数据硬答，
+   * 真正需要两步的问题（"先看看有没有冲突，再帮我加一条"）就永远做不完。
    */
   #withQueryResults(messages, replyText, queried) {
     const usable = queried.filter((entry) => entry.result);
@@ -730,11 +1029,42 @@ export class AiChatService {
       {
         role: 'user',
         content:
-          '[系统注入] 上面的只读查询已由系统执行完毕，结果如下（JSON）。请**据此直接用自然语言回答用户的问题**：' +
-          '不要再说"需要你确认""我拿不到数据"，也不要再输出查询草稿。\n' +
+          '[系统注入] 上面的只读查询已由系统执行完毕，结果如下（JSON）。请据此处理用户的问题：' +
+          '如果还需要查别的，可以再输出一个 query 草稿；否则现在就用自然语言回答用户，不要再输出查询草稿。' +
+          '不要再说"需要你确认""我拿不到数据"。\n' +
           JSON.stringify(usable.map((entry) => entry.result)),
       },
     ];
+  }
+
+  /**
+   * 这条草稿是不是"已经查过的那条查询"。
+   *
+   * 比的是**业务指纹**（见 `#draftKey`）而不是整份草稿。为什么必须去重：模型拿到结果后
+   * 很容易把同一条查询再发一遍（它想"再确认一次"），不去重就会把 MAX_ROUNDS 全烧在重复查询上，
+   * 最终答案永远出不来。失败的查询也算"查过"：同样的草稿再跑一次只会同样失败，白花一次上游调用。
+   */
+  #isRepeatQuery(entry, queried) {
+    const key = this.#draftKey(entry);
+    return (queried ?? []).some((item) => this.#draftKey(item) === key);
+  }
+
+  /**
+   * 草稿的**业务指纹**：动作 + target + 条件 / 字段（+ 记录 id）。
+   *
+   * 为什么不直接 `JSON.stringify(draft)`：模型换个 `explain` 的说法、`confidence` 抖一下，
+   * 整份草稿就不相等了 —— 同一条查询会被当成新查询（把轮次烧光），同一条写入会被执行两遍
+   * （auto 档直接落两条重复记录）。只比"这件事本身"才拦得住，所以下面**只取**业务字段。
+   */
+  #draftKey(entry) {
+    const draft = entry?.draft ?? {};
+    return JSON.stringify({
+      action: draft.action ?? '',
+      target: draft.target ?? '',
+      filters: draft.filters ?? null,
+      fields: draft.fields ?? null,
+      id: draft.id ?? null,
+    });
   }
 
   async #touchConversation(id, firstText) {

@@ -101,6 +101,20 @@
 }
 .ac-term-name { font-weight: 600; font-size: 13px; }
 .ac-term-meta { font-size: 12px; color: var(--muted, #8a8f98); font-variant-numeric: tabular-nums; }
+/* 学期行的「整学期计入 / 整学期屏蔽」三态勾选框：推到最右，别跟学期名与口径挤在一起 */
+.ac-term-check {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted, #8a8f98);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ac-term-check:hover { color: var(--fg, #e6e6ea); }
+.ac-term-check input { cursor: pointer; }
+.ac-term-check input:disabled { cursor: not-allowed; }
 
 /* 未计入的行压暗，但仍然可读 —— 用户要能看见自己排除了什么 */
 .ac-row-off { opacity: 0.5; }

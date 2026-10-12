@@ -2,7 +2,9 @@
  * 思源学堂服务：把「登录 → 拉课程 → 拉活动 → 同步到日历」串起来。
  *
  * 设计要点：
- * - 会话只保留在内存 + `data/lms-session.json`（0600），进程重启后免登录；
+ * - **登录与会话票据交给全局认证模块**（`services.auth`，order=5）：
+ *   学堂与教务用的是同一个学校账号，共享 Cookie 罐才能单点登录。
+ *   本模块不再自建 jar/http/CasAuth，也不再写 lms-session.json；
  * - 课程/活动落本地缓存（JsonStore），离线也能看，重新同步不会重复建日程；
  * - 同步是「先预览后应用」：预览只读、纯计算，应用才写数据；
  * - 所有面向 HTTP 的失败都翻译成带状态码的 HttpError，路由层不再判断。
@@ -12,18 +14,18 @@ import path from 'node:path';
 
 import { HttpError } from '../../core/http/router.js';
 import { todayKey } from '../../shared/time.js';
-import { AUTH_STATUS, CasAuth, generateVisitorId } from './cas-auth.js';
+import { AUTH_STATUS } from './cas-auth.js';
 import { DEFAULT_SYNC_TYPES, activityTypesOf, resolveLmsConfig } from './config.js';
-import { CookieJar, HttpClient } from './http-client.js';
 import { JsonFile } from './secret-store.js';
 import { LmsApi } from './api.js';
+import { ReplayDownloader, humanSize } from './replay-download.js';
 import { applySyncPlan, buildSyncPlan } from './sync.js';
 import { parseLmsDate } from './time.js';
 
-/** 会话文件最多认多久（超过则忽略，强制重新登录）。 */
-const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 /** 活动缓存的新鲜度：预览时若超过这个时间就顺手刷新一次。 */
 const ACTIVITY_TTL_MS = 10 * 60 * 1000;
+/** 拿不到账号信息时的重试间隔（展示信息，不值得每次都去撞上游）。 */
+const USER_RETRY_MS = 60 * 1000;
 /** 单次预览最多补拉多少条作业详情（详情接口一个活动一次请求）。 */
 const MAX_DETAIL_FETCH = 40;
 
@@ -31,20 +33,47 @@ const courseRecordId = (courseId) => `lms:course:${courseId}`;
 const activityRecordId = (activityId) => `lms:activity:${activityId}`;
 
 export class LmsService {
-  constructor({ store, services, broadcast = () => {}, config = resolveLmsConfig(), dataDir, visitorId } = {}) {
+  /**
+   * @param {object} options
+   * @param {object} options.auth **共享的全局认证服务**（`services.auth`，order=5）。
+   *   必需：思源学堂与教务用的是同一个学校账号，登录已经收敛到 `auth` 模块。
+   *   缺它会在装配期就报错（见 module.js），而不是运行到一半才发现。
+   */
+  constructor({ store, services, broadcast = () => {}, config = resolveLmsConfig(), dataDir, auth } = {}) {
+    if (!auth) {
+      // 装配期就炸，而不是等到用户点登录才报错。
+      // 这条分支只在"单独加载 lms 而没加载 auth"时触发（比如 onlyModules），
+      // 正常装配下 auth 的 order=5 一定先于本模块。
+      throw new Error('lms 模块需要 auth 模块（order=5）：请确保它被一起装配（见 src/modules/auth/module.js）');
+    }
     this.store = store;
     this.broadcast = broadcast;
     this.config = resolveLmsConfig(config ?? {});
     this.dataDir = dataDir ?? store?.dataDir ?? '.';
     this.services = services ?? {};
-    this.jar = new CookieJar();
-    this.http = new HttpClient({ userAgent: config.userAgent, timeoutMs: config.timeoutMs, jar: this.jar });
-    this.auth = new CasAuth({ http: this.http, config, visitorId: visitorId ?? generateVisitorId() });
-    this.api = new LmsApi({ http: this.http, config });
-    this.sessionFile = new JsonFile(path.join(this.dataDir, 'lms-session.json'));
+    /**
+     * 共享认证。**HTTP 客户端与 Cookie 罐都从它来** ——
+     * 这正是单点登录成立的原因：罐子里有 CAS 的 TGC，学堂与教务才能互相免密。
+     * 本模块不再自建 jar/http/CasAuth，也不再自己读写会话文件。
+     */
+    this.sharedAuth = auth;
+    this.jar = auth.jar;
+    this.http = auth.http;
+    this.api = new LmsApi({ http: this.http, config: this.config });
+    /** 同步元信息是普通业务数据 → 0644。会话票据由 auth 模块管，不再有 lms-session.json。 */
+    // 回放下载：视频直链要带录播站票据 + 学堂 Cookie，只能在主进程下
+    this.downloads = new ReplayDownloader({
+      http: this.http,
+      downloadDir: this.config.downloadDir ?? path.join(this.dataDir, 'downloads'),
+      broadcast,
+      log: (message) => this.services?.log?.(message),
+    });
     this.metaFile = new JsonFile(path.join(this.dataDir, 'lms-meta.json'), { mode: 0o644 });
     this.verified = false;
     this.restored = false;
+    /** 上次尝试拉账号信息的时间：失败后不立刻重试，免得每次业务请求都撞一次上游。 */
+    this.userFetchedAt = 0;
+    this.userFetching = false;
     this.state = {
       status: 'anonymous',
       user: null,
@@ -62,7 +91,52 @@ export class LmsService {
 
   // ---------------------------------------------------------------- 对外状态
 
+  /**
+   * 把共享认证里「学堂」这个站点的状态投影到本模块。
+   *
+   * 为什么必须这么做：**登录态的唯一真相在 auth 模块**。用户在**设置页**登录时，
+   * 更新的是共享认证；本模块的 `state` 不会自己变，于是会出现
+   * 「设置里明明已登录，切到学堂页却还说未登录」。
+   *
+   * 只在两个方向上动：
+   *   - auth 说就绪 → 本模块跟着变就绪；
+   *   - 本模块**曾经声称已登录**而 auth 说不可用（比如在设置里退了）→ 降级为未登录。
+   * 刻意不碰 `need_mfa` / `need_captcha` / `error`：那是登录**进行中**的状态，
+   * 此时站点本来就还没就绪，擅自改成 anonymous 会把界面正在走的流程打断。
+   */
+  #syncAuthState() {
+    const site = this.sharedAuth.siteStatus('lms');
+    if (site?.ready) {
+      if (this.state.status !== 'ready') {
+        this.state.status = 'ready';
+        this.state.error = null;
+        this.state.mfa = null;
+      }
+      this.verified = true;
+      // 姓名是**模块本地**的展示信息（不像登录态那样由共享认证持有）：
+      // 从设置页登录不经过本模块的 #finishLogin()，而 status() 又不会走 #ensureReady()，
+      // 所以这里补一次。不 await（status() 是同步的），拿不到只是不显示名字。
+      if (!this.state.user?.name) void this.#ensureUser();
+      return;
+    }
+    if (this.state.status === 'ready') {
+      this.state.status = 'anonymous';
+      this.state.mfa = null;
+      this.verified = false;
+      return;
+    }
+    // 登录正在**设置页**进行中（需要两步验证 / 图形验证码）：跟着显示。
+    // 不跟的话，用户在设置页走到"输验证码"这一步，切到学堂页却看到"未登录"，
+    // 会以为登录根本没开始。登录是全局的一件事，状态也就该是全局的。
+    const global = this.sharedAuth.status();
+    if (global.status === 'need_mfa' || global.status === 'need_captcha') {
+      this.state.status = global.status;
+      this.state.mfa = global.mfa ?? null;
+    }
+  }
+
   status() {
+    this.#syncAuthState();
     const courses = this.store.lmsCourses.all();
     const activities = this.store.lmsActivities.all();
     const schedules = this.store.schedules.all().filter((item) => String(item.externalId ?? '').startsWith('lms:'));
@@ -73,7 +147,7 @@ export class LmsService {
       status: this.state.status,
       user: this.state.user,
       mfa: this.state.mfa,
-      captchaRequired: Boolean(this.auth?.captchaRequired),
+      captchaRequired: Boolean(this.sharedAuth?.status?.().captchaRequired),
       error: this.state.error,
       baseUrl: this.config.baseUrl,
       cache: {
@@ -94,11 +168,15 @@ export class LmsService {
 
   // ---------------------------------------------------------------- 登录相关
 
-  /** 进程启动时调用：恢复上次的会话。 */
+  /**
+   * 进程启动时调用：恢复上次状态。
+   *
+   * **不再读会话文件** —— 票据由 `auth` 模块统一持有（它比本模块先 restore，
+   * 所以这里拿到的已经是恢复好的共享罐）。本模块只负责自己的元信息与登录态投影。
+   */
   async restore() {
     if (this.restored) return this.status();
     this.restored = true;
-    const saved = await this.sessionFile.read();
     const meta = (await this.metaFile.read()) ?? {};
     this.state.lastCoursesAt = meta.lastCoursesAt ?? null;
     this.state.lastActivitiesAt = meta.lastActivitiesAt ?? null;
@@ -106,29 +184,24 @@ export class LmsService {
     this.state.autoSync = Boolean(meta.autoSync);
     this.state.autoSyncIntervalHours = Number(meta.autoSyncIntervalHours) > 0 ? Number(meta.autoSyncIntervalHours) : 6;
     this.state.lastAutoSyncAt = meta.lastAutoSyncAt ?? null;
-    if (!saved?.cookies?.length) return this.status();
-    const savedAt = Date.parse(saved.savedAt ?? '');
-    if (Number.isFinite(savedAt) && Date.now() - savedAt > SESSION_MAX_AGE_MS) {
-      await this.sessionFile.remove();
-      return this.status();
+    // 用户名等展示信息跟着本模块的元信息走（0644 业务数据）。
+    // 它**不再**随会话票据走 —— 票据归 auth 管，且票据文件里刻意不放 PII。
+    // 存下来是为了重启后界面能立刻显示"谁登录着"，而不必先发一次网络请求。
+    this.state.user = meta.user ?? null;
+
+    const site = this.sharedAuth?.siteStatus?.('lms');
+    if (site?.ready) {
+      // 先乐观地认为已登录，真正的失效会在第一次业务请求时被发现（并走 invalidate 重验）
+      this.state.status = 'ready';
+      this.verified = true;
     }
-    this.jar = CookieJar.fromJSON(saved.cookies);
-    this.http.jar = this.jar;
-    this.state.user = saved.user ?? null;
-    // 先乐观地认为已登录，真正的失效会在第一次业务请求时被发现并清理
-    this.state.status = 'ready';
-    this.state.error = null;
     return this.status();
   }
 
   async login({ username, password, captcha, trustAgent = true } = {}) {
     this.state.error = null;
     try {
-      if (!this.auth.postUrl && !this.auth.hasLogin) {
-        const started = await this.auth.begin();
-        if (started === AUTH_STATUS.READY) return this.#finishLogin();
-      }
-      const result = await this.auth.login({ username, password, captcha, trustAgent });
+      const result = await this.sharedAuth.login({ username, password, captcha, trustAgent, siteId: 'lms' });
       return this.#handleAuthResult(result);
     } catch (error) {
       throw this.#translate(error, '登录思源学堂失败');
@@ -137,9 +210,10 @@ export class LmsService {
 
   async sendMfaCode() {
     try {
-      const result = await this.auth.sendMfaCode();
+      const result = await this.sharedAuth.sendMfaCode();
       this.state.status = 'need_mfa';
-      this.state.mfa = { ...(this.state.mfa ?? {}), flow: 'mfa', required: true, phoneMasked: result.phoneMasked, sent: true };
+      // 保留原有的 flow（可能是 'sec' 二次认证），只更新"已发送"相关的字段
+      this.state.mfa = { ...(this.state.mfa ?? {}), phoneMasked: result.phoneMasked, sent: true };
       return { phone: result.phone, phoneMasked: result.phoneMasked, status: this.status() };
     } catch (error) {
       throw this.#translate(error, '发送验证码失败');
@@ -148,8 +222,7 @@ export class LmsService {
 
   async verifyMfaCode(code) {
     try {
-      await this.auth.verifyMfaCode(code);
-      const result = await this.auth.login({});
+      const result = await this.sharedAuth.verifyMfaCode(code);
       return this.#handleAuthResult(result);
     } catch (error) {
       throw this.#translate(error, '验证码校验失败');
@@ -158,15 +231,33 @@ export class LmsService {
 
   async captcha() {
     try {
-      return await this.auth.fetchCaptcha();
+      return await this.sharedAuth.captcha();
     } catch (error) {
       throw this.#translate(error, '获取验证码失败');
     }
   }
 
+  /**
+   * 退出登录。
+   *
+   * ⚠️ 在单点登录下**"只退出学堂"没有意义**：CAS 的 TGC 还在共享罐里，
+   * 下次访问会被静默重新认证 —— 看起来就像"退不掉"。
+   * 所以这里执行的是**全局退出**（与设置页那个退出按钮同一个动作），
+   * 保证"点了退出就真的退出"这一直觉成立。
+   */
   async logout() {
-    await this.#clearSession();
+    await this.sharedAuth.logout();
+    await this.#resetLocalState();
     return this.status();
+  }
+
+  /** 清掉本模块的登录态投影与缓存标记（不动共享票据，那是 auth 的事）。 */
+  async #resetLocalState() {
+    this.verified = false;
+    this.state.status = 'anonymous';
+    this.state.user = null;
+    this.state.mfa = null;
+    this.state.error = null;
   }
 
   // ---------------------------------------------------------------- 课程 / 活动
@@ -244,6 +335,86 @@ export class LmsService {
     this.state.lastActivitiesAt = now;
     await this.#persistMeta();
     return { ...this.listActivities({ courseIds }), errors };
+  }
+
+  /**
+   * 课程页数据：课程信息 + 这门课的活动按类型分组。
+   *
+   * 全部来自本地缓存（`POST /lms/activities/refresh` 负责刷新），
+   * 打开课程页不该再打一次学校接口 —— 那会让"点一下课程"变成几秒白屏。
+   */
+  coursePage(courseId) {
+    const record = this.store.lmsCourses.all().find((item) => Number(item.courseId) === Number(courseId));
+    if (!record) throw HttpError.notFound(`本地没有课程 ${courseId}（先刷新课程）`);
+    const course = courseView(record);
+    const items = this.listActivities({ courseIds: [courseId] }).items;
+    const groups = { replay: [], homework: [], material: [], live: [], other: [] };
+    for (const item of items) {
+      const bucket =
+        item.type === 'lesson'
+          ? 'replay'
+          : item.type === 'homework'
+            ? 'homework'
+            : item.type === 'material'
+              ? 'material'
+              : item.type === 'lecture_live'
+                ? 'live'
+                : 'other';
+      groups[bucket].push(item);
+    }
+    return {
+      course,
+      groups,
+      counts: Object.fromEntries(Object.entries(groups).map(([key, list]) => [key, list.length])),
+      fetchedAt: this.state.lastActivitiesAt,
+      loggedIn: this.state.status === 'ready',
+    };
+  }
+
+  /** 取某个回放活动的视频列表（需要联网换票据，所以是显式动作）。 */
+  async replayVideos(activityId) {
+    await this.#ensureReady();
+    const record = this.store.lmsActivities.get(activityRecordId(activityId));
+    if (!record) throw HttpError.notFound(`本地没有活动 ${activityId}（先刷新活动）`);
+    const activity = activityView(record);
+    const result = await this.#guard(
+      () => this.api.replayVideos(activity, { lessonId: activity.id }),
+      '获取回放地址失败',
+    );
+    return {
+      activityId: activity.id,
+      title: activity.title ?? null,
+      courseName: activity.courseName ?? null,
+      replayCode: result?.replayCode ?? null,
+      videos: (result?.videos ?? []).map((video) => ({ ...video, sizeText: humanSize(video.size) })),
+    };
+  }
+
+  /** 开始下载一个回放视频。`url`/`label` 由前端从 replayVideos 的结果里带过来。 */
+  startDownload({ activityId, video } = {}) {
+    const record = this.store.lmsActivities.get(activityRecordId(activityId));
+    if (!record) throw HttpError.notFound(`本地没有活动 ${activityId}（先刷新活动）`);
+    const activity = activityView(record);
+    return this.downloads.start({
+      video,
+      courseName: activity.courseName ?? null,
+      title: activity.title ?? null,
+      activityId: activity.id,
+    });
+  }
+
+  listDownloads() {
+    return { items: this.downloads.list(), active: this.downloads.activeCount, downloadDir: this.downloads.downloadDir };
+  }
+
+  cancelDownload(id) {
+    const job = this.downloads.cancel(id);
+    if (!job) throw HttpError.notFound(`没有下载任务 ${id}`);
+    return job;
+  }
+
+  clearDownloads() {
+    return { items: this.downloads.clearFinished() };
   }
 
   async activityDetail(activityId) {
@@ -366,6 +537,7 @@ export class LmsService {
   }
 
   stopAutoSync() {
+    this.downloads?.cancelAll();
     if (this.autoSyncTimer) clearInterval(this.autoSyncTimer);
     this.autoSyncTimer = undefined;
     return this;
@@ -477,17 +649,25 @@ export class LmsService {
     }
   }
 
+  /**
+   * 把共享认证的登录结果投影成本模块的状态。
+   *
+   * 注意来源变了：以前是 `CasAuth` 的返回值（`{status, message, mfa}`），
+   * 现在是 `AuthService` 的（`{status, error, mfa, sites}`）—— 后者用的是 `error` 而不是 `message`。
+   */
   #handleAuthResult(result) {
-    switch (result.status) {
+    switch (result?.status) {
       case AUTH_STATUS.READY:
         return this.#finishLogin();
       case AUTH_STATUS.NEED_MFA:
         this.state.status = 'need_mfa';
-        this.state.mfa = result.mfa ?? { flow: 'mfa', required: true, phoneMasked: null, sent: false };
+        // 默认值在前、共享认证给的值在后：`flow`（'mfa' 短信 / 'sec' 二次认证）必须透传，
+        // 界面靠它决定引导哪条流程。
+        this.state.mfa = { flow: 'mfa', required: true, phoneMasked: null, sent: false, ...(result.mfa ?? {}) };
         return this.status();
       case AUTH_STATUS.NEED_CAPTCHA:
         this.state.status = 'need_captcha';
-        this.state.error = result.message ?? '请输入图形验证码';
+        this.state.error = result.error ?? '请输入图形验证码';
         return this.status();
       case AUTH_STATUS.NEED_ACCOUNT_CHOICE:
         this.state.status = 'error';
@@ -495,7 +675,8 @@ export class LmsService {
         return this.status();
       default:
         this.state.status = 'error';
-        this.state.error = result.message ?? '登录失败';
+        // AuthService 用 error 字段；CasAuth 时代是 message —— 两个都认，避免漏掉提示
+        this.state.error = result?.error ?? result?.message ?? '登录失败';
         return this.status();
     }
   }
@@ -507,20 +688,14 @@ export class LmsService {
     this.verified = true;
     try {
       this.state.user = await this.api.userInfo({ refresh: true });
-    } catch (error) {
+    } catch {
       // 登录票据已经拿到，用户信息只是展示用，拿不到不算失败
       this.state.user = this.state.user ?? { name: '', userNo: '' };
     }
-    await this.#persistSession();
+    // 会话票据由共享认证统一落盘；本模块把自己那份元信息（含展示用的账号）也存一下
+    await this.sharedAuth.persist();
+    await this.#persistMeta();
     return this.status();
-  }
-
-  async #persistSession() {
-    await this.sessionFile.write({
-      savedAt: new Date().toISOString(),
-      user: this.state.user,
-      cookies: this.jar.toJSON(),
-    });
   }
 
   async #persistMeta() {
@@ -531,51 +706,97 @@ export class LmsService {
       autoSync: this.state.autoSync,
       autoSyncIntervalHours: this.state.autoSyncIntervalHours,
       lastAutoSyncAt: this.state.lastAutoSyncAt,
+      /** 展示用的账号信息 —— 不是凭据，凭据在 auth-session.json（0600）。 */
+      user: this.state.user,
     });
   }
 
-  async #clearSession() {
-    this.jar = new CookieJar();
-    this.http.jar = this.jar;
-    this.auth.reset();
-    this.verified = false;
-    this.state.status = 'anonymous';
-    this.state.user = null;
-    this.state.mfa = null;
-    this.state.error = null;
-    await this.sessionFile.remove();
-  }
-
-  /** 业务请求前确保有可用登录态，失效时清掉本地票据并提示重新登录。 */
+  /**
+   * 业务请求前确保学堂可用。
+   *
+   * 职责已经变了：以前本模块自己判断票据、自己清会话；现在只是问共享认证一句
+   * 「学堂这个站点能用吗」——SSO 生效时它会静默用 TGC 换回学堂会话，用户无感。
+   */
   async #ensureReady() {
-    if (this.verified || this.auth.hasLogin) {
-      this.verified = this.verified || this.auth.hasLogin;
-      if (this.state.status !== 'ready') this.state.status = 'ready';
+    if (this.verified) {
+      // 早返回也**必须**补这一步：`#syncAuthState()` 会直接把 verified 置为 true
+      // （从设置页登录时就是这条路径），而拉姓名原先是写在下面的成功分支里的，
+      // 于是姓名永远不会被拉到，界面显示「（未获取到姓名）」。
+      await this.#ensureUser();
       return;
     }
-    if (this.restored && this.jar.toJSON().length) {
-      try {
-        this.state.user = await this.api.userInfo({ refresh: true });
-        this.auth.hasLogin = true;
-        this.verified = true;
-        this.state.status = 'ready';
-        return;
-      } catch {
-        await this.#clearSession();
-        throw HttpError.unauthorized('思源学堂登录态已失效，请重新登录');
-      }
+    const outcome = await this.sharedAuth.ensure('lms');
+    if (outcome.ok) {
+      this.verified = true;
+      if (this.state.status !== 'ready') this.state.status = 'ready';
+      await this.#ensureUser();
+      return;
     }
-    throw HttpError.unauthorized('请先登录思源学堂');
+    // 站点不可用：只把自己打回待验证，**不动共享票据** ——
+    // 那是全程序共用的，清掉会连带把教务也踢下线。
+    this.verified = false;
+    this.sharedAuth.invalidate('lms', outcome.reason ?? null);
+    this.state.status = 'anonymous';
+    throw HttpError.unauthorized(`思源学堂登录态已失效，请重新登录（${outcome.reason ?? '需要登录'}）`);
   }
 
-  /** 上游异常统一翻译：保留 HttpError，其余包装成 502。 */
+  /**
+   * 补一次账号信息（姓名 / 学号），只用于界面展示。
+   *
+   * 拿不到不算错误 —— 登录态是好的，只是名字没显示出来。
+   * 失败后隔一会儿才重试，免得每次业务请求都去撞一次上游。
+   */
+  async #ensureUser() {
+    if (this.state.user?.name) return;
+    if (this.userFetching) return;
+    if (Date.now() - (this.userFetchedAt || 0) < USER_RETRY_MS) return;
+    this.userFetching = true;
+    this.userFetchedAt = Date.now();
+    try {
+      const user = await this.api.userInfo({ refresh: true });
+      if (user?.name) {
+        this.state.user = user;
+        // 广播一次，让已经打开的学堂页把姓名显示出来。
+        // 不会自激：state.user.name 已存在，上面那两处就不会再触发 #ensureUser。
+        this.broadcast({ type: 'data_changed', module: 'lms', reason: 'user' });
+      }
+    } catch {
+      /* 展示信息，失败就静默跳过 */
+    } finally {
+      this.userFetching = false;
+    }
+  }
+
+  /**
+   * 上游异常统一翻译：保留 HttpError，其余包装成 502。
+   *
+   * 顺带承担一件重要的事：**业务请求发现票据失效时，要把本模块打回未登录**。
+   * 以前这由 `#clearSession()` 顺手做掉；现在票据归共享认证管，如果不显式处理，
+   * 就会出现"接口已经 401 了，但 /lms/status 还说 ready"的矛盾状态
+   * （`LmsApi` 抛的是 HttpError，所以必须先判登录态失效、再走 HttpError 的早返回）。
+   */
   #translate(error, prefix) {
-    if (error instanceof HttpError) return error;
     const message = error?.message ?? String(error);
-    if (/登录态已失效|请先登录/.test(message)) return HttpError.unauthorized(message);
+    if (/登录态已失效|请先登录/.test(message)) {
+      this.#onAuthFailure();
+      return error instanceof HttpError ? error : HttpError.unauthorized(message);
+    }
+    if (error instanceof HttpError) return error;
     // 验证码这类「用户输入问题」按 400 返回，更贴近 HTTP 语义（原来统一被包成 502）
     if (/验证码不正确|验证码不能为空|请先发送验证码/.test(message)) return HttpError.badRequest(message);
     return HttpError.upstream(`${prefix}：${message}`);
+  }
+
+  /**
+   * 把本模块打回未登录，并让共享认证下次重新验证学堂这个站点。
+   *
+   * **不动共享票据**：那是全程序共用的，清掉会连带把教务踢下线。
+   * 重新验证时如果 CAS 的 TGC 还有效，SSO 会静默把学堂会话换回来 —— 用户无感。
+   */
+  #onAuthFailure() {
+    this.verified = false;
+    this.state.status = 'anonymous';
+    this.sharedAuth.invalidate('lms', '业务请求发现登录态失效');
   }
 
   #guard(promiseFactory, prefix) {
