@@ -116,5 +116,7 @@ test('模板、每日笔记、数据库视图和 Canvas 均可持久化', async 
     assert.equal(canvas.status, 201);
     const stored = await call('GET', `/note-canvases/${canvas.body.item.id}`);
     assert.equal(stored.body.item.nodes[0].noteId, daily1.body.summary.id);
+    const aiDesign = await call('POST', `/note-canvases/${canvas.body.item.id}/ai-design`, { nodeId: 'n1' });
+    assert.equal(aiDesign.status, 501); assert.equal(aiDesign.body.error.code, 'AI_UNAVAILABLE');
   } finally { await app.close(); }
 });

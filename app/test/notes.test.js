@@ -186,3 +186,80 @@ test('替换 Provider 会取消旧订阅', async () => {
   await notes.connectProvider({ capabilities: () => ({}), listNotes: () => [] });
   assert.equal(cancelled, 1);
 });
+
+test('三维知识星系支持旋转、缩放、节点拖动与原位预览，并在拖动后防止误开笔记', async () => {
+  const app = bootRenderer({ api, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
+  const mount = await app.render('notes'); const notes = app.PCModules.getService('notes'); let opens = 0;
+  await notes.connectProvider({
+    capabilities: () => ({}), listNotes: () => [summary(), summary({ id: 'note-2', title: '线性代数' }), summary({ id: 'note-3', title: '概率论' })],
+    graph: async () => ({ nodes: [{ id: 'note-1', title: '高等数学', favorite: true }, { id: 'note-2', title: '线性代数' }, { id: 'note-3', title: '概率论' }], edges: [{ source: 'note-1', target: 'note-2' }, { source: 'note-2', target: 'note-3' }] }),
+    openNote() { opens += 1; }, createCanvas: async () => ({}),
+  });
+  const graphTab = mount.querySelectorAll('button').find((button) => button.textContent === '知识图谱'); await graphTab.listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 20));
+  const stage = mount.querySelector('.notes-graph-stage'); const satellite = mount.querySelector('.notes-graph-node');
+  assert.equal(stage.querySelector('.notes-graph-orbits'), null, '背景不得显示虚线同心轨道'); assert.match(stage.textContent, /滚轮缩放/); assert.equal(stage.querySelector('.notes-graph-planet'), null, '中心不得再显示实体星球');
+  assert.match(mount.querySelector('.notes-graph-controls').textContent, /标签圆形大小/); assert.match(mount.querySelector('.notes-graph-controls').textContent, /连线长度/); assert.match(mount.querySelector('.notes-graph-legend').textContent, /关系层级/);
+  let nativeDragPrevented = false; stage.listeners.dragstart[0]({ preventDefault() { nativeDragPrevented = true; } }); assert.equal(nativeDragPrevented, true, '应禁止浏览器原生拖拽以避免禁用光标和文字残影');
+  const beforeZoom = satellite.getAttribute('transform'); stage.listeners.wheel[0]({ deltaY: -100, preventDefault() {}, target: stage }); assert.notEqual(satellite.getAttribute('transform'), beforeZoom);
+  const beforeRotate = satellite.getAttribute('transform'); stage.listeners.pointerdown[0]({ button: 0, clientX: 10, clientY: 10, pointerId: 1, target: stage, preventDefault() {} }); assert.equal(stage.classList.contains('is-rotating'), true); stage.listeners.pointermove[0]({ clientX: 420, clientY: 35, pointerId: 1, preventDefault() {} }); stage.listeners.pointerup[0]({ pointerId: 1 }); assert.equal(stage.classList.contains('is-rotating'), false); assert.notEqual(satellite.getAttribute('transform'), beforeRotate); assert.equal(opens, 0, '旋转知识星球时不得误开笔记');
+  const translateX = (value) => Number(/translate\(([-\d.]+)/.exec(value)?.[1]); const beforeDrag = satellite.getAttribute('transform'); const beforeDragX = translateX(beforeDrag); satellite.listeners.pointerdown[0]({ button: 0, clientX: 100, clientY: 100, pointerId: 2, preventDefault() {}, stopPropagation() {} }); satellite.listeners.pointermove[0]({ clientX: 135, clientY: 120, pointerId: 2, preventDefault() {} }); satellite.listeners.pointerup[0]({ pointerId: 2 }); const afterDrag = satellite.getAttribute('transform'); assert.notEqual(afterDrag, beforeDrag); assert.ok(translateX(afterDrag) > beforeDragX, '即使图谱已转到背面，鼠标向右拖动时节点在屏幕上也必须向右移动'); assert.equal(opens, 0, '拖动卫星时不得误开笔记');
+  satellite.listeners.keydown[0]({ key: 'Enter' }); await new Promise((resolve) => setTimeout(resolve, 1)); assert.equal(opens, 0, '轻触只应显示原位预览，不得直接跳转'); assert.ok(stage.querySelector('.notes-graph-preview'));
+  const edit = stage.querySelectorAll('button').find((button) => button.textContent === '修改笔记'); await edit.listeners.click[0](); assert.equal(opens, 1, '只有点击修改笔记按钮才进入笔记页面');
+});
+
+test('Canvas 曲线随拖动实时更新，连线与卡片均可右键管理并安全删除', async () => {
+  const app = bootRenderer({ api, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
+  const mount = await app.render('notes'); const notes = app.PCModules.getService('notes');
+  let canvas = { id: 'canvas-1', name: '测试画布', nodes: [{ id: 'n1', type: 'file', noteId: 'note-1', x: 20, y: 20 }, { id: 'n2', type: 'file', noteId: 'note-2', x: 240, y: 20 }], edges: [{ id: 'e1', fromNode: 'n1', toNode: 'n2' }] };
+  let noteDeletes = 0;
+  await notes.connectProvider({
+    capabilities: () => ({}), listNotes: () => [summary(), summary({ id: 'note-2', title: '线性代数' })],
+    listCanvases: async () => [canvas], updateCanvas: async (id, patch) => { canvas = { ...canvas, ...patch }; return canvas; },
+    createCanvas: async () => canvas, deleteCanvas: async () => ({ deleted: true }), deleteNote: async () => { noteDeletes += 1; }, openNote() {},
+  });
+  const canvasTab = mount.querySelectorAll('button').find((button) => button.textContent === 'Canvas'); await canvasTab.listeners.click[0]();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  let card = mount.querySelector('.notes-canvas-node');
+  const path = mount.querySelector('.notes-canvas-edge'); const oldCurve = path.getAttribute('d');
+  card.listeners.pointerdown[0]({ button: 0, clientX: 20, clientY: 20, pointerId: 1 });
+  card.listeners.pointermove[0]({ clientX: 100, clientY: 80, pointerId: 1 });
+  assert.notEqual(path.getAttribute('d'), oldCurve, '拖动过程中曲线应实时跟随卡片');
+  await card.listeners.pointerup[0]({ pointerId: 1 });
+  let hit = mount.querySelector('.notes-canvas-edge-hit');
+  hit.listeners.contextmenu[0]({ preventDefault() {}, stopPropagation() {}, clientX: 150, clientY: 90 });
+  const elbow = mount.querySelectorAll('button').find((button) => button.textContent === '折线'); await elbow.listeners.click[0]();
+  assert.equal(canvas.edges[0].lineType, 'elbow');
+  hit = mount.querySelector('.notes-canvas-edge-hit'); hit.listeners.contextmenu[0]({ preventDefault() {}, stopPropagation() {}, clientX: 150, clientY: 90 });
+  app.context.confirm = () => true;
+  const removeEdge = mount.querySelectorAll('button').find((button) => button.textContent === '删除连接线'); await removeEdge.listeners.click[0]();
+  assert.equal(canvas.edges.length, 0, '删除连接线不得删除两端卡片'); assert.equal(canvas.nodes.length, 2);
+  card.listeners.contextmenu[0]({ preventDefault() {}, stopPropagation() {}, clientX: 100, clientY: 100 });
+  const green = mount.querySelectorAll('button').find((button) => button.title === 'green'); await green.listeners.click[0]();
+  assert.equal(canvas.nodes[0].color, 'green');
+  card = mount.querySelector('.notes-canvas-node'); card.listeners.contextmenu[0]({ preventDefault() {}, stopPropagation() {}, clientX: 100, clientY: 100 });
+  assert.equal(mount.querySelectorAll('button').some((button) => button.textContent === '置于顶层' || button.textContent === '置于底层'), false);
+  const remove = mount.querySelectorAll('button').find((button) => button.textContent === '删除卡片'); await remove.listeners.click[0]({ stopPropagation() {} });
+  assert.deepEqual(canvas.nodes.map((node) => node.id), ['n2']);
+  assert.equal(canvas.edges.length, 0, '删除节点后不能保留悬空连线');
+  assert.equal(noteDeletes, 0, '删除画布卡片不得删除原始笔记');
+});
+
+test('Canvas 可从全部笔记中选择添加，并在确认后应用 AI 美化建议', async () => {
+  const app = bootRenderer({ api, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
+  const mount = await app.render('notes'); const notes = app.PCModules.getService('notes');
+  const allNotes = [summary(), summary({ id: 'note-2', title: '线性代数' }), summary({ id: 'note-3', title: '概率论', folder: '数学' })];
+  let canvas = { id: 'canvas-2', name: 'AI 画布', nodes: [{ id: 'n1', type: 'file', noteId: 'note-1', x: 20, y: 20 }], edges: [] };
+  await notes.connectProvider({
+    capabilities: () => ({}), listNotes: () => allNotes, listCanvases: async () => [canvas], updateCanvas: async (id, patch) => { canvas = { ...canvas, ...patch }; return canvas; }, createCanvas: async () => canvas, deleteCanvas: async () => ({}), openNote() {},
+    suggestCanvasDesign: async () => ({ model: 'test-ai', suggestion: { shape: 'hexagon', color: 'purple', lineType: 'elbow', lineStyle: 'dashed', lineColor: 'green', lineWidth: 3.5, arrow: 'both', advice: '把核心概念放在中央。' } }),
+  });
+  const canvasTab = mount.querySelectorAll('button').find((button) => button.textContent === 'Canvas'); await canvasTab.listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 20));
+  const add = mount.querySelectorAll('button').find((button) => button.textContent === '添加笔记'); await add.listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 5));
+  const probability = app.context.document.body.querySelectorAll('button').find((button) => button.textContent.includes('概率论')); await probability.listeners.click[0]();
+  assert.equal(canvas.nodes.some((node) => node.noteId === 'note-3'), true, '选择器应能添加非当前笔记');
+  const card = mount.querySelector('.notes-canvas-node'); card.listeners.contextmenu[0]({ preventDefault() {}, stopPropagation() {}, clientX: 80, clientY: 80 });
+  const aiAction = mount.querySelectorAll('button').find((button) => button.textContent === 'AI 美化与画布建议'); await aiAction.listeners.click[0]({ stopPropagation() {} }); await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.match(app.context.document.body.textContent, /把核心概念放在中央/);
+  const apply = app.context.document.body.querySelectorAll('button').find((button) => button.textContent === '应用此方案'); await apply.listeners.click[0]();
+  assert.equal(canvas.nodes[0].shape, 'hexagon'); assert.equal(canvas.nodes[0].color, 'purple');
+});

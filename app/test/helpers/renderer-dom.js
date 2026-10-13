@@ -144,6 +144,7 @@ export class El {
   }
   setAttribute(name, value) {
     this.attributes[name] = value;
+    if (name === 'class') this.className = value;
     this[name] = value;
   }
   getAttribute(name) {
@@ -239,6 +240,7 @@ export function bootRenderer({ api, state = {} } = {}) {
       readyState: 'loading',
       body: new El('body'),
       createElement: (tag) => new El(tag),
+      createElementNS: (namespaceURI, tag) => { const node = new El(tag); node.namespaceURI = namespaceURI; return node; },
       getElementById: () => new El('div'),
       querySelectorAll: () => [],
       addEventListener() {},
