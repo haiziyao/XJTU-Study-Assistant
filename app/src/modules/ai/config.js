@@ -14,6 +14,11 @@
  *
  * 联网检索配置（`search*`）：
  *   - `searchMaxPages`（网络搜索最大条数）**默认 8、只允许 5–30 的整数**；
+ *   - `searchRetryMax`（**一个回合内**最多联网检索几次）**默认 3、只允许 1–6 的整数**。
+ *     它管的是"这一轮对话里模型能自己重试几次"：每一次 web 查询都会把
+ *     `attempt`（第几次）与 `remaining`（还剩几次）回灌给模型，用完就只能收尾作答。
+ *     没有它的话，模型搜不到就会一直换关键词重搜，把 8 轮循环烧在一件事上 ——
+ *     用户等半天，最后拿到的还是一句"没搜到"；有了上限，最坏情况也停在 6 次以内。
  *   - 用户在设置页填错 → `save()` 直接抛 `HttpError.badRequest`（`assertAiConfigInput`），
  *     而磁盘/环境变量里读出来的脏值只**静默回落默认值** ——
  *     一份手改坏的配置文件不该让服务起不来。
@@ -64,6 +69,12 @@ export const AI_DEFAULTS = Object.freeze({
   /** 「网络搜索最大条数」：一次最多读几个网页。**合法区间 5–30**，越界报错。 */
   searchMaxPages: 8,
   /**
+   * 「一个回合内最多检索几次」：用户问一件事时，模型最多能发起几次联网检索（含自己重试）。
+   * **合法区间 1–6**，默认 3；用完不再执行新的 web 查询，改为把
+   * `SEARCH_RETRY_EXHAUSTED` 回灌给模型让它如实收尾（见 chat-service 的检索预算）。
+   */
+  searchRetryMax: 3,
+  /**
    * 搜索服务：`auto`（默认，有 key 就用 API）/ `tavily` / `brave` / `serper` / `bing` /
    * `scrape`（强制解析结果页，哪怕配了 key）。
    */
@@ -87,6 +98,7 @@ export const AI_CONFIG_FIELDS = Object.freeze([
   'drawMode',
   'searchEnabled',
   'searchMaxPages',
+  'searchRetryMax',
   'searchProvider',
   'searchApiKey',
   'searchApiKeys',
@@ -95,6 +107,14 @@ export const AI_CONFIG_FIELDS = Object.freeze([
 /** 「网络搜索最大条数」的合法区间（与 web-search.js 的 SEARCH_LIMIT_MIN/MAX 一致）。 */
 export const SEARCH_MAX_PAGES_MIN = 5;
 export const SEARCH_MAX_PAGES_MAX = 30;
+
+/**
+ * 「一个回合内最多检索几次」的合法区间（`searchRetryMax`）。
+ * 下限 1：设成 0 等于把联网关掉 —— 那件事应该由 `searchEnabled` 表达，不该藏在次数里。
+ * 上限 6：工具循环本身最多只有 MAX_ROUNDS 轮（见 chat-service），次数比轮数还大就没有意义了。
+ */
+export const SEARCH_RETRY_MIN = 1;
+export const SEARCH_RETRY_MAX = 6;
 
 /**
  * 「上下文窗口上限」的合法区间。
@@ -155,6 +175,16 @@ function normSearchMaxPages(value, fallback = AI_DEFAULTS.searchMaxPages) {
   const base = num(fallback, { fallback: AI_DEFAULTS.searchMaxPages, min: SEARCH_MAX_PAGES_MIN, max: SEARCH_MAX_PAGES_MAX });
   const parsed = num(value, { fallback: base, min: SEARCH_MAX_PAGES_MIN, max: SEARCH_MAX_PAGES_MAX });
   return Math.min(SEARCH_MAX_PAGES_MAX, Math.max(SEARCH_MAX_PAGES_MIN, Math.trunc(parsed)));
+}
+
+/**
+ * 「一个回合内最多检索几次」的宽松归一化：取整 + 收敛到 1–6。
+ * 与 `normSearchMaxPages` 同款分工：越界/脏值静默回落默认，只保证**内部一定合法**。
+ */
+function normSearchRetryMax(value, fallback = AI_DEFAULTS.searchRetryMax) {
+  const base = num(fallback, { fallback: AI_DEFAULTS.searchRetryMax, min: SEARCH_RETRY_MIN, max: SEARCH_RETRY_MAX });
+  const parsed = num(value, { fallback: base, min: SEARCH_RETRY_MIN, max: SEARCH_RETRY_MAX });
+  return Math.min(SEARCH_RETRY_MAX, Math.max(SEARCH_RETRY_MIN, Math.trunc(parsed)));
 }
 
 /**
@@ -223,6 +253,25 @@ export function assertAiConfigInput(input = {}) {
       throw HttpError.badRequest(
         `网络搜索最大条数只能是 ${SEARCH_MAX_PAGES_MIN}–${SEARCH_MAX_PAGES_MAX} 之间的整数，收到 ${value}`,
         { field: 'searchMaxPages' },
+      );
+    }
+  }
+
+  // 检索次数预算：越界同样当场 400。它不是"可选的高级项"——
+  // 设成 0 会让模型一次都搜不了（用户以为开着联网却永远搜不到），必须拦下来。
+  const retries = input.searchRetryMax;
+  if (retries !== undefined && retries !== null && retries !== '') {
+    const value = Number(retries);
+    if (!Number.isFinite(value)) {
+      throw HttpError.badRequest(`检索重试上限必须是数字，收到 ${JSON.stringify(retries)}`, { field: 'searchRetryMax' });
+    }
+    if (!Number.isInteger(value)) {
+      throw HttpError.badRequest(`检索重试上限必须是整数，收到 ${value}`, { field: 'searchRetryMax' });
+    }
+    if (value < SEARCH_RETRY_MIN || value > SEARCH_RETRY_MAX) {
+      throw HttpError.badRequest(
+        `检索重试上限只能是 ${SEARCH_RETRY_MIN}–${SEARCH_RETRY_MAX} 之间的整数，收到 ${value}`,
+        { field: 'searchRetryMax' },
       );
     }
   }
@@ -310,6 +359,8 @@ export function normalizeAiConfig(input = {}, base = AI_DEFAULTS) {
     base.searchEnabled !== false,
   );
   out.searchMaxPages = normSearchMaxPages(raw.searchMaxPages, base.searchMaxPages);
+  // 检索次数预算：同样宽松归一（磁盘/环境变量脏值静默回落），实际用它的地方在 chat-service
+  out.searchRetryMax = normSearchRetryMax(raw.searchRetryMax, base.searchRetryMax);
   const wantedProvider = String(raw.searchProvider ?? base.searchProvider ?? 'auto').trim().toLowerCase();
   out.searchProvider = SEARCH_PROVIDER_VALUES.includes(wantedProvider) ? wantedProvider : 'auto';
   if (raw.searchApiKey !== undefined) out.searchApiKey = raw.searchApiKey;
@@ -355,6 +406,8 @@ export function maskAiConfig(config = {}) {
     // ------------------------------------------------------------ 联网检索
     searchEnabled: config.searchEnabled !== false,
     searchMaxPages: config.searchMaxPages,
+    /** 一个回合内最多联网检索几次（界面上的「检索重试上限」）。 */
+    searchRetryMax: config.searchRetryMax,
     searchProvider: config.searchProvider,
     /** 这一轮**实际**会用的通道：tavily / brave / serper / bing，或 scrape（免密钥解析结果页）。 */
     searchBackend: backend.id,
@@ -399,6 +452,7 @@ export function aiConfigFromEnv(env = process.env) {
     drawMode: env.PC_AI_DRAW_MODE,
     searchEnabled: env.PC_AI_SEARCH_ENABLED,
     searchMaxPages: env.PC_AI_SEARCH_MAX_PAGES,
+    searchRetryMax: env.PC_AI_SEARCH_RETRY_MAX,
     searchProvider: env.PC_AI_SEARCH_PROVIDER,
     searchApiKey: env.PC_AI_SEARCH_API_KEY,
     searchApiKeys: {

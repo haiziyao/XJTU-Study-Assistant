@@ -26,7 +26,7 @@ import { ERROR_CODES } from '../../shared/constants.js';
 import { HttpError } from '../../core/http/router.js';
 import { todayKey } from '../../shared/time.js';
 
-import { maskAiConfig, AI_DEFAULTS } from './config.js';
+import { maskAiConfig, AI_DEFAULTS, SEARCH_RETRY_MIN, SEARCH_RETRY_MAX } from './config.js';
 import { extractDrafts, previewDrafts } from './drafts.js';
 import { buildChatSystemPrompt, buildCommandSystemPrompt, describeChatPrompt, estimateTokens } from './prompt.js';
 import {
@@ -52,6 +52,57 @@ const WEB_TEXT_CHARS = 1_200;
 
 /** 联网检索在草稿里用的 target 名（模型输出 `{"action":"query","target":"web"}`）。 */
 const WEB_TARGET = 'web';
+
+/**
+ * 被用户中途停止的 assistant 消息落库时用的状态。
+ *
+ * 为什么不复用 `failed`：这两件事对用户**完全不同** ——
+ * `failed` 是"这次没成，你可以重来"，界面该给错误原因与重试入口；
+ * `stopped` 是"你叫停的"，界面该显示"已停止"，并且**保留已经生成的那半段正文**
+ * （用户往往正是看着那半段才决定停的）。混成一个状态，用户会以为程序崩了。
+ */
+const STATUS_STOPPED = 'stopped';
+
+/**
+ * 本回合的联网检索次数已经用完。
+ *
+ * 为什么用"回灌一个错误"而不是"悄悄跳过这次草稿"：跳过的话模型完全不知道自己的检索
+ * 没有执行 —— 它会照着"我搜过了"的语气继续编，或者把同一件事再说一遍，
+ * 把剩下的轮次全烧在同一个动作上，用户最终拿到的还是一句空话。
+ * 把"次数用完"当成**一次有原因的结果**回灌，模型才有依据收尾：
+ * 要么用已经拿到的数据作答，要么如实说拿不到并给下一步。
+ */
+const SEARCH_RETRY_EXHAUSTED = 'SEARCH_RETRY_EXHAUSTED';
+
+/** 停止信号触发时内部用的错误码（停止有自己的落库状态，这个码不会落库）。 */
+const STOPPED_CODE = 'AI_STOPPED';
+
+/**
+ * 一次检索失败 / 空结果时给模型的**三条具体建议**（回灌文案里逐条给出）。
+ *
+ * 为什么必须具体到"换更短的关键词 / 直读某个网址"：只说"再试试"等于没说 ——
+ * 实测模型会原地把同一句话换个说法再搜一遍（预算就是这么被烧掉的）。
+ * 给出可执行的岔路，它才会真的换策略，或者按第三条如实收尾。
+ */
+const SEARCH_RETRY_ADVICE = Object.freeze([
+  '①换一组更短、更具体的关键词再搜一次（把整句问话压成 2–4 个关键词，例如「西安 天气」）',
+  '②如果你知道是哪个校方栏目/页面，直接读那个网址：草稿里给 fields.url，不要再拿网址去搜',
+  '③如果确实拿不到，就如实告诉用户"这次没拿到"并给出下一步（换个问法再试 / 用户自己打开某个网址），不要编内容',
+]);
+
+/**
+ * 过程清单里写操作用的动词。
+ *
+ * 与 `#historySummary` 的 `ACTION_LABELS`（新建/修改/删除）**故意不同**：
+ * 那边是"上一轮做了什么"的回顾（可以说"新建"），这边是"它准备做什么"的进行时。
+ */
+const PLAN_WRITE_LABELS = Object.freeze({
+  create: '写入',
+  update: '修改',
+  delete: '删除',
+  complete: '完成',
+  rollover: '顺延',
+});
 
 /**
  * 定时唤醒的执行策略。
@@ -203,7 +254,234 @@ const EMPTY_MEMORY = (maxItems = DEFAULT_MEMORY_BUDGET.maxItems, maxChars = DEFA
   budget: { maxItems, maxChars, usedItems: 0, usedChars: 0, truncated: false },
 });
 
+/* ------------------------------------------------------------ 过程清单（plan） */
+
+/**
+ * 一条草稿的**业务指纹**（与 `#draftKey` 同一口径）。
+ *
+ * 抽成模块级函数是为了让过程清单也能用它去重，而不必把服务实例传进去：
+ * 模型把同一件事说两遍时，清单里不该出现两个一模一样的步骤。
+ */
+function draftFingerprint(entry) {
+  const draft = entry?.draft ?? {};
+  return JSON.stringify({
+    action: draft.action ?? '',
+    target: draft.target ?? '',
+    filters: draft.filters ?? null,
+    fields: draft.fields ?? null,
+    id: draft.id ?? null,
+  });
+}
+
+/** 从草稿里挑一个"人话名字"：标题优先，其次检索词 / 关键词 / id。 */
+function draftName(draft = {}) {
+  const value =
+    draft.fields?.title ??
+    draft.filters?.title ??
+    draft.fields?.query ??
+    draft.filters?.q ??
+    draft.fields?.keyword ??
+    draft.filters?.keyword ??
+    draft.fields?.url ??
+    draft.id ??
+    '';
+  return String(value).trim().slice(0, 60);
+}
+
+/**
+ * 过程清单里的 target 中文名。
+ *
+ * 为什么不直接用 `draft.target`：这张卡片是**给用户看的**，
+ * 「查询 schedule」「写入 schedule」这种中英夹杂的句子没人愿意读第二眼。
+ * 认不出的 target 原样显示 —— 宁可显示一个陌生词，也不要猜成"日程"。
+ */
+const PLAN_TARGET_LABELS = Object.freeze({
+  web: '网上资料',
+  schedule: '日程',
+  todo: '待办',
+  event: '考试/事件',
+  note: '笔记',
+  grade: '成绩',
+  memory: '记忆',
+});
+
+/** 查询带了日期区间时缀在步骤名后面：`查询日程（2026-10-13）`。 */
+function planRangeText(filters = {}) {
+  const from = filters?.from ?? filters?.date ?? null;
+  const to = filters?.to ?? filters?.date ?? null;
+  if (!from && !to) return '';
+  return from && to && from !== to ? `（${from}~${to}）` : `（${from ?? to}）`;
+}
+
+/**
+ * 过程清单里一步的文案：只读查询 → 「检索/查询 …」，写入 → 「写入/修改/删除 …」。
+ * 用户扫一眼就能分清"它要去看"还是"它要改我的数据" —— 这两件事的心理预期完全不同。
+ */
+function planStepLabel(entry) {
+  const draft = entry?.draft ?? {};
+  const kind = PLAN_TARGET_LABELS[draft.target] ?? draft.target ?? '数据';
+  const name = draftName(draft);
+  if (draft.action === 'query') {
+    // 联网检索按契约写成「检索「关键词」」：这是用户最常见到的一步
+    if (draft.target === WEB_TARGET) return name ? `检索「${name}」` : '检索网上资料';
+    return name ? `查询${kind}「${name}」` : `查询${kind}${planRangeText(draft.filters)}`;
+  }
+  const verb = PLAN_WRITE_LABELS[draft.action] ?? draft.action ?? '操作';
+  return name ? `${verb}${kind}「${name}」` : `${verb}${kind}`;
+}
+
+/**
+ * 一轮对话的「过程清单」（界面上那张 AI todolist）。
+ *
+ * 四条口径都是契约：
+ *   1. **只在有草稿时才有清单**：纯聊天一次 plan 都不广播 —— 给一句"你好"套一层进度条，
+ *      用户会以为系统在背后做了一堆事，而它其实只是回了句话；
+ *   2. **每次都是全量快照**（`steps` 整份重发），前端整体重画，不做增量合并 ——
+ *      少一类"漏收一条事件就画错"的 bug；
+ *   3. **同一回合内 messageId 不变**：所有轮次的步骤都挂在这一条 assistant 消息上；
+ *   4. 停止之后不再广播任何后续步骤（`isAborted`）；但停止那一刻会先把没跑完的
+ *      落成 `failed` 再广播最后一份（见 `AiChatService#stop`），否则界面上会留下
+ *      永远转圈的步骤，用户以为它还在干活。
+ */
+class TurnPlan {
+  constructor({ conversationId, messageId, broadcast, isAborted = () => false }) {
+    this.conversationId = conversationId;
+    this.messageId = messageId;
+    this.broadcast = broadcast;
+    this.isAborted = isAborted;
+    this.steps = [];
+    this.byKey = new Map();
+    /** 步骤 id 的序号：`q1` / `w1`（查询与写入各自编号，与契约里的例子一致）。 */
+    this.counters = { q: 0, w: 0 };
+    this.closed = false;
+  }
+
+  /** 登记一条草稿对应的步骤；同一条草稿（指纹相同）只登记一次。 */
+  add(entry, { defer = false } = {}) {
+    if (this.closed) return null;
+    const key = draftFingerprint(entry);
+    const existing = this.byKey.get(key);
+    if (existing) return existing;
+    const draft = entry?.draft ?? {};
+    const kind = draft.action === 'query' ? 'q' : 'w';
+    this.counters[kind] += 1;
+    const step = {
+      id: `${kind}${this.counters[kind]}`,
+      label: planStepLabel(entry),
+      status: 'pending',
+      target: draft.target ?? null,
+    };
+    this.steps.push(step);
+    this.byKey.set(key, step);
+    // 新步骤出现本身就是一次状态变化：先让界面把"待办"列出来，再逐个变成 running
+    if (!defer) this.emit();
+    return step;
+  }
+
+  /**
+   * 一轮的草稿**一次性**登记：这一轮的快照只广播一次，而不是每条草稿各广播一次。
+   * 为什么：一次广播里就该看到"这一轮要做的全部事情"，否则界面会先画出一条、
+   * 半秒后再补上第二条 —— 看起来像系统漏了一步。
+   */
+  addAll(entries) {
+    let added = false;
+    for (const entry of entries ?? []) {
+      const before = this.steps.length;
+      this.add(entry, { defer: true });
+      if (this.steps.length > before) added = true;
+    }
+    if (added) this.emit();
+  }
+
+  /** 这一步真的开始跑了（检索发出去了 / 写操作要落库了）。 */
+  start(entry) {
+    const step = this.byKey.get(draftFingerprint(entry));
+    if (!step || step.status !== 'pending') return;
+    step.status = 'running';
+    this.emit();
+  }
+
+  /** 这一步有结果了：`error` 为空 = done，否则 = failed。 */
+  finish(entry, error) {
+    const step = this.byKey.get(draftFingerprint(entry));
+    if (!step || step.status === 'done' || step.status === 'failed') return;
+    step.status = error ? 'failed' : 'done';
+    this.emit();
+  }
+
+  /**
+   * 收尾：还在 pending / running 的一律落到终态。
+   *
+   * 正常收尾传 `done`：没自动执行的写草稿已经变成"待用户确认"的卡片了，
+   * 系统这一轮该做的做完（卡片本身会写清"还没落库"）。
+   * 被停止时传 `failed`：那一步**确实没有完成**，标成 done 就是撒谎。
+   */
+  settle(status = 'done') {
+    let changed = false;
+    for (const step of this.steps) {
+      if (step.status === 'done' || step.status === 'failed') continue;
+      step.status = status;
+      changed = true;
+    }
+    if (changed) this.emit();
+  }
+
+  /** 回合结束后封口：不再有任何 plan 广播（迟到的步骤不该在下一轮之后又冒出来）。 */
+  close() {
+    this.closed = true;
+  }
+
+  emit() {
+    if (this.closed || !this.steps.length) return;
+    if (this.isAborted()) return;
+    this.broadcast?.({
+      type: 'plan',
+      module: 'ai',
+      payload: {
+        conversationId: this.conversationId,
+        messageId: this.messageId,
+        // 全量快照：拷一层再发，免得广播出去之后被后续改动"追改"
+        steps: this.steps.map((step) => ({ ...step })),
+      },
+    });
+  }
+}
+
+/* ------------------------------------------------------------ 联网检索预算 */
+
+/**
+ * 一个回合的联网检索预算（`searchRetryMax`，默认 3、范围 1–6）。
+ *
+ * 为什么次数要在服务端数：模型看不到自己这一回合搜过几次（每一轮都是全新的一次请求），
+ * 不告诉它剩余次数，它就会一路换词重试到轮次上限 —— 用户等半天，最后拿到的还是"没搜到"。
+ */
+function createSearchBudget(max) {
+  const value = Number(max);
+  const limit = Number.isFinite(value)
+    ? Math.min(SEARCH_RETRY_MAX, Math.max(SEARCH_RETRY_MIN, Math.trunc(value)))
+    : AI_DEFAULTS.searchRetryMax;
+  return { max: limit, used: 0 };
+}
+
+/** 用掉一次预算，返回"这是第几次、还剩几次"。 */
+function consumeSearchBudget(budget) {
+  budget.used += 1;
+  return { attempt: budget.used, remaining: Math.max(0, budget.max - budget.used) };
+}
+
 export class AiChatService {
+  /**
+   * 正在跑的回合：`conversationId -> { messageId, controller, plan, phase }`。
+   * `POST /ai/chat/stop` 靠它找到"该打断哪一轮"；没有登记 = 空闲（返回 idle，不是错误）。
+   */
+  #turns = new Map();
+
+  /**
+   * 会话级的排队链：`conversationId -> Promise`（见 `#acquireTurn`）。
+   * 同一个会话同一时刻只跑一轮；不同会话互不影响。
+   */
+  #turnQueue = new Map();
+
   constructor({
     store,
     broadcast,
@@ -805,6 +1083,97 @@ export class AiChatService {
     const conversation = conversationId
       ? this.getConversation(conversationId)
       : await this.createConversation(trimmed || files[0]?.name || '新对话');
+
+    /**
+     * 停止开关：这一次 send 里**所有**上游调用与工具执行都挂在它上面（见 `#runTurn`）。
+     * 它在排队**之前**建好，但只有真正开始跑的那一轮才登记进 `#turns` ——
+     * 排队中的请求不该被 stop 打到（它连一条 assistant 消息都还没有）。
+     */
+    const controller = new AbortController();
+    /**
+     * 消息排队（服务端这一半）：**同一个会话同一时刻只跑一轮**。
+     *
+     * 为什么必须排队：界面允许用户在模型还在回答时继续发下一条（排队发送）。
+     * 如果两轮并行，会有两个后果 ——
+     *   1. 两条 assistant 占位消息交替流式，用户看到两个气泡同时在长，时间线也乱了；
+     *   2. 后一轮组装上下文时会把前一轮刚落的用户消息也读进去，等于"抢答"了下一句。
+     * 只影响**同一会话**：换到别的会话提问照旧并行，不该被别人的长回答堵住。
+     * 排队期间 HTTP 请求就挂着（不返回），这正合"排队"的语义：轮到了才开始跑。
+     */
+    const releaseTurn = await this.#acquireTurn(conversation.id);
+    try {
+      return await this.#runTurn({
+        conversation,
+        trimmed,
+        files,
+        context,
+        stream,
+        thinking,
+        effort,
+        mode,
+        searchMode,
+        model,
+        uploadWarnings,
+        controller,
+      });
+    } finally {
+      // 先撤销登记再放行排队者：反过来的话，下一个请求可能已经占用了这一格
+      this.#forgetTurn(conversation.id, controller);
+      releaseTurn();
+    }
+  }
+
+  /**
+   * 停止正在跑的那一轮（`POST /ai/chat/stop`）。
+   *
+   * 两种返回，都是 200：
+   *   - 有在跑的回合 → `{ ok:true, stopped:true, conversationId, messageId }`，并立刻广播
+   *     `chat_stopped`；那一轮会在很短时间内以 `status:"stopped"` 收尾落库。
+   *   - 没有在跑的回合 → `{ ok:true, stopped:false, reason:'idle' }`。**不是错误**：
+   *     用户连点两下、或消息刚好答完，都不该看到一个 500。
+   *
+   * 为什么先收尾清单再 abort：plan 的广播在 `abort` 之后会被静音（见 TurnPlan.emit），
+   * 最后一份 steps 就发不出去了 —— 而"停止那一刻把没跑完的步骤标成 failed"
+   * 恰恰是界面最需要的那一份（否则卡片上永远转圈）。
+   */
+  stop({ conversationId } = {}) {
+    const id = String(conversationId ?? '').trim();
+    if (!id) throw HttpError.badRequest('conversationId 不能为空', { field: 'conversationId' });
+    const turn = this.#turns.get(id);
+    // 已经在收尾（phase 不是 running）或已经被停止过：一律按"空闲"回答，重复点击不报错
+    if (!turn || turn.phase !== 'running' || turn.controller.signal.aborted) {
+      return { ok: true, stopped: false, reason: 'idle' };
+    }
+    turn.phase = 'stopping';
+    turn.plan?.settle('failed');
+    turn.plan?.close();
+    turn.controller.abort();
+    this.broadcast?.({
+      type: 'chat_stopped',
+      module: 'ai',
+      payload: { conversationId: id, messageId: turn.messageId ?? null },
+    });
+    return { ok: true, stopped: true, conversationId: id, messageId: turn.messageId ?? null };
+  }
+
+  /**
+   * 真正跑一轮对话（拿到排队位置之后才会进来）。
+   *
+   * 拆成两个方法只为一件事：让"排队 → 执行 → 收尾"这条线有一个 `finally`
+   * —— 无论是正常答完、出错还是被停止，回合登记都必须撤销、锁都必须放掉。
+   * 方法体与拆分前逐行一致（原来的 `send` 从这里往后原样搬过来）。
+   */
+  async #runTurn({ conversation, trimmed, files, context, stream, thinking, effort, mode, searchMode, model, uploadWarnings, controller }) {
+    /**
+     * 登记"正在跑的回合"。
+     *
+     * messageId 先留 null：占位的 assistant 消息要等上下文与摘要都准备好才建，
+     * 而"用户按下停止"完全可能发生在那之前 —— 那时也必须能停，否则用户会看到
+     * "我明明点了停止，它却接着答完了"（长对话的摘要那一步就是一次几秒的上游调用）。
+     */
+    const turn = { messageId: null, controller, plan: null, phase: 'running' };
+    this.#turns.set(conversation.id, turn);
+    const signal = controller.signal;
     const userMessage = await this.#appendMessage({
       conversationId: conversation.id,
       role: 'user',
@@ -819,7 +1188,7 @@ export class AiChatService {
 
     const enriched = await this.buildContext(context);
     // 长对话：把窗口之外的旧内容压成摘要（失败就沿用旧摘要，绝不因此发不出消息）
-    const summary = await this.#ensureSummary(conversation);
+    const summary = await this.#ensureSummary(conversation, signal);
     // 作图：设置里开着就给（默认开），关着但用户用了「画…」这类指令词也临时给
     const draw = this.config.get().drawMode !== false || DRAW_KEYWORDS.test(trimmed);
     const history = this.#history(conversation.id);
@@ -859,6 +1228,17 @@ export class AiChatService {
       search: searchMode,
     });
 
+    // 占位消息落库之后才知道 messageId：补进登记，并建这一轮的「过程清单」
+    turn.messageId = assistant.id;
+    const plan = new TurnPlan({
+      conversationId: conversation.id,
+      messageId: assistant.id,
+      broadcast: this.broadcast,
+      // 停止之后不再广播 plan 的任何后续步骤（迟到的全量快照也不行）
+      isAborted: () => signal.aborted,
+    });
+    turn.plan = plan;
+
     // 一次 send 里所有"跨轮"的状态都提到循环外面 —— 它们最终要一起落库/回显
     let partial = '';            // 本轮已流出的正文（第一轮就失败时，这就是能留住的那半句）
     let reasoningAll = '';       // 思维链：**跨轮累积**，一张「思考过程」卡里看得到全部轮
@@ -867,6 +1247,12 @@ export class AiChatService {
     const executed = [];         // 自动执行的写操作：跨轮累积
     let drafts = [];             // 留给用户确认的草稿（没执行的，含校验不过的）
     let content = '';            // 被采纳的那一轮正文（每轮都会被下一轮覆盖）
+    /**
+     * 「停止时该落的正文」= 用户此刻在屏幕上看到的那一份。
+     * 流式的每一块 delta 都会更新它（那时还没抽掉草稿，正是屏幕上的样子），
+     * 每轮抽完草稿再用干净版覆盖一次 —— 这样"按了停止"不会让正文突然倒回去。
+     */
+    let lastContent = '';
     let lastRaw = null;          // 最近一轮"抽草稿前"的原文
     let lastModel = model;
     let lastFinishReason = null;
@@ -875,11 +1261,46 @@ export class AiChatService {
     /** 空承诺兜底只用一次（见循环末尾 `looksLikePromise`）。 */
     let promisedNudge = false;
     let rounds = 0;
+    /**
+     * 联网检索预算（用户第 1 条："查不到之后自己重试，但次数太多就停"）。
+     * **一个回合一份、跨轮累计**：模型在第 3 轮发起的那次检索同样消耗这一份。
+     */
+    const searchBudget = createSearchBudget(this.config.get().searchRetryMax);
+    /**
+     * 停止收尾：用**此刻**已经积累的状态把这条消息落成 `stopped`。
+     * 写成闭包是因为它读的是这些 `let` 变量的最终值（不是快照），
+     * 于是循环外面与 catch 里可以共用同一份逻辑。
+     */
+    const finishStopped = () => this.#saveStopped({
+      conversation,
+      assistant,
+      userMessage,
+      trimmed,
+      partial,
+      content: lastContent,
+      reasoningAll,
+      usageRounds,
+      queried,
+      executed,
+      drafts,
+      lastRaw,
+      lastModel,
+      lastFinishReason,
+      rounds,
+      mode,
+      searchMode,
+      thinking,
+      uploadWarnings,
+    });
+    // 停止可能发生在摘要 / 建占位消息这段时间里（摘要也是一次上游调用）：立刻按"已停止"收尾
+    if (signal.aborted) return await finishStopped();
     try {
       // 上下文逐轮追加（回灌 = 追加一条 assistant 草稿 + 一条注入结果的 user），
       // 所以下一轮**看得到**前面所有轮查过什么，不会把同一条查询再问一遍。
       let turnMessages = messages;
       for (let round = 1; round <= MAX_ROUNDS; round += 1) {
+        // 用户按了停止：**立刻跳出**，不再追加轮数（也不广播任何后续 plan 步骤）
+        if (signal.aborted) break;
         // "实际调用轮数"按发出去了几次算：最后一轮哪怕上游报错，它也确实被调过
         rounds = round;
         // 本轮状态清零。reset 之后前端渲染的就是"这一轮"从零长出来的正文，
@@ -895,6 +1316,9 @@ export class AiChatService {
             // 现在"我查一下 → 拿到数据 → 回答"整个过程都有增量可看。
             stream: Boolean(stream),
             reasoningEffort: effort,
+            // 停止要能打断**正在流式输出**的上游调用：provider 把它接到 fetch 的
+            // AbortSignal 上（见 provider.js 的 forwardAbort），abort 会让这个 await 直接抛错
+            signal,
             onDelta: stream
               ? (delta) => {
                   if (!started) {
@@ -917,6 +1341,8 @@ export class AiChatService {
                     });
                   }
                   partial += delta;
+                  // 停止时要落的正文就是"用户此刻看到的这一段"
+                  lastContent = partial;
                   this.broadcast?.({
                     type: 'ai_delta',
                     module: 'ai',
@@ -953,6 +1379,8 @@ export class AiChatService {
               : undefined,
           });
         } catch (error) {
+          // 停止导致的 AbortError 不是"这一轮没成"：不记 PARTIAL，直接交给收尾按 stopped 落库
+          if (signal.aborted) break;
           // 第一轮就失败 = 这条回复彻底没成，照旧往上抛（外层把消息标 failed）
           if (round === 1) throw error;
           // 后面几轮失败只是"总结这一步没成"：已经查到的数据必须照常返回给用户，
@@ -961,6 +1389,8 @@ export class AiChatService {
           break;
         }
 
+        // 上游这一段刚跑完就收到停止：不再处理这一轮的结果（更不执行任何草稿）
+        if (signal.aborted) break;
         usageRounds.push(result.usage ?? null);
         // 模型名与结束原因取**最后一轮**：多轮里只有最后那轮说的话是给用户看的
         lastModel = result.model ?? this.config.get().model;
@@ -973,9 +1403,23 @@ export class AiChatService {
         const previewed = await previewDrafts(this.commands, extracted.drafts);
         // 抽掉草稿后的正文：本轮它就是"当前的最终答案"（下一轮会把它覆盖掉）
         content = extracted.text;
+        lastContent = content;
         // 原文只在"这轮确实抽出了草稿"时更新：排查"模型到底说了啥"时只有这里有，
         // 而纯自然语言那一轮（content 就等于原文）留着也是重复。
         if (extracted.drafts.length) lastRaw = result.text ?? partial ?? '';
+
+        /**
+         * 过程清单：**只从这一轮的草稿里**登记步骤。
+         *
+         * 纯聊天（这一轮没有任何草稿）→ 一份 plan 都不广播：不给简单问题套一层假进度条，
+         * 那只会让用户以为系统在背后跑了一堆东西。同一条草稿（业务指纹相同）只登记一次。
+         */
+        plan.addAll(previewed);
+        for (const entry of previewed) {
+          // 预校验就没过的草稿不会再有"运行"这一步：直接把步骤落成 failed（黄灯不能一直转）
+          if (entry.error) plan.finish(entry, entry.error);
+        }
+        if (signal.aborted) break;
 
         // ── 写操作 ──────────────────────────────────────────────────────────
         // 「自动审批」**每一轮**都要跑：以前只在第一轮回灌前执行一次，于是"先查一次、再照着写"
@@ -1014,7 +1458,7 @@ export class AiChatService {
           freshKeys.add(key);
           freshWrites.push(entry);
         }
-        const executedNow = mode === 'auto' ? await this.#autoExecuteWrites(freshWrites) : [];
+        const executedNow = mode === 'auto' ? await this.#autoExecuteWrites(freshWrites, { signal, plan }) : [];
         if (executedNow.length) {
           roundDrafts = freshWrites.filter((entry) => !executedNow.some((item) => item.entry === entry));
           executed.push(...executedNow);
@@ -1041,9 +1485,15 @@ export class AiChatService {
           ? await this.#runReadOnlyQueries(previewed.filter((entry) => !this.#isRepeatQuery(entry, queried)), {
               // 联网档位是**这次请求**的属性，必须一路传进执行器（见 #runWebQuery）
               searchMode,
+              // 停止信号、过程清单、检索预算也一起带下去：执行器是真正"动手"的地方
+              signal,
+              plan,
+              searchBudget,
             })
           : [];
         queried.push(...fresh);
+        // 查询/检索跑到一半被停止：立刻跳出，不再执行后面的任何草稿
+        if (signal.aborted) break;
 
         /**
          * **循环终止条件**：这一轮既没有查出"新"查询、也没有真执行写操作 = 模型这轮是在直接
@@ -1103,6 +1553,15 @@ export class AiChatService {
         turnMessages = this.#withExecutionResults(turnMessages, extracted.text, { queried: fresh, executed: executedNow });
       }
 
+      // 循环因停止而跳出：按"已停止"收尾（正文保留停止前的内容），绝不落成 done
+      if (signal.aborted) return await finishStopped();
+      // 已经进入收尾：这之后到来的 stop 一律回 idle（消息马上就落库了，不该再被打断）
+      turn.phase = 'finishing';
+      /**
+       * 收尾时把清单落成终态：还在 pending 的（例如等用户确认的写操作）也算"系统这一步做完了"，
+       * 界面因此不会留下一排永远转圈的步骤。
+       */
+      plan.settle('done');
       const saved = await this.store.aiMessages.update(assistant.id, {
         // 正文 = **最后一轮**抽掉草稿后的话；它为空时按"这一刻的事实"兜底：
         // 查过数据就说查到了、自动执行过写操作就说处理好了（细节另有数据卡片/回执卡）。
@@ -1165,6 +1624,8 @@ export class AiChatService {
         warnings: uploadWarnings,
       };
     } catch (error) {
+      // 停止也会让上游抛错（AbortError）；那不是失败，按"已停止"落库，绝不标成 failed
+      if (signal.aborted) return await finishStopped();
       const failure = {
         code: error instanceof HttpError ? error.code : ERROR_CODES.INTERNAL,
         message: error?.message ?? 'AI 调用失败',
@@ -1185,6 +1646,152 @@ export class AiChatService {
     }
   }
 
+  // ---------------------------------------------------------------- 回合登记 / 停止 / 排队
+
+  /**
+   * 会话级的排队锁：拿到它才能开始跑这一轮。
+   *
+   * 实现就是"一条链"：后一个请求把前一个的 promise 当自己的前置条件，
+   * 于是顺序严格按到达先后（FIFO），不需要定时器、不需要轮询、也不会饿死谁。
+   * 返回的 `release` **必须**放在 `finally` 里调用 —— 漏一次，这个会话就永远卡住了。
+   */
+  async #acquireTurn(conversationId) {
+    const previous = this.#turnQueue.get(conversationId) ?? Promise.resolve();
+    let release;
+    const current = new Promise((resolve) => {
+      release = resolve;
+    });
+    this.#turnQueue.set(conversationId, current);
+    await previous;
+    return () => {
+      release();
+      // 只有自己还是队尾时才清掉这一格：否则会把后来者的链断掉
+      if (this.#turnQueue.get(conversationId) === current) this.#turnQueue.delete(conversationId);
+    };
+  }
+
+  /**
+   * 回合结束的清理（正常答完、出错、被停止都要走到）。
+   * 用 controller 认领：这一格若已经被下一轮接管，就什么都别动。
+   */
+  #forgetTurn(conversationId, controller) {
+    const turn = this.#turns.get(conversationId);
+    if (!turn || turn.controller !== controller) return;
+    this.#turns.delete(conversationId);
+    // 兜底收尾：任何一条异常路径都不能让界面留下"永远转圈"的步骤
+    turn.plan?.settle(controller.signal.aborted ? 'failed' : 'done');
+    turn.plan?.close();
+  }
+
+  /**
+   * 让一次"出网调用"可以**不再等待**：停止信号一到就立刻返回 `null`，底层请求在后台自己结束。
+   *
+   * 为什么不是"取消"：检索/读页面在 web-search.js 里，它们的 fetch 没有接收我们的 signal
+   * （那是另一个模块的接口，本轮不动）。但对用户来说"按下停止后不再等它"就是全部所需 ——
+   * 结果本来就要丢掉，晚到的返回值只是被忽略。
+   * 两个分支都要接住：不然晚到的失败会变成 unhandledRejection（把测试与进程一起带崩）。
+   */
+  #abortable(promise, signal) {
+    if (!signal) return promise;
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        // 已经停了：不等它，但也要接住它的结果，免得变成未处理的拒绝
+        promise.then(() => {}, () => {});
+        resolve(null);
+        return;
+      }
+      const onAbort = () => resolve(null);
+      signal.addEventListener('abort', onAbort, { once: true });
+      promise.then(
+        (value) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  /**
+   * 被停止的那条 assistant 消息**落库**（契约里最要紧的一条）。
+   *
+   * 为什么不把这条占位消息直接丢掉：用户屏幕上的那半段正文是真的、已经查到的数据也是真的。
+   * 整条删掉的话，用户会觉得"我明明看到它写了半段，一按停止连话都没了"。
+   * 所以：保留 `content`（停止前生成的部分）+ `status:"stopped"` + `stoppedAt`，
+   * 前端据此显示「已停止」；而**绝不能当成一条正常答完的回复**（那会让用户以为
+   * 半句话就是它的完整答案，还会被后续轮次当成事实引用）。
+   */
+  async #saveStopped({
+    conversation,
+    assistant,
+    userMessage,
+    trimmed,
+    partial,
+    content,
+    reasoningAll,
+    usageRounds,
+    queried,
+    executed,
+    drafts,
+    lastRaw,
+    lastModel,
+    lastFinishReason,
+    rounds,
+    mode,
+    searchMode,
+    thinking,
+    uploadWarnings,
+  }) {
+    const saved = await this.store.aiMessages.update(assistant.id, {
+      // 正文取"停止前最后看到的那一份"：正流到一半时就是已经吐出来的那半段
+      content: content || partial || '',
+      drafts,
+      executed,
+      thinking,
+      permission: mode,
+      search: searchMode,
+      reasoning: reasoningAll.slice(0, 20_000) || null,
+      queried,
+      status: STATUS_STOPPED,
+      stoppedAt: new Date().toISOString(),
+      model: lastModel,
+      usage: usageRounds[0] ?? null,
+      usageFollowup: usageRounds[1] ?? null,
+      usageRounds,
+      rounds,
+      // 被停止**不是**"撞上轮次上限"：这两件事在界面上要给不同的提示
+      roundLimit: false,
+      finishReason: lastFinishReason,
+      raw: lastRaw ?? partial ?? null,
+      error: null,
+    });
+    await this.#touchConversation(conversation.id, trimmed);
+    this.broadcast?.({
+      type: 'ai_message',
+      module: 'ai',
+      payload: { conversationId: conversation.id, message: saved, drafts, queried, rounds, stopped: true },
+    });
+    return {
+      ok: true,
+      stopped: true,
+      conversation: this.store.aiConversations.get(conversation.id),
+      user: userMessage,
+      assistant: saved,
+      drafts,
+      queried,
+      executed,
+      thinking,
+      permission: mode,
+      search: searchMode,
+      rounds,
+      roundLimit: false,
+      warnings: uploadWarnings,
+    };
+  }
+
   // ---------------------------------------------------------------- 内部
 
   /**
@@ -1195,10 +1802,10 @@ export class AiChatService {
    *   - 长对话每积累 `SUMMARY_MIN_MESSAGES` 条才压一次；
    *   - 已经覆盖的部分不重压（`summaryCount` 记着覆盖到第几条）。
    */
-  async #ensureSummary(conversation) {
+  async #ensureSummary(conversation, signal = null) {
     const plan = this.#summaryPlan(conversation);
     if (plan.fresh.length < SUMMARY_MIN_MESSAGES) return plan.existing;
-    const written = await this.#writeSummary(conversation, plan);
+    const written = await this.#writeSummary(conversation, plan, signal);
     // 压缩是"锦上添花"：失败（或模型没给出内容）就沿用旧摘要，绝不让这条消息发不出去
     return written.ok ? written.text : plan.existing;
   }
@@ -1229,7 +1836,7 @@ export class AiChatService {
    * 不抛异常：自动压缩那条路上"压缩失败"必须降级成"继续用旧摘要"，
    * 所以失败以 `{ ok:false }` 返回，由调用方决定是记日志还是报错给用户。
    */
-  async #writeSummary(conversation, { existing, older, fresh }) {
+  async #writeSummary(conversation, { existing, older, fresh }, signal = null) {
     const transcript = fresh
       .slice(-40) // 一次最多压 40 条：再长的对话也是分批压，避免单次请求过大
       .map((item) => `${item.role === 'user' ? '用户' : '助手'}：${String(item.content).slice(0, 500)}`)
@@ -1250,6 +1857,8 @@ export class AiChatService {
           },
         ],
         temperature: 0.2,
+        // 摘要也是一次上游调用：停止时要能把它一起打断（否则用户按了停止还得等它跑完）
+        signal,
       });
       const text = String(result?.text ?? '').trim().slice(0, SUMMARY_MAX_CHARS);
       if (!text) return { ok: false, message: '模型没有返回可用的摘要内容' };
@@ -1507,15 +2116,17 @@ export class AiChatService {
    * 为什么必须自动执行：模型看不见数据，就会一直说"我拿不到/需要你确认"，
    * 而用户问的是"我明天有什么日程"——这种问题应该直接给答案。
    */
-  async #runReadOnlyQueries(previewed, { searchMode = 'off' } = {}) {
+  async #runReadOnlyQueries(previewed, { searchMode = 'off', signal = null, plan = null, searchBudget = null } = {}) {
     const out = [];
     for (const entry of previewed) {
       if (entry.draft?.action !== 'query') continue;
       if (out.length >= MAX_AUTO_QUERIES) break;
+      // **每一条查询之间**都看一下停止信号：用户按了停止，就不该再发起下一条（写入那条路同理）
+      if (signal?.aborted) break;
       // 联网检索走自己的执行器：它要读**用户在界面上选的通道**（校外/校内/关），
       // 而那个信息只存在于这一次请求里，命令服务那边看不到（理由见 #runWebQuery）。
       if (entry.draft.target === WEB_TARGET) {
-        out.push(await this.#runWebQuery(entry, searchMode));
+        out.push(await this.#runWebQuery(entry, { searchMode, signal, plan, searchBudget }));
         continue;
       }
       /**
@@ -1530,11 +2141,14 @@ export class AiChatService {
         out.push({ draft: entry.draft, error: entry.error });
         continue;
       }
+      plan?.start(entry);
       try {
         const result = await this.commands.execute(entry.draft, { dryRun: true });
         out.push({ draft: entry.draft, result: this.#compactQueryResult(entry.draft.target, result) });
+        plan?.finish(entry, null);
       } catch (error) {
         out.push({ draft: entry.draft, error: { code: error.code ?? 'INTERNAL', message: error.message } });
+        plan?.finish(entry, error);
       }
     }
     return out;
@@ -1658,8 +2272,19 @@ export class AiChatService {
    * 「联网关掉了」的口径：不搜，并且**明确告诉模型原因**（它会照实转告用户），
    * 而不是返回空结果让它以为"网上没有"。
    */
-  async #runWebQuery(entry, searchMode) {
+  async #runWebQuery(entry, { searchMode = 'off', signal = null, plan = null, searchBudget = null } = {}) {
     const draft = entry.draft;
+    /**
+     * 记一步"没做成"。
+     *
+     * **一定**要作为结果回灌给模型（调用方会把它 push 进 `queried`）：
+     * 静默跳过的话，模型会以为这次检索跑过了，接下来要么编内容、要么把同一条再发一遍。
+     * `counters` 是"第几次 / 还剩几次"，失败也要带上（见 #searchFeedbackText）。
+     */
+    const fail = (error, counters = {}) => {
+      plan?.finish(entry, error);
+      return { draft, error, ...counters };
+    };
     /**
      * 用户**直接给了网址**时，读那一页，而不是"拿网址去搜"。
      *
@@ -1671,26 +2296,49 @@ export class AiChatService {
     const directUrl = String(draft.fields?.url ?? '').trim();
     const query = String(draft.fields?.query ?? draft.filters?.q ?? '').trim();
     if (!directUrl && !query) {
-      return {
-        draft,
-        error: {
-          code: 'BAD_REQUEST',
-          message: '联网检索要么给检索词（fields.query），要么给要读的网址（fields.url）',
-        },
-      };
+      return fail({
+        code: 'BAD_REQUEST',
+        message: '联网检索要么给检索词（fields.query），要么给要读的网址（fields.url）',
+      });
     }
     // 同一个开关管两件事：读指定网址同样是"出网"，用户关掉联网就不做
     if (!WEB_SEARCH_MODES.includes(searchMode) || searchMode === 'off') {
-      return {
-        draft,
-        error: {
-          code: 'SEARCH_OFF',
-          message:
-            '联网搜索已关闭（输入框下面的地球图标选了「不联网」）。想让我读这个页面，先把它切成「从校外网搜索」或「从校内网搜索」。',
-        },
-      };
+      // 这两条**都不算**用掉检索次数：根本没出网（见下面的预算说明）
+      return fail({
+        code: 'SEARCH_OFF',
+        message:
+          '联网搜索已关闭（输入框下面的地球图标选了「不联网」）。想让我读这个页面，先把它切成「从校外网搜索」或「从校内网搜索」。',
+      });
     }
-    if (directUrl) return this.#readGivenUrls(draft, directUrl);
+    /**
+     * 检索预算：**只有真的要出网才算一次**。读指定网址也算一次 —— 它一样花掉了
+     * 一次出网机会（用户设的额度管的是"联网几次"，不是"搜索几次"）。
+     *
+     * 用尽时不再发起任何新请求，而是把 `SEARCH_RETRY_EXHAUSTED` 回灌给模型：
+     * 这不是"跳过"，是**一次有原因的结果** —— 模型据此用已有数据收尾，
+     * 或者如实告诉用户拿不到并给下一步（用户要的"AI 自认为可以结束"）。
+     */
+    if (searchBudget && searchBudget.used >= searchBudget.max) {
+      return fail(
+        {
+          code: SEARCH_RETRY_EXHAUSTED,
+          message:
+            `联网检索次数已用完（本回合上限 ${searchBudget.max} 次）。系统不会再执行新的联网检索：` +
+            '请用已经拿到的结果作答；如果确实没有可用结果，就如实告诉用户"这次没拿到"并给出下一步，不要编造内容。',
+        },
+        { attempt: null, remaining: 0 },
+      );
+    }
+    const { attempt, remaining } = searchBudget ? consumeSearchBudget(searchBudget) : { attempt: null, remaining: null };
+    /** 成功的结果也要把"第几次 / 还剩几次"带上：模型据此决定"再试一次"还是"收手作答"。 */
+    const succeed = (result) => ({ draft, result: { ...result, attempt, remaining }, attempt, remaining });
+    if (directUrl) {
+      plan?.start(entry);
+      const outcome = await this.#abortable(this.#readGivenUrls(draft, directUrl), signal);
+      // 停止信号到了：这次读页面不再等结果（底层请求自己在后台结束，结果丢弃）
+      if (!outcome) return fail({ code: STOPPED_CODE, message: '这一轮已被用户停止，读页面不再等待结果' }, { attempt, remaining });
+      return outcome.error ? fail(outcome.error, { attempt, remaining }) : succeed(outcome.result);
+    }
     // 通道以界面为准：界面选校外时，模型写 campus 也不越权（反过来同理）
     const mode = searchMode;
     const config = this.config.get() ?? {};
@@ -1699,23 +2347,30 @@ export class AiChatService {
     const asked = normalizeSearchLimit(draft.fields?.limit, { fallback: limit });
     const count = Math.max(1, Math.min(limit, asked));
     const log = (level, message) => this.#log(level, message);
+    plan?.start(entry);
     try {
-      const results = await searchWeb({ query, mode, limit: count, config, log, fetchImpl: this.searchFetch ?? undefined });
+      const results = await this.#abortable(
+        searchWeb({ query, mode, limit: count, config, log, fetchImpl: this.searchFetch ?? undefined }),
+        signal,
+      );
+      // 停止信号到了：这次检索不再等结果（底层请求自己在后台结束，结果丢弃）
+      if (!results) return fail({ code: STOPPED_CODE, message: '这一轮已被用户停止，检索结果不再等待' }, { attempt, remaining });
       if (!results.length) {
-        return {
-          draft,
-          result: this.#compactQueryResult(WEB_TARGET, {
-            filters: { query, mode },
-            count: 0,
-            items: [],
-            explain:
-              mode === 'campus'
-                ? '校内检索没有返回结果（可能被反爬挡住，或校内站点里没有匹配）—— 如实告诉用户没搜到，不要编造'
-                : '检索没有返回结果（可能被搜索引擎拦截，或还没配置搜索 API 密钥）—— 如实告诉用户没搜到，不要编造',
-          }),
-        };
+        return succeed(this.#compactQueryResult(WEB_TARGET, {
+          filters: { query, mode },
+          count: 0,
+          items: [],
+          explain:
+            mode === 'campus'
+              ? '校内检索没有返回结果（可能被反爬挡住，或校内站点里没有匹配）—— 如实告诉用户没搜到，不要编造'
+              : '检索没有返回结果（可能被搜索引擎拦截，或还没配置搜索 API 密钥）—— 如实告诉用户没搜到，不要编造',
+        }));
       }
-      const pages = await readPages(results, { limit: count, log, fetchImpl: this.searchFetch ?? undefined });
+      const pages = await this.#abortable(
+        readPages(results, { limit: count, log, fetchImpl: this.searchFetch ?? undefined }),
+        signal,
+      );
+      if (!pages) return fail({ code: STOPPED_CODE, message: '这一轮已被用户停止，读正文不再等待' }, { attempt, remaining });
       const byUrl = new Map(pages.map((page) => [page.url, page]));
       /**
        * 校内结果排前面。
@@ -1735,6 +2390,9 @@ export class AiChatService {
           scope: item.scope,
           matchedBy: item.matchedBy ?? null,
           site: item.site ?? null,
+          // 发布日期：只有"栏目列表直读"（`matchedBy: 'column'`）的条目才有（列表页上就写着日期）。
+          // 有了它，模型才能回答"最新的是哪条"；为 null 时**不能**替这条编一个日期。
+          publishedAt: item.publishedAt ?? null,
           // 正文只在真抓到时才有：`ok:false` 的条目 text 为空、error 说明原因（列表页/PDF/要登录），
           // 模型据此知道"这条只有摘要，别当成读过了"
           text: String(page.text ?? '').slice(0, WEB_TEXT_CHARS),
@@ -1753,17 +2411,14 @@ export class AiChatService {
         ? `校内检索「${query}」：校内站点命中 ${campusCount} 条、公网结果 ${items.length - campusCount} 条，读到 ${read} 篇正文` +
           (campusCount === 0 ? '（校内站点一条都没命中：免密钥通道对 site: 语法支持很差，已带上学校名重试；下面给的是公网结果，回答时要说明这一点）' : '')
         : `校外检索「${query}」：搜到 ${results.length} 条，读到 ${read} 篇正文`;
-      return {
-        draft,
-        result: this.#compactQueryResult(WEB_TARGET, {
-          filters: { query, mode },
-          count: items.length,
-          items,
-          explain,
-        }),
-      };
+      return succeed(this.#compactQueryResult(WEB_TARGET, {
+        filters: { query, mode },
+        count: items.length,
+        items,
+        explain,
+      }));
     } catch (error) {
-      return { draft, error: { code: error.code ?? 'INTERNAL', message: `联网检索失败：${error.message}` } };
+      return fail({ code: error.code ?? 'INTERNAL', message: `联网检索失败：${error.message}` }, { attempt, remaining });
     }
   }
 
@@ -1775,15 +2430,20 @@ export class AiChatService {
    *   - 逐条 try/catch，一条失败不影响其它条；
    *   - 结果原样回给前端（渲染成"已自动执行"的回执卡），用户仍然看得见发生了什么。
    */
-  async #autoExecuteWrites(drafts) {
+  async #autoExecuteWrites(drafts, { signal = null, plan = null } = {}) {
     const out = [];
     for (const entry of drafts) {
+      // 一条写完之后再看一眼：被停止就不再执行下一条（写操作落库是不可撤销的，宁可少做）
+      if (signal?.aborted) break;
       if (entry.error || entry.draft?.action === 'query' || entry.draft?.ok === false) continue;
+      plan?.start(entry);
       try {
         const result = await this.commands.execute(entry.draft);
         out.push({ entry, draft: entry.draft, result });
+        plan?.finish(entry, null);
       } catch (error) {
         out.push({ entry, draft: entry.draft, error: { code: error.code ?? 'INTERNAL', message: error.message } });
+        plan?.finish(entry, error);
       }
     }
     return out;
@@ -1801,10 +2461,13 @@ export class AiChatService {
       // `textSource`/`note` 是**来源口径**：`container`=站内正文容器（真全文）、
       // `body`=整页清洗、`meta`=只拿到 meta 摘要。没有它，模型分不清
       // "我读完了全文"和"我只看到两百字摘要"，就会承诺摘要里没有的细节。
-      // `matchedBy`/`site` 是**校内档的来源证据**：site=校内站点自己的检索接口命中（最权威）、
-      // domain=公网结果但域名在校内、mention=公网结果里提到本校。工具说明与 README 都向模型承诺了这两个字段，
-      // 而投影表白名单一开始漏了它们 —— 模型因此分不清"这条是校方页面"还是"公网上提到学校"。
-      web: ['title', 'url', 'snippet', 'source', 'scope', 'matchedBy', 'site', 'text', 'chars', 'textSource', 'note', 'ok', 'error'],
+      // `matchedBy`/`site` 是**校内档的来源证据**：column=校方栏目列表直读（最新几条、带发布日期）、
+      // site=校内站点自己的检索接口命中、domain=公网结果但域名在校内、mention=公网结果里提到本校。
+      // 工具说明与 README 都向模型承诺了这几个字段，而投影表白名单一开始漏了它们 ——
+      // 模型因此分不清"这条是校方页面"还是"公网上提到学校"。
+      // `publishedAt` 是栏目直读条目的**发布日期**（`YYYY-MM-DD`，只知道月份时是 `YYYY-MM`）：
+      // 没有它，"最近有什么新闻"就答不出"最新的一条是几月几号"（真机反馈的原话）。
+      web: ['title', 'url', 'snippet', 'source', 'scope', 'matchedBy', 'site', 'publishedAt', 'text', 'chars', 'textSource', 'note', 'ok', 'error'],
     };
     // 模块声明的投影表覆盖内置表（内置三张表保持原样，行为不变）
     const fields = this.queryFields?.[target] ?? FIELDS[target] ?? ['id', 'title'];
@@ -1885,8 +2548,59 @@ export class AiChatService {
       (failed.length
         ? '\n下面这些查询**没有执行成功**（把原因如实告诉用户，不要假装查过、也不要换个说法编内容）：\n' +
           JSON.stringify(failed)
-        : '')
+        : '') +
+      this.#searchFeedbackText(queried)
     );
+  }
+
+  /**
+   * 联网检索的「预算 + 下一步」说明（接在回灌文案后面）。
+   *
+   * 三件事必须写清楚，缺一个模型就会犯对应的错：
+   *   1. **这是第几次、还剩几次** —— 不说，它就会一直换关键词重试到轮次上限，
+   *      用户等半天最后只拿到"没搜到"；
+   *   2. 失败/空结果时给**具体建议**（换更短的关键词 / 直读网址 / 如实说拿不到）——
+   *      只告诉它"没搜到"，它下一步要么原样再搜一遍，要么开编；
+   *   3. 预算用尽时明说"系统不会再执行新的检索"，逼它按已有结果收尾。
+   */
+  #searchFeedbackText(queried) {
+    const web = (queried ?? []).filter((entry) => entry?.draft?.target === WEB_TARGET);
+    if (!web.length) return '';
+    const lines = [];
+    for (const entry of web) {
+      const attempt = Number(entry.attempt ?? entry.result?.attempt ?? 0);
+      const remaining = Number(entry.remaining ?? entry.result?.remaining ?? 0);
+      const exhausted = entry.error?.code === SEARCH_RETRY_EXHAUSTED;
+      // 没真的出网（联网关着 / 参数不全）时次数没动，不写"第 N 次"，免得模型以为搜过了
+      if (!attempt && !exhausted) continue;
+      const name = String(entry.draft?.fields?.query ?? entry.draft?.filters?.q ?? entry.draft?.fields?.url ?? '').trim();
+      const counter = attempt
+        ? `本次检索是第 ${attempt} 次，还剩 ${remaining} 次`
+        : `本次没有发起检索（次数未消耗），还剩 ${remaining} 次`;
+      const head = `· ${name ? `检索「${name}」` : '本次联网检索'}：${counter}。`;
+      // "没有可用结果"有两种：整条失败（entry.error），或者返回了条目但一条可用正文都没有
+      // （count===0 / 全部 ok:false）—— 后者更隐蔽，模型很容易当成"网上没有"
+      const empty =
+        !entry.result ||
+        Number(entry.result.count ?? 0) === 0 ||
+        (entry.result.items ?? []).every((item) => item.ok === false);
+      if (exhausted) {
+        /**
+         * 预算用尽时**不能**再劝它"换个关键词再搜" —— 那两句建议此刻是做不到的事，
+         * 模型照着做只会又发一条被挡回来的草稿。这里只留第三条：用已有结果作答，
+         * 或者如实说拿不到并给下一步（这就是用户要的"AI 自己知道该收尾了"）。
+         */
+        lines.push(`${head}没有拿到可用结果，且**本回合的检索次数已经用完、不能再发起新的检索**：请用已经拿到的结果作答；如果确实没有可用结果，就如实告诉用户"这次没拿到"并给出下一步，不要编造内容。`);
+      } else if (entry.error) {
+        lines.push(`${head}没有拿到可用结果（${entry.error.message}）。可以这样办：${SEARCH_RETRY_ADVICE.join('；')}。`);
+      } else if (empty) {
+        lines.push(`${head}没有拿到可用结果（0 条可用条目）。可以这样办：${SEARCH_RETRY_ADVICE.join('；')}。`);
+      } else {
+        lines.push(head);
+      }
+    }
+    if (!lines.length) return '';
+    return `\n[系统注入 · 联网检索预算] 一个回合内的联网检索次数有限，用完之后系统不再执行新的检索：\n${lines.join('\n')}`;
   }
 
   /**
@@ -1979,14 +2693,7 @@ export class AiChatService {
    * （auto 档直接落两条重复记录）。只比"这件事本身"才拦得住，所以下面**只取**业务字段。
    */
   #draftKey(entry) {
-    const draft = entry?.draft ?? {};
-    return JSON.stringify({
-      action: draft.action ?? '',
-      target: draft.target ?? '',
-      filters: draft.filters ?? null,
-      fields: draft.fields ?? null,
-      id: draft.id ?? null,
-    });
+    return draftFingerprint(entry);
   }
 
   async #touchConversation(id, firstText) {

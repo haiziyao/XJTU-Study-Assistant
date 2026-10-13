@@ -178,6 +178,22 @@ export function registerAiRoutes(router, { ai, files, aiScheduler, apiPrefix }) 
       search: typeof body?.search === 'string' ? body.search : 'off',
     });
   });
+
+  /**
+   * 停止正在跑的那一轮（界面输入框旁边那个「停止」按钮）。
+   *
+   * 返回形状是**冻结契约**，别改名：
+   *   - `{ ok:true, stopped:true, conversationId, messageId }` —— 确实打断了一次在跑的回合：
+   *     那一轮会以 `status:"stopped"` 收尾落库（正文保留停止前的部分），
+   *     并且同时通过 WebSocket 广播 `chat_stopped`；
+   *   - `{ ok:true, stopped:false, reason:"idle" }` —— 当前没有在跑的回合。
+   *     **空闲不是错误**：用户连点两下、或者消息刚好答完，都不该看到一个 500。
+   *
+   * `conversationId` 也可以走查询串（`?conversationId=`）：界面在"首条消息还没返回、
+   * 会话 id 只从广播里拿到"的时刻更顺手，两种入口都不增加服务端的复杂度。
+   */
+  router.post(`${P}/chat/stop`, ({ body, query }) =>
+    ai.stop({ conversationId: body?.conversationId ?? query?.conversationId }));
 }
 
 /* ------------------------------------------------------------------ 会话生命周期

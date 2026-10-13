@@ -152,8 +152,16 @@ export function createOpenAiCompatProvider({ getConfig, fetchImpl = globalThis.f
         baseUrl: config.baseUrl,
       });
     } finally {
+      // 超时只覆盖"连上并拿到响应头"这一段（老行为，不要改：一个长回答流式输出几分钟很正常，
+      // 让它受 timeoutMs 约束会把正常的慢回答掐掉）。
       clearTimeout(timer);
-      signal?.removeEventListener('abort', forwardAbort);
+      /**
+       * 但**取消**的监听从这里起必须继续挂着，直到这次调用真正结束 ——
+       * 以前在这里 removeEventListener，于是 `signal` 只对"响应头到达之前"有效：
+       * 用户按下停止时正文已经开流，abort 打不到正在读的响应体上，模型会继续把整段话吐完
+       * （实测：界面上显示"已停止"，几秒后消息却变成了完整回答）。
+       * 监听用 `{ once: true }` 注册，触发即自动摘除；没触发时它随这一轮的 AbortSignal 一起被回收。
+       */
     }
 
     if (!response.ok) {
@@ -193,6 +201,9 @@ export function createOpenAiCompatProvider({ getConfig, fetchImpl = globalThis.f
       if (timedOut) {
         throw HttpError.upstream(`等待上游超时（${Math.round(timeoutMs / 1000)} 秒，流式）`, { timeoutMs });
       }
+      // 调用方主动取消（用户按了停止）：如实说是"被取消"，而不是含糊的"流坏了" ——
+      // 上层按 `signal.aborted` 判定这次要落成 stopped，这条文案只用于排查
+      if (signal?.aborted) throw HttpError.upstream('请求已被取消');
       throw HttpError.upstream(`读取上游流失败：${redactSecret(error?.message ?? error, config.apiKey)}`);
     }
   }
