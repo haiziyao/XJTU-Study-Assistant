@@ -232,3 +232,20 @@ test('聊天滚动：贴底时跟随最新内容，用户往上翻后不再被�
     await app.close();
   }
 });
+
+
+/**
+ * 输入法组合期间的回车**不能发送**（用户报的 bug：打字时按回车确认候选词，消息被直接发出去）。
+ * 三个判断缺一不可：`isComposing`、`keyCode === 229`、以及 compositionend 之后的时间窗
+ * （Safari 会在组合结束前就把 isComposing 置回 false）。这里做源码级契约断言：
+ * 任何一处被删掉，实机就会又开始误发。
+ */
+test('输入区：回车发送必须避开输入法组合（isComposing / keyCode 229 / 组合结束时间窗）', async () => {
+  const source = await readFile(new URL('../src/renderer/shell/app.js', import.meta.url), 'utf8');
+  assert.match(source, /compositionstart/, '要监听 compositionstart');
+  assert.match(source, /compositionend/, '要监听 compositionend');
+  assert.match(source, /event\.isComposing === true/, '要判 event.isComposing');
+  assert.match(source, /event\.keyCode === 229/, '要判 keyCode === 229（部分输入法只给这个）');
+  assert.match(source, /Date\.now\(\) < composingUntil/, '要有组合结束后的时间窗（Safari 的 isComposing 复位更早）');
+  assert.match(source, /if \(event\.shiftKey\) return;/, 'Shift+回车仍是换行');
+});

@@ -2335,11 +2335,32 @@
       meter.querySelector('.context-ring-btn')?.focus();
     });
     dom.chatSend.addEventListener('click', submit);
+    /**
+     * 回车发送 —— 但**中文/日文输入法组合期间的回车绝不能发送**。
+     *
+     * 真机 bug（用户报的）：用输入法打字时按回车是"确认候选词"，结果消息被直接发出去，
+     * 半截话带着拼音就上屏了。两道判断缺一不可：
+     *   1. `event.isComposing`：标准属性，组合期间为 true；
+     *   2. `event.keyCode === 229`：Chrome/Safari 在组合期间给 keydown 的哨兵值，
+     *      有些输入法（尤其是 macOS 上某些第三方输入法）只给这个、不给 isComposing；
+     *   3. **再加一个时间窗**：Safari 会在 `compositionend` 之前就把 isComposing 置回 false，
+     *      于是"确认候选词"那一下仍会被当成普通回车 —— 记下组合结束的时刻，
+     *      其后 80ms 内的回车一律按"还在输入"处理（人不可能在 80ms 内打完候选再敲回车）。
+     */
+    let composingUntil = 0;
+    input.addEventListener('compositionstart', () => {
+      composingUntil = Number.POSITIVE_INFINITY;
+    });
+    input.addEventListener('compositionend', () => {
+      composingUntil = Date.now() + 80;
+    });
     input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && !event.shiftKey) {
-        event.preventDefault();
-        submit();
-      }
+      if (event.key !== 'Enter') return;
+      const composing = event.isComposing === true || event.keyCode === 229 || Date.now() < composingUntil;
+      if (composing) return;
+      if (event.shiftKey) return; // Shift+回车 = 换行
+      event.preventDefault();
+      submit();
     });
     input.addEventListener('input', () => {
       autoGrowInput();
