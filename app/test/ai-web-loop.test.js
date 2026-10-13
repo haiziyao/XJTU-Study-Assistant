@@ -444,3 +444,60 @@ test('契约：web 投影表包含工具说明承诺的字段（matchedBy / site
   }
   assert.match(source, /matchedBy: item\.matchedBy/, 'items 映射也要真的带上匹配来源，不只是白名单里写个名字');
 });
+
+
+/**
+ * 空承诺兜底（真机事故："？？？"那张截图）。
+ *
+ * 用户问「最近我们航天学院有什么新闻吗」，模型回了一句"我再搜一次学院近期的新闻。"、
+ * **一条检索草稿都没发**，循环按"这轮答完了"收尾 —— 用户屏幕上只有一句空话。
+ * 提示词里虽然写了"要查就当场查"，但不能指望模型每次都听话，所以系统做确定性补救：
+ * 正文像"纯承诺"时注入一条提醒再跑一轮，逼它要么发草稿、要么把话说完整。
+ */
+test('联网检索：模型只写"我再搜一次"却不发草稿时，系统会注入提醒再跑一轮（不许空承诺收尾）', async () => {
+  const mock = await startMockAi({
+    apiKey: KEY,
+    replies: [
+      '我再搜一次学院近期的新闻。', // 第 1 轮：只有承诺，没有草稿
+      `这就去查。\n${fenced({ ok: true, action: 'query', target: 'web', fields: { query: '西安交通大学 航天航空学院 新闻' }, explain: '搜学院新闻' })}`,
+      '搜到了：学院近期有来访交流与讲座安排。',
+    ],
+  });
+  const web = await startFakeWeb();
+  const { app, call } = await startApp({ searchFetch: web.fetchImpl });
+  try {
+    await configure(call, mock, { searchMaxPages: 5 });
+    const sent = await call('POST', '/ai/chat', { text: '最近我们航天航空学院有什么新闻吗', search: 'web', stream: false });
+    assert.equal(sent.status, 200, JSON.stringify(sent.body)?.slice(0, 200));
+    // 三次上游调用 = 承诺 → (系统提醒) → 带草稿检索 → 作答；注入内容在第二次请求的 messages 里
+    assert.equal(mock.state.calls, 3, `应当是 3 次上游调用，实际 ${mock.state.calls}`);
+    const injected = JSON.stringify(mock.state.bodies[1]?.messages ?? []);
+    assert.match(injected, /没有发出|系统注入/, '要明确告诉模型"你说了要查但没发草稿"');
+    assert.ok((sent.body.queried ?? []).length >= 1, '补救之后必须真的检索了');
+    assert.match(String(sent.body.assistant?.content ?? ''), /搜到了|来访|讲座/, '最终给用户的必须是真答案，不是那句承诺');
+    assert.doesNotMatch(String(sent.body.assistant?.content ?? ''), /^我再搜一次/, '不许把空承诺当最终答复');
+  } finally {
+    await app.close();
+    await web.close();
+    await mock.close();
+  }
+});
+
+test('联网检索：正常回答（"查到了 1 条。"这类含结果的句子）不会被当成空承诺', async () => {
+  const mock = await startMockAi({
+    apiKey: KEY,
+    replies: ['我查一下。', '查到了 1 条，是明天 10:00 的材料力学。'],
+  });
+  const web = await startFakeWeb();
+  const { app, call } = await startApp({ searchFetch: web.fetchImpl });
+  try {
+    await configure(call, mock);
+    const sent = await call('POST', '/ai/chat', { text: '明天有什么安排', search: 'off', stream: false });
+    assert.equal(sent.status, 200);
+    assert.equal(mock.state.calls, 2, `含结果的回答就是最终答复，不该多跑一轮（实际 ${mock.state.calls} 次）`);
+  } finally {
+    await app.close();
+    await web.close();
+    await mock.close();
+  }
+});

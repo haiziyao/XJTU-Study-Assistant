@@ -106,6 +106,23 @@ const MAX_ROUNDS = 8;
  *   - 压过就记 `summaryCount`（已覆盖多少条），下次只压新增的部分，不重复烧 token；
  *   - **压缩失败不阻塞对话**：拿旧摘要继续，宁可少记一点也不让这条消息发不出去。
  */
+/**
+ * "我再去查/看一下"这类**空承诺**的识别（只用于兜底补救，不用于判断语义好坏）。
+ * 命中后系统会注入一条提醒再跑一轮：要么发草稿，要么把话说完整（见循环里的 `looksLikePromise`）。
+ */
+function looksLikePromiseToLook(text) {
+  const line = String(text ?? '').trim();
+  // 只可能是"一整段就是一句承诺"：稍长的回答里出现"查"字太正常了（"查到了 1 条。"就是被误判过的）
+  if (!line || line.length > 24) return false;
+  // **单句**：带逗号/分号的是"我先看 A，然后做 B"这种有内容的复合句，不是纯承诺
+  // （"我先看一下你的待办，然后给你排个顺序。"被误判过一次，害得它多跑一轮还把话说了两遍）
+  if (/[，,；;]/.test(line)) return false;
+  // 有数字或完成态 = 已经在说结果了，不是承诺
+  if (/[0-9]/.test(line) || /[了到出]/.test(line)) return false;
+  // 必须带"要去查/看"的动词（未来时）
+  return /(搜|查|检索|看看|看一下|读一下|翻一下)/.test(line);
+}
+
 const SUMMARY_MIN_MESSAGES = 6;
 const SUMMARY_MAX_CHARS = 600;
 
@@ -855,6 +872,8 @@ export class AiChatService {
     let lastFinishReason = null;
     let queryError = null;
     let hitRoundLimit = false;
+    /** 空承诺兜底只用一次（见循环末尾 `looksLikePromise`）。 */
+    let promisedNudge = false;
     let rounds = 0;
     try {
       // 上下文逐轮追加（回灌 = 追加一条 assistant 草稿 + 一条注入结果的 user），
@@ -1041,6 +1060,38 @@ export class AiChatService {
          * 用户要的是"它真的做了，而且知道发生了什么"，一句"已经加好了"配上一句"但这条撞了你的英语晨读"
          * 才是自动审批该有的样子；没执行写操作时（只读查询 / 纯聊天 / manual 档）照旧收尾，一次都不多花。
          */
+        /**
+         * **"我再搜一次"式空承诺的确定性兜底**（真机事故：用户问"最近我们航天学院有什么新闻吗"，
+         * 模型回了一句"我再搜一次学院近期的新闻。"、**一条检索草稿都没发**，循环按"这轮答完了"收尾，
+         * 用户屏幕上只有一句空话 —— 这正是用户截图里的"？？？"）。
+         *
+         * 提示词里已经写过"说了要查就必须同轮带上草稿"，但**不能指望模型每次都听话**：
+         * 这里做一次确定性的补救 —— 一旦这轮"既没有新查询、也没有执行写入"，而正文又**明显是在
+         * 承诺要去查/去看**，就注入一条系统提醒再跑一轮，逼它要么发草稿、要么把话说完整。
+         *
+         * 只补救一次（`promisedNudge`）：模型第二次仍然只说不做时就按它的原话收尾 ——
+         * 无限催下去只会烧钱，而且用户至少能看到"它确实卡住了"。
+         */
+        const looksLikePromise =
+          !extracted.drafts.length &&
+          looksLikePromiseToLook(extracted.text) &&
+          !promisedNudge &&
+          round < MAX_ROUNDS;
+        if (looksLikePromise) {
+          promisedNudge = true;
+          turnMessages = [
+            ...turnMessages,
+            {
+              role: 'user',
+              content:
+                '[系统注入] 你上一句说了要检索/去看，但**没有发出 ```command 草稿**，系统因此什么都没做。\n' +
+                '现在请立刻在这一轮里发出检索草稿（需要联网用 target:"web"，读指定网址用 fields.url）；\n' +
+                '如果你其实不需要检索，就把答案直接写完整：已知什么、缺什么、下一步建议。\n' +
+                '注意：只写"我再查一次"而没有草稿，系统会把它当成你的最终答复发给用户。',
+            },
+          ];
+          continue;
+        }
         if (!fresh.length && !executedNow.length) break;
         // 还有新查询（或刚写完还没回灌）、但轮数已经用光：记下来，调用方据此知道
         // "答案是被上限截断的"，而不是以为模型就答了这么点。
@@ -1425,7 +1476,13 @@ export class AiChatService {
     }
 
     if (!parts.length) return null;
-    const line = `[上一轮：${parts.join('；')}]`;
+    /**
+     * 前缀写成 `[系统记录 · 上一轮：…]` 而不是 `[上一轮：…]`：
+     * 这行是**系统补在 assistant 消息后面**的（模型看不到自己上一轮的回执，只能靠它接上下文），
+     * 但真机实测模型会把它当成自己的文风照抄进正文（用户截图里那句"[上一轮：已查 web 8 条]"就是被抄的）。
+     * 明确标成"系统记录"，配合提示词里的"不要复述系统记录"，就不会再出现在回答里。
+     */
+    const line = `[系统记录 · 上一轮：${parts.join('；')}]`;
     return line.length > HISTORY_SUMMARY_MAX ? `${line.slice(0, HISTORY_SUMMARY_MAX - 1)}…` : line;
   }
 
