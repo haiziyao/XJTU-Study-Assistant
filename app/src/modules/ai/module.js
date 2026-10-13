@@ -39,6 +39,8 @@ export default {
     { name: 'aiFiles', file: 'ai-files.json', indexes: ['hash'] },
     // 定时唤醒任务（时间 + 提示词）：到点由调度器触发一次对话，结果写进 conversationId 指定的会话
     { name: 'aiSchedules', file: 'ai-schedules.json', indexes: ['nextRunAt'] },
+    // 后台模型调用的用量账本（按天 + 用途聚合）：周报这类不落会话的调用也要能用 /ai/usage 看见
+    { name: 'aiUsage', file: 'ai-usage.json', indexes: ['date'] },
   ],
 
   aiTools: AI_TOOL_SPECS,

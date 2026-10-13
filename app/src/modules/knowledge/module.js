@@ -24,11 +24,18 @@ import { KNOWLEDGE_TOOLS } from './tools.js';
 const AI_PROMPT = `【知识库：教务处政策 / 规章 / 校历】
 - 可以用只读指令 {"ok":true,"action":"query","target":"knowledge","filters":{"q":"转专业 条件","limit":5}} 检索教务处政策语料
   （148 篇：学籍管理、课程考核、学业预警、毕业学位、培养方案、校历与作息时间等）。filters 还支持
-  category（栏目 slug）与 path（直接读某一篇的前 8000 字）。
-- **引用必须带 url**：把校规说成"一般来说"是不行的，每条结论都要能点回教务处原文。
-- **语料里没有的，如实说不知道**（例如"今年保研名额"）——绝不许用你自己的记忆编政策。
+  category（栏目 slug）、path（直接读某一篇）、url（那一篇的来源链接）。
+- **要读某篇的具体条款（数字、学分、比例、时限、名单、表格），必须用 filters.path 或 filters.url 点名那一篇**：
+  {"ok":true,"action":"query","target":"knowledge","filters":{"url":"https://dean.xjtu.edu.cn/info/1033/1130.htm"}}
+  —— 点名时系统会回**较长正文**（content，默认 4000 字，带 truncated 与 totalChars）。
+- **只给 q 的检索只回 240 字片段（snippet），那不是全文**。片段断在句中、或你要的条款显然在更后面时：
+  绝不许把片段当全文、更不许拿片段外推或编数字；要么说"我只读到片段"，要么拿这条结果的 path/url 再查一次。
+- content 的 truncated 为 true 时，表示这篇比 content 更长（totalChars 是它真实的总字数）：
+  说明"我只读到这部分"，不要把截断处当成结尾，也不要补全没读到的部分。
 - 结果里 kind 为 portal / attachments / external-links 的篇目**没有可检索正文**
   （正文在图片或附件里）：只能告诉用户"原文见此链接"，不要展开想象。
+- **引用必须带 url**：把校规说成"一般来说"是不行的，每条结论都要能点回教务处原文。
+- **语料里没有的，如实说不知道**（例如"今年保研名额"）——绝不许用你自己的记忆编政策。
 - 政策会修订：publishedAt 较早的条款要提示"以官网最新版本为准"。`;
 
 export default {
@@ -38,10 +45,19 @@ export default {
   order: 70,
   // 语料是仓库里的文件（不是 JsonStore 集合），没有 collections
   aiPrompt: AI_PROMPT,
+  /**
+   * 回灌给对话模型的字段白名单（`chat-service` 的 `#compactQueryResult` 按它挑字段）。
+   *
+   * `content` / `truncated` / `totalChars` 必须在这里 —— 它们**只在 filters 带 path/url 时才有值**
+   * （按关键词检索的那条路径根本没有这三个字段，见 `service.js` 的 search()），
+   * 所以加上它们是安全的：不会把整库倒进上下文，只会让"点名读一篇"真的读得到条款。
+   * 白名单一旦漏字段，模型就永远看不见正文全文 —— 这正是本次"读不到 12/8/4 学分阈值"的根因之一。
+   */
   aiQueryFields: {
-    knowledge: ['title', 'url', 'publishedAt', 'category', 'kind', 'snippet'],
+    knowledge: ['title', 'url', 'publishedAt', 'category', 'kind', 'snippet', 'content', 'truncated', 'totalChars'],
   },
-  // 检索结果只给片段，条数也别多：6 条 × 240 字 ≈ 1.5k 字，够模型引用又不淹掉对话
+  // 检索结果只给片段，条数也别多：6 条 × 240 字 ≈ 1.5k 字，够模型引用又不淹掉对话。
+  // path 直读是 count:1（只可能 1 条），所以这条上限对它没有影响，不必为它放宽。
   aiQueryLimits: { knowledge: 6 },
   aiTools: KNOWLEDGE_TOOLS,
 

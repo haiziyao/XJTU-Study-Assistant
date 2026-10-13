@@ -272,6 +272,190 @@ test('待办过滤：overdue、completed、priority、keyword；upcoming 按截�
   }
 });
 
+test('待办工时：estimatedMinutes（整数分钟）换算成 estimatedHours，estimatedHours 原语义不变', async () => {
+  const { app, call } = await startApp();
+  try {
+    // S3 的真实场景：模型按提示词写了 estimatedMinutes:120，落库却成了默认 1 小时（静默丢数据）
+    const minutes = await call('POST', '/todos', { title: '交实验报告', deadline: '2099-06-01', estimatedMinutes: 120 });
+    assert.equal(minutes.status, 201);
+    assert.equal(minutes.body.item.estimatedHours, 2, '120 分钟 = 2 小时');
+    assert.equal(minutes.body.item.estimatedMinutes, undefined, 'estimatedMinutes 只是入参写法，不落库');
+
+    // 保留一位小数
+    const half = await call('POST', '/todos', { title: '背单词', deadline: '2099-06-01', estimatedMinutes: 90 });
+    assert.equal(half.body.item.estimatedHours, 1.5);
+
+    // estimatedHours 的老语义一个字都不改（小数、0、上限校验）
+    const hours = await call('POST', '/todos', { title: '写报告', deadline: '2099-06-01', estimatedHours: 1.5 });
+    assert.equal(hours.body.item.estimatedHours, 1.5);
+    assert.equal(hours.body.keyAdjusted, undefined);
+
+    // 一位小数的口径要稳：45 分钟 → 0.8（不是 0.75 这种没约定的尾巴）
+    const fortyFive = await call('POST', '/todos', { title: '小测', deadline: '2099-06-01', estimatedMinutes: 45 });
+    assert.equal(fortyFive.body.item.estimatedHours, 0.8);
+
+    // 正数不抹成 0：1 分钟也是要花的时间
+    const oneMinute = await call('POST', '/todos', { title: '签到', deadline: '2099-06-01', estimatedMinutes: 1 });
+    assert.equal(oneMinute.body.item.estimatedHours, 0.1);
+
+    // 校验照旧：负数 / 非整数分钟 / 两种口径同时给都要 400（不猜、不丢）
+    assert.equal((await call('POST', '/todos', { title: 'x', deadline: '2099-06-01', estimatedMinutes: -5 })).status, 400);
+    assert.equal((await call('POST', '/todos', { title: 'x', deadline: '2099-06-01', estimatedMinutes: 1.5 })).status, 400);
+    const both = await call('POST', '/todos', { title: 'x', deadline: '2099-06-01', estimatedHours: 2, estimatedMinutes: 120 });
+    assert.equal(both.status, 400);
+    assert.equal(both.body.error.details.field, 'estimatedHours');
+    assert.match(both.body.error.message, /estimatedMinutes/);
+
+    // PATCH：分钟写法要能覆盖库里已有的小时值（不能被"当前记录 + patch"里的旧值顶掉）
+    const patched = await call('PATCH', `/todos/${hours.body.item.id}`, { estimatedMinutes: 90 });
+    assert.equal(patched.status, 200);
+    assert.equal(patched.body.item.estimatedHours, 1.5);
+    // 只改标题时工时保持不变
+    const renamed = await call('PATCH', `/todos/${hours.body.item.id}`, { title: '写实验报告' });
+    assert.equal(renamed.body.item.estimatedHours, 1.5);
+    assert.equal(renamed.body.item.title, '写实验报告');
+  } finally {
+    await app.close();
+  }
+});
+
+test('待办未知字段 400（不再静默丢数据），并给出「你是不是想用 X」的就近建议', async () => {
+  const { app, call } = await startApp();
+  try {
+    // ① 拼错一个字母：必须 400，且提示里同时出现原字段与候选字段
+    const typo = await call('POST', '/todos', { title: '交实验报告', deadline: '2099-06-01', estimatedMinuts: 60 });
+    assert.equal(typo.status, 400, '拼错的字段名 = 用户的话被丢掉，必须当场报错');
+    assert.equal(typo.body.error.code, 'BAD_REQUEST');
+    assert.equal(typo.body.error.details.field, 'estimatedMinuts');
+    assert.deepEqual(typo.body.error.details.unknownFields, ['estimatedMinuts']);
+    assert.deepEqual(typo.body.error.details.suggestions[0].suggest, ['estimatedMinutes', 'estimatedHours']);
+    for (const needle of ['estimatedMinuts', 'estimatedMinutes', 'estimatedHours']) {
+      assert.match(typo.body.error.message, new RegExp(needle), `提示里要有 ${needle}`);
+    }
+    // 落库的东西一个都不能多（400 就是没写进去）
+    assert.equal((await call('GET', '/todos')).body.items.length, 0);
+
+    // ② 把日程字段写到待办上：给出"该用哪个 target/字段"的具体解释
+    const scheduleField = await call('POST', '/todos', { title: '自习', deadline: '2099-06-01', startTime: '09:00' });
+    assert.equal(scheduleField.status, 400);
+    assert.match(scheduleField.body.error.message, /schedule/);
+    const category = await call('POST', '/todos', { title: '自习', deadline: '2099-06-01', category: 'study' });
+    assert.equal(category.status, 400);
+    assert.deepEqual(category.body.error.details.suggestions[0].suggest, ['tags']);
+
+    // ③ 拼错的 deadline / title 也能被认出来
+    const dueTypo = await call('POST', '/todos', { title: '交材料', dedline: '2099-06-01' });
+    assert.equal(dueTypo.status, 400);
+    assert.deepEqual(dueTypo.body.error.details.suggestions[0].suggest, ['deadline']);
+
+    // ④ 别名照旧能用（别把兼容写法误伤成未知字段）
+    const aliased = await call('POST', '/todos', { title: '交作业', due_date: '2099-06-01', hours: 2, notes: '用 A4 纸' });
+    assert.equal(aliased.status, 201);
+    assert.equal(aliased.body.item.deadline, '2099-06-01');
+    assert.equal(aliased.body.item.estimatedHours, 2);
+    assert.equal(aliased.body.item.description, '用 A4 纸');
+    // 模型常把 id 一起塞进 fields：允许出现但被忽略
+    const withId = await call('PATCH', `/todos/${aliased.body.item.id}`, { id: aliased.body.item.id, title: '交作业（改）' });
+    assert.equal(withId.status, 200);
+    assert.equal(withId.body.item.title, '交作业（改）');
+
+    // ⑤ PATCH 与 POST 同口径
+    const patchTypo = await call('PATCH', `/todos/${aliased.body.item.id}`, { estimatdHours: 3 });
+    assert.equal(patchTypo.status, 400);
+    assert.match(patchTypo.body.error.message, /estimatdHours/);
+
+    // ⑥ 日程/事件不受这条规则影响（它们本来就不拒绝未知字段，行为不变）
+    const schedule = await call('POST', '/schedules', {
+      title: '自习',
+      date: '2099-06-01',
+      startTime: '09:00',
+      somethingUnknown: 1,
+    });
+    assert.equal(schedule.status, 201);
+  } finally {
+    await app.close();
+  }
+});
+
+test('待办 dryRun 预览与真写一致：换算、未知字段、更新都以同一条校验路径为准', async () => {
+  const { app, call } = await startApp();
+  try {
+    // create：预览里就是换算后的时间（确认卡显示 2 小时，落库也必须 2 小时）
+    const dry = await call('POST', '/commands/execute', {
+      dryRun: true,
+      draft: { ok: true, action: 'create', target: 'todo', fields: { title: '交实验报告', deadline: '2099-06-01', estimatedMinutes: 120 } },
+    });
+    assert.equal(dry.status, 200);
+    assert.equal(dry.body.dryRun, true);
+    assert.equal(dry.body.validated.estimatedHours, 2);
+    assert.equal(dry.body.planned.fields.estimatedMinutes, 120, 'planned 原样回显模型给的东西');
+    assert.equal((await call('GET', '/todos')).body.items.length, 0, 'dryRun 不落库');
+
+    const real = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'create', target: 'todo', fields: { title: '交实验报告', deadline: '2099-06-01', estimatedMinutes: 120 } },
+    });
+    assert.equal(real.status, 200);
+    assert.equal(real.body.item.estimatedHours, dry.body.validated.estimatedHours, '预览与真写必须同一个值');
+
+    // 拼错字段：预览就该 400（用户点确认之前看见错误），真写也 400
+    const badDraft = { ok: true, action: 'create', target: 'todo', fields: { title: '交材料', deadline: '2099-06-01', estimatdHours: 2 } };
+    const dryBad = await call('POST', '/commands/execute', { dryRun: true, draft: badDraft });
+    assert.equal(dryBad.status, 400);
+    const realBad = await call('POST', '/commands/execute', { draft: badDraft });
+    assert.equal(realBad.status, 400);
+
+    // update：预览要跑真校验（未知字段在这里也必须冒出来）
+    const id = real.body.item.id;
+    const dryUpdate = await call('POST', '/commands/execute', {
+      dryRun: true,
+      draft: { ok: true, action: 'update', target: 'todo', filters: { id }, fields: { estimatedMinutes: 30 } },
+    });
+    assert.equal(dryUpdate.status, 200);
+    assert.equal(dryUpdate.body.validated.estimatedHours, 0.5);
+    const dryUpdateBad = await call('POST', '/commands/execute', {
+      dryRun: true,
+      draft: { ok: true, action: 'update', target: 'todo', filters: { id }, fields: { estmatdHours: 3 } },
+    });
+    assert.equal(dryUpdateBad.status, 400, '更新草稿的未知字段必须在点上确认之前就报出来');
+    assert.match(dryUpdateBad.body.error.message, /estmatdHours/);
+    // 真写真改
+    const realUpdate = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'update', target: 'todo', filters: { id }, fields: { estimatedMinutes: 30 } },
+    });
+    assert.equal(realUpdate.status, 200);
+    assert.equal(realUpdate.body.items[0].estimatedHours, 0.5);
+  } finally {
+    await app.close();
+  }
+});
+
+test('dschat 兼容 PATCH 待办：不认识的外来装饰字段在适配层滤掉，不因严格校验整条失败', async () => {
+  const { app, call } = await startApp();
+  try {
+    const created = await call('POST', '/todos', { title: '交实验报告', deadline: '2099-06-01' });
+    const id = created.body.item.id;
+    // dschat 的读-改-写会把 toDschatEvent 吐出的字段原样送回来（all_day / start_time / repeat…）
+    const patched = await call('PATCH', `/compat/dschat/events/${id}`, {
+      title: '交实验报告（改）',
+      notes: 'A4 纸',
+      date: '2099-06-02',
+      all_day: true,
+      start_time: null,
+      end_time: null,
+      repeat: 'none',
+      repeat_interval: 1,
+      created_at: 1,
+      updated_at: 2,
+    });
+    assert.equal(patched.status, 200, '兼容层不该因为待办的严格校验而整条失败');
+    assert.equal(patched.body.item.title, '交实验报告（改）');
+    assert.equal(patched.body.item.notes, 'A4 纸');
+    assert.equal(patched.body.item.date, '2099-06-02');
+  } finally {
+    await app.close();
+  }
+});
+
 test('顺延未完成待办：截止日平移到目标周的同一星期几，且落点绝不早于今天', async () => {
   const { app, call } = await startApp();
   try {

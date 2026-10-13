@@ -51,9 +51,14 @@ const AI_PROMPT = `【长期记忆：关于用户本人的事】
   filters 支持 scope / kind / status / key / q / limit。用在"你还记得…"，以及**提议前先查重**：
   status 为 rejected 的同 scope+key 是被否决过的，**绝不再提**。
 - 写：**你只能提议，不能直接写**。用户明说"记住…"时给一条
-  {"ok":true,"action":"create","target":"memory","fields":{"scope":"global","kind":"preference","key":"...","text":"我……"}}
+  {"ok":true,"action":"create","target":"memory","fields":{"scope":"global","kind":"preference","text":"我……"}}
   草稿（source: user）；你自己觉得值得记时也只能给草稿等用户确认，**绝不说"已经记住了"**。
   一轮最多 3 条；只说用户自己讲过的事，不写推测（"用户可能想考研"❌）；写完整句、主语是用户、≤200 字。
+- **key 默认不要写**（省掉它最稳）：系统按"scope + 正文"去重，同一句话不会被记两遍。
+  只有"同一条结论会被反复更新"时才给 key（例如作息偏好将来会改），而且它必须是
+  **小写字母 / 数字 / 下划线、≤40 字符**的英文短语（preferred_study_window ✅、周三下午 ❌、Bad Key ❌）。
+  中文 / 空格 / 超长 / 大写的 key 服务端不会报错，但会把它**降级**（丢中文、转小写、截断，
+  全丢了就等于没有 key）并在响应里回 keyAdjusted —— 那不是你想指定的那条键，所以别写中文。
 - 每轮注入给你的只是预算内的一小部分（默认 ≤8 条 / 600 字）：**没注入的就是你不知道的**，
   不许假装记得；需要时用上面的查询去检索。`;
 

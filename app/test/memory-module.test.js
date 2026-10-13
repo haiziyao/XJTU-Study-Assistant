@@ -226,11 +226,15 @@ test('记忆：写入校验 —— 200 字上限、敏感信息、非法枚举�
     for (const body of [
       { text: '合法正文', kind: 'feeling' },
       { text: '合法正文', scope: '课程:1' },
-      { text: '合法正文', key: '中文键' },
       { text: '合法正文', reviewAt: '下周三' },
     ]) {
       assert.equal((await ctx.call('POST', '/memories', body)).status, 400, `应拒绝：${JSON.stringify(body)}`);
     }
+    // key 是**例外**：不合法不再 400，而是降级 + 如实回报（见下一条测试的 S5 全链路）
+    const chineseKey = await ctx.call('POST', '/memories', { text: '合法正文', key: '中文键' });
+    assert.equal(chineseKey.status, 201, '中文 key 不该让整条记忆写不进去');
+    assert.equal(chineseKey.body.item.key, null);
+    assert.equal(chineseKey.body.keyAdjusted.from, '中文键');
 
     // 404：路径参数指向不存在的记忆
     for (const [method, route, body] of [
@@ -242,6 +246,71 @@ test('记忆：写入校验 —— 200 字上限、敏感信息、非法枚举�
       assert.equal(missing.status, 404, `${method} ${route} 应该 404`);
       assert.equal(missing.body.error.code, 'NOT_FOUND');
     }
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('记忆：中文 key 不 400 —— S5 全链路（propose → 确认 → 落库，响应里带 keyAdjusted）', async () => {
+  const ctx = await startApp();
+  try {
+    // 真机现场：用户说"记住我周三下午不方便安排学习任务"，模型按自己的理解写了中文 key。
+    // 修之前：POST /memories/propose 直接 400 → 前端确认卡点下去什么都不发生。
+    const proposed = await ctx.call('POST', '/memories/propose', {
+      kind: 'constraint',
+      key: '周三下午不便安排学习',
+      text: '我周三下午不方便安排学习任务',
+    });
+    assert.equal(proposed.status, 200, '提议不能因为 key 的格式失败');
+    const draft = proposed.body.draft;
+    assert.ok(draft, '必须给得出草稿，用户才有卡可点');
+    assert.equal(draft.fields.key, null, '草稿里给的是降级后的键（无 key → 按正文去重）');
+    assert.equal(draft.fields.text, '我周三下午不方便安排学习任务');
+    assert.deepEqual(proposed.body.keyAdjusted, {
+      from: '周三下午不便安排学习',
+      to: null,
+      reason: 'no_usable_chars+illegal_chars_dropped',
+    });
+    assert.match(draft.warnings.join(' '), /key/, '确认卡上要说明 key 被系统调过');
+
+    // 用户点确认：/commands/execute 才是落库那一刻（修之前这里也是 400）
+    const executed = await ctx.call('POST', '/commands/execute', { draft });
+    assert.equal(executed.status, 200, '确认必须真的落库，而不是又一张报错');
+    assert.equal(executed.body.item.key, null);
+    assert.equal(executed.body.item.text, '我周三下午不方便安排学习任务');
+    assert.equal((await ctx.call('GET', '/memories')).body.count, 1);
+
+    // 直接 POST /memories（用户明说"记住…"）同样降级 + 回报
+    const direct = await ctx.call('POST', '/memories', { kind: 'preference', key: 'Bad Key', text: '我习惯在图书馆自习' });
+    assert.equal(direct.status, 201);
+    assert.equal(direct.body.item.key, 'bad_key');
+    assert.deepEqual(direct.body.keyAdjusted, {
+      from: 'Bad Key',
+      to: 'bad_key',
+      reason: 'illegal_chars_dropped+uppercase_lowercased',
+    });
+
+    // PATCH 与写入同口径：降级不 400，合法 key 不报调整
+    const patched = await ctx.call('PATCH', `/memories/${direct.body.item.id}`, { key: 'study_place' });
+    assert.equal(patched.status, 200);
+    assert.equal(patched.body.item.key, 'study_place');
+    assert.equal(patched.body.keyAdjusted, undefined, '合法 key 不该报"已调整"');
+    const patchedBad = await ctx.call('PATCH', `/memories/${direct.body.item.id}`, { key: '中文键' });
+    assert.equal(patchedBad.status, 200, 'PATCH 也不许出现"预览过、点确认才 400"');
+    assert.equal(patchedBad.body.item.key, null);
+    assert.equal(patchedBad.body.keyAdjusted.from, '中文键');
+
+    // 合法 key 的语义一个字都不变：同 key 冲突仍然 409（不静默覆盖）
+    await ctx.call('POST', '/memories', { kind: 'preference', key: 'study_window', text: '我习惯晚上学习' });
+    const conflict = await ctx.call('POST', '/memories', { kind: 'preference', key: 'study_window', text: '我习惯早上学习' });
+    assert.equal(conflict.status, 409);
+    assert.equal(conflict.body.error.code, 'CONFLICT');
+    assert.ok(conflict.body.error.details.existing.id);
+
+    // 查询参数 key 仍然严格 400（写入降级是为了不丢用户的话；查询放宽会变成"查了全库"）
+    const badQuery = await ctx.call('GET', '/memories?key=我的键');
+    assert.equal(badQuery.status, 400);
+    assert.equal(badQuery.body.error.details.field, 'key');
   } finally {
     await ctx.close();
   }

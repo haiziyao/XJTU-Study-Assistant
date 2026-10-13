@@ -208,7 +208,14 @@ export class ScheduleService {
     };
   }
 
-  /** 与其他日程的时间冲突（同日、时段相交）。仅提示，不阻断写入。 */
+  /**
+   * 与其他日程的时间冲突（同日、时段相交）。仅提示，不阻断写入。
+   *
+   * **一处判断，两处使用**：真写（`commands.create` 落库后）与 dryRun 预览（确认卡要提前报出重叠）
+   * 都调这一个方法。不要在任一侧另写一套"什么算重叠"——预览说不撞、落库说撞，比不提示更糟。
+   * `candidate` 可以是一条已落库的记录（带 id，用来排除自己），也可以是 `preview()` 的归一化结果
+   * （没有 id，等于"这条新建的还不存在"，同日的都算潜在冲突）。
+   */
   conflictsFor(candidate) {
     if (!candidate?.date || !candidate.startTime) return [];
     const sameDay = this.range({ from: candidate.date, to: candidate.date }).filter(

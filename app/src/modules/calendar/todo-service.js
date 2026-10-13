@@ -42,6 +42,33 @@ const EDITABLE = [
 ];
 
 /**
+ * 入参里**允许出现**的字段名（canonical 名，别名先过 `mapFieldName`）。
+ *
+ * - `estimatedMinutes` 不落库（会被换算成 `estimatedHours`），但必须在这里：它是**日程**的字段，
+ *   而提示词、前端、模型都容易顺手把它写进待办（真机缺陷 S3 就是这么来的）。
+ * - `id` 允许出现但**被忽略**：模型给 update 草稿时常把 id 一并塞进 `fields`，
+ *   拿它定位可以，写进数据不行（那是另一条记录的主键，落进文件就是脏数据）。
+ */
+const KNOWN_FIELDS = new Set([...EDITABLE, 'estimatedMinutes', 'id']);
+
+/** 报错时摆在最前面的字段清单（人/模型照着改一次就能对）。 */
+const KNOWN_FIELD_LIST =
+  'title / deadline / estimatedHours（小时，可小数；也收 estimatedMinutes，整数分钟） / priority / completed / description / tags';
+
+/**
+ * 单个别名的归一化（不认识的键原样返回）。
+ * `normalizeInput`（取值）与 `assertKnownFields`（判断认不认识）共用这一张表：
+ * 各写一份的话，迟早出现"别名能转换、却被未知字段检查拦下"这种自相矛盾。
+ */
+function mapFieldName(key) {
+  if (key === 'due_date' || key === 'dueDate' || key === 'date') return 'deadline';
+  if (key === 'estimated_hours' || key === 'hours') return 'estimatedHours';
+  if (key === 'done') return 'completed';
+  if (key === 'notes' || key === 'note') return 'description';
+  return key;
+}
+
+/**
  * 入参别名归一化。
  *
  * 刻意**不复用** compat.js 的 `normalizeAliases`：那张表属于 dschat 2 的单日事件形状，
@@ -50,20 +77,117 @@ const EDITABLE = [
  */
 function normalizeInput(rawInput = {}) {
   const out = {};
-  for (const [key, value] of Object.entries(rawInput)) {
-    const mapped =
-      key === 'due_date' || key === 'dueDate' || key === 'date'
-        ? 'deadline'
-        : key === 'estimated_hours' || key === 'hours'
-          ? 'estimatedHours'
-          : key === 'done'
-            ? 'completed'
-            : key === 'notes' || key === 'note'
-              ? 'description'
-              : key;
-    out[mapped] = value;
-  }
+  for (const [key, value] of Object.entries(rawInput)) out[mapFieldName(key)] = value;
   return out;
+}
+
+/** Levenshtein 距离（字段名都很短，这一小段足够，不值得引依赖）。 */
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      current[j] = Math.min(prev[j] + 1, current[j - 1] + 1, prev[j - 1] + cost);
+    }
+    prev = current;
+  }
+  return prev[b.length];
+}
+
+/**
+ * 语义分组：整个词都写错（不是拼错一两个字母）时，靠这层猜"他大概想说什么"。
+ * 例：`due` → deadline、`status` → completed、`category`/`type` → tags。
+ */
+const FIELD_GROUPS = [
+  { match: /(minut|hour|dur|time|estimat|length)/i, suggest: ['estimatedHours', 'estimatedMinutes'] },
+  { match: /(dead|due|date|day|when)/i, suggest: ['deadline'] },
+  { match: /(titl|name|task|content|text)/i, suggest: ['title'] },
+  { match: /(desc|note|remark|memo|detail|comment|备注|说明)/i, suggest: ['description'] },
+  { match: /(done|finish|complete|status|check|state|完成)/i, suggest: ['completed'] },
+  { match: /(prior|level|urgent|import|rank|优先)/i, suggest: ['priority'] },
+  { match: /(tag|kind|type|categor|group|label|标签)/i, suggest: ['tags'] },
+  { match: /(source|origin|origi|from)/i, suggest: ['source'] },
+];
+
+/**
+ * 明明属于**日程**（或历史遗留）的字段被写到待办上时，给一句更具体的解释。
+ * 这类错误光说"不认识"没用：调用方要知道"那我该用哪个 target / 哪个字段"。
+ */
+const FOREIGN_HINTS = {
+  startTime: '待办只有截止日、没有时刻：要记"几点到几点"请用 target: "schedule"',
+  endTime: '待办没有结束时刻：要记起止时间请用 target: "schedule"',
+  location: '待办没有地点：要记地点请用 target: "schedule"（或写进 description）',
+  category: '待办没有分类（分类属于日程）：待办可以放进 tags',
+  reminders: '待办没有提醒：提醒属于日程（target: "schedule"）',
+  repeat: '待办不支持重复：重复规则属于日程（target: "schedule"）',
+  status: '待办的完成态字段是 completed（布尔），没有 status',
+  allDay: '待办本来就是"某天之前要打勾的事"，没有 allDay',
+  completed_at: '完成时间由系统维护（completedAt），不需要传',
+};
+
+/** 「你是不是想用 X」：先给拼写最近的，再用语义分组补一个（最多两个，别把提示塞满）。 */
+function suggestFields(name) {
+  const lowered = String(name).toLowerCase();
+  const near = [...KNOWN_FIELDS]
+    .filter((field) => field !== 'id')
+    .map((field) => ({ field, distance: editDistance(lowered, field.toLowerCase()) }))
+    .filter((entry) => entry.distance <= 2)
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, 2)
+    .map((entry) => entry.field);
+  const group = FIELD_GROUPS.find((entry) => entry.match.test(lowered));
+  if (!group) return near;
+  return [...near, ...group.suggest.filter((field) => !near.includes(field))].slice(0, 2);
+}
+
+/**
+ * 未知字段**必须报错**，而不是静默丢掉。
+ *
+ * 为什么（真机缺陷 S3 的教训）：提示词把待办的预估工时写成 `estimatedMinutes`，而服务端只认
+ * `estimatedHours` —— 未知键被静默丢弃，用户说"预计两小时"、落库变成默认 1 小时，全程没有任何
+ * 报错，用户和模型都以为记对了。**字段名写错 = 用户说的话被丢掉**，这种损失必须当场可见。
+ *
+ * 只对**写入**生效：读取没有"字段"可写。建议尽量"就近"（拼写距离 + 语义分组），
+ * 因为调用方看不到我们的字段清单，报错里直接告诉它该用哪个键，下一轮就能改对；
+ * 只说"未知字段 x"，它多半会换个名字继续猜。
+ */
+function assertKnownFields(rawInput = {}) {
+  const unknown = [];
+  for (const key of Object.keys(rawInput)) {
+    const mapped = mapFieldName(key);
+    if (!KNOWN_FIELDS.has(mapped)) unknown.push({ field: key, mapped });
+  }
+  if (!unknown.length) return;
+
+  const suggestions = unknown.map(({ field, mapped }) => {
+    const suggest = suggestFields(mapped);
+    const hint = FOREIGN_HINTS[mapped];
+    return { field, ...(suggest.length ? { suggest } : {}), ...(hint ? { hint } : {}) };
+  });
+  const [first] = suggestions;
+  // advice 里不带句末标点：hint 与建议两种句式共用同一句收尾，拼出来的错误信息才读得通
+  const advice = first.hint ?? (first.suggest?.length ? `你是不是想用 ${first.suggest.join(' / ')}` : '请检查拼写');
+  throw HttpError.badRequest(
+    `字段 ${first.field} 不是待办认识的字段：${advice}。待办字段：${KNOWN_FIELD_LIST}`,
+    {
+      field: first.field,
+      unknownFields: suggestions.map((item) => item.field),
+      suggestions,
+    },
+  );
+}
+
+/**
+ * 某个入参键（含别名）是不是待办认得的？
+ *
+ * 给**兼容层**用（calendar/routes.js 的 dschat PATCH）：那边收到的是 dschat 的事件形状，
+ * 里面本来就带 `start_time` / `all_day` / `repeat*` 这些"待办根本没有"的装饰字段。
+ * 适配层负责在进入严格校验之前把它们滤掉，否则 dschat 客户端的读-改-写会整条失败。
+ * 域内接口（/todos、指令、AI 草稿）不走这里 —— 它们必须**如实报错**，见 assertKnownFields。
+ */
+export function isTodoInputField(key) {
+  return KNOWN_FIELDS.has(mapFieldName(String(key)));
 }
 
 /** 布尔字段：接受 true/false 与 'true'/'false'/'1'/'0'（HTTP query 里都是字符串）。 */
@@ -78,7 +202,19 @@ function booleanValue(value, field, { optional = true, fallback } = {}) {
   throw HttpError.badRequest(`字段 ${field} 不合法：必须是布尔值`, { field });
 }
 
+/**
+ * 分钟 → 小时（待办落库只认小时）：保留一位小数（120 → 2、90 → 1.5）。
+ * 正数不抹成 0：1 分钟也是要花的时间，落成 0 小时会让"复杂度/计划工时"统计失真。
+ */
+function minutesToHours(minutes) {
+  if (!(minutes > 0)) return 0;
+  return Math.max(0.1, Number((minutes / 60).toFixed(1)));
+}
+
 function normalize(rawInput, { partial = false } = {}) {
+  // 未知字段先拦（理由见 assertKnownFields）：写错的字段名 = 用户说的话被丢掉，
+  // 必须当场 400 并给出"你是不是想用 X"，而不是静默忽略后落一个默认值。
+  assertKnownFields(rawInput);
   const input = normalizeInput(rawInput);
   const data = {};
 
@@ -88,13 +224,35 @@ function normalize(rawInput, { partial = false } = {}) {
   if (input.deadline !== undefined) data.deadline = requireDate(input.deadline, 'deadline');
   else if (!partial) data.deadline = requireDate(undefined, 'deadline');
 
-  if (input.estimatedHours !== undefined) {
+  /**
+   * 预估工时：待办的领域字段是 `estimatedHours`（小时，可小数），但 `estimatedMinutes`
+   * 是**日程**的字段、也是模型最容易顺手写进来的那个（真机缺陷 S3：提示词里就写着 estimatedMinutes，
+   * 服务端只认 estimatedHours，120 分钟被静默丢掉、落库成了默认 1 小时）。
+   * 所以两种写法都收：分钟 ÷ 60 保留一位小数。原字段的语义一个字都不改。
+   */
+  const hasHours = input.estimatedHours !== undefined && input.estimatedHours !== null && input.estimatedHours !== '';
+  const hasMinutes = input.estimatedMinutes !== undefined && input.estimatedMinutes !== null && input.estimatedMinutes !== '';
+  if (hasHours && hasMinutes) {
+    // 同一件事的两种口径给出两个值 = 调用方自己没说清，猜哪个都可能丢数据（原则同 assertKnownFields）
+    throw HttpError.badRequest('字段 estimatedHours 与 estimatedMinutes 不能同时传：它们是同一个语义的两种写法，只传一个', {
+      field: 'estimatedHours',
+      alsoGiven: 'estimatedMinutes',
+    });
+  }
+  if (hasHours) {
     data.estimatedHours = numberValue(input.estimatedHours, 'estimatedHours', {
       min: 0,
       max: MAX_ESTIMATED_HOURS,
       optional: true,
       fallback: 1,
     });
+  } else if (hasMinutes) {
+    const minutes = intValue(input.estimatedMinutes, 'estimatedMinutes', {
+      min: 0,
+      max: MAX_ESTIMATED_HOURS * 60,
+      optional: false,
+    });
+    data.estimatedHours = minutesToHours(minutes);
   } else if (!partial) data.estimatedHours = 1;
 
   if (input.priority !== undefined) {
@@ -262,14 +420,34 @@ export class TodoService {
     return data;
   }
 
-  async update(id, patch) {
+  /**
+   * 「现有记录 + patch」重建成一份完整字段（**不落库**）。
+   *
+   * `update()` 与 `previewUpdate()` 共用它：dryRun 预览必须与真写走同一条归一化路径，
+   * 否则会出现"预览说没问题、点确认才 400"的卡点 —— 那正是这一版要修的毛病。
+   */
+  #rebuild(id, patch = {}) {
     const current = this.get(id);
-    const merged = { ...pickDefined(current, EDITABLE), ...normalizeInput(patch) };
+    const incoming = normalizeInput(patch);
+    const merged = { ...pickDefined(current, EDITABLE), ...incoming };
+    // patch 只给了"分钟"写法时，必须把从库里带过来的 estimatedHours 让位：
+    // 两个都在会被当成"调用方同时给了两种口径"而 400，而调用方其实只写了一个。
+    if (incoming.estimatedMinutes !== undefined && incoming.estimatedHours === undefined) delete merged.estimatedHours;
     const data = normalize(merged, { partial: false });
     // 完成态与 completedAt 必须一起变：勾选时写时间戳，取消勾选时清成 null
     // （必须是 null 而不是 undefined：JSON 集合的合并会把 undefined 当成「不带这个字段」）
     if (data.completed) data.completedAt = data.completedAt ?? new Date().toISOString();
     else data.completedAt = null;
+    return data;
+  }
+
+  /** update 的「只校验、不落库」版本：dryRun 的更新预览与真写同口径（含未知字段 400）。 */
+  previewUpdate(id, patch) {
+    return this.#rebuild(id, patch);
+  }
+
+  async update(id, patch) {
+    const data = this.#rebuild(id, patch);
     const updated = await this.collection.update(id, data);
     this.broadcast({ type: 'data_changed', payload: { target: 'todo', action: 'update', id } });
     return decorate(updated, todayKey());

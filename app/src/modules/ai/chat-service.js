@@ -11,13 +11,15 @@
  *   3. **先插一条 assistant 占位消息**（`status: "streaming"`）拿到稳定的 messageId，
  *      流式的 delta 才能带着它广播出去；
  *   4. **循环**调上游（最多 `MAX_ROUNDS` 轮，一轮 = 一次 `provider.chat`，**每轮都流式**）：
- *      抽草稿 → dryRun 预校验 → 只读查询自动执行（`auto` 档连写操作一起执行）→
- *      把查询结果回灌进上下文再进下一轮；某一轮没查出**新**查询，就说明它在作答，循环结束；
+ *      抽草稿（一轮可含多条写入草稿）→ dryRun 预校验 → 只读查询自动执行（`auto` 档连写操作一起执行）→
+ *      把这一轮的结果（查询结果 **和** 已自动执行的写操作结果）回灌进上下文再进下一轮；
+ *      某一轮既没有**新**查询、也没有真执行写操作，就说明它在作答，循环结束；
  *   5. 用**最后一轮**的正文把占位消息更新成 `done`（`rounds` / `roundLimit` / `usageRounds` 一起记下）；
  *   6. 失败：第一轮就失败 → 整条标 `failed` 并带上错误（不删，用户能看到"刚才那次没成"）；
  *      第二轮及以后的"总结失败" → 只记 `PARTIAL`，已经查到的数据照常返回。
  *
- * 本服务**不直接写业务数据**：草稿只做 dryRun 预览，真正落库由用户确认后走 `/commands/execute`。
+ * 本服务**不直接写业务数据**：草稿只做 dryRun 预览，真正落库由用户确认后走 `/commands/execute`；
+ * 唯一的例外是 `auto`（自动审批）档 —— 那是用户显式授权系统替他点确认，执行结果照样回执 + 回灌。
  */
 
 import { ERROR_CODES } from '../../shared/constants.js';
@@ -272,6 +274,31 @@ export class AiChatService {
 
     const sum = { prompt: 0, completion: 0, total: 0, cached: 0, uncached: 0, reasoning: 0 };
     let calls = 0;
+    /**
+     * 后台调用（`complete()`，例如生成周报）单独累计，再并入总量。
+     *
+     * 为什么不"只算总量就完事"：用户需要能分辨"这些 token 是我聊天花的，还是后台自动花的" ——
+     * 合并显示但**单独报一个 background 字段**，用量气泡里就能解释清楚。
+     * 按会话过滤时不计入（后台调用不属于任何会话，硬塞进去会让单会话的数字对不上）。
+     */
+    const background = { calls: 0, prompt: 0, completion: 0, total: 0, cached: 0 };
+    if (!conversationId) {
+      for (const row of this.store.aiUsage?.all?.() ?? []) {
+        background.calls += Number(row.calls) || 0;
+        background.prompt += Number(row.prompt) || 0;
+        background.completion += Number(row.completion) || 0;
+        background.total += Number(row.total) || 0;
+        background.cached += Number(row.cached) || 0;
+      }
+      // 并进总量：用户看的是"这段时间花了多少"，后台调用（周报之类）当然算在内。
+      // 单独留 background 明细只是为了让他能分辨"哪些是自动花的"，不是不计入。
+      calls += background.calls;
+      sum.prompt += background.prompt;
+      sum.completion += background.completion;
+      sum.total += background.total;
+      sum.cached += background.cached;
+      sum.uncached += Math.max(background.prompt - background.cached, 0);
+    }
     // 一条回复可能是**多次**上游调用（只读查询一轮一轮地回灌），每次都是真花钱的，都要算。
     //
     // 统计口径（保证**同一轮只算一次**，且对字段的任意组合都成立）：
@@ -314,6 +341,8 @@ export class AiChatService {
       replies: messages.length,
       /** 计入口径：一条回复可能是 1 次调用，也可能是多次（每轮只读查询回灌各算一次） */
       calls,
+      /** 其中有多少次是**后台调用**（周报这类不带会话的模型请求），以及它们花了多少 —— 与聊天分开报。 */
+      background,
       tokens: {
         total: sum.total,
         input: inputDenominator,
@@ -533,6 +562,10 @@ export class AiChatService {
       temperature: temperature === undefined ? this.config.get().temperature : temperature,
       reasoningEffort: THINKING_LEVELS[thinking] ?? THINKING_LEVELS.none,
     });
+    // 后台调用（不带会话的模型请求，例如生成学习周报）也要记账：
+    // `/ai/usage` 原来只扫已落库的 assistant 消息，于是这些调用的 token **完全看不见** ——
+    // 用户看着"这周才花了这么点"，实际有一部分被周报悄悄花掉了（实测发现的缺陷）。
+    await this.#recordBackgroundUsage('complete', result.usage, this.config.get().model);
     return {
       ok: true,
       text: String(result.text ?? '').trim(),
@@ -540,6 +573,42 @@ export class AiChatService {
       model: this.config.get().model,
       provider: this.config.get().provider,
     };
+  }
+
+  /**
+   * 记一次"后台模型调用"的用量（按天 + 用途聚合成一条，避免无界增长）。
+   *
+   * 为什么聚合而不是流水：这些调用的**明细**没有意义（不属于任何会话），
+   * 有意义的只是"这段时间后台花了多少"。按 `日期:用途` 记一行，长期也不会把集合撑大。
+   * 集合缺失时静默跳过 —— 老数据目录/裁剪过的测试环境不该因此报错。
+   */
+  async #recordBackgroundUsage(kind, usage, model) {
+    const collection = this.store.aiUsage;
+    if (!collection || !usage) return;
+    try {
+      const date = new Date().toISOString().slice(0, 10);
+      const id = `${date}:${kind}`;
+      const existing = collection.get?.(id);
+      const prompt = Number(usage.prompt_tokens) || 0;
+      const completion = Number(usage.completion_tokens) || 0;
+      const total = Number(usage.total_tokens) || prompt + completion;
+      const cached = Number(usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens) || 0;
+      const patch = {
+        date,
+        kind,
+        model: model ?? null,
+        calls: (Number(existing?.calls) || 0) + 1,
+        prompt: (Number(existing?.prompt) || 0) + prompt,
+        completion: (Number(existing?.completion) || 0) + completion,
+        total: (Number(existing?.total) || 0) + total,
+        cached: (Number(existing?.cached) || 0) + cached,
+      };
+      if (existing) await collection.update(id, patch);
+      else await collection.insert({ id, ...patch });
+    } catch (error) {
+      // 记账失败不该影响这次调用本身（用户拿到的是报告，不是一个统计错误）
+      this.#log('warn', `后台用量记账失败：${error?.message ?? error}`);
+    }
   }
 
   /**
@@ -779,14 +848,38 @@ export class AiChatService {
         // 这条最常见的路径里，第二轮才冒出来的写草稿再也无人执行 —— 这正是用户说的
         // "自动审批没啥用"。没执行的（校验不过的、非 auto 档的）留在 drafts 里走人工确认卡。
         const autoQuery = mode !== 'strict';
+        /**
+         * 本轮要处理的写草稿：**一轮可以有多条**。
+         *
+         * 「一句话三件事」以前只落一件，根因不在这里（提示词只让模型给一条，见 prompt.js），
+         * 但这里也不能只取 `previewed[0]` —— 提示词放开成"最多 3 条"之后，三条必须**都**走完
+         * 预览→执行这条路。数组顺序与模型输出的顺序一致，落库顺序因此也是用户说话的顺序。
+         */
         let roundDrafts = autoQuery
           ? previewed.filter((entry) => entry.draft?.action !== 'query' || entry.error)
           : previewed;
-        // 同一条写操作被模型在多轮里重复输出时**只能执行一次** —— auto 档尤其致命：
+        // 同一条写操作被模型重复输出时**只能执行一次** —— auto 档尤其致命：
         // 它会落两条一模一样的记录。模型看不到自己上一轮输出过的 ```command 块（回灌时草稿已经
         // 被抽掉了），只看到"我准备加一条待办"的正文，所以它在后面某一轮把同一件事再说一遍很常见。
+        // 注意：写结果现在会**回灌**（见下面的 #withExecutionResults），模型更容易"把刚做完的事
+        // 再说一遍"（它想确认），所以这道指纹去重是必需的，不是可选的优化。
         const doneKeys = new Set(executed.map((item) => this.#draftKey(item.entry)));
-        const freshWrites = roundDrafts.filter((entry) => !doneKeys.has(this.#draftKey(entry)));
+        /**
+         * 真正要执行的写草稿 = 跨轮去重（`doneKeys`）+ **轮内去重**。
+         *
+         * 轮内去重不是防御性编程：模型经常把同一件事写两遍（正文里列一遍、再单独给一条草稿），
+         * 抽出来就是两条一模一样的草稿 —— 以前两条都会被 auto 档执行掉，库里落两条重复记录。
+         * 确认卡那条路（下面的 `seenDrafts`）一直有去重，写库这条路漏了；一轮允许多条草稿之后
+         * 这个漏洞更容易被触发，所以在这里一次收干净。
+         */
+        const freshWrites = [];
+        const freshKeys = new Set(doneKeys);
+        for (const entry of roundDrafts) {
+          const key = this.#draftKey(entry);
+          if (freshKeys.has(key)) continue;
+          freshKeys.add(key);
+          freshWrites.push(entry);
+        }
         const executedNow = mode === 'auto' ? await this.#autoExecuteWrites(freshWrites) : [];
         if (executedNow.length) {
           roundDrafts = freshWrites.filter((entry) => !executedNow.some((item) => item.entry === entry));
@@ -818,18 +911,30 @@ export class AiChatService {
           : [];
         queried.push(...fresh);
 
-        // **循环终止条件**：这一轮没有查出任何"新"查询 = 模型这轮是在直接回答用户，
-        // 它就是最终回答，收尾。这条判断同时覆盖两种正常结束：纯聊天（压根没草稿）、
-        // 以及查完之后开始作答（模型不再发查询草稿）。
-        if (!fresh.length) break;
-        // 还有新查询、但轮数已经用光（模型想查第六次）：记下来，调用方据此知道
+        /**
+         * **循环终止条件**：这一轮既没有查出"新"查询、也没有真执行写操作 = 模型这轮是在直接
+         * 回答用户，它就是最终回答，收尾。这条判断覆盖三种正常结束：纯聊天（压根没草稿）、
+         * 查完之后开始作答（模型不再发查询草稿）、以及 auto 档写完之后的最后一句总结。
+         *
+         * `executedNow.length` 这一项是**缺陷 1 的另一半**：以前只看 `fresh`，于是 auto 档把日程
+         * 写进库之后循环立刻结束，写操作的执行结果（尤其是 `conflicts`）根本没机会回到模型那里 ——
+         * 正文只会说"给你加上"，绝口不提"这条和你的英语晨读重叠了"。现在真写了就回灌一轮，
+         * 让模型有机会把系统刚做的事说清楚。
+         *
+         * 代价（**只为这一种情况多花一次上游调用**）：auto 档每执行掉一条写操作就多一轮模型调用。
+         * 一次对话"加三条安排"从 1 次调用变成 2 次，这一轮的 token 大约翻倍 —— 这是明知故犯的取舍：
+         * 用户要的是"它真的做了，而且知道发生了什么"，一句"已经加好了"配上一句"但这条撞了你的英语晨读"
+         * 才是自动审批该有的样子；没执行写操作时（只读查询 / 纯聊天 / manual 档）照旧收尾，一次都不多花。
+         */
+        if (!fresh.length && !executedNow.length) break;
+        // 还有新查询（或刚写完还没回灌）、但轮数已经用光：记下来，调用方据此知道
         // "答案是被上限截断的"，而不是以为模型就答了这么点。
         if (round >= MAX_ROUNDS) {
           hitRoundLimit = true;
           break;
         }
         // 把这一轮的结果回灌进上下文，进入下一轮 —— 这才是真正的工具循环
-        turnMessages = this.#withQueryResults(turnMessages, extracted.text, fresh);
+        turnMessages = this.#withExecutionResults(turnMessages, extracted.text, { queried: fresh, executed: executedNow });
       }
 
       const saved = await this.store.aiMessages.update(assistant.id, {
@@ -1104,7 +1209,7 @@ export class AiChatService {
        *
        * 实测过的事故：模型说"我把原文调出来看"，草稿却被 400 挡掉（path 传了 URL），
        * 旧代码在这里 `continue` → 本轮"没有新查询" → 循环立刻结束 → 用户只看到那句
-       * "我去看看"，既没有结果也没有解释。失败也是结果：把它回灌（见 #withQueryResults
+       * "我去看看"，既没有结果也没有解释。失败也是结果：把它回灌（见 #queryInjectionText
        * 的 failed 段），模型才有机会改个写法重试或如实说明。
        */
       if (entry.error) {
@@ -1154,6 +1259,8 @@ export class AiChatService {
         snippet: item.snippet,
         source: item.source,
         scope: item.scope,
+        matchedBy: item.matchedBy ?? null,
+        site: item.site ?? null,
         ok: page.ok !== false,
         error: page.error ?? null,
         chars: String(page.text ?? '').length,
@@ -1312,6 +1419,8 @@ export class AiChatService {
           snippet: item.snippet,
           source: item.source,
           scope: item.scope,
+          matchedBy: item.matchedBy ?? null,
+          site: item.site ?? null,
           // 正文只在真抓到时才有：`ok:false` 的条目 text 为空、error 说明原因（列表页/PDF/要登录），
           // 模型据此知道"这条只有摘要，别当成读过了"
           text: String(page.text ?? '').slice(0, WEB_TEXT_CHARS),
@@ -1378,7 +1487,10 @@ export class AiChatService {
       // `textSource`/`note` 是**来源口径**：`container`=站内正文容器（真全文）、
       // `body`=整页清洗、`meta`=只拿到 meta 摘要。没有它，模型分不清
       // "我读完了全文"和"我只看到两百字摘要"，就会承诺摘要里没有的细节。
-      web: ['title', 'url', 'snippet', 'source', 'scope', 'text', 'chars', 'textSource', 'note', 'ok', 'error'],
+      // `matchedBy`/`site` 是**校内档的来源证据**：site=校内站点自己的检索接口命中（最权威）、
+      // domain=公网结果但域名在校内、mention=公网结果里提到本校。工具说明与 README 都向模型承诺了这两个字段，
+      // 而投影表白名单一开始漏了它们 —— 模型因此分不清"这条是校方页面"还是"公网上提到学校"。
+      web: ['title', 'url', 'snippet', 'source', 'scope', 'matchedBy', 'site', 'text', 'chars', 'textSource', 'note', 'ok', 'error'],
     };
     // 模块声明的投影表覆盖内置表（内置三张表保持原样，行为不变）
     const fields = this.queryFields?.[target] ?? FIELDS[target] ?? ['id', 'title'];
@@ -1406,16 +1518,39 @@ export class AiChatService {
   }
 
   /**
-   * 把这一轮查到的只读结果回灌进对话（**每轮**都回灌，不是固定的"第二次调用"）。
+   * 把这一轮"系统真的做了的事"回灌进对话（**每轮**都回灌，不是固定的"第二次调用"）。
+   *
+   * 两类结果共用一条注入消息（而不是两条）：
+   *   - `queried`：只读查询的结果（模型据此作答）；
+   *   - `executed`：auto 档**已经落库**的写操作结果（模型据此说清"系统做了什么"，尤其是冲突）。
+   *
+   * 为什么合成一条：两者常常同一轮发生（"先查一下有没有撞，再帮我加一条"），拆成两条会变成
+   * 连续两条 user 消息 —— 上游兼容端点对消息角色交替的校验并不一致，能少踩一个坑就少踩一个。
    *
    * 用一条 `role: "user"` 的显式标注消息而不是 `role: "tool"`：我们没走函数调用协议，
    * 各家 OpenAI 兼容端点对 `tool` 消息的校验不一致，而带标注的 user 消息到处都能跑。
+   */
+  #withExecutionResults(messages, replyText, { queried = [], executed = [] } = {}) {
+    const sections = [this.#queryInjectionText(queried), this.#writeInjectionText(executed)].filter(Boolean);
+    if (!sections.length) return messages;
+    return [
+      ...messages,
+      {
+        role: 'assistant',
+        content: replyText || (queried.length ? '（我发起了一次只读查询）' : '（我执行了一次写入操作）'),
+      },
+      { role: 'user', content: sections.join('\n\n') },
+    ];
+  }
+
+  /**
+   * 只读查询的回灌文案。
    *
    * 文案刻意留了"还可以再查"的口子：多轮循环靠它继续下去（查日程 → 查待办 → 写一条 → 回话）。
    * 以前这里写死"不要再输出查询草稿"，等于把模型的手绑住 —— 它只能拿第一轮的数据硬答，
    * 真正需要两步的问题（"先看看有没有冲突，再帮我加一条"）就永远做不完。
    */
-  #withQueryResults(messages, replyText, queried) {
+  #queryInjectionText(queried) {
     const usable = queried.filter((entry) => entry.result);
     /**
      * 失败/被拦下的查询也要回灌（只要它的原因）。
@@ -1427,22 +1562,87 @@ export class AiChatService {
     const failed = queried
       .filter((entry) => !entry.result && entry.error)
       .map((entry) => ({ target: entry.draft?.target ?? null, reason: entry.error.message ?? String(entry.error) }));
-    return [
-      ...messages,
-      { role: 'assistant', content: replyText || '（我发起了一次只读查询）' },
-      {
-        role: 'user',
-        content:
-          '[系统注入] 上面的只读查询已由系统执行完毕，结果如下（JSON）。请据此处理用户的问题：' +
-          '如果还需要查别的，可以再输出一个 query 草稿；否则现在就用自然语言回答用户，不要再输出查询草稿。' +
-          '不要再说"需要你确认""我拿不到数据"。\n' +
-          JSON.stringify(usable.map((entry) => entry.result)) +
-          (failed.length
-            ? '\n下面这些查询**没有执行成功**（把原因如实告诉用户，不要假装查过、也不要换个说法编内容）：\n' +
-              JSON.stringify(failed)
-            : ''),
-      },
-    ];
+    if (!usable.length && !failed.length) return '';
+    return (
+      '[系统注入] 上面的只读查询已由系统执行完毕，结果如下（JSON）。请据此处理用户的问题：' +
+      '如果还需要查别的，可以再输出一个 query 草稿；否则现在就用自然语言回答用户，不要再输出查询草稿。' +
+      '不要再说"需要你确认""我拿不到数据"。\n' +
+      JSON.stringify(usable.map((entry) => entry.result)) +
+      (failed.length
+        ? '\n下面这些查询**没有执行成功**（把原因如实告诉用户，不要假装查过、也不要换个说法编内容）：\n' +
+          JSON.stringify(failed)
+        : '')
+    );
+  }
+
+  /**
+   * 写操作执行结果的回灌文案（auto 档专用，manual / strict 档没有"已执行"这回事）。
+   *
+   * 为什么必须有这一段：写操作是系统"背着模型"做的，模型只看得到自己上一轮说过什么
+   * （而且草稿代码块在回灌时已经被抽掉了）。没有这条注入，它就只能按"我准备加…"的口吻收尾，
+   * 用户永远听不到①这条到底落库了没有、②它和已有日程撞了没有 —— 而后者恰恰是日历最该主动提醒的。
+   *
+   * 文案里把三件事说死，都是实测会出错的地方：
+   *   1. 只能说系统**回报过**的东西（返回的 id / 标题 / 时间），不许编"已经提醒你了"；
+   *   2. `conflicts` 非空时必须**主动**点名冲突条目（标题 + 时刻），不要等用户问；
+   *   3. 不许把同一件事再输出一遍草稿 —— 靠 #draftKey 去重兜底，但提示词先说清能少一轮废调用。
+   */
+  #writeInjectionText(executed) {
+    if (!executed?.length) return '';
+    const records = executed.map((entry) => this.#compactWriteResult(entry));
+    const failed = records.filter((item) => item.ok === false);
+    return (
+      '[系统注入] 上面的**写操作已由系统自动执行完毕**（用户选了"自动审批"档，不需要他再点确认）。' +
+      '执行结果（JSON）：\n' +
+      JSON.stringify(records) +
+      '\n请据此用自然语言告诉用户系统**真的做了什么**（用返回的标题与时间，不要编造 id 或没回报过的细节）：' +
+      (failed.length ? '执行失败的条目要如实说没成、并说明原因，绝不能报成成功；' : '') +
+      '如果某条结果里的 conflicts 非空，必须**主动提醒**"这条和已有的哪条日程时间重叠"（点名冲突条目的标题与时刻），不要等用户来问。' +
+      '不要再说"我准备…你确认一下"，也不要重复输出同一条写入草稿。'
+    );
+  }
+
+  /**
+   * 写操作结果的**紧凑投影**：只留模型回话需要的字段。
+   *
+   * 为什么不整条回灌：`create` 返回的 `item` 是完整记录（description 可能几千字、还带 repeat /
+   * 各种内部字段），原样塞进下一轮提示词既贵又容易让模型跑偏；`affected`（id/标题/日期）加上
+   * 新建记录自己的时段就够它把话说清楚了。
+   *
+   * `conflicts` 用的是与确认卡、真写回执**同一份**对象（`schedules.conflictsFor` 的返回），
+   * 这里只做字段裁剪，不做二次判断 —— 一份"什么算重叠"的口径就够，多一份迟早会漂移。
+   */
+  #compactWriteResult(entry) {
+    const FIELDS = {
+      todo: ['id', 'title', 'deadline', 'priority', 'completed'],
+      schedule: ['id', 'title', 'date', 'startTime', 'endTime', 'location', 'category'],
+      event: ['id', 'title', 'startDate', 'endDate', 'category'],
+    };
+    const target = entry.draft?.target ?? null;
+    const action = entry.draft?.action ?? null;
+    if (entry.error) {
+      return { action, target, ok: false, error: entry.error.message ?? String(entry.error) };
+    }
+    const result = entry.result ?? {};
+    const project = (item, keys) => {
+      const picked = {};
+      for (const key of keys) if (item?.[key] !== undefined && item?.[key] !== null) picked[key] = item[key];
+      return picked;
+    };
+    const keys = FIELDS[target] ?? ['id', 'title'];
+    const items = [...(result.item ? [result.item] : []), ...(result.items ?? [])].map((item) => project(item, keys));
+    // 冲突条目一定是日程：用日程字段裁，而不是用本条 target 的字段
+    const conflicts = (result.conflicts ?? []).map((item) => project(item, FIELDS.schedule));
+    return {
+      action,
+      target,
+      ok: true,
+      ...(items.length ? { items } : {}),
+      ...(result.affected?.length ? { affected: result.affected } : {}),
+      ...(result.deleted !== undefined ? { deleted: result.deleted } : {}),
+      ...(conflicts.length ? { conflicts, note: `与 ${conflicts.length} 条已有日程时间重叠` } : {}),
+      explain: result.explain ?? null,
+    };
   }
 
   /**

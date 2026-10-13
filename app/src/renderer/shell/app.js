@@ -557,6 +557,24 @@
       box.appendChild(warnings);
     }
 
+    /**
+     * 时段重叠要在**点确认之前**就说。
+     *
+     * 跨功能实测发现的缺口：冲突只在真写完成后才回执（`resultCard`），而 `dryRun` 预演不返回
+     * `conflicts` —— 于是"确认卡上没有任何重叠提示，用户点完才知道撞了"。后端现在会在预演里带上
+     * `preview.conflicts`，这里负责把它画出来（模型侧的同一信息由 `ai/chat-service` 回灌给它）。
+     */
+    const conflicts = preview.conflicts ?? [];
+    if (conflicts.length) {
+      const box2 = mk('div', 'cc-warnings');
+      const lines = conflicts
+        .slice(0, 3)
+        .map((item) => (typeof item === 'string' ? item : `${item.title ?? '已有安排'} ${item.date ?? ''} ${item.startTime ?? ''}${item.endTime ? `-${item.endTime}` : ''}`.trim()));
+      box2.appendChild(mk('div', 'cc-warning', `与 ${conflicts.length} 条日程时间重叠：${lines.join('；')}`));
+      if (conflicts.length > lines.length) box2.appendChild(mk('div', 'cc-warning', `…另有 ${conflicts.length - lines.length} 条`));
+      box.appendChild(box2);
+    }
+
     if (typeof draft.confidence === 'number') {
       box.appendChild(mk('div', 'cc-meta', `置信度 ${(draft.confidence * 100).toFixed(0)}% · 来源 ${draft.provider ?? 'rules'}`));
     }

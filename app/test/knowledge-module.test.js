@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createServer, PACKAGE_ROOT } from '../src/server/index.js';
+import { startMockAi } from './helpers/ai-mock.js';
 
 const CORPUS_REL = 'knowledge/dean';
 
@@ -284,6 +285,82 @@ test('知识库：path 也接受来源 URL 与 URL 路径片段（用户看到�
     assert.equal(missing.status, 400);
     assert.match(String(missing.body.error.message), /path 字段|url|filters\.q/);
   } finally {
+    await ctx.close();
+  }
+});
+
+/**
+ * 跨功能实测的**现场复现**（这次是端到端，不是只看服务层）。
+ *
+ * 用户问「学校对学业预警是怎么规定的？我会不会被预警？」时，模型引用真链接、也确实按 url
+ * 读到了那一篇，却给不出 12 / 8 / 4 学分三档阈值（"这一页正文读到第三条就断了"）。
+ * 链路断在三处，缺一处这条用例就会红：
+ *   1. `search({ path/url })` 要回长正文（service.js）；
+ *   2. `filters.url` 也要被当"点名"（commands.js）；
+ *   3. `aiQueryFields.knowledge` 要放行 `content`/`truncated`/`totalChars`（module.js）——
+ *      投影表白名单漏字段的话，正文在服务层读出来了、到模型手里又被剥掉，症状与"读不到"一模一样。
+ * 断言落在**回灌给上游的那条消息**上：那才是模型真正看得见的世界。
+ */
+test('知识库：模型按 url 点名读《学业预警细则》，回灌上下文里必须出现 12/8/4 学分', async () => {
+  const mock = await startMockAi({
+    apiKey: 'sk-test-knowledge-0001',
+    replies: [
+      '我先把原文调出来看。\n```command\n' +
+        JSON.stringify({
+          ok: true,
+          action: 'query',
+          target: 'knowledge',
+          filters: { url: 'https://dean.xjtu.edu.cn/info/1033/1130.htm', q: '学业预警 学分' },
+          explain: '读学业预警细则原文',
+        }) +
+        '\n```',
+      '一级预警是 12 学分以上、二级 8 学分、三级 4 学分。',
+    ],
+  });
+  const ctx = await startApp();
+  try {
+    const saved = await ctx.call('POST', '/ai/config', {
+      apiKey: 'sk-test-knowledge-0001',
+      model: 'deepseek-flash',
+      baseUrl: mock.baseUrl,
+    });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body).slice(0, 200));
+
+    const sent = await ctx.call('POST', '/ai/chat', {
+      text: '学校对学业预警是怎么规定的？我会不会被预警？',
+      stream: false,
+      search: 'off',
+    });
+    assert.equal(sent.status, 200, JSON.stringify(sent.body).slice(0, 300));
+
+    // 回灌给模型的那一份（`#compactQueryResult` 投影之后的结果）里要有正文与阈值
+    const fedBack = mock.state.bodies
+      .flatMap((body) => body.messages ?? [])
+      .map((message) => String(message.content ?? ''))
+      .join('\n');
+    assert.match(fedBack, /\[系统注入\]/, '要有回灌消息');
+    assert.match(fedBack, /学业预警与学籍处理实施细则/, '回灌里要有那一篇');
+    assert.match(fedBack, /12\s*学分/, '回灌里必须出现一级预警的 12 学分（这就是当初缺的那一行）');
+    assert.match(fedBack, /8\s*学分/);
+    assert.match(fedBack, /4\s*学分/);
+    assert.match(fedBack, /"totalChars":\s*\d+/, '要如实给出原文总字数');
+
+    // 系统提示词里要写清"点名读才有正文、片段不是全文" —— 模型不知道这条就会继续用 q 检索
+    const system = mock.state.bodies
+      .flatMap((body) => body.messages ?? [])
+      .filter((message) => message.role === 'system')
+      .map((message) => String(message.content ?? ''))
+      .join('\n');
+    assert.match(system, /filters\.path 或 filters\.url/, '提示词要教模型怎么点名读某篇');
+    assert.match(system, /240 字片段（snippet）/, '提示词要说清"只给 q 时只有片段"');
+    assert.match(system, /绝不许把片段当全文/, '提示词要禁掉"拿片段当全文/外推"');
+
+    // 前端卡片也看得到正文（用户有权核对模型读到的到底是哪一段）
+    const entry = (sent.body.queried ?? []).find((item) => item.result?.target === 'knowledge');
+    assert.ok(entry?.result?.items?.[0]?.content, '查询结果里要带正文');
+    assert.match(entry.result.items[0].content, /12\s*学分/);
+  } finally {
+    await mock.close();
     await ctx.close();
   }
 });

@@ -13,7 +13,7 @@
  */
 
 import { HttpError } from '../../core/http/router.js';
-import { KIND_LABEL } from './service.js';
+import { KIND_LABEL, normalizeKey } from './service.js';
 
 const trimText = (value) => (typeof value === 'string' ? value.trim() : '');
 
@@ -85,12 +85,18 @@ export function createMemoryCommands({ memory }) {
     /**
      * 落库（用户确认之后）。`dryRun` 只做校验 —— 确认卡要在用户点之前就能报出
      * "超过 200 字""含敏感信息"这类错误，而不是点完才发现什么都没发生。
+     *
+     * 两条路径都回报 `keyAdjusted`：key 不合法时服务层**降级**而不是 400
+     * （见 service.normalizeKey）。降级必须让调用方看见 —— 否则它还会拿原来那个键来查，
+     * 永远查不到刚刚落库的这条。
      */
     async create(draft, options = {}) {
       const fields = draft?.fields ?? {};
+      const { keyAdjusted } = normalizeKey(fields.key);
+      const adjusted = keyAdjusted ? { keyAdjusted } : {};
       if (options.dryRun) {
         const validated = memory.validate(fields, { defaultSource: fields.source ?? 'ai' });
-        return { dryRun: true, planned: { action: 'create', target: 'memory', fields }, validated };
+        return { dryRun: true, planned: { action: 'create', target: 'memory', fields }, validated, ...adjusted };
       }
       const result = await memory.createFromCommand(fields, { confidence: draft?.confidence });
       const item = result.item;
@@ -98,10 +104,13 @@ export function createMemoryCommands({ memory }) {
         item,
         duplicated: Boolean(result.duplicated),
         replaced: result.replaced ?? null,
+        ...(result.keyAdjusted ? { keyAdjusted: result.keyAdjusted } : {}),
         affected: [{ id: item.id, title: item.text }],
         explain: result.duplicated
           ? `这条已经记过了：${item.text}`
-          : `记住了（${KIND_LABEL[item.kind] ?? item.kind}，来源 ${item.source}）：${item.text}`,
+          : `记住了（${KIND_LABEL[item.kind] ?? item.kind}，来源 ${item.source}）：${item.text}${
+              result.keyAdjusted ? '（key 已按规则自动调整，见 keyAdjusted）' : ''
+            }`,
       };
     },
 
@@ -113,12 +122,14 @@ export function createMemoryCommands({ memory }) {
       delete fields.id;
       delete fields.source;
       delete fields.supersededBy;
+      const { keyAdjusted } = normalizeKey(fields.key);
+      const adjusted = keyAdjusted ? { keyAdjusted } : {};
       if (options.dryRun) {
         const validated = memory.validate({ ...current, ...fields }, { defaultSource: current.source });
-        return { dryRun: true, planned: { action: 'update', target: 'memory', ids: [current.id], fields }, validated };
+        return { dryRun: true, planned: { action: 'update', target: 'memory', ids: [current.id], fields }, validated, ...adjusted };
       }
       const item = await memory.update(current.id, fields);
-      return { item, affected: [{ id: item.id, title: item.text }], explain: `已改正：${item.text}` };
+      return { item, affected: [{ id: item.id, title: item.text }], explain: `已改正：${item.text}`, ...adjusted };
     },
 
     /** 删除（不可逆，§10.4）。`dryRun` 只回报会删哪一条。 */

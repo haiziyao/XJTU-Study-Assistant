@@ -174,3 +174,21 @@ test('思源学堂：活动类型的中文标签，前端与后端两份表必�
     assert.equal(frontend.get(type), label, `前端缺 ${type} 的中文标签，会显示成裸英文`);
   }
 });
+
+
+/**
+ * 结构性契约：**视图必须自己创建 `.view-content` 滚动容器**。
+ *
+ * 外壳的 `.panel-body` 是 `overflow: hidden` 的 flex 容器（见 shell.css），真正滚动的是视图挂进去的
+ * `.view-content`（`flex:1; min-height:0; overflow:auto`）。忘了它就表现为"内容一多就被裁掉、
+ * 而且滚不动"，`PC.snapshotScroll()` 也会一起失效 —— 这个 bug 真的上过线
+ * （用户原话：「神人没给对话页面加滚动」）。这里只盯**标签页式的三个中枢页**：
+ * 日历/学堂/学业有各自的滚动与吸顶逻辑，笔记系统是独立工作区布局，都不在这个契约范围内。
+ */
+test('视图契约：标签页式中枢页（对话/复习/传输）各自创建 .view-content 滚动容器', async () => {
+  const views = ['chat-hub.js', 'review.js', 'transfer.js'];
+  for (const file of views) {
+    const source = await readFile(new URL(`../src/renderer/views/${file}`, import.meta.url), 'utf8');
+    assert.match(source, /mk\('div', 'view-content'\)/, `${file} 要自己建 .view-content（否则 .panel-body 把它裁掉且不能滚）`);
+  }
+});

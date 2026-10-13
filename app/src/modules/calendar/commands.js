@@ -57,7 +57,28 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
         // 点了确认才冒出来，确认卡就成了摆设 —— 走 AI 的草稿尤其依赖这一步兜住模型的编造字段。
         // `planned` 是原样回显（模型到底给了什么），`validated` 是校验/归一化后的最终字段。
         const validated = targetService(draft.target)?.preview(fields) ?? null;
-        return { dryRun: true, planned: { action: 'create', target: draft.target, fields }, validated };
+        /**
+         * 日程的预览还要**算冲突**：时段重叠这件事，用户点"确认"之前就该看见。
+         *
+         * 以前只有真写（下面 schedules.create 之后）才调 `conflictsFor`，于是：
+         *   - 用户看着一张干干净净的确认卡点了确认，才知道撞了已有的日程；
+         *   - 自动审批档下模型更是全程不知情，正文只会说"给你加上了"，绝口不提重叠 ——
+         *     而它本来是可以提醒"这条和你的英语晨读重叠了"的。
+         *
+         * 这里刻意**调用与真写同一个** `schedules.conflictsFor`，不复制第二份判断：
+         * 两边各写一套"什么算重叠"（跨天、重复日程展开、缺 endTime 按 60 分钟兜底）迟早会漂移，
+         * 到时候预览说不撞、落库说撞，比不提示更糟。
+         *
+         * 无重叠时返回空数组（而不是省略字段）：确认卡与回灌逻辑要能区分"没查"和"查了没撞"。
+         * 待办/日历事件没有时段，真写时也不报冲突，所以这里不造一个空字段出来。
+         */
+        const conflicts = draft.target === 'schedule' && validated ? schedules.conflictsFor(validated) : null;
+        return {
+          dryRun: true,
+          planned: { action: 'create', target: draft.target, fields },
+          validated,
+          ...(conflicts ? { conflicts } : {}),
+        };
       }
       if (draft.target === 'todo') {
         const item = await todos.create(fields);
@@ -119,7 +140,20 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
       if (!matches.length) throw HttpError.notFound(`没有找到符合条件的${labelOf(draft.target)}`);
       const fields = draft.fields ?? {};
       if (options.dryRun) {
-        return { dryRun: true, planned: { action: 'update', target: draft.target, ids: matches.map((m) => m.id), fields } };
+        /**
+         * 待办的更新预览要跑**真校验**（与 create 分支同一个理由）：
+         * 真写走的是「现有记录 + patch」重建，未知字段/两种工时口径冲突都会 400；
+         * 预览不跑的话，用户点一张"看起来没问题"的确认卡才会失败 —— 那就是卡点点不动。
+         *
+         * 拿第一条匹配来重建：字段级校验与"改哪一条"无关（多条匹配时真写会对每条各跑一次）。
+         * 日程/事件保持不变（它们本来就不拒绝未知字段，预览语义不在这次改动范围内）。
+         */
+        const validated = draft.target === 'todo' ? todos.previewUpdate(matches[0].id, fields) : null;
+        return {
+          dryRun: true,
+          planned: { action: 'update', target: draft.target, ids: matches.map((m) => m.id), fields },
+          ...(validated ? { validated } : {}),
+        };
       }
       const updated = [];
       for (const match of matches) {

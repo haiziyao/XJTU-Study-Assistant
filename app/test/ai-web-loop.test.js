@@ -14,6 +14,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import http from 'node:http';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -423,4 +424,23 @@ test('联网检索：联网关掉时不给读网址，并说明怎么打开', as
     await web.close();
     await mock.close();
   }
+});
+
+
+/**
+ * 契约测试：**投影表必须包含工具说明里承诺给模型的字段**。
+ *
+ * 这条来自跨功能测试（B 组 S18）：`web-search.js` 产出 `matchedBy`/`site` 并在工具说明里
+ * 承诺"每条都标 site|domain|mention"，README 也这么写，但 chat 的投影白名单漏了它们 ——
+ * 模型拿不到"这条是站内直搜命中还是公网提到本校"，排序依据与口径一起丢了。
+ * 同类字段还有 `textSource`/`note`（正文 vs 摘要），也一并锁住。
+ */
+test('契约：web 投影表包含工具说明承诺的字段（matchedBy / site / textSource / note）', async () => {
+  const source = await readFile(new URL('../src/modules/ai/chat-service.js', import.meta.url), 'utf8');
+  const line = source.split('\n').find((row) => row.includes("web: ['title'"));
+  assert.ok(line, '找不到 web 投影表');
+  for (const field of ['matchedBy', 'site', 'textSource', 'note', 'chars', 'scope']) {
+    assert.ok(line.includes(`'${field}'`), `投影表要包含 ${field}（工具说明里承诺过）：${line.trim()}`);
+  }
+  assert.match(source, /matchedBy: item\.matchedBy/, 'items 映射也要真的带上匹配来源，不只是白名单里写个名字');
 });

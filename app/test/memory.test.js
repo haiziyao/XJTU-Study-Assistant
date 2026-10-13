@@ -23,9 +23,11 @@ import { JsonStore } from '../src/core/store/json-store.js';
 import {
   MemoryService,
   DEFAULT_BUDGET,
+  MAX_KEY_CHARS,
   firstSentence,
   freshnessOf,
   isReviewDue,
+  normalizeKey,
   normalizeText,
   scoreOf,
   sensitiveReason,
@@ -74,7 +76,7 @@ test('记忆：正文 1~200 字，空/超长一律 400', async () => {
   }
 });
 
-test('记忆：scope / kind / key / source / confidence / value 都有校验', async () => {
+test('记忆：scope / kind / source / confidence / value 都有校验（key 见下一条：不合法是降级）', async () => {
   const ctx = await makeService();
   const base = { text: '我习惯晚上 19:00 之后安排学习任务' };
   try {
@@ -82,9 +84,6 @@ test('记忆：scope / kind / key / source / confidence / value 都有校验', a
       ['scope', { scope: '课程:39020' }],
       ['scope', { scope: 'course' }],
       ['kind', { kind: 'feeling' }],
-      ['key', { key: '我的键' }],
-      ['key', { key: 'Bad_Key' }],
-      ['key', { key: 'a'.repeat(41) }],
       ['value', { value: () => 'x' }],
       ['sourceRef', { sourceRef: 'm-183' }],
     ]) {
@@ -110,6 +109,124 @@ test('记忆：scope / kind / key / source / confidence / value 都有校验', a
       from: '19:00',
     });
     await assert.rejects(() => ctx.memory.create({ text: '值太大', value: { blob: 'x'.repeat(3000) } }), (error) => error.status === 400);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('记忆：非法 key 不再 400 —— 降级 + keyAdjusted 如实回报（S5：卡点点不动）', async () => {
+  const ctx = await makeService();
+  try {
+    // ① 中文 key（真机场景：用户说"记住我周三下午不方便安排学习任务"，模型据实写下中文 key）
+    //    有效片段一个都没有 → 降级成"无 key"，按 §10.3 的 text 去重走，**记忆必须落库**
+    const chinese = await ctx.memory.create({ kind: 'constraint', key: '周三下午不便安排学习', text: '我周三下午不方便安排学习任务' });
+    assert.equal(chinese.item.key, null, '中文 key 降级成"无 key"');
+    assert.equal(chinese.item.text, '我周三下午不方便安排学习任务', '用户要记的那句话必须原样落库');
+    assert.deepEqual(chinese.keyAdjusted, {
+      from: '周三下午不便安排学习',
+      to: null,
+      reason: 'no_usable_chars+illegal_chars_dropped',
+    });
+    assert.equal(ctx.store.memories.all().length, 1, '确实写进去了，不是"点了没反应"');
+
+    // 降级成"无 key"之后按 text 去重：同一句话再说一遍是幂等，而不是新建第二条
+    const again = await ctx.memory.create({ kind: 'constraint', key: '周三下午不方便', text: '我周三下午不方便安排学习任务' });
+    assert.equal(again.duplicated, true);
+    assert.equal(again.item.id, chinese.item.id);
+
+    // ② 大小写 / 空格：能用的片段保留、小写、下划线连接（语义不变，只是写法归一）
+    const upper = await ctx.memory.create({ text: '我习惯晚上学习', key: 'Bad_Key' });
+    assert.equal(upper.item.key, 'bad_key');
+    assert.deepEqual(upper.keyAdjusted, { from: 'Bad_Key', to: 'bad_key', reason: 'uppercase_lowercased' });
+
+    const spaced = await ctx.memory.create({ text: '我习惯在图书馆自习', key: 'study place' });
+    assert.equal(spaced.item.key, 'study_place');
+    assert.equal(spaced.keyAdjusted.reason, 'illegal_chars_dropped');
+
+    // ③ 超长：截断到 40，且不留下尾部的半截下划线（截断处正好落在下划线上就一起去掉）
+    const long = await ctx.memory.create({ text: '我习惯早睡', key: `${'a'.repeat(39)}_zzz` });
+    assert.equal(long.item.key, 'a'.repeat(39));
+    assert.equal(long.keyAdjusted.reason, 'too_long_truncated');
+    assert.equal((await ctx.memory.create({ text: '我习惯早起', key: 'b'.repeat(MAX_KEY_CHARS + 1) })).item.key.length, MAX_KEY_CHARS);
+    // 归一化是纯函数：合法 key 原样返回、非法 key 带明细，调用方可以拿它自己预判
+    assert.deepEqual(normalizeKey('preferred_study_window'), { key: 'preferred_study_window', keyAdjusted: null });
+    assert.equal(normalizeKey('周三下午').key, null);
+    assert.deepEqual(normalizeKey(''), { key: null, keyAdjusted: null }, '空值 = 没给 key，不是"被调整过"');
+
+    // ④ 合法 key 行为**一个字都不变**：原样落库、不报 keyAdjusted
+    const legal = await ctx.memory.create({ text: '我习惯下午学习', key: 'preferred_study_window' });
+    assert.equal(legal.item.key, 'preferred_study_window');
+    assert.equal(legal.keyAdjusted, undefined, '没动过就不报 —— 调用方据此判断服务端有没有改过它');
+
+    // 合法 key 的冲突语义照旧：同 scope + key 再写不同内容 → 409（不静默覆盖）
+    await assert.rejects(
+      () => ctx.memory.create({ text: '我习惯早上学习', key: 'preferred_study_window' }),
+      (error) => error.status === 409 && error.details.existing.id === legal.item.id,
+    );
+
+    // ⑤ 非字符串 key（对象）也降级，不炸、也不编出一个荒唐的键
+    const weird = await ctx.memory.create({ text: '我在读大二', key: { a: 1 } });
+    assert.equal(weird.item.key, null);
+    assert.equal(weird.keyAdjusted.reason, 'not_a_text_key');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('记忆：非法 key 的 propose 也能出可用草稿（确认后按 text 去重落库，不 400）', async () => {
+  const ctx = await makeService();
+  try {
+    const result = ctx.memory.propose({ kind: 'constraint', key: '周三下午不便安排学习', text: '我周三下午不方便安排学习任务' });
+    assert.equal(result.writes, false);
+    assert.ok(result.draft, '不合法 key 也要能给出草稿 —— 否则用户点确认就是一次 400');
+    assert.equal(result.draft.fields.key, null, '草稿里给的是降级后的键');
+    assert.equal(result.draft.fields.text, '我周三下午不方便安排学习任务');
+    assert.deepEqual(result.keyAdjusted, { from: '周三下午不便安排学习', to: null, reason: 'no_usable_chars+illegal_chars_dropped' });
+    assert.match(result.draft.warnings.join(' '), /key/, '确认卡上要说清 key 被系统调过');
+    assert.equal(ctx.store.memories.all().length, 0, '提议仍然一个字都不落库');
+
+    // 走用户确认那条路（source 按草稿给的 ai）
+    const created = await ctx.memory.createFromCommand(result.draft.fields, { confidence: result.draft.confidence });
+    assert.equal(created.item.key, null);
+    assert.equal(created.item.source, 'ai');
+    assert.equal(ctx.store.memories.all().length, 1);
+    assert.equal(created.keyAdjusted, undefined, '草稿里带的已经是降级后的键，确认这一步没有可降级的东西');
+
+    // 但**直接**把带中文 key 的草稿交给指令路径（自动审批档就是这条路）时，照样要回报
+    const direct = await ctx.memory.createFromCommand({ key: '早上不排任务', text: '我不喜欢早上排任务' });
+    assert.equal(direct.item.key, null);
+    assert.deepEqual(direct.keyAdjusted, { from: '早上不排任务', to: null, reason: 'no_usable_chars+illegal_chars_dropped' });
+
+    // 合法 key 的 propose 不报 keyAdjusted（行为不变）
+    const clean = ctx.memory.propose({ text: '我习惯晚上 19:00 之后学习', key: 'preferred_study_window' });
+    assert.equal(clean.draft.fields.key, 'preferred_study_window');
+    assert.equal(clean.keyAdjusted, undefined);
+
+    // 已经记过的那条（无 key、按 text 去重）不再重复提议
+    const duplicate = ctx.memory.propose({ kind: 'constraint', key: '中文键', text: '我周三下午不方便安排学习任务' });
+    assert.equal(duplicate.draft, null);
+    assert.equal(duplicate.suppressed, 'duplicate');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('记忆：PATCH 改 key 与写入同口径（降级而不是 400），合法 key 撞车仍 409', async () => {
+  const ctx = await makeService();
+  try {
+    const holder = (await ctx.memory.create({ text: '我习惯晚上学习', key: 'night_study' })).item;
+    const other = (await ctx.memory.create({ text: '我周三下午不方便', key: 'wed_busy' })).item;
+
+    // 与 validate()（dryRun 预览走的那条）同口径：预览说行，真写就必须也行
+    assert.equal(ctx.memory.validate({ ...other, key: '中文键' }).key, null, 'dryRun 预览已经是降级后的键');
+    const fixed = await ctx.memory.update(other.id, { key: '中文键' });
+    assert.equal(fixed.key, null, '真写同样降级，不许出现"预览过、点确认才 400"');
+
+    // 合法 key 的撞车保护不变
+    await assert.rejects(
+      () => ctx.memory.update(other.id, { key: 'night_study' }),
+      (error) => error.status === 409 && error.details.existing.id === holder.id,
+    );
   } finally {
     await ctx.cleanup();
   }

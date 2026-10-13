@@ -50,6 +50,22 @@ const DEFAULT_LIMIT = 5;
 const DEFAULT_MAX_CHARS = 8000;
 const MAX_MAX_CHARS = 20000;
 
+/**
+ * `search({ path })`（"我点名要这一篇"）额外带回的**长正文**上限。
+ *
+ * 为什么按关键词检索时不能有它、点名时却必须有：
+ *   - 按 `q` 检索是"我不知道是哪一篇，帮我找" —— 10 条 × 全文就等于把半个语料倒进提示词，
+ *     这是 §14.1/§14.4 明令禁止的，所以那里**只给片段**，维持原样；
+ *   - 带 `path` 是"**我就要这一篇**"（模型已经拿到 url/path，只是想读条款）—— 这时再只给 240 字
+ *     片段就等于收了一次钱不给货：实测《学业预警与学籍处理实施细则》2169 字，
+ *     12/8/4 三档阈值在**第 341 字**的表格里，240 字片段刚好停在"三级预警"前一行，
+ *     模型只能老实说"这一页正文读到第三条就断了"。给全文片段才配得上"点名读一篇"的语义。
+ *
+ * 4000 的来历：约等于 2 页 A4 的政策正文，够覆盖绝大多数细则的条款主体；
+ * 再长就走 `truncated` + `totalChars` 如实告知，需要更多再显式调 `read()`（默认 8000）。
+ */
+const DEFAULT_PATH_MAX_CHARS = 4000;
+
 /** 哈希口径与抓取器一致：sha256 十六进制的前 16 位（`scripts/crawl-dean.js` 的 `sha256()`）。 */
 const sha256 = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16);
 
@@ -410,6 +426,10 @@ export class KnowledgeService {
       kind: item?.kind ?? 'document',
       content: text.slice(0, size),
       truncated: text.length > size,
+      // 这一篇**一共多少字**（截断前的真实长度）。给它是为了让"被截了"可被校验：
+      // `truncated` 是个布尔，调用方无法判断"差一点"还是"差一个数量级"，
+      // 而"要不要再读一次 / 该不该说'我只看到一部分'"正是靠这个数字决定的。
+      totalChars: text.length,
     };
   }
 
@@ -420,12 +440,24 @@ export class KnowledgeService {
    *
    * 约定（任务书 + §14.4）：
    *   - `q` 为空且没有 `path` → 空结果，**不抛错**（`count: 0`）；
-   *   - `path` 非空 → 直接读那一篇，按片段逻辑返回 1 条（给模型"读这篇的摘要"用）；
+   *   - `path` 非空 → 直接读那一篇，按片段逻辑返回 1 条，并**额外带上长正文**
+   *     （`content` / `truncated` / `totalChars`，默认上限 4000 字，见 `DEFAULT_PATH_MAX_CHARS`）；
    *   - `limit` 默认 5、上限 10；`category` 是栏目 slug，收窄到该栏目。
+   *
+   * 两条通道给的东西**刻意不一样**，这是本文件最重要的分叉：
+   *   "帮我找一篇"（只有 q）→ 只给片段；"我就要这一篇"（有 path）→ 给正文。
+   * 混起来任何一边都会坏：全都给全文会把对话预算撑爆，全都只给片段则模型永远读不到条款数字。
    */
-  search({ q = '', category = '', path: requestedPath = '', limit = DEFAULT_LIMIT, snippetChars = 240 } = {}) {
+  search({
+    q = '',
+    category = '',
+    path: requestedPath = '',
+    limit = DEFAULT_LIMIT,
+    snippetChars = 240,
+    pathMaxChars = DEFAULT_PATH_MAX_CHARS,
+  } = {}) {
     const query = String(q ?? '').trim();
-    if (requestedPath) return this.#searchByPath(requestedPath, query, snippetChars);
+    if (requestedPath) return this.#searchByPath(requestedPath, query, snippetChars, pathMaxChars);
     if (!query || !this.available) return { available: this.available, q: query, count: 0, items: [] };
 
     this.#ensureLoaded();
@@ -443,14 +475,23 @@ export class KnowledgeService {
       available: this.available,
       q: query,
       count,
-      // 只回片段：整篇正文不在这里出去（要整篇请走 read()），这是"不整篇进提示词"的落点
+      // 只回片段：整篇正文不在这里出去（要整篇请走 `search({ path })` 或 `read()`），
+      // 这是"不整篇进提示词"的落点。`({ text, ...item })` 顺手丢掉内部字段 `text`，
+      // 于是这条路径**天然不可能**带上 `content` —— 用户没点名哪一篇，凭什么给它全文。
       items: items.map(({ text, ...item }) => item),
     };
   }
 
-  /** `search({ path })`：直接定位那一篇，做 1 条结果（越界照旧 400）。 */
-  #searchByPath(requestedPath, query, snippetChars) {
-    const doc = this.read({ path: requestedPath });
+  /**
+   * `search({ path })`：直接定位那一篇，做 1 条结果（越界照旧 400）。
+   *
+   * 与按关键词检索的两点差别（都只在"点名 = 我知道要哪一篇"这个语义下才成立）：
+   *   1. 多回 `content`（长正文 + `truncated` + `totalChars`）；
+   *   2. `content` 用**原文**（`read()` 的口径，保留表格与 Markdown 结构），
+   *      而 `snippet` 仍是清洗过的片段 —— 读条款要结构，找关键词要干净文本。
+   */
+  #searchByPath(requestedPath, query, snippetChars, pathMaxChars) {
+    const doc = this.read({ path: requestedPath, maxChars: pathMaxChars });
     const expanded = expandQuery(query);
     // 片段基于正文（`read()` 已经去掉 H1）：有查询词就把窗口开在命中处，否则给开头
     const snippet = buildSnippet({ ...doc, text: doc.content }, expanded, snippetChars);
@@ -473,6 +514,11 @@ export class KnowledgeService {
           score: null, // 直接定位不是"排序出来的"，给 null 比编一个分数诚实
           snippet,
           matches,
+          // 点了名就给正文：`truncated` / `totalChars` 是**如实口径** ——
+          // 超过上限时必须让调用方看得出"这只是前 N 字"，不许把截断当成全文讲出去
+          content: doc.content,
+          truncated: doc.truncated,
+          totalChars: doc.totalChars,
         },
       ],
     };

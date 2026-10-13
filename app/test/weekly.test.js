@@ -570,3 +570,31 @@ test('周报：aiPrompt 会被 ai 模块聚合进系统提示词（没有学习�
     await mock.close();
   }
 });
+
+
+/**
+ * 跨功能测试（B 组 S23/S24）发现的缺陷：`ai.complete()` 的用量**完全不计入** `/ai/usage`，
+ * 于是周报这类"后台自动花的钱"在用量统计里看不见，用户会低估账单。
+ * 现在按天+用途记进 `aiUsage` 账本，并在 usage 响应里单独报 `background`。
+ */
+test('周报：后台模型调用的用量要计入 /ai/usage（background 字段）', async () => {
+  const mock = await startMockAi({ apiKey: KEY, reply: '本周小结：新写 2 篇笔记。' });
+  const { app, call } = await startApp({ mock, ai: { apiKey: KEY, baseUrl: mock.baseUrl } });
+  try {
+    const before = (await call('GET', '/ai/usage')).body;
+    const generated = await call('POST', '/weekly/report/generate', { from: '2026-10-12', to: '2026-10-12', force: true });
+    assert.equal(generated.status, 200, JSON.stringify(generated.body)?.slice(0, 200));
+    assert.equal(generated.body.fallback, false, '这次应该真的调用了模型（否则测不到记账）');
+
+    const after = (await call('GET', '/ai/usage')).body;
+    assert.ok(
+      (after.background?.calls ?? 0) > (before.background?.calls ?? 0),
+      `后台调用次数要 +1：before=${JSON.stringify(before.background)} after=${JSON.stringify(after.background)}`,
+    );
+    assert.ok((after.background?.total ?? 0) > (before.background?.total ?? 0), '后台 token 也要累计');
+    assert.ok((after.tokens?.total ?? 0) >= (after.background?.total ?? 0), '总量里要含后台那部分');
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});

@@ -57,7 +57,7 @@ export const MEMORY_TOOLS = [
     params: {
       scope: 'string?（默认 global）',
       kind: 'string?（默认 fact）',
-      key: 'string?（稳定键，小写字母/数字/下划线，≤40）',
+      key: 'string?（**推荐省略**：不写就按 scope + 正文去重；只在"同一条会被反复更新"时给稳定键，且必须是小写字母/数字/下划线、≤40；中文等非法 key 会被服务端降级并在响应里回 keyAdjusted）',
       text: 'string（必填，1~200 字）',
       value: 'object?（结构化值，如 {"from":"19:00"}）',
       sourceRef: 'object?（从哪学的，如 {"messageId":"m-183"}）',

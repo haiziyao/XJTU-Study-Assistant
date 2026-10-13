@@ -34,7 +34,9 @@ import { ERROR_CODES } from '../../shared/constants.js';
 /** 正文上限：超过 200 字直接 400（§10.2 的 `text`：1~200 字）。 */
 export const MAX_TEXT_CHARS = 200;
 /** `key` 的口径：小写字母 / 数字 / 下划线，≤ 40（§10.3）。 */
-const KEY_RE = /^[a-z0-9_]{1,40}$/;
+export const MAX_KEY_CHARS = 40;
+// 校验正则从上限推出来：口径只有一处，改 MAX_KEY_CHARS 不会漏掉这里
+const KEY_RE = new RegExp(`^[a-z0-9_]{1,${MAX_KEY_CHARS}}$`);
 /** `scope` 的三种形态（§10.3）。`course:` 的 id **不做存在性校验**：课程可能还没同步。 */
 const SCOPE_RE = /^(global|course:[^\s:]{1,64}|module:[a-z][a-z0-9-]*)$/;
 /** 结构化值的体积上限：value 是"便于稳定复用"的辅助字段，不该变成第二个正文。 */
@@ -120,7 +122,66 @@ export function sensitiveReason(text) {
   return undefined;
 }
 
-/** 路由层复用同一套 scope / key 口径：查询参数写错了要 400，而不是静默返回空列表。 */
+/**
+ * `key` 的**归一化**（写入路径专用，**永不抛错**）。
+ *
+ * 为什么不合法就 400（真机缺陷 S5 的教训）：
+ * 用户说"记住我周三下午不方便安排学习任务"，模型据实写下 `key: "周三下午不便安排学习"`
+ * 是完全自然的反应 —— 而 key 只是**内部去重句柄**，不是用户说的内容。为它的格式把整条记忆
+ * 拒掉，用户看到的就是"我说了记住，卡点一按就报错"，真正要记的那件事一个字都没落地。
+ * 该不该拒绝的标准是"这条结论该不该被记住"，不是"它的句柄长得对不对"。
+ * 所以这里只做**降级**，并把降级结果如实回报给调用方（`keyAdjusted`）。
+ *
+ * 降级规则（对齐 §10.3 的口径）：
+ * - 能用的片段（`[A-Za-z0-9_]`）保留并小写：`Bad_Key` → `bad_key`；
+ * - 中文 / 空格 / 标点 / 表情一律丢弃，**不猜拼音**：猜错会得到一个语义不同的键，
+ *   下次同键写入就会把两条毫不相干的记忆串成一条（取代链上留的还是错证据）。
+ *   宁可真降级成"没有键"—— 无键按 §10.3 的 `scope + 归一化 text` 去重，语义依然正确；
+ * - 超过 40 字符截断（截断后再去掉尾部下划线，别留下 `xxx_` 这种半截样子）；
+ * - 一个可用片段都没有 → `null`，即"无 key"。
+ *
+ * 降级**必须写进响应**（`keyAdjusted: {from, to, reason}`）：静默把 key 换成另一个值，
+ * 等于下一次写入时在另一条记忆上覆盖，比报错更难查。合法 key 原样返回且**不报** keyAdjusted
+ * （调用方据此判断"服务端没动过它"）。
+ *
+ * @returns {{ key: string|null, keyAdjusted: {from: string|null, to: string|null, reason: string}|null }}
+ */
+export function normalizeKey(raw) {
+  if (raw === undefined || raw === null) return { key: null, keyAdjusted: null };
+
+  // 标量（数字/布尔）可以当字符串用：数字键本来就合法。
+  // 对象/数组显然是调用方写错了 —— 降级成"无键"，而不是把它 JSON 化成一个荒唐的键。
+  let from;
+  if (typeof raw === 'string') from = raw.trim();
+  else if (typeof raw === 'number' && Number.isFinite(raw)) from = String(raw);
+  else if (typeof raw === 'boolean') from = String(raw);
+  else return { key: null, keyAdjusted: { from: null, to: null, reason: 'not_a_text_key' } };
+
+  if (from === '') return { key: null, keyAdjusted: null };
+  if (KEY_RE.test(from)) return { key: from, keyAdjusted: null };
+
+  let key = (from.match(/[A-Za-z0-9_]+/g) ?? [])
+    .join('_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+  let truncated = false;
+  if (key.length > MAX_KEY_CHARS) {
+    key = key.slice(0, MAX_KEY_CHARS).replace(/_+$/, '');
+    truncated = true;
+  }
+  if (!key) key = null;
+
+  const reasons = [];
+  if (key === null) reasons.push('no_usable_chars');
+  if (/[^A-Za-z0-9_]/.test(from)) reasons.push('illegal_chars_dropped');
+  if (/[A-Z]/.test(from)) reasons.push('uppercase_lowercased');
+  if (truncated) reasons.push('too_long_truncated');
+
+  return { key, keyAdjusted: { from, to: key, reason: reasons.join('+') } };
+}
+
+/** 路由层复用同一套 scope / key 口径：**查询参数**写错了要 400，而不是静默返回空列表。 */
 export const isValidScope = (value) => typeof value === 'string' && SCOPE_RE.test(value);
 export const isValidKey = (value) => typeof value === 'string' && KEY_RE.test(value);
 
@@ -157,12 +218,12 @@ function optionalKind(value, { fallback = 'fact' } = {}) {
   return value;
 }
 
+/**
+ * `key` 字段：**不合法不再 400，而是降级**（理由见 `normalizeKey`）。
+ * 这里只取归一化后的键；要不要把降级告诉调用方由各入口自己决定（它们才拿得到原始的 key）。
+ */
 function optionalKey(value) {
-  if (value === undefined || value === null || value === '') return null;
-  if (typeof value !== 'string' || !KEY_RE.test(value)) {
-    fail('key', `只能是小写字母/数字/下划线且不超过 40 字符（收到 ${JSON.stringify(value)}）`);
-  }
-  return value;
+  return normalizeKey(value).key;
 }
 
 function optionalValue(value) {
@@ -440,6 +501,8 @@ export class MemoryService {
 
     const scope = optionalScope(input.scope);
     const kind = optionalKind(input.kind);
+    // `key` 不合法时**降级**而不是 400（理由见 normalizeKey）：这里给出的仍是最终要落库的字段。
+    // 降级明细由各入口自己取（`#write` / `propose` / 指令处理器）—— 只有它们拿得到调用方原始的 key。
     const key = optionalKey(input.key);
     return {
       scope,
@@ -464,7 +527,8 @@ export class MemoryService {
    *
    * @param {object} input
    * @param {boolean} [input.replace] 带 `true` 时用新值取代同键旧条（旧条转 superseded，不删除）
-   * @returns {Promise<{ item: object, duplicated?: boolean, replaced?: object }>}
+   * @returns {Promise<{ item: object, duplicated?: boolean, replaced?: object, keyAdjusted?: object }>}
+   *   `keyAdjusted` 只在 key 被降级（见 `normalizeKey`）时出现：`{ from, to, reason }`。
    */
   async create(input = {}) {
     return this.#serialize(() =>
@@ -507,10 +571,14 @@ export class MemoryService {
    */
   async #write(input = {}, { defaultSource = 'user', replace = false, confidence } = {}) {
     const fields = this.validate({ ...input, confidence: confidence ?? input.confidence }, { defaultSource });
+    // key 被降级过就必须回报（见 normalizeKey）：调用方要能看出"服务端动过这个键"，
+    // 否则它下次还拿原来那个键来查，永远查不到自己刚写下的那条。
+    const { keyAdjusted } = normalizeKey(input.key);
+    const adjusted = keyAdjusted ? { keyAdjusted } : {};
     const existing = fields.key ? this.activeByKey(fields.scope, fields.key) : this.activeByText(fields.scope, fields.text);
 
     if (existing && normalizeText(existing.text) === normalizeText(fields.text)) {
-      return { item: existing, duplicated: true };
+      return { item: existing, duplicated: true, ...adjusted };
     }
     if (existing && !replace) {
       throw HttpError.conflict('已存在同键记忆', {
@@ -531,7 +599,9 @@ export class MemoryService {
       await this.collection.update(existing.id, { status: 'superseded', supersededBy: created.id });
     }
     this.#changed('create', created.id, existing ? { superseded: existing.id } : {});
-    return existing ? { item: created, replaced: { id: existing.id, text: existing.text } } : { item: created };
+    return existing
+      ? { item: created, replaced: { id: existing.id, text: existing.text }, ...adjusted }
+      : { item: created, ...adjusted };
   }
 
   /**
@@ -545,10 +615,16 @@ export class MemoryService {
    * - 同 `scope + key` 已 `active` 且内容等价 → 不提（`suppressed: 'duplicate'`）；
    * - 内容等价但键不同（无 key 路径）→ 同样不提。
    * 已 `active` 但内容不同 → 照常给草稿，并带上 `conflicts` 与 `warnings` 提醒会和谁打架。
+   *
+   * `key` 不合法时不报错、只降级，并把 `keyAdjusted` 放进返回值**与草稿的 `warnings`**：
+   * 确认卡是用户唯一能看见这张草稿的地方，"键被系统改过"必须在那里说得出来
+   * （§10.6 的原则：模型不能悄悄替用户决定记成什么样）。
    */
   propose(input = {}) {
     const fields = this.validate({ ...input, source: 'ai' }, { defaultSource: 'ai' });
     const confidence = optionalConfidence(input.confidence, fields.confidence);
+    const { keyAdjusted } = normalizeKey(input.key);
+    const adjusted = keyAdjusted ? { keyAdjusted } : {};
 
     const rejected = fields.key
       ? this.collection.find((item) => item.scope === fields.scope && item.key === fields.key && item.status === 'rejected')[0]
@@ -561,6 +637,7 @@ export class MemoryService {
         conflicts: [],
         writes: false,
         explain: '这条建议此前已经被你否决过，不再提议。',
+        ...adjusted,
       };
     }
 
@@ -573,6 +650,7 @@ export class MemoryService {
         conflicts: [],
         writes: false,
         explain: '这条已经记过了，不重复提议。',
+        ...adjusted,
       };
     }
     const archived = fields.key
@@ -582,6 +660,13 @@ export class MemoryService {
     const warnings = [];
     if (existing) warnings.push(`与已有记忆「${existing.text}」冲突`);
     if (archived) warnings.push(`同键记忆「${archived.text}」已被归档，确认后会新建一条 active`);
+    if (keyAdjusted) {
+      warnings.push(
+        keyAdjusted.to
+          ? `key 已自动调整为「${keyAdjusted.to}」（原值 ${JSON.stringify(keyAdjusted.from)}：key 只能用小写字母/数字/下划线、≤40 字符）`
+          : `原 key ${JSON.stringify(keyAdjusted.from)} 里没有可用字符（只能用 a-z 0-9 _），已按"无 key"处理：改按正文去重`,
+      );
+    }
 
     return {
       draft: {
@@ -607,6 +692,7 @@ export class MemoryService {
       },
       conflicts: existing ? [existing] : [],
       writes: false,
+      ...adjusted,
     };
   }
 
@@ -617,6 +703,11 @@ export class MemoryService {
    * - `active / archived → active`（archived 可恢复）；
    * - `superseded → active` ❌ 会造出两条同键 active，契约给的恢复方式是"再写一条新的"；
    * - `rejected → active` ❌ 明确"不可逆为 active，只能新建"。
+   *
+   * `key` 与写入路径同口径：不合法就降级（见 `normalizeKey`），**不 400**。这条不能只改一半 ——
+   * 指令路径的 dryRun 预览走的是 `validate()`（已经会降级），真写却 400 的话，
+   * 用户点一张"预览说没问题"的确认卡就会失败，正是要修的那种"卡点点不动"。
+   * 降级结果由路由 / 指令处理器用 `normalizeKey()` 放进响应（只有它们拿得到原始 patch）。
    */
   async update(id, patch = {}) {
     return this.#serialize(() => this.#applyUpdate(id, patch));
@@ -629,6 +720,8 @@ export class MemoryService {
     if (patch.text !== undefined) next.text = requiredText(patch.text);
     if (patch.scope !== undefined) next.scope = optionalScope(patch.scope, { fallback: current.scope });
     if (patch.kind !== undefined) next.kind = optionalKind(patch.kind, { fallback: current.kind });
+    // key 与写入路径同口径：不合法就降级而不是 400（理由见 normalizeKey）。
+    // 这里写进 `next` 的是最终值；"降级明细"由调用方用 normalizeKey(patch.key) 自己取。
     if (patch.key !== undefined) next.key = optionalKey(patch.key);
     if (patch.value !== undefined) next.value = optionalValue(patch.value);
     if (patch.sourceRef !== undefined) next.sourceRef = optionalSourceRef(patch.sourceRef);

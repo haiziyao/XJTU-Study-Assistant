@@ -149,6 +149,14 @@ test('AI：一次对话自动建会话、存两条消息，并记录模型与用
     assert.match(system.content, /不是 notes/);
     assert.match(system.content, /priority（整数 0=低/);
     assert.match(system.content, /不是 "high"/);
+    // 待办的工时字段必须是 estimatedHours（S3：提示词原先写成 estimatedMinutes，
+    // 而服务端只认 estimatedHours，用户说的"两小时"被静默丢成默认 1 小时）
+    assert.match(system.content, /estimatedHours（预估\*\*工时\*\*/);
+    assert.match(system.content, /estimatedMinutes（整数分钟），系统会换算/);
+    assert.match(system.content, /不会静默丢弃/);
+    // 记忆的 key 规则（S5：模型写中文 key → 确认卡必然 400，因为提示词从没教过它格式）
+    assert.match(system.content, /默认省略/);
+    assert.match(system.content, /别写中文 key/);
     assert.equal(sent.model, 'mock-chat');
     assert.equal(sent.stream, false);
   } finally {

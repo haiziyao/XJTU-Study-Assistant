@@ -32,6 +32,7 @@ import {
   MEMORY_STATUSES,
   isValidKey,
   isValidScope,
+  normalizeKey,
 } from './service.js';
 
 /** 可选文本：空串当"没传"，避免 `?kind=` 把结果过滤成空。 */
@@ -106,6 +107,9 @@ export function registerMemoryRoutes(router, { services, apiPrefix = '/api/v1' }
       throw HttpError.badRequest('字段 scope 不合法：必须是 global / course:<课程 id> / module:<模块 id>', { field: 'scope' });
     }
     const key = optionalText(query?.key);
+    // 查询参数**仍然严格** 400：写入降级（把中文 key 变成"无 key"）是为了不丢掉用户说的话，
+    // 而查询是要"按这个键去找"。把查询键也降级，`?key=我的键` 会退化成"查全库"，
+    // 调用方反而会以为"同键记忆存在" —— 查不到就如实查不到，比悄悄放宽好。
     if (key && !isValidKey(key)) {
       throw HttpError.badRequest('字段 key 不合法：只能是小写字母/数字/下划线且不超过 40 字符', { field: 'key' });
     }
@@ -127,16 +131,22 @@ export function registerMemoryRoutes(router, { services, apiPrefix = '/api/v1' }
    *
    * 状态码按 §10.5：新建 `201`；无 key 命中同文（幂等）返回 `200 + duplicated: true`；
    * 同 `scope + key` 已有 active 且没带 `replace` → `409`。
+   *
+   * `key` 不合法（中文 / 空格 / 超长 / 大写）**不再是 400**：服务层会降级它
+   * （见 service.normalizeKey），并在响应里带上 `keyAdjusted: {from, to, reason}`。
+   * 用户说过"记住"的事不能因为一个内部句柄的格式而记不下；但降级也绝不静默。
    */
   router.post(P, async ({ body }) => {
     const input = requireBody(body);
     const result = await memory.create(input);
-    if (result.duplicated) return { item: result.item, duplicated: true, writes: true };
+    const adjusted = result.keyAdjusted ? { keyAdjusted: result.keyAdjusted } : {};
+    if (result.duplicated) return { item: result.item, duplicated: true, writes: true, ...adjusted };
     return {
       __status: 201,
       item: result.item,
       replaced: result.replaced ?? null,
       writes: true,
+      ...adjusted,
     };
   });
 
@@ -158,10 +168,14 @@ export function registerMemoryRoutes(router, { services, apiPrefix = '/api/v1' }
    *
    * **不是"记住"的入口**：这里改的是既有记忆，`source` / `confidence` / `supersededBy`
    * 由服务层按 §10.4 的迁移规则自己管，不接受直接改。
+   *
+   * `key` 与写入路径同口径（降级而不是 400），降级明细照样回报：只改一半就会出现
+   * "预览说没问题、点确认才失败"的卡点，那正是要修的毛病。
    */
   router.patch(`${P}/:id`, async ({ params, body }) => {
     const patch = requireBody(body);
-    return { item: await memory.update(params.id, patch) };
+    const { keyAdjusted } = normalizeKey(patch.key);
+    return { item: await memory.update(params.id, patch), ...(keyAdjusted ? { keyAdjusted } : {}) };
   });
 
   /** 删除（§10.5）：不可逆；同 key 允许重新提议。 */

@@ -179,8 +179,16 @@
     const restore = window.PC?.snapshotScroll?.() ?? null;
     const draw = () => {
       ui.mount.textContent = '';
-      ui.mount.appendChild(renderTabs());
-      if (ui.error) ui.mount.appendChild(alertBox('没能完成', ui.error.message ?? String(ui.error), 'fail'));
+      /**
+       * **必须自己建一层 `.view-content`**：外壳的 `.panel-body` 是 `overflow: hidden` 的 flex 容器，
+       * 真正滚动的是视图自己挂进去的 `.view-content`（`flex:1; min-height:0; overflow:auto`）。
+       * 直接把内容挂到 mount 上会表现为「贴边 + 内容一多就裁掉、而且滚不动」——
+       * 这个 bug 真的发生过（用户原话："神人没给对话页面加滚动"），而且 `PC.snapshotScroll()`
+       * 找的也是 `#panel-body .view-content`，没它连"重画保住滚动位置"一起失效。
+       */
+      const content = mk('div', 'view-content');
+      content.appendChild(renderTabs());
+      if (ui.error) content.appendChild(alertBox('没能完成', ui.error.message ?? String(ui.error), 'fail'));
       const body = mk('div', 'ch-body');
       const render = {
         conversations: renderConversations,
@@ -189,7 +197,8 @@
         schedules: renderSchedules,
       }[ui.tab];
       render?.(body);
-      ui.mount.appendChild(body);
+      content.appendChild(body);
+      ui.mount.appendChild(content);
     };
     draw();
     window.PC?.keepScroll?.(restore, draw);
@@ -208,8 +217,8 @@
         ui.error = null;
         // 切标签页要回到顶部：换了一屏内容，停在上一个标签的滚动位置会让人以为页面卡住了
         paint();
-        const scroller = ui.mount.closest('.panel-body') ?? ui.mount.parentElement;
-        if (scroller) scroller.scrollTop = 0;
+        const scroller = ui.mount.querySelector('.view-content') ?? ui.mount;
+        scroller.scrollTop = 0;
         void ensureLoaded(tab.id);
       });
       bar.appendChild(node);

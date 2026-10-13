@@ -21,8 +21,14 @@ import { buildIcs } from './ics-service.js';
 import { COMMAND_GRAMMAR } from './parser.js';
 import { MARKUP_GRAMMAR, parseMarkup } from './markup-parser.js';
 import { fromDschatEvent, normalizeAliases, toDschatEvent } from './compat.js';
+import { isTodoInputField } from './todo-service.js';
 
 const MAX_AGGREGATE_DAYS = 400;
+
+/** 只留待办认得的键（给 dschat 兼容层用，理由见 compat PATCH 路由里的注释）。 */
+function pickTodoFields(payload) {
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => isTodoInputField(key)));
+}
 
 /** query 里的布尔：`1` / `true` / `yes` 都算真。 */
 function isTruthy(value) {
@@ -337,9 +343,14 @@ export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1'
   router.patch(`${P}/compat/dschat/events/:id`, async ({ params, body }) => {
     const payload = { ...(body ?? {}) };
     delete payload.id;
-    const item = services.store.schedules.get(params.id)
-      ? await schedules.update(params.id, payload)
-      : await todos.update(params.id, payload);
+    // 待办侧的未知字段是**硬错误**（见 todo-service 的 assertKnownFields）：写错名字 = 用户的话被丢掉。
+    // 但 dschat 的事件形状天生带 `start_time` / `all_day` / `repeat*` 这些"待办没有"的装饰字段
+    // （`toDschatEvent` 就是把它们吐出去的，客户端读-改-写会把它们送回来），
+    // 所以在**适配层**按目标过滤：这不是把错误藏起来，而是把外来形状翻译成本地形状，
+    // 域内接口（/todos、指令、AI 草稿）依然严格报错，一个字都不放过。
+    const schedule = services.store.schedules.get(params.id);
+    const fields = schedule ? payload : pickTodoFields(payload);
+    const item = schedule ? await schedules.update(params.id, fields) : await todos.update(params.id, fields);
     return { item: toDschatEvent(item) };
   });
 
