@@ -2,6 +2,16 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
+    <!--
+      手机适配的**地基**，缺一个都会出事：
+        - width=device-width    不加的话 iOS/安卓按 980px 虚拟宽度排版，媒体查询命不中「窄屏」，
+          手机上看到的是缩小版的桌面三栏（字小到看不清、按钮也点不准）；
+        - initial-scale=1       同上，禁掉浏览器自作主张的"缩放适配"；
+        - viewport-fit=cover    配合 CSS 的 env(safe-area-inset-*)，刘海屏/圆角屏下底部输入区才不被切掉。
+      这份 index.html 同时被桌面 Electron 窗口和局域网网关（8886 的 /app/）使用；
+      桌面窗口是固定尺寸的 BrowserWindow，这些 meta 对宽屏三栏布局没有任何影响。
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; style-src 'self'; img-src 'self' data: http://127.0.0.1:* http://localhost:*; object-src 'self' data: blob:; frame-src 'self' data: blob:"
@@ -55,6 +65,7 @@
             rows="2"
             placeholder="用一句话添加日程 / 待办，例如：明天 15:00-16:00 项目周会"
             autocomplete="off"
+            enterkeyhint="send"
             title="Enter 发送 · Shift + Enter 换行"
           ></textarea>
           <button class="primary-btn" id="chat-send" type="button">发送</button>

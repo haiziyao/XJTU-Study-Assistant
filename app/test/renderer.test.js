@@ -192,3 +192,43 @@ test('视图契约：标签页式中枢页（对话/复习/传输）各自创建
     assert.match(source, /mk\('div', 'view-content'\)/, `${file} 要自己建 .view-content（否则 .panel-body 把它裁掉且不能滚）`);
   }
 });
+
+
+/**
+ * 滚动跟随：**只在用户本来就贴底时才跟随**。
+ *
+ * 真机 bug：流式增量（正文与"思考过程"）是每帧触发的，之前那两处无条件写
+ * `scrollTop = scrollHeight` —— 用户往上翻的时候每一帧都被拽回底部，表现出来就是
+ * "发送消息后聊天窗口不能顺利滚动"。这条测试锁住修好后的语义：
+ *   贴底（距底 < 24px）→ 跟随；往上翻了 → 一动不动。
+ */
+test('聊天滚动：贴底时跟随最新内容，用户往上翻后不再被拽回底部', async () => {
+  const { app, origin, scripts } = await loadRenderer();
+  try {
+    const context = makeSandbox(origin);
+    vm.runInContext(scripts.map((s) => s.text).join('\n;\n'), context, { filename: 'renderer-bundle.js' });
+    const helpers = context.window.__PC_SCROLL__;
+    assert.ok(helpers, '渲染层要暴露 __PC_SCROLL__ 供测试断言');
+    // 用一个"假滚动容器"断言判断口径：不必启动整个外壳（真实布局尺寸在 jsdom/vm 里拿不到）
+    const log = { scrollHeight: 1000, clientHeight: 200, scrollTop: 0 };
+
+    // ① 用户往上翻了：距底 800px，跟随必须"不动"
+    log.scrollTop = 0;
+    assert.equal(helpers.isPinnedToBottom(log), false, '距底 800px 不算贴底');
+    helpers.followBottom(false, log);
+    assert.equal(log.scrollTop, 0, '用户往上翻之后，流式增量不许把视图拽回底部');
+
+    // ② 用户滚回底部附近（距底 10px）：应当继续跟随
+    log.scrollTop = 790;
+    assert.equal(helpers.isPinnedToBottom(log), true, '距底 10px 算贴底');
+    helpers.followBottom(false, log);
+    assert.equal(log.scrollTop, 1000, '贴底时应当跟到最新内容');
+
+    // ③ force：新消息/新卡片是用户自己的动作，无论在哪都跟到底
+    log.scrollTop = 0;
+    helpers.followBottom(true, log);
+    assert.equal(log.scrollTop, 1000, 'force 用于"刚发了消息"这类必须看到最新内容的情况');
+  } finally {
+    await app.close();
+  }
+});

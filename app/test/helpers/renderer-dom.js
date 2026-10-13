@@ -71,6 +71,10 @@ export class El {
     this._text = '';
     this._innerHTML = '';
     this._scrollTop = 0;
+    // 滚动几何：真实 DOM 里是只读的布局属性，桩里给默认值让测试能自己摆布
+    // （滚动跟随的判断就靠这三个数：scrollHeight - scrollTop - clientHeight）
+    this.scrollHeight = 0;
+    this.clientHeight = 0;
   }
 
   set innerHTML(value) {

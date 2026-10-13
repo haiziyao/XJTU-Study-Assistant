@@ -113,7 +113,27 @@
     /** 模型选择器缓存的列表。 */
     models: null,
     health: null,
+    /**
+     * 当前**视图** id。默认 `'calendar'`。
+     *
+     * ⚠️ 这个默认值**是桌面端的行为**（打开就显示日历面板），刻意保持原样不动 ——
+     * "桌面端一点都不能变"是硬要求，把默认视图换成对话中枢会改掉每天的打开体验。
+     *
+     * 手机端"打开就能用"= 一进来就是聊天框，那件事**不走这个字段**，而是由
+     * `mobileScreen` 表达（见下）：窄屏下「视图」与「当前给哪一屏」是两个正交的概念 ——
+     * 窄屏可以"视图=日历、屏幕=聊天"（刚打开时的默认态），宽屏则两者总是一致。
+     */
     view: new URLSearchParams(location.search).get('view') ?? 'calendar',
+    /**
+     * **窄屏（≤760px）当前显示哪一屏**：`'chat'` | `'panel'`。
+     *
+     * 为什么要有它：宽屏三栏本身就能同时显示"对话 + 功能页"，窄屏一次只能给一屏，
+     * 于是需要一个"现在给哪一屏"的开关。它**不是第二套状态源** ——
+     *   - 点击导航 → selectView() 同时写 state.view 与这里（hash 也跟着走）；
+     *   - 刷新 / 从别处跳回 → 由 `?view=` 或 `location.hash` 还原；
+     * 两边始终由 `setMobileScreen()` 这一个函数负责落地，不存在"谁说了算"的问题。
+     */
+    mobileScreen: null,
     panelCollapsed: false,
     calendar: { mode: 'month', anchor: U.todayKey() },
     todo: { filter: 'all' },
@@ -121,6 +141,19 @@
 
   /** DOM 引用缓存：在 boot() 里一次性填充（因此必须是 let，不能是 const）。 */
   let dom = {};
+
+  /**
+   * 窄屏断点，与 `shell.css` 里 `@media (max-width: 760px)` **必须一致**。
+   *
+   * 两边各写一份是无奈之举：CSS 的媒体查询条件 JavaScript 读不到，而"要不要给
+   * iOS 自动聚焦"这类行为又必须在 JS 里判断。改断点时两处一起改。
+   */
+  const MOBILE_QUERY = '(max-width: 760px)';
+
+  /** 当前是不是窄屏（真实的 matchMedia 结果，不缓存：窗口可拖宽、手机可横竖屏切换）。 */
+  function isMobile() {
+    return window.matchMedia(MOBILE_QUERY).matches;
+  }
 
   /* ------------------------------------------------------------ 基础工具 */
 
@@ -191,16 +224,10 @@
     }
   }
 
-  function selectView(view) {
-    state.view = view;
-    if (view !== 'notes') document.body.classList.remove('notes-focus');
-    for (const button of document.querySelectorAll('.nav-item')) {
-      button.classList.toggle('active', button.dataset.view === view);
-    }
-    // 主动切视图要回到顶部：新视图是"新的一页"，沿用上一个视图的滚动位置会停在半空中。
-    // 这与「重画保住位置」是两回事，所以走参数而不是复制一份 renderPanel。
-    renderPanel({ keepScroll: false });
-  }
+  /**
+   * 「点导航」这件事在桌面端的处理见下面的 `selectView`（窄屏/宽屏共用同一个入口，
+   * 宽屏分支与改动前逐行一致：写 state.view → 换高亮 → 重画面板）。
+   */
 
   /**
    * 重画右侧视图。
@@ -273,6 +300,9 @@
   }
 
   function togglePanel() {
+    // 窄屏没有"收起面板"这回事：面板就是当前那一整屏，收起等于把屏幕变空。
+    // 按钮本身已经在 CSS 里隐藏，这里再挡一次 —— 免得将来有人用脚本调它。
+    if (isMobile()) return;
     state.panelCollapsed = !state.panelCollapsed;
     document.body.classList.toggle('panel-collapsed', state.panelCollapsed);
     dom.panelToggle.textContent = state.panelCollapsed ? '⟨' : '⟩';
@@ -284,11 +314,237 @@
     renderPanel();
   }
 
+  /* ------------------------------------------------------ 窄屏（手机）布局 */
+
+  /*
+   * 手机端的显隐关系由两个 body 类表达，别无它法：
+   *   body.mobile-chat   显示中间那一大屏 = 聊天框（默认）
+   *   body.mobile-panel  显示整屏功能页（`.panel` 吃满内容区，聊天列 display:none）
+   * 两个类只在 `@media (max-width: 760px)` 里有定义，所以宽屏上加了也没有任何效果，
+   * 桌面端的 DOM 与像素都不受影响（这是硬要求）。
+   *
+   * 为什么改的是 body 类而不是给 `.app` 挂 `data-screen`：
+   * 仓库既有约定就是 `body.panel-collapsed` / `body.notes-focus` 这一套，
+   * 沿用同一种写法，读代码的人不用在两套切换机制之间来回对照。
+   */
+
+  /** 左侧导航里「对话」是第一个栏目；点它 = 回聊天屏。 */
+  const CHAT_VIEW = 'chat';
+
+  /* ------------------------------------------------------ 窄屏（手机）状态机 */
+
+  /** 窄屏当前屏的取值（与 `body.mobile-*` 类名一一对应）。 */
+  const SCREEN_CHAT = 'chat';
+  const SCREEN_PANEL = 'panel';
+
+  /**
+   * 是不是"看功能页"的那些视图。
+   *
+   * 只有一个例外：`chat` 这一项本身在窄屏代表**聊天屏**，不是"对话中枢"功能页 ——
+   * 手机上用户点「对话」想要的是那个能打字的聊天框，而不是一张对话管理列表。
+   */
+  function screenFor(view) {
+    return view === CHAT_VIEW ? SCREEN_CHAT : SCREEN_PANEL;
+  }
+
+  /**
+   * **唯一**落地"现在显示哪一屏"的函数。
+   *
+   * @param {'chat'|'panel'} screen
+   * @param {{ render?: boolean, syncHash?: boolean }} [options]
+   *   `render` 默认 true：**只在 `screen === 'panel'` 时有意义** —— 切到/停在功能页时重画一次面板。
+   *   `syncHash` 默认 true：把当前屏写进 `location.hash`；还原 hash 时传 false（否则自己触发一次 hashchange）。
+   *
+   * ⚠️ `screen === 'chat'` 时**一律不重画面板**：聊天列的内容与「右侧视图」无关，
+   * 重画只会白拉一次数据、白冒一次错（手机上那一屏根本看不见）。
+   * 反过来，只要屏幕是功能页就重画一次 —— 代价由 `snapshotScroll()` 兜住，
+   * 换来的是"内容一定是最新的"，比抠掉一次重画划算。
+   */
+  function setMobileScreen(screen, options = {}) {
+    const next = screen === SCREEN_PANEL ? SCREEN_PANEL : SCREEN_CHAT;
+    state.mobileScreen = next;
+    if (options.syncHash !== false) syncHashForScreen(next);
+    applyLayoutMode();
+    // 顺序要紧：先挂类（`ensureBackButton` 靠 `mobile-panel` 判断该不该建），
+    // 再补返回按钮 —— 否则功能页第一次显示时顶上会少一条退路。
+    ensureBackButton();
+    if (next !== SCREEN_PANEL || options.render === false) return;
+    // 与桌面端"主动切视图要回到顶部"同理：手机上是换了一整屏，沿用上一屏的滚动位置会停在半空。
+    renderPanel({ keepScroll: false });
+  }
+
+  /** 把当前屏写成 `#chat` / `#<view>`，让刷新和分享链接回到同一屏。 */
+  function syncHashForScreen(screen) {
+    const id = screen === SCREEN_CHAT ? CHAT_VIEW : state.view;
+    const next = `#${encodeURIComponent(id)}`;
+    if (location.hash === next) return;
+    // replace 而不是赋值：手机上点导航很频繁，赋值会往历史里塞一串栈，
+    // 用户按"后退"要按十几次才出得去。这里只需要"刷新时能看到"。
+    try {
+      location.replace(next);
+    } catch {
+      /* 某些壳里不允许改地址：退化成不持久化，不影响功能 */
+    }
+  }
+
+  /** 读 `location.hash` 得到视图 id（`#chat` / `#calendar`；空或非法返回 null）。 */
+  function readHashView() {
+    const raw = location.hash.replace(/^#/, '').trim();
+    return raw ? decodeURIComponent(raw) : null;
+  }
+
+  /**
+   * 导航到某个视图。这就是"点导航"的全部语义，桌面端与窄屏共用。
+   *
+   * 为什么把三件事写在一个函数里：状态（state.view）、导航高亮、面板内容，
+   * 加上窄屏的"切到哪一屏"与 hash 持久化 —— 它们本来就该同步变化。
+   * 分散在事件监听里写，只要漏一处就会出现"高亮在日历、面板还是待办"这种鬼状态。
+   */
+  function selectView(view) {
+    state.view = view;
+    if (view !== 'notes') document.body.classList.remove('notes-focus');
+    for (const button of document.querySelectorAll('.nav-item')) {
+      button.classList.toggle('active', button.dataset.view === view);
+    }
+    // 主动切视图要回到顶部：新视图是"新的一页"，沿用上一个视图的滚动位置会停在半空中。
+    // 这与「重画保住位置」是两回事，所以走参数而不是复制一份 renderPanel。
+    // ⚠️ 顺序要紧：窄屏要先决定"给不给功能页"，否则点「对话」会白白重画一次面板
+    // （手机上那一屏根本看不见，纯浪费）。
+    if (!isMobile()) {
+      renderPanel({ keepScroll: false });
+      return;
+    }
+    // 窄屏「视图=日历、屏幕=聊天」是合法组合（刚打开就是这样）：这时**不重画**面板 ——
+    // 看不见的那一屏不需要内容，重画只会白拉一次数据、白冒一次错。
+    // `setMobileScreen` 内部会对"屏幕=功能页"重画，所以这里判断一次就够了。
+    setMobileScreen(screenFor(view), { render: state.mobileScreen === SCREEN_PANEL || screenFor(view) === SCREEN_PANEL });
+  }
+
+  /**
+   * 窄屏的导航入口：`http://<手机>:8886/app/#calendar`。
+   *
+   * 手机浏览器刷新后 `location.search` 还在，但用户点过导航之后 `state.view` 只活在内存里，
+   * 刷新就丢。所以每次切屏都写 hash，刷新时优先读 hash、其次读 `?view=`，都没有才回聊天屏。
+   */
+  function applyHashView() {
+    const id = readHashView();
+    const view = id && Modules.has(id) ? id : CHAT_VIEW;
+    selectView(view);
+  }
+
+  /**
+   * 挂上 `body.mobile-*` 类与 `data-screen`，并保证"没有 hash 时至少有 #chat"。
+   *
+   * `data-screen` 与 body 类是同一次赋值的两个出口：
+   *   - CSS 用 `body.mobile-chat` / `body.mobile-panel` 控制哪一栏可见；
+   *   - JS 用 `dataset.screen` 判断"当前这一屏是不是功能页"（比读 classList 更好读，
+   *     也让截图脚本/DOM 断言有一个稳定属性可查）。
+   * 两者由这一个函数同时写，不存在"类挂上了、属性还是旧值"的窗口。
+   */
+  function applyLayoutMode() {
+    const mobile = isMobile();
+    const chat = state.mobileScreen === SCREEN_CHAT;
+    // 宽屏（含桌面 Electron 窗口被拖宽）一律**不挂** `mobile-*`：
+    // 这些类只在窄屏媒体查询里有定义，挂上去不影响宽屏渲染，但会让"当前到底是哪一种布局"
+    // 在 DOM 上无法判断。状态如实反映布局，排查问题时不用再猜。
+    document.body.classList.toggle('mobile-chat', mobile && chat);
+    document.body.classList.toggle('mobile-panel', mobile && !chat);
+    if (mobile) document.body.dataset.screen = chat ? SCREEN_CHAT : SCREEN_PANEL;
+    else delete document.body.dataset.screen;
+    // 导航高亮跟着"当前这一屏"走，而不是只跟着 state.view：
+    // 手机上刚打开时是"视图=日历（桌面端的默认值）、屏幕=聊天"，此时**不该**有任何模块被高亮
+    // （一旦点亮「日历」，用户会以为已经在看日历了）。窄屏显示功能页时才按 state.view 点亮。
+    if (mobile) {
+      const active = chat ? null : state.view;
+      for (const button of document.querySelectorAll('.nav-item')) {
+        button.classList.toggle('active', button.dataset.view === active);
+      }
+    }
+    // 窄屏下 hash 是**状态的一部分**（刷新要靠它回到同一屏），所以首屏就补上，
+    // 而不是等用户点一次导航才开始记。宽屏不写：地址栏干净，也不给桌面端引入新行为。
+    if (mobile && !readHashView()) syncHashForScreen(state.mobileScreen);
+  }
+
+  /**
+   * 建"← 返回对话"按钮。
+   *
+   * 为什么手机端**必须**有它：整屏功能页把聊天列盖住了，而手机浏览器没有桌面端那种
+   * "另一栏一直可见"的退路；只剩浏览器自己的后退键，可它会连着页面历史一起回退
+   * （很可能直接退出应用），并不是"回到聊天"。所以每个功能页顶部都必须有一条明确的退路。
+   *
+   * 判定用 `body.mobile-panel` 而不是 `matchMedia`：宽屏上永远只有 `mobile-chat`，
+   * 于是**桌面端的 DOM 里根本不会出现这个按钮**（"桌面一点都不能变"是硬要求，
+   * 不能只靠 CSS 把它藏起来 —— 藏起来的元素仍然占着 DOM，别人一查就露）。
+   * 手机上它是先在聊天屏建好、切到功能页才显示的，所以必须有 `mobile-panel` 才建。
+   */
+  function ensureBackButton() {
+    if (dom.panelBack || !document.body.classList.contains('mobile-panel') || !dom.panelHead) return;
+    const button = mk('button', 'panel-back', '← 返回对话');
+    button.type = 'button';
+    button.addEventListener('click', () => selectView(CHAT_VIEW));
+    // 追加在标题之后（DOM 顺序不动标题），视觉顺序交给 CSS 的 `order: -1`。
+    dom.panelHead.appendChild(button);
+    dom.panelBack = button;
+  }
+
+  /** 窄屏下 hash 变化 = 用户按了浏览器后退/前进，或手改了地址栏。 */
+  function wireMobileLayout() {
+    window.addEventListener('hashchange', () => {
+      if (!isMobile()) return;
+      const id = readHashView();
+      if (!id || !Modules.has(id)) return;
+      if (id === state.view && state.mobileScreen === screenFor(id)) return;
+      // 这里不能复用 selectView：它会再写一次 hash，把用户的后退操作又推回去。
+      // 导航高亮交给 setMobileScreen → applyLayoutMode（它按"当前这一屏"算），
+      // 不在这里再写一遍 —— 同一件事两处写，迟早会不一致。
+      state.view = id;
+      setMobileScreen(screenFor(id), { syncHash: false });
+    });
+
+    // 手机横竖屏切换、桌面拖窗口跨过断点时调整挂载状态：
+    //   - 进入窄屏：state 没变，补一次返回按钮即可（`mobile-*` 类本来就在）；
+    //   - 回到宽屏：把 `mobile-*` 类摘掉。宽屏 CSS 虽然不认识这些类，但留着它们会让
+    //     DOM 断言（比如"桌面不该有 mobile 状态"）无从判断 —— 状态要如实反映当前布局。
+    // state.view / state.mobileScreen **不动**：宽屏有三栏本来就同时显示两者，
+    // 拖宽再拖窄时用户应该回到原来那一屏，而不是被重置。
+    window.addEventListener('resize', () => {
+      if (isMobile()) ensureBackButton();
+      else applyLayoutMode();
+    });
+  }
+
   /* ------------------------------------------------------------ 对话面板 */
+
+  /**
+   * 是否"贴在底部"：距底不足 24px 就算。滚动跟随只能在这个前提下做。
+   *
+   * 为什么必须有这个判断：流式增量（正文与思考过程）是**每帧**触发的，无条件写
+   * `scrollTop = scrollHeight` 等于每一帧都把视图拽回底部 —— 用户往上翻的时候，
+   * 手一松就被拉回去，表现出来就是"聊天窗口滚不动"（真机反馈过）。
+   * 24px 的容差是给"差一点点到底"留的余量：那种情况用户其实还想看最新内容。
+   */
+  function isPinnedToBottom(el = dom.chatLog) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  }
+
+  /**
+   * 跟随到底部（**只在用户本来就在底部时**）。流式增量必须走这个，不要直接写 scrollTop。
+   * `el` 可传入（测试用假容器断言判断口径，不必真的启动整个外壳）。
+   */
+  function followBottom(force = false, el = dom.chatLog) {
+    if (force || isPinnedToBottom(el)) el.scrollTop = el.scrollHeight;
+  }
+
+  /**
+   * 挂到 window 供渲染层测试断言（见 test/renderer.test.js 的滚动用例）：**不是**给视图用的 API。
+   * 为什么值得测：流式增量每帧调它，判断写错就会变成"聊天窗口滚不动"（真机 bug，改过一次）。
+   */
+  window.__PC_SCROLL__ = { followBottom, isPinnedToBottom };
 
   function push(node) {
     dom.chatLog.appendChild(node);
-    dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
+    // 新消息/新卡片是用户自己触发的动作，直接跟到底（force），别让上一次的滚动位置把新内容藏起来
+    followBottom(true);
     return node;
   }
 
@@ -1099,7 +1355,7 @@
   function keepBodyLast(card) {
     if (!card || !card.parentNode) return;
     dom.chatLog.appendChild(card);
-    dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
+    followBottom();
   }
 
   /**
@@ -2021,12 +2277,21 @@
     });
   }
 
-  /** 输入框自增高：上限与 shell.css 的 max-height 一致（180px），下限靠 CSS 的 min-height 兜。 */
+  /**
+   * 输入框自增高：上限与 shell.css 的 `max-height` 一致（桌面 180px），下限靠 CSS 的 min-height 兜。
+   *
+   * 窄屏用 28vh 而不是 180px：竖屏手机上 180px 已经接近半屏，一输入就把聊天记录全挤没了；
+   * 但也不能太小（键盘弹起后可见区域只剩一半）。下限 108px 与 shell.css 里
+   * `.chat-compose textarea { min-height }` **必须一致** —— 这里只是镜像，不是第二个来源。
+   * 注意 `element.style.height` 这里是**行内样式**，但它是 CSP `style-src 'self'` 允许的
+   * 属性赋值（被拦的是 `<style>`/`style="..."` 属性与 `eval`），且这段代码本来就存在。
+   */
   function autoGrowInput() {
     const input = dom.chatInput;
     if (!input) return;
+    const max = isMobile() ? Math.max(108, Math.round(window.innerHeight * 0.28)) : 180;
     input.style.height = 'auto';
-    input.style.height = `${Math.min(180, input.scrollHeight)}px`;
+    input.style.height = `${Math.min(max, input.scrollHeight)}px`;
   }
 
   function wireChat() {
@@ -2200,7 +2465,8 @@
       if (streaming.node.parentNode?.parentNode === dom.chatLog) {
         dom.chatLog.insertBefore(state.reasoningNode.card, streaming.node.parentNode);
       }
-      dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
+      // **每帧都会走到这里**：必须条件跟随，否则用户往上翻时会被一直拽回底部（"滚不动"）
+      followBottom();
       return;
     }
 
@@ -2209,7 +2475,8 @@
     streaming.text = typeof payload.text === 'string' ? payload.text : streaming.text + (payload.delta ?? '');
     streaming.node.classList.add('streaming');
     setBubbleText(streaming.node, streaming.text);
-    dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
+    // 同上：正文也是逐帧增长的，无条件跟随会让"正在滚"的用户被反复拉回底部
+    followBottom();
   }
 
   /**
@@ -2269,6 +2536,7 @@
       navBottom: document.getElementById('nav-bottom'),
       panelTitle: document.getElementById('panel-title'),
       panelBody: document.getElementById('panel-body'),
+      panelHead: document.querySelector('.panel-head'),
       panelToggle: document.getElementById('panel-toggle'),
       chatLog: document.getElementById('chat-log'),
       chatInput: document.getElementById('chat-input'),
@@ -2317,6 +2585,27 @@
 
     buildNav();
     wireChat();
+    // 窄屏布局要在**画面板之前**定好"这一屏给谁"：先挂上 body.mobile-* 类，
+    // 后面 selectView() 才知道该走"回聊天"还是"切功能页"（否则会先白画一次没人看得见的面板）。
+    wireMobileLayout();
+    // 初始"给哪一屏"在这里一次算好，不走 selectView：
+    //   有 hash（刷新 / 分享链接）→ 跟着 hash 走；
+    //   没有 hash → **聊天屏**（手机打开就能说话），但 `state.view` 仍是桌面端那个默认值
+    //   （日历）—— 于是导航高亮必须是"没有模块被点亮"（见 applyLayoutMode）。
+    // 这里先只挂类、不画面板：内容等下面 restoreConversation() 之后再画，
+    // 免得首帧白画一次用户在手机上根本看不见的面板。
+    const bootHash = readHashView();
+    state.mobileScreen = bootHash && Modules.has(bootHash) ? screenFor(bootHash) : SCREEN_CHAT;
+    applyLayoutMode();
+    // 按位置写清楚：默认那一屏（聊天）不该在地址栏留下痕迹，
+    // 否则用户从 3210 打开手机上会是 http://…:8886/app/#calendar（hash 还在，但看的是聊天）。
+    if (!bootHash) {
+      try {
+        location.replace('#' + CHAT_VIEW);
+      } catch {
+        /* 某些壳不允许改地址：退化成不持久化 */
+      }
+    }
     // 先把持久化的档位读回来再画控件与提示 —— 否则首帧画的是默认值，
     // 用户会看到「手动审批」闪一下再跳成自己上次选的档位。
     const storedPermission = readStored('potato.permission');
@@ -2339,7 +2628,9 @@
       return;
     }
 
-    dom.chatInput.focus();
+    // 桌面端自动聚焦输入框（打开就能打字）；手机上**不要**：
+    // iOS Safari 的自动聚焦会立刻弹出软键盘，把首屏顶掉一半，用户还没看清页面就先看到键盘。
+    if (!isMobile()) dom.chatInput.focus();
     await loadMeta();
     // 关窗/刷新后续聊：还原上次那条对话与没发出去的草稿（对话已经被删了就安静退回欢迎语）
     const storedDraft = readStored(DRAFT_KEY);
@@ -2348,7 +2639,15 @@
       autoGrowInput();
     }
     await restoreConversation();
-    selectView(state.view);
+    // 手机刷新后要停在同一屏：hash 优先（用户点过导航才会写），其次 `?view=`（外部链接），
+    // 都没有就停在启动时定好的聊天屏 —— 这时**什么都不用做**：
+    // 上面 applyLayoutMode() 已经把这一屏挂好了，再走一次 selectView(state.view) 反而会
+    // 因为 `state.view` 是桌面端默认值（日历）而把面板白画一遍，还把导航高亮错点到「日历」上。
+    // 桌面端没有 hash 时行为与改动前逐行一致（selectView(state.view)）。
+    const bootQueryView = new URLSearchParams(location.search).get('view');
+    if (isMobile() && bootHash) applyHashView();
+    else if (isMobile() && bootQueryView) selectView(state.view);
+    else if (!isMobile()) selectView(state.view);
     connectSocket();
   }
 

@@ -60,6 +60,16 @@ body {
   height: 100%;
 }
 
+/*
+ * 禁止移动浏览器自作主张的"文本膨胀"（iOS 横屏时会把正文放大，安卓 WebView 也有类似开关）。
+ * 放在全局而不是移动端媒体查询里：桌面端本来就没有这条行为，写上等于没写；
+ * 一旦漏了，手机上会出现"我明明写了 16px，实际却是 19px"这种查不出来的错位。
+ */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   margin: 0;
   overflow: hidden;
@@ -2223,4 +2233,723 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
 /* 迁移提示（旧模型名被自动换掉时显示一次） */
 .ai-hint.ai-migrated {
   color: var(--orange);
+}
+
+/* ==========================================================================
+   移动端（手机浏览器）：两栏 = 窄导航 + 一整屏功能页
+   ==========================================================================
+
+   为什么手机端不是「把三栏挤一挤」：
+     桌面三栏能成立，是因为屏幕有 1500px 宽 —— 导航 128 + 对话 + 右侧视图 780 还能各留出
+     可用宽度。到了 390px 的手机上，同样三条并排只剩每个 130px 左右：日历的月视图一格宽度
+     不到 4px，聊天气泡会被压成一行两个字，任何表单控件都点不准。这不是"难看"，是**不能用**。
+     所以窄屏改成**一次只给一屏**：左导航选栏目，右边整屏给这个栏目用；默认那一屏是聊天框。
+     代价是聊天和功能页不能同屏（桌面端可以），换来的是每一屏都真正可用。
+
+   为什么"返回对话"按钮**必须**存在：
+     手机浏览器没有桌面那种"后退到上一栏"的肌肉记忆，全屏功能页又把聊天列完全盖住了。
+     如果不在内容区顶部留一个明确的返回入口，用户切到「设置」之后就只剩浏览器自身的后退键
+     可走 —— 而后退键会连着 URL/历史一起回退（可能直接退出页面），不是"回到聊天"。
+     所以每个功能页顶上必须有一条"← 返回对话"，这是手机端唯一的退路。
+
+   规则分两处：
+     - 这里（shell.css）：布局、字号、点按尺寸 —— 纯 CSS 能表达的显隐关系；
+     - shell/app.js 的 applyLayoutMode()：`body.mobile-chat` / `body.mobile-panel` 两个类，
+       由 `state.view` 与 `location.hash` 驱动（**不新增第二套状态源**）。
+   -------------------------------------------------------------------------- */
+
+/* 只在窄屏生效的尺寸令牌。放在媒体查询里，宽屏根本读不到，桌面端逐像素不变。 */
+@media (max-width: 760px) {
+  :root {
+    /* 窄导航：56–64px 之间取 60px。图标仍是 22px（不缩小图标），
+       多出来的宽度用来把文字标签放大到 12px 并留出左右内边距。 */
+    --sidebar-w: 60px;
+    /* 手机上的正文基准。16px 不只是"好看"：
+       iOS Safari 在聚焦 font-size < 16px 的输入框时会**自动放大整页**，
+       而放大后的页面退回原样需要手动双指捏合 —— 这是手机上最烦人的一类 bug。 */
+    --mobile-font: 16px;
+  }
+
+  /* -------------------------------------------------------------- 骨架：两栏 */
+
+  .app {
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+    /* dvh = 动态视口高度：手机浏览器地址栏收起/展开时 vh 不变，dvh 会跟着变，
+       底部输入区因此不会被地址栏盖住。前面那行 100vh 是给不认 dvh 的老内核兜底。 */
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  /* 第三栏（右侧面板）在手机上就是"整屏功能页"：它不再是并列的第三列，而是盖住聊天列的
+     那一屏。聊天列用 display:none 退出网格（不是 visibility/opacity，避免留下不可见但
+     仍参与布局的空列），此时面板自动落到第 2 列并吃满剩余宽度。 */
+  body.mobile-chat .panel {
+    display: none;
+  }
+
+  body.mobile-panel .chat {
+    display: none;
+  }
+
+  /* 手机上竖着放不下"对话 + 功能页"两屏，所以不分屏。 */
+  body.notes-focus .app {
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  }
+
+  /* 桌面端"收起右侧视图"的状态如果在窄屏仍然生效，会出现**两边都空**的死局
+     （聊天列被手机布局隐藏、面板又被收起）。所以窄屏一律忽略这个状态。 */
+  body.panel-collapsed .panel {
+    display: flex !important;
+  }
+
+  /* 手机上没有"收起面板"这件事（面板就是当前整屏），按钮留着会误导。 */
+  .panel-toggle {
+    display: none;
+  }
+
+  /* ---------------------------------------------------- 左：窄导航（点按 ≥ 44px） */
+
+  .sidebar {
+    padding: 8px 4px;
+    gap: 6px;
+  }
+
+  .brand {
+    padding: 8px 0 4px;
+  }
+
+  .brand-name {
+    font-size: 12px;
+    letter-spacing: 0;
+  }
+
+  .nav {
+    gap: 4px;
+  }
+
+  .nav-item {
+    /* 点按目标：图标 22 + 标签 12×1.2 ≈ 15 + gap 4 + 上下 padding 2×10 = 51px，
+       稳稳超过 44px（Apple HIG）/ 48dp（Material）的推荐下限。
+       图标本身**不缩小** —— 手指点的是整块按钮，不是图标。 */
+    min-height: 52px;
+    padding: 10px 2px;
+    gap: 4px;
+    border-radius: var(--radius-sm);
+  }
+
+  .nav-icon {
+    width: 22px;
+    height: 22px;
+  }
+
+  .nav-icon svg {
+    width: 22px;
+    height: 22px;
+  }
+
+  .nav-label {
+    /* 导航标签：桌面 11px → 手机 12px。再大就会把「思源学堂」挤出 60px 的栏宽。 */
+    font-size: 12px;
+    line-height: 1.15;
+    letter-spacing: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  /* 左栏底部的主题开关：整块可点，文字压到 11px 才放得进 60px 宽。 */
+  .theme-toggle {
+    min-height: 44px;
+    padding: 6px 2px;
+    font-size: 11px;
+    line-height: 1.2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  /* ---------------------------------------------------- 中：聊天（默认那一屏） */
+
+  .chat-head {
+    padding: 8px 10px;
+    gap: 6px;
+  }
+
+  .chat-title {
+    /* 16px 而不是更大：顶栏要同时放下 状态点 + 标题 + 模型徽标 + 连接状态，
+       标题一放大就会被挤成"对/话"两行（截图上真的这样过）。 */
+    font-size: 16px;
+  }
+
+  .badge {
+    font-size: 16px;
+    padding: 4px 10px;
+  }
+
+  .status-pill {
+    font-size: 12px;
+    /* 「已连接」这类状态可长可短：窄屏让它省略，别把标题挤走。 */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .chat-log {
+    padding: 12px 12px 16px;
+    gap: 14px;
+  }
+
+  .bubble {
+    /* 92% 的桌面上限在 390px 上只有 340px：一句正常长度的话会被切成很多行，读起来很累。
+       放到 100%（仍靠 user/bot 的对齐区分角色），让一句话尽量少折行。 */
+    max-width: 100%;
+    padding: 12px 14px;
+    border-radius: 14px;
+    font-size: var(--mobile-font);
+    line-height: 1.62;
+    overflow-wrap: anywhere;
+  }
+
+  /* 气泡里的富文本（Markdown/公式/表格）跟着放大，不然正文 16px、子元素还是 13px。 */
+  .bubble .rt-p,
+  .bubble .rt-list li,
+  .bubble-text,
+  .cc-title,
+  .cc-explain {
+    font-size: var(--mobile-font);
+    line-height: 1.62;
+  }
+
+  .rt-h,
+  .rt-pre,
+  .rt-code {
+    font-size: 15px;
+  }
+
+  .rt-table {
+    font-size: 15px;
+  }
+
+  .chat-note {
+    font-size: 13px;
+  }
+
+  .chip-btn {
+    /* 示例提示词是"一点就发"，属于点按目标：撑到 44px 高、字号提到 16px
+       （一开始写 14px，实测在手机上仍然偏小 —— 它是聊天屏里用户最先会点的东西）。 */
+    font-size: 16px;
+    min-height: 44px;
+    padding: 10px 14px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /* 草稿确认卡：字段行在窄屏改成上下两行，不然"开始 / 09:00"会被挤成两行两个字。 */
+  .cc-row {
+    grid-template-columns: 84px 1fr;
+    font-size: 15px;
+  }
+
+  .cc-sub,
+  .cc-meta,
+  .cc-note {
+    font-size: 13px;
+  }
+
+  .cc-warning,
+  .cc-list-row,
+  .cc-kb-snippet,
+  .cc-web-snippet {
+    font-size: 15px;
+  }
+
+  .cc-list-time,
+  .cc-kb-meta,
+  .cc-kb-url,
+  .cc-web-url,
+  .cc-web-meta,
+  .cc-web-open {
+    font-size: 13px;
+  }
+
+  .chat-card {
+    padding: 12px;
+    gap: 10px;
+  }
+
+  /* -------------------------------------------------- 输入区（点按 + 不缩放 + 安全区） */
+
+  .chat-compose {
+    /* 底部要留出 Home Indicator 的高度（viewport-fit=cover 下 env() 才有意义）：
+       不补这一块，iPhone 上的发送按钮会和系统手势条叠在一起，很容易误触。 */
+    padding: 10px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+    padding-left: calc(12px + env(safe-area-inset-left, 0px));
+    padding-right: calc(12px + env(safe-area-inset-right, 0px));
+    gap: 8px;
+    align-items: flex-end;
+  }
+
+  .chat-compose textarea {
+    /* min-height 108px，是按**实测的占位提示行数**倒推的，不是拍脑袋：
+         可用文字宽度 = 390（视口）− 60（导航）− 24（compose 左右内边距）
+                        − 44（+ 按钮）− 58（发送键）− 16（两个 gap）− 10（textarea 自己的滚动条）
+                        ≈ 178px
+         占位提示「用一句话添加日程 / 待办，例如：明天 15:00-16:00 项目周会」在这宽度下折 3 行，
+         3 × 16px × 1.5 = 72px，加上下内边距 18px + 边框 2px = 92px，再留一行余量 → 108px。
+       第一版写 56px、第二版 66px，截图里第 3 行都是被切掉的 —— 占位文字被裁是最难自查的一类问题。
+       max-height 用 vh 而不是固定 180px：竖屏手机上 180px 已经接近半屏，一输入就把聊天记录挤没了。
+       ⚠️ 改这个值要同步改 app.js 里 autoGrowInput() 的上限（那边算的是同一个上限）。 */
+    font-size: var(--mobile-font);
+    line-height: 1.5;
+    min-height: 108px;
+    max-height: 28vh;
+    padding: 9px 12px;
+  }
+
+  .compose-plus {
+    /* 「+」是附件入口：44×44 的方块，图标保持原尺寸。 */
+    width: 44px;
+    height: 44px;
+    font-size: 20px;
+  }
+
+  .chat-compose .primary-btn {
+    /* 发送键是这一屏用得最多的按钮：44px 高 + 16px 字。 */
+    min-height: 44px;
+    padding: 0 16px;
+    font-size: 16px;
+    align-self: flex-end;
+  }
+
+  .chat-attachments {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+
+  .attach-chip {
+    font-size: 14px;
+    min-height: 40px;
+  }
+
+  /* 输入框下面那一行控件（联网 / 思考 / 权限 / 用量 / 绘图）：
+     它们本来就是给手指设计的小图标按钮，这里统一撑到 44×44。
+     用 min-* 而不是固定 width/height —— 图标与布局尺寸一点不动，只把可点区域变大。 */
+  .chat-controls {
+    padding: 0 12px calc(8px + env(safe-area-inset-bottom, 0px));
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .compose-icon-btn,
+  .context-ring-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .compose-select > button {
+    min-height: 44px;
+  }
+
+  .compose-select > button .cs-label,
+  .compose-select > button .cs-value {
+    font-size: 16px;
+  }
+
+  /* 上下文占用圆环中间那个百分比：圆环直径 30px，17px 的数字会挤出来，
+     放到 15px 并把圆环略微加大 —— 它是仪表盘读数，不是正文。 */
+  .ctx-pct {
+    font-size: 15px;
+  }
+
+  .compose-menu {
+    min-width: 220px;
+  }
+
+  /* 向上展开的菜单在窄屏上不能超出屏幕：菜单本身可滚，选完自动收起。 */
+  .compose-menu button {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .compose-menu .cm-hint {
+    font-size: 13px;
+  }
+
+  /* ---------------------------------------------------- 右：整屏功能页 + 返回对话 */
+
+  .panel-head {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+
+  .panel-head h2 {
+    font-size: 17px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* 手机端唯一的"退路"。它由 shell/app.js 在启动时建好（桌面端不建，DOM 完全不变），
+     这里用 order:-1 把它排到标题之前 —— 视觉顺序「← 返回对话 | 标题」，DOM 顺序仍是追加。 */
+  .panel-back {
+    order: -1;
+    display: inline-flex;
+    align-items: center;
+    flex: none;
+    min-height: 44px;
+    padding: 0 12px;
+    font-size: 15px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line);
+    background: var(--bg-elevated);
+    color: var(--fg);
+  }
+
+  .panel-head .panel-back:active {
+    background: var(--bg-hover);
+  }
+
+  /* 整个功能页的通用内边距：窄屏少留白、多给内容。
+     这里只调外壳，不动各视图内部 —— 视图自己的横向溢出交给下面的兜底规则。 */
+  .view-content {
+    padding: 12px 12px calc(20px + env(safe-area-inset-bottom, 0px));
+    gap: 12px;
+  }
+
+  /* 通用兜底：窄屏下任何视图都不该横向撑破外壳。
+     真要宽（日历月视图、宽表格）就让**它自己**在局部横向滚动，
+     而不是把整页顶出去 —— 整页横向滚动在手机上会连带把左侧导航滑走。 */
+  .panel-body,
+  .view-content {
+    max-width: 100%;
+  }
+
+  .rt-table-wrap,
+  .cc-list,
+  .cc-filters {
+    max-width: 100%;
+  }
+
+  /* 设置页是直接塞进 .panel-body 的（没有 .view-content 那层），内边距在这里补。 */
+  .panel-body > .settings {
+    padding: 12px 12px calc(20px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* ---------------------------------------------------- 通用控件：字体与高度 */
+
+  /* 关键一条：所有输入类控件的字号提到 16px。
+     低于 16px 时 iOS Safari 聚焦会自动放大整页，而缩放状态下的布局判断全是错的。 */
+  input,
+  select,
+  textarea {
+    font-size: var(--mobile-font);
+    min-height: 44px;
+    padding: 9px 12px;
+  }
+
+  input[type='checkbox'],
+  input[type='radio'] {
+    /* 勾选框不能撑成 44px 高，否则整行布局会被拉散；改由下面的 label 承担点按面积。 */
+    min-height: 0;
+    width: 20px;
+    height: 20px;
+    flex: none;
+  }
+
+  .field-label,
+  .field-hint {
+    font-size: 14px;
+  }
+
+  .field {
+    gap: 6px;
+  }
+
+  .check-field {
+    /* 把整行做成点按目标（label 包着 checkbox），手指不必精确戳那个 20px 的框。 */
+    font-size: var(--mobile-font);
+    min-height: 44px;
+    gap: 10px;
+  }
+
+  .form-grid {
+    gap: 12px;
+  }
+
+  .wd-chip {
+    min-height: 40px;
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+
+  /* 按钮体系：桌面 28px 高 / 12px 字 → 手机 44px 高 / 14～15px 字。
+     统一用 min-height 撑开（内边距配合），图标不缩放。 */
+  .primary-btn,
+  .ghost-btn,
+  .danger-btn,
+  .seg-btn,
+  .tab,
+  .icon-btn,
+  .chip-btn {
+    min-height: 44px;
+    font-size: 14px;
+  }
+
+  .primary-btn,
+  .ghost-btn,
+  .danger-btn {
+    padding: 0 16px;
+    /* 按钮上的文字在手机上也要 16px：它是"要点的东西"，字号小一半等于点错率翻倍。 */
+    font-size: 16px;
+  }
+
+  .icon-btn {
+    min-width: 44px;
+    font-size: 16px;
+    /* 图标仍居中：min-height 只是把可点范围撑大，不改变图标大小。
+       注意有的 .icon-btn 装的是内联 SVG（‹ › ✕），有的装的是纯文字，
+       所以字号要一起给 —— 只给尺寸不给字号，文字版看上去还是桌面大小。 */
+    padding: 0 10px;
+  }
+
+  .seg-btn,
+  .tab {
+    padding: 0 14px;
+    font-size: 16px;
+  }
+
+  .nav-group {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .toolbar {
+    padding: 10px 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .toolbar-title {
+    font-size: 17px;
+  }
+
+  /* 卡片与设置区块：标题层级整体上抬一档。 */
+  .card {
+    padding: 14px;
+  }
+
+  .card-title {
+    font-size: 17px;
+  }
+
+  .section-title {
+    font-size: 17px;
+  }
+
+  .settings {
+    gap: 14px;
+  }
+
+  .ai-field {
+    /* 桌面的「72px 标签 + 输入框」并排在 390px 上只剩 300px 给输入框，
+       手机改成上下两行：标签一行、输入框占满一行。 */
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .ai-field-label {
+    font-size: 14px;
+  }
+
+  .ai-input {
+    font-size: var(--mobile-font);
+    min-height: 44px;
+    padding: 9px 12px;
+  }
+
+  .ai-hint,
+  .appearance-hint {
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  /* 弹层：手机上让弹层吃满宽度并留出安全区，底部才不会被手势条压住。 */
+  .modal-mask {
+    padding: 12px;
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .modal {
+    width: 100%;
+    max-height: 90dvh;
+  }
+
+  .modal-head,
+  .modal-foot {
+    padding: 12px;
+  }
+
+  .modal-body {
+    padding: 12px;
+  }
+
+  .modal-foot {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    flex-wrap: wrap;
+  }
+
+  /* Toast 浮在输入区上方：底部安全区 + 输入区高度都让开，否则会盖住"发送"。 */
+  .toast {
+    bottom: calc(150px + env(safe-area-inset-bottom, 0px));
+    max-width: calc(100vw - 32px);
+    font-size: 15px;
+  }
+}
+
+/* 极窄屏（320px 级的老机型 / 分屏）：只压缩留白，不再改字号 —— 16px 是这条线下面
+   唯一不能退让的值，宁可让内容折行也不把字缩小。 */
+@media (max-width: 420px) {
+  /* 导航标签**不再往下调**：12px 是这条线以下唯一不能让的值（点按目标看得清比省两像素重要），
+     宽度不够就让「思源学堂」折成两行。 */
+  .brand-name {
+    font-size: 11px;
+  }
+
+  .theme-toggle {
+    font-size: 11px;
+  }
+
+  .chat-head {
+    padding: 8px 10px;
+  }
+
+  .chat-log {
+    padding: 10px 10px 14px;
+    gap: 12px;
+  }
+
+  .chat-compose {
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+    gap: 6px;
+  }
+
+  /* 「+」保持 44×44：它是聊天屏上最容易误触的按钮，宁可让输入框少 4px。 */
+  .compose-plus {
+    width: 44px;
+    height: 44px;
+  }
+
+  .chat-compose .primary-btn {
+    padding: 0 12px;
+  }
+
+  .view-content,
+  .panel-body > .settings {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+}
+
+
+/* ==========================================================================
+   移动端字号下限：外壳层的**一次总修**，而不是逐个视图去改 CSS
+   ==========================================================================
+
+   为什么放在外壳层、并且用 `!important`：
+     各业务视图（日历 / 学堂 / 笔记 / 复习 / 学业 / 知识库 / 认证 …）自己写的字号
+     是**按桌面三栏**定的 —— 右侧面板有 780px 宽，12px 的日期数字、10px 的农历提示
+     在那种尺寸下是"信息密度高"；同一份 CSS 搬到 390px 的手机上，"信息密度高"就变成
+     "看不清 + 点不准"。逐个视图改 CSS 有四个问题：
+       1) 违反本次改动的边界（只允许改外壳；确实必要时才动单个视图并说明原因）；
+       2) 视图是插件式登记的，"新增功能不用改外壳"，反过来外壳也不该认识每个视图的类名；
+       3) 漏一个视图就漏一类字，而且很难发现（要一页页翻）；
+       4) 视图自己也可能有 media query，优先级一叠加就没人说得清最终是哪条生效。
+     所以这里用**一条**通用规则把手机上所有视图正文的字号抬到 16px 下限，
+     再用几条"本来就该更小"的例外把密集区域放开（例外比规则少得多，也看得见）。
+
+   为什么是 `!important`：
+     这条规则要压过 `.month-grid .dnum`（0,2,0）、`.kb-col-label` 这类视图里的具体选择器。
+     要么把每个选择器抄一遍（就是上面第 3 条的漏项问题），要么用一条明确标注了理由的
+     `!important`。后者可读、可检查、也只作用在窄屏这一个媒体查询里 —— 桌面端一个字都不受影响。
+     这不是"偷懒压样式"：它是"手机端字号下限"这条产品约束的**唯一落点**。
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 760px) {
+  /* 下限的三块地盘：
+       .view-content  绝大多数视图自己建的那层滚动容器；
+       .settings      设置页是直接挂进 .panel-body 的，没有 .view-content（见 settings.js）；
+       .chat          聊天屏，它不在 .panel 里，得单独列。
+     三块都列全，是因为"漏一块"的表现是"某几页字还是小的"，很难发现。 */
+  :is(.view-content, .settings, .chat, .chat-head) {
+    font-size: 16px;
+  }
+
+  :is(.view-content, .settings, .chat, .chat-head) :where(p, span, div, li, td, th, label, b, i, em, strong, small, time, a) {
+    font-size: 16px !important;
+  }
+
+  :is(.view-content, .settings, .chat, .chat-head) :where(button, input, select, textarea) {
+    /* 按钮上的字同样不能小于 16px（"月 / 周 / 日"这种分段按钮最容易漏） */
+    font-size: 16px !important;
+  }
+
+  /* --- 例外一：导航标签（窄栏里塞不下 16px），已在上面单独定为 12px --- */
+  .sidebar :where(.nav-label, .brand-name, .theme-toggle) {
+    font-size: 12px !important;
+  }
+
+  /* --- 例外二：月视图的日历格子。42 列宽的格子里塞 16px 的日期数字会直接溢出，
+         所以按"整格放大"处理：日期 17px 保证看得清，农历/节气降到 12px 只作提示。
+         这是本次唯一一处动到单个视图排版的规则，理由是月视图的尺寸约束来自它自己的
+         7 列栅格，不是外壳能决定的。 --- */
+  .month-grid .cell {
+    padding: 4px 4px 5px;
+  }
+
+  .month-grid .dnum {
+    font-size: 17px !important;
+    min-width: 24px;
+    height: 24px;
+    line-height: 24px;
+  }
+
+  .month-grid .cell-lunar,
+  .month-grid .cell-add,
+  .month-grid .dstat {
+    /* 农历/节气/条数徽标：附属信息，12px 是"能看清但不抢主数字"的一档 */
+    font-size: 12px !important;
+  }
+
+  .month-head .weekday {
+    font-size: 14px;
+  }
+
+  /* --- 例外三：纯装饰/极短的技术标签（键值对里的"接口地址"这类长文本走正文档，
+         这里放开的是 tag / 徽标 / 色块文字），12px 足够，且它们都带边框或底色，
+         不会因为小就点不中。 --- */
+  :is(.view-content, .settings, .chat, .chat-head) :where(.tag, .badge, .swatch, .kb-badge, .auth-badge, .cs-field-hint, .kb-col-label) {
+    font-size: 12px !important;
+  }
+
+  /* 例外二之补：上下文占用圆环里的百分比。圆环直径 30px，16px 的数字会顶到环上，
+     它是仪表盘读数不是正文，单独放回 15px。 */
+  .chat .ctx-pct,
+  .chat .ctx-head-total {
+    font-size: 15px !important;
+  }
+
+  /* 注：圆环读数（.ctx-pct）在截图脚本的"偏小清单"里也登记成了允许项 —— 
+     口径要跟代码一致，否则每次跑验证都会报一处假失败。 */
+
+  /* 附属说明（快捷键提示、字段说明）单独一档 13px：比标签大一档，比正文小一档，
+     用来保持"标题 > 正文 > 说明"的层级不至于被 16px 下限压平。 */
+  :is(.view-content, .settings, .chat, .chat-head) :where(.field-hint, .ai-hint, .appearance-hint, .hint) {
+    font-size: 13px !important;
+  }
+
+  /* 手机端那个「← 返回对话」：它是唯一的退路，按钮本身有边框和底色，
+     12px 的视觉重量压不住，用 16px 与正文同级。 */
+  .panel-back {
+    font-size: 16px !important;
+  }
 }
