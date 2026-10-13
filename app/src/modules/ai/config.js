@@ -17,6 +17,13 @@
  *   - 用户在设置页填错 → `save()` 直接抛 `HttpError.badRequest`（`assertAiConfigInput`），
  *     而磁盘/环境变量里读出来的脏值只**静默回落默认值** ——
  *     一份手改坏的配置文件不该让服务起不来。
+ *
+ * 上下文窗口（`contextWindow`）：
+ *   - 它**不是**截断规则，而是「上下文占用指示」的**分母**：
+ *     真正的截断仍然是 `historyTurns` 条数 + 滚动摘要（见 chat-service）；
+ *   - 默认 1_000_000（1M），合法区间 8000–2_000_000，越界同 `searchMaxPages` 的两段式处理；
+ *   - 分母由用户填是因为不同模型/端点的窗口差别很大（128K / 1M / 自建代理），
+ *     写死一个数只会让百分比长期对不上；`GET /ai/status` 会把它带出去，前端据此算百分比。
  */
 
 import path from 'node:path';
@@ -37,6 +44,14 @@ export const AI_DEFAULTS = Object.freeze({
   temperature: 0.3,
   /** 送进模型的历史轮数（一轮 = 一问一答）；0 表示不带历史。 */
   historyTurns: 12,
+  /**
+   * 上下文窗口上限（token）：**只作为「已用多少 / 上限」里的分母**。
+   *
+   * 为什么需要它：窗口截断一直按 `historyTurns` 条数 + 滚动摘要走，于是"现在这轮到底占了多少窗口"
+   * 在界面上完全不可见；要显示一个百分比就必须有个分母。不同端点差别很大（128K / 1M / 自建代理），
+   * 所以做成可配置项，默认 1M。
+   */
+  contextWindow: 1_000_000,
   /**
    * 是否允许模型输出 ```svg 图形（沿用 dschat2 的 draw_mode 语义，默认开）。
    * 关掉只是"不再主动告诉模型可以画"，用户明说「画个图」时仍会临时开启（见 chat-service）。
@@ -68,6 +83,7 @@ export const AI_CONFIG_FIELDS = Object.freeze([
   'timeoutMs',
   'temperature',
   'historyTurns',
+  'contextWindow',
   'drawMode',
   'searchEnabled',
   'searchMaxPages',
@@ -79,6 +95,14 @@ export const AI_CONFIG_FIELDS = Object.freeze([
 /** 「网络搜索最大条数」的合法区间（与 web-search.js 的 SEARCH_LIMIT_MIN/MAX 一致）。 */
 export const SEARCH_MAX_PAGES_MIN = 5;
 export const SEARCH_MAX_PAGES_MAX = 30;
+
+/**
+ * 「上下文窗口上限」的合法区间。
+ * 下限 8000：比这更小的窗口连系统提示词都装不下，当分母只会得到一个恒 >100% 的假警报。
+ * 上限 2_000_000：留出比 1M 更大的一档（有些代理会聚合出更大的窗口），同时挡住手滑多敲的 0。
+ */
+export const CONTEXT_WINDOW_MIN = 8_000;
+export const CONTEXT_WINDOW_MAX = 2_000_000;
 
 /** `searchProvider` 的合法取值：auto + 四家 API + 强制只解析结果页。 */
 export const SEARCH_PROVIDER_VALUES = Object.freeze(['auto', 'scrape', ...SEARCH_PROVIDERS]);
@@ -131,6 +155,16 @@ function normSearchMaxPages(value, fallback = AI_DEFAULTS.searchMaxPages) {
   const base = num(fallback, { fallback: AI_DEFAULTS.searchMaxPages, min: SEARCH_MAX_PAGES_MIN, max: SEARCH_MAX_PAGES_MAX });
   const parsed = num(value, { fallback: base, min: SEARCH_MAX_PAGES_MIN, max: SEARCH_MAX_PAGES_MAX });
   return Math.min(SEARCH_MAX_PAGES_MAX, Math.max(SEARCH_MAX_PAGES_MIN, Math.trunc(parsed)));
+}
+
+/**
+ * 「上下文窗口上限」的宽松归一化：取整 + 收敛到 8000–2_000_000。
+ * 与 `normSearchMaxPages` 同款：磁盘/环境变量里的脏值静默回落，服务照常起来。
+ */
+function normContextWindow(value, fallback = AI_DEFAULTS.contextWindow) {
+  const base = num(fallback, { fallback: AI_DEFAULTS.contextWindow, min: CONTEXT_WINDOW_MIN, max: CONTEXT_WINDOW_MAX });
+  const parsed = num(value, { fallback: base, min: CONTEXT_WINDOW_MIN, max: CONTEXT_WINDOW_MAX });
+  return Math.min(CONTEXT_WINDOW_MAX, Math.max(CONTEXT_WINDOW_MIN, Math.trunc(parsed)));
 }
 
 /**
@@ -193,6 +227,24 @@ export function assertAiConfigInput(input = {}) {
     }
   }
 
+  // 上下文窗口上限：它是「用量百分比」的分母，填错了指示会长期失真，所以同样当场 400。
+  const window = input.contextWindow;
+  if (window !== undefined && window !== null && window !== '') {
+    const value = Number(window);
+    if (!Number.isFinite(value)) {
+      throw HttpError.badRequest(`上下文上限必须是数字，收到 ${JSON.stringify(window)}`, { field: 'contextWindow' });
+    }
+    if (!Number.isInteger(value)) {
+      throw HttpError.badRequest(`上下文上限必须是整数，收到 ${value}`, { field: 'contextWindow' });
+    }
+    if (value < CONTEXT_WINDOW_MIN || value > CONTEXT_WINDOW_MAX) {
+      throw HttpError.badRequest(
+        `上下文上限只能是 ${CONTEXT_WINDOW_MIN}–${CONTEXT_WINDOW_MAX} 之间的整数（token），收到 ${value}`,
+        { field: 'contextWindow' },
+      );
+    }
+  }
+
   const provider = input.searchProvider;
   if (provider !== undefined && provider !== null && provider !== '') {
     const value = String(provider).trim().toLowerCase();
@@ -245,6 +297,8 @@ export function normalizeAiConfig(input = {}, base = AI_DEFAULTS) {
   out.timeoutMs = num(raw.timeoutMs, { fallback: base.timeoutMs, min: 1_000, max: 600_000 });
   out.temperature = num(raw.temperature, { fallback: base.temperature, min: 0, max: 2 });
   out.historyTurns = num(raw.historyTurns, { fallback: base.historyTurns, min: 0, max: 100 });
+  // 上下文上限只影响「用量指示」的分母，不影响任何截断行为（截断仍看 historyTurns + 摘要）
+  out.contextWindow = normContextWindow(raw.contextWindow, base.contextWindow);
   // 布尔字段：pickAiConfig 已把它转成字符串，这里再解释一次
   out.drawMode = bool(raw.drawMode === undefined ? base.drawMode : raw.drawMode, base.drawMode);
 
@@ -291,6 +345,8 @@ export function maskAiConfig(config = {}) {
     temperature: config.temperature,
     timeoutMs: config.timeoutMs,
     historyTurns: config.historyTurns,
+    /** 上下文窗口上限：前端拿它当「已用 / 上限」的分母（见 shell/app.js 的圆环）。 */
+    contextWindow: config.contextWindow,
     drawMode: config.drawMode !== false,
     configured: Boolean(key),
     hasKey: Boolean(key),
@@ -339,6 +395,7 @@ export function aiConfigFromEnv(env = process.env) {
     timeoutMs: env.PC_AI_TIMEOUT_MS,
     temperature: env.PC_AI_TEMPERATURE,
     historyTurns: env.PC_AI_HISTORY_TURNS,
+    contextWindow: env.PC_AI_CONTEXT_WINDOW,
     drawMode: env.PC_AI_DRAW_MODE,
     searchEnabled: env.PC_AI_SEARCH_ENABLED,
     searchMaxPages: env.PC_AI_SEARCH_MAX_PAGES,

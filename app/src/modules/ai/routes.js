@@ -60,15 +60,30 @@ export function registerAiRoutes(router, { ai, files, aiScheduler, apiPrefix }) 
   }
 
   // ---------------------------------------------------------------- 上下文
-  router.get(`${P}/context`, async ({ query }) =>
-    ai.buildContext({
+  /**
+   * `GET /ai/context` 有两种口径，靠 `conversationId` 区分（都是同一个路径，避免两套命名）：
+   *   - **不带** `conversationId`：老语义不变 ——「给模型的上下文」（now / today / view / memory / recent），
+   *     `/ai/nl2command` 与外部 Agent 一直在用它，不能因为新增指标就换掉它的返回形状；
+   *   - **带** `conversationId`：返回这个会话的**上下文窗口占用**（`limit` / `used` / `percent` /
+   *     `source` / `breakdown`），也就是输入框上方那个圆环与明细弹层的数据。
+   *
+   * 注意它和 `/ai/usage` 不是一回事：`/ai/usage` 是**累计花了多少 token**（按会话或全库求和），
+   * 这里问的是**此刻上下文里装了多少**（优先取最近一次请求的 `prompt_tokens`）。
+   *
+   * 没传 `conversationId` 时**不会**返回全库口径：全库请走 `/ai/usage`；服务层对
+   * "窗口模式下没给会话 id" 一律 400（见 chat-service 的 `contextUsage`）。
+   */
+  router.get(`${P}/context`, async ({ query }) => {
+    const conversationId = typeof query.conversationId === 'string' ? query.conversationId.trim() : '';
+    if (conversationId) return ai.contextUsage({ conversationId });
+    return ai.buildContext({
       view: query.view,
       module: query.module,
       courseId: query.courseId,
       maxItems: query.maxItems,
       maxChars: query.maxChars,
-    }),
-  );
+    });
+  });
 
   // ---------------------------------------------------------------- 会话
   /**
@@ -89,6 +104,15 @@ export function registerAiRoutes(router, { ai, files, aiScheduler, apiPrefix }) 
 
   /** 真删除（连消息一起删）。归档只是从默认列表里移开，不会走到这里。 */
   router.delete(`${P}/conversations/:id`, ({ params }) => ai.deleteConversation(params.id));
+
+  /**
+   * 手动压缩上下文（对话里的 `/com` / `/compact` 指令，以及圆环弹层里那个按钮）。
+   *
+   * 与自动压缩**完全同一套逻辑**（服务层 `compact()` 复用摘要那一段），差别只有两点：
+   * 它是用户显式要求的（失败要如实报出来，而不是悄悄沿用旧摘要），
+   * 以及没配密钥时返回 501（AI_UNAVAILABLE）而不是 500 —— 那不是服务出错。
+   */
+  router.post(`${P}/conversations/:id/compact`, ({ params }) => ai.compact({ conversationId: params.id }));
 
   /**
    * 清空全部会话（设置页用）。注意与 `DELETE /ai/conversations/:id` 的先后：带 :id 的先匹配。

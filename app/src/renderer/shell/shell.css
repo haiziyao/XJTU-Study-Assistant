@@ -2060,6 +2060,166 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
   color: var(--fg);
 }
 
+
+/*
+ * 「上下文」圆环 + 明细弹层（位置在「用量」左边）。
+ *
+ * 三档配色只改 `--ctx-color` 一个变量：圆环的弧、百分比文字、悬停底色一起变。
+ * 阈值与 `app.js` 的 `ContextMeter.level()` 一致（<60 常规 / 60–85 提醒 / >85 警示），
+ * 两处必须一起改 —— 那里算档位、这里给颜色。
+ */
+.context-ring-btn {
+  --ctx-color: var(--blue);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 7px 0 5px;
+  color: var(--fg-3);
+  background: none;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.context-ring-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.context-ring-btn.lvl-warn {
+  --ctx-color: var(--orange);
+}
+.context-ring-btn.lvl-hot {
+  --ctx-color: var(--red);
+}
+.ctx-ring {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+}
+/* 从 12 点方向开始画弧（SVG 的 0° 在 3 点方向，不转的话起点看着像歪的） */
+.ctx-ring-svg {
+  display: block;
+  transform: rotate(-90deg);
+}
+.ctx-ring-svg .ring-track {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 3;
+}
+.ctx-ring-svg .ring-bar {
+  fill: none;
+  stroke: var(--ctx-color);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dashoffset var(--t);
+}
+.ctx-pct {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-2);
+}
+.context-ring-btn.lvl-warn .ctx-pct,
+.context-ring-btn.lvl-hot .ctx-pct {
+  color: var(--ctx-color);
+}
+
+/* 明细弹层：比其它菜单宽一点（里面有堆叠条与分类行） */
+.context-menu {
+  min-width: 272px;
+  padding: 8px 10px 6px;
+}
+.ctx-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--fg);
+}
+.ctx-head-title {
+  font-weight: 600;
+}
+.ctx-head-total {
+  font-size: 11.5px;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+/* 堆叠条：彩色部分的总长 = used/limit，段内按分类占比分；底色就是"还没用到的部分" */
+.ctx-bar {
+  display: flex;
+  height: 6px;
+  margin: 7px 0 8px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+.ctx-seg {
+  display: block;
+  width: var(--ctx-w, 0%);
+  min-width: 0;
+  background: currentColor;
+  transition: width var(--t);
+}
+/* 四个分类的颜色（图例的小方块与堆叠条共用这几个类） */
+.ctx-seg-system {
+  color: var(--blue);
+}
+.ctx-seg-tools {
+  color: var(--purple);
+}
+.ctx-seg-history {
+  color: var(--green);
+}
+.ctx-seg-summary {
+  color: var(--orange);
+}
+.ctx-legend {
+  display: grid;
+  gap: 2px;
+}
+.ctx-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.ctx-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.ctx-legend-label {
+  flex: 1;
+  color: var(--fg-3);
+}
+.ctx-legend-value {
+  font-variant-numeric: tabular-nums;
+}
+/*
+ * 弹层里那个压缩按钮。注意 `.compose-menu button`（上面的通用规则）选择器权重更高，
+ * 所以这里必须带上 `.context-menu` 前缀，否则底色/居中会被那条通用规则吃掉。
+ */
+.context-menu .ctx-compact-btn {
+  justify-content: center;
+  width: 100%;
+  margin-top: 9px;
+  min-height: 30px;
+  padding: 6px 8px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--fg);
+  background: rgba(108, 140, 255, 0.12);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.context-menu .ctx-compact-btn:hover {
+  color: var(--blue);
+  border-color: var(--blue);
+  background: rgba(108, 140, 255, 0.18);
+}
+
 /* 迁移提示（旧模型名被自动换掉时显示一次） */
 .ai-hint.ai-migrated {
   color: var(--orange);

@@ -30,6 +30,16 @@
     '添加待办 明天 交实验报告 预计2小时',
   ];
 
+  /**
+   * `/com`（等价 `/compact`）：**用户指令**，立刻压缩上下文。
+   *
+   * 为什么不把它发给模型：这是给程序看的命令，不是给模型看的话。发上去只会污染对话
+   * （模型可能学着在回复里也写一句“/com”），而且要花钱；所以命中后**根本不发请求**，
+   * 由前端直接调 `POST /ai/conversations/:id/compact`，服务端也只对"摘要提示词"负责。
+   * 大小写不敏感；`/com` 后面跟的参数一律忽略（写成 `/compact` 也一样）。
+   */
+  const COMPACT_COMMAND = /^\/(?:com|compact)(?:\s|$)/i;
+
   /** 官方支持的图片格式（其余一律当普通文件，别硬塞给上游）。 */
   const VISION_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'];
 
@@ -440,6 +450,8 @@
       for (const message of messages) renderHistoryMessage(message);
       if (!messages.length) systemNote('这个对话还没有消息，直接说话就行。', 'meta');
       dom.chatLog.scrollTop = dom.chatLog.scrollHeight;
+      // 换了会话就必须立刻重画圆环：上一个会话的占用数字留着不动，用户会以为这就是当前会话的
+      await refreshContextMeter();
       pending?.remove();
       return { ok: true, count: messages.length };
     } catch (error) {
@@ -458,6 +470,9 @@
   function newConversation() {
     clearChatLog();
     setConversationId(null);
+    // 新会话还没有上下文可言：把圆环清成空态（而不是停在上一条会话的数字上）
+    contextMeterData = null;
+    contextMeterPaint?.(null);
     welcome();
     dom.chatInput?.focus();
     return { ok: true };
@@ -941,6 +956,9 @@
    */
   async function send(text) {
     const content = String(text ?? '').trim();
+    // `/com` 是**用户指令**：命中后改走"压缩"这个动作，**不发给模型**（见 COMPACT_COMMAND 的说明）。
+    // 放在最前面是为了"一个字都不落库"：它不该在对话流里留下一条用户消息。
+    if (ContextMeter.isCompactCommand(content)) return compactContext();
     const files = state.attachments;
     if (!content && !files.length) return;
     if (files.length && !state.ai.available) {
@@ -1044,7 +1062,10 @@
       }
       const drafts = result.drafts ?? [];
       for (const entry of drafts) renderAiDraft(entry);
+      // 这一轮刚产生真实 usage：圆环的 used 优先取它，所以必须跟着回复一起刷新
+      // （与「用量」共用同一个时机，不另起定时器）
       void refreshUsageBadge();
+      void refreshContextMeter();
       if (!drafts.length && !queried.length && !(result.executed ?? []).length) {
         systemNote(`${state.ai.provider ?? 'AI'} · 只是聊天，没有产生任何写入`, 'meta');
       }
@@ -1379,6 +1400,8 @@
           paintControlStates();
         },
       }),
+      // 圆环在「用量」左边：左=这一刻上下文有多满，右=累计花了多少，两个数字挨着才好一起读
+      contextMeter(),
       usageSelect(),
       drawToggle(),
     );
@@ -1451,6 +1474,169 @@
 
   /** 千分位（数字很长时可读性差别很大）。 */
   const groupDigits = (value) => Number(value || 0).toLocaleString('en-US');
+
+  /* ------------------------------------------------ 上下文占用：圆环 + 明细弹层
+   *
+   * 数据来自 `GET /ai/context?conversationId=`：`used` **优先是最近一次真实请求的 `prompt_tokens`**
+   * （准确、免费），没有真实请求时才退化成按字符估算，并由服务端标 `source: "estimate"`。
+   * 这里只做三件事：算百分比 / 画圆环 / 排版明细弹层。
+   *
+   * 为什么把这几段纯计算抽成一个对象并挂到 window：渲染层是一堆 classic script + IIFE，
+   * 没有模块系统；而这些数字正是用户直接读的（千分位、K/M 紧凑写法、百分比、圆环弧长、
+   * 三档配色阈值），最容易被后续改动改坏。挂出来之后测试断言的是**同一份实现**，
+   * 而不是在测试里再抄一遍公式（抄的那份照样会漂移）。
+   */
+  const CONTEXT_CATEGORY_LABEL = { system: '系统提示词', tools: '工具定义', history: '对话消息', summary: '摘要' };
+  /** 圆环半径（viewBox 32 的正中间留一圈）：周长就是 stroke-dasharray 的满值。 */
+  const RING_RADIUS = 13;
+  const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+
+  /** 占用档位：<60 常规（蓝）、60–85 提醒（橙）、>85 警示（红）——颜色由 shell.css 给。 */
+  function meterLevel(percent) {
+    const value = Number(percent) || 0;
+    if (value > 85) return 'hot';
+    if (value >= 60) return 'warn';
+    return 'ok';
+  }
+
+  /** 圆环几何：dasharray = 整圈，dashoffset = 留白的那一段（0% 整圈空、100% 画满）。 */
+  function ringDashOf(percent) {
+    const clamped = Math.min(100, Math.max(0, Number(percent) || 0));
+    return {
+      circumference: RING_CIRCUMFERENCE,
+      dasharray: RING_CIRCUMFERENCE.toFixed(2),
+      dashoffset: (RING_CIRCUMFERENCE * (1 - clamped / 100)).toFixed(2),
+    };
+  }
+
+  /**
+   * token 的紧凑写法：1234 → `1.2K`、135000 → `135K`、1234567 → `1.2M`、999 → `999`。
+   *
+   * 两条小规矩：不到 1000 就原样给整数（加个 `1.0K` 反而更难读）；
+   * **正好是整单位时不补 `.0`**（1_000_000 → `1M`）—— 分母通常就是这种整数，`.0` 只是噪声。
+   */
+  function compactTokens(value) {
+    const number = Math.max(0, Number(value) || 0);
+    const scale = (divisor, suffix) => {
+      const scaled = number / divisor;
+      return `${Number.isInteger(scaled) ? String(scaled) : scaled.toFixed(1)}${suffix}`;
+    };
+    if (number >= 1_000_000) return scale(1_000_000, 'M');
+    if (number >= 1_000) return scale(1_000, 'K');
+    return String(Math.round(number));
+  }
+
+  /**
+   * 界面上的 token 读数。
+   *
+   * `~` 表示"这是圆整/估算出来的量级"，所以：
+   *   - 用量与各分类（`~207.3K` / `~1.5K`）带它；
+   *   - **用户自己配置的精确值**（上限）不带（`1M`）—— 写成 `~1M` 会让人以为上限也是估的，
+   *     而参照图要表达的是"读数 / 配置"这一对比；
+   *   - 不到 1000 的小数字原样给（`11`、`572`），加波浪号没有意义。
+   */
+  function displayTokens(value, { exact = false } = {}) {
+    const number = Math.max(0, Number(value) || 0);
+    const text = compactTokens(number);
+    return exact || number < 1000 ? text : `~${text}`;
+  }
+
+  const ContextMeter = {
+    group: groupDigits,
+    /** 紧凑写法（不带波浪号） */
+    compact: compactTokens,
+    /** 界面上显示的读数（圆整过的带 `~`） */
+    tokens: displayTokens,
+
+    /**
+     * `/com` / `/compact` 判定（大小写不敏感；后面跟参数也算命中）。
+     * `send()` 用它决定"这条不发模型"，渲染层测试也断言它（同一个正则，两处不会漂移）。
+     */
+    isCompactCommand(text) {
+      return COMPACT_COMMAND.test(String(text ?? '').trim());
+    },
+
+    compact: compactTokens,
+    level: meterLevel,
+    ringDash: ringDashOf,
+
+    /** 百分比文案：一位小数（与服务端 percent 的口径一致）。 */
+    percentText(percent) {
+      return `${(Number(percent) || 0).toFixed(1)}%`;
+    },
+
+    /**
+     * 圆环的 SVG 标记串（用 innerHTML 挂上去，与 composeIcon 同一套做法）。
+     *
+     * dasharray / dashoffset 写成 **SVG 表现属性**而不是 `style=`：本程序 CSP 是 `style-src 'self'`，
+     * 内联样式会被浏览器直接拦掉（同一个坑见 prompt.js 里给模型的绘图规范）。
+     */
+    ringSvg(percent) {
+      const dash = ringDashOf(percent);
+      return (
+        '<svg class="ctx-ring-svg" viewBox="0 0 32 32" width="22" height="22" aria-hidden="true">' +
+        `<circle class="ring-track" cx="16" cy="16" r="${RING_RADIUS}"></circle>` +
+        `<circle class="ring-bar" cx="16" cy="16" r="${RING_RADIUS}"` +
+        ` stroke-dasharray="${dash.dasharray}" stroke-dashoffset="${dash.dashoffset}"></circle>` +
+        '</svg>'
+      );
+    },
+
+    /**
+     * 把服务端那份 `/ai/context` 变成界面直接可用的视图模型（纯函数，测试直接喂假数据断言）。
+     *
+     * 堆叠条的两条口径（别把它们混起来）：
+     *   - **彩色部分的总长** = `used / limit`，也就是"占了多少窗口"这个事实；
+     *   - 段与段之间按**分类占比**再分（分类是估算，真实 usage 不给分类），
+     *     所以彩色总长用的是真实总量、细分用的是估算比例 —— 弹层底部那行小字必须说清这件事。
+     */
+    describe(data) {
+      const limit = Number(data?.limit) > 0 ? Number(data.limit) : 0;
+      const used = Math.max(0, Number(data?.used) || 0);
+      const percent = limit > 0 ? Number(((used / limit) * 100).toFixed(1)) : 0;
+      const breakdown = data?.breakdown ?? {};
+      const rows = Object.keys(CONTEXT_CATEGORY_LABEL)
+        .map((key) => ({ key, label: CONTEXT_CATEGORY_LABEL[key], tokens: Math.max(0, Number(breakdown[key]) || 0) }))
+        // 摘要为 0 就不摆这一行（没有压缩过的会话不该出现一行恒为 0 的"摘要"）
+        .filter((row) => row.key !== 'summary' || row.tokens > 0);
+      const total = rows.reduce((sum, row) => sum + row.tokens, 0);
+      const fill = limit > 0 ? Math.min(100, Math.max(0, (used / limit) * 100)) : 0;
+      const source = data?.source === 'prompt_tokens' ? 'prompt_tokens' : 'estimate';
+      return {
+        ready: Boolean(data),
+        limit,
+        used,
+        percent,
+        percentText: `${percent.toFixed(1)}%`,
+        level: meterLevel(percent),
+        usedText: groupDigits(used),
+        limitText: groupDigits(limit),
+        /** 头部右侧：`~207.3K / 1M` */
+        total: `${displayTokens(used)} / ${displayTokens(limit, { exact: true })}`,
+        source,
+        sourceLabel: source === 'prompt_tokens' ? '真实请求' : '字符估算',
+        /** 弹层底部那行小字：说清哪些数字是估的，别把估算伪装成总量 */
+        sourceNote:
+          source === 'prompt_tokens'
+            ? '分类为按字符估算，总计来自最近一次真实请求的 prompt_tokens'
+            : '分类与总计都是按字符估算（这个会话还没发出过真实请求）',
+        messages: Number(data?.messages) || 0,
+        windowMessages: Number(data?.windowMessages) || 0,
+        windowTurns: Number(data?.windowTurns) || 0,
+        summaryChars: Number(data?.summaryChars) || 0,
+        summaryCovered: Number(data?.summaryCovered) || 0,
+        segments: rows.map((row) => ({
+          ...row,
+          // 段的宽度 = 彩色总长 × 该分类在估算总量里的占比（见上面的两条口径）
+          width: total > 0 ? (fill * row.tokens) / total : 0,
+          text: displayTokens(row.tokens),
+        })),
+      };
+    },
+  };
+  // 挂到 window 供渲染层测试断言（见 test/ai-context-meter.test.js）：**不是**给视图用的 API，
+  // 视图要显示占用请用 PC.service('chat').compact 那一侧的动作。
+  window.PCContextMeter = ContextMeter;
 
   /**
    * 「用量」：累计 token 与**缓存命中率**。
@@ -1529,6 +1715,118 @@
     return wrap;
   }
 
+  /**
+   * 「上下文」圆环（在用量按钮左边）+ 点开的明细弹层。
+   *
+   * 为什么要有它：窗口截断一直按 `historyTurns` 条数 + 滚动摘要走，界面上**看不出**"现在这轮
+   * 装了多少、还剩多少余地"。用户于是只有两种状态：不知道，或者某天突然发现"它把开头忘了"。
+   * 圆环把这件事变成一眼可见，并且给了主动压缩的入口（弹层里那个按钮 = `/com`）。
+   *
+   * 交互（照仓库里既有的 `.compose-select` + `.compose-menu` 写法）：
+   *   - 点圆环 → 打开弹层（**不再**直接压缩：压缩是花钱的动作，必须先看到明细再决定）；
+   *   - 点别处 / Esc → 收起；按钮是 `<button>`，`aria-expanded` 跟着真实开合状态走。
+   */
+  function contextMeter() {
+    const wrap = mk('div', 'compose-select align-right context-meter');
+    const button = mk('button', 'context-ring-btn');
+    button.type = 'button';
+    button.setAttribute('aria-haspopup', 'true');
+    button.setAttribute('aria-expanded', 'false');
+    const ringBox = mk('span', 'ctx-ring');
+    const percentLabel = mk('span', 'ctx-pct');
+    button.append(ringBox, percentLabel);
+
+    const menu = mk('div', 'compose-menu context-menu');
+    wrap.append(button, menu);
+    menu.addEventListener('click', (event) => event.stopPropagation());
+
+    /** 画圆环。`view` 为 null 表示"还没有会话"，此时显示空态而不是 0%。 */
+    const paintRing = (view) => {
+      ringBox.innerHTML = view ? ContextMeter.ringSvg(view.percent) : '';
+      percentLabel.textContent = view ? view.percentText : '—';
+      for (const name of ['ok', 'warn', 'hot']) button.classList.toggle(`lvl-${name}`, view?.level === name);
+      const text = view
+        ? `上下文已用 ${view.usedText} / 上限 ${view.limitText} token（来源：${view.sourceLabel}）` +
+          '；点开看分类明细，可在弹层里压缩（= 输入 /com）'
+        : '上下文占用：还没有会话（先聊一句）；点开看说明';
+      button.title = text;
+      button.setAttribute('aria-label', text);
+    };
+
+    /** 画弹层：上下文明细（堆叠条 + 分类行 + 压缩按钮）。 */
+    const paintMenu = (data) => {
+      if (data?.loading) {
+        menu.replaceChildren(mk('div', 'cm-hint', '读取中…'));
+        return;
+      }
+      if (data?.error) {
+        menu.replaceChildren(mk('div', 'cm-hint', `拿不到上下文占用：${data.error.message ?? data.error}`));
+        return;
+      }
+      const view = data ? ContextMeter.describe(data) : null;
+      if (!view) {
+        menu.replaceChildren(mk('div', 'cm-hint', '还没有会话：先聊一句，圆环就会开始统计。'));
+        return;
+      }
+
+      const head = mk('div', 'ctx-head');
+      head.append(mk('span', 'ctx-head-title', `上下文已用 ${view.percentText}`), mk('span', 'ctx-head-total', view.total));
+
+      // 堆叠条：总长 = used/limit，段内按分类占比分；底色就是"还没用到的部分"
+      const bar = mk('div', 'ctx-bar');
+      for (const segment of view.segments) {
+        const node = mk('span', `ctx-seg ctx-seg-${segment.key}`);
+        node.title = `${segment.label} ${segment.text}`;
+        // 宽度走 CSS 变量（CSP 禁内联 style 属性；CSSOM 写自定义属性是允许的，主题也是这么改的）
+        node.style.setProperty('--ctx-w', `${segment.width.toFixed(2)}%`);
+        bar.appendChild(node);
+      }
+
+      const legend = mk('div', 'ctx-legend');
+      for (const segment of view.segments) {
+        const row = mk('div', 'ctx-legend-row');
+        row.append(
+          mk('span', `ctx-dot ctx-seg-${segment.key}`),
+          mk('span', 'ctx-legend-label', segment.label),
+          mk('span', 'ctx-legend-value', segment.text),
+        );
+        legend.appendChild(row);
+      }
+
+      const compactBtn = mk('button', 'ctx-compact-btn', '压缩上下文（/com）');
+      compactBtn.type = 'button';
+      compactBtn.title = `把窗口外较早的对话压成摘要（保留最近 ${view.windowTurns} 轮不动）`;
+      compactBtn.addEventListener('click', () => {
+        closeComposeMenu(wrap);
+        void compactContext();
+      });
+
+      menu.replaceChildren(head, bar, legend, compactBtn, mk('div', 'cm-hint', view.sourceNote));
+    };
+
+    // 装到外面：`refreshContextMeter()` 要用它重画（整行会被 renderControls 重建，所以要每次更新引用）
+    contextMeterPaint = (data) => {
+      if (data && !data.loading && !data.error) contextMeterData = data;
+      // 读取中/出错时圆环保留上一次的数字（别闪成 0%），原因在弹层里说
+      paintRing(contextMeterData ? ContextMeter.describe(contextMeterData) : null);
+      paintMenu(data ?? contextMeterData);
+    };
+    paintRing(contextMeterData ? ContextMeter.describe(contextMeterData) : null);
+
+    button.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const open = wrap.classList.contains('open');
+      for (const node of document.querySelectorAll('.compose-select.open')) closeComposeMenu(node);
+      if (open) return;
+      wrap.classList.add('open');
+      button.setAttribute('aria-expanded', 'true');
+      await refreshContextMeter({ open: true });
+    });
+    // 重建后如果弹层本来是开着的（例如刚点了绘图开关），把内容补上
+    if (wrap.classList.contains('open')) void refreshContextMeter({ open: true });
+    return wrap;
+  }
+
   /** 图标的统一挂法：取不到图标就留空，按钮仍然可用（与 navIcon() 的回退思路一致）。 */
   function composeIcon(name) {
     const box = mk('span', 'ci-icon');
@@ -1543,6 +1841,101 @@
     const rate = data.cacheHitRate;
     if (rate !== null && rate !== undefined) return `${(rate * 100).toFixed(1)}%`;
     return `${groupDigits(data.tokens?.total)} tok`;
+  }
+
+  /**
+   * 圆环最近一次拿到的 `/ai/context` 结果，以及"重画它"的那个函数。
+   *
+   * 为什么放在外面：`renderControls()` 会整行重建（点一下绘图开关就重建一次），
+   * 重建后圆环必须**立刻**用上一次的结果画出来（否则会闪一下空态）；而每次重建这个函数本身也会换新。
+   */
+  let contextMeterData = null;
+  let contextMeterPaint = null;
+
+  /**
+   * 收起一个向上展开的弹层，并把 `<button>` 上的 `aria-expanded` 同步成 false。
+   *
+   * 为什么单独抽出来：收起的路径有三条（点自己、点别处、Esc），而 `aria-expanded` 只要漏掉一条
+   * 就会开始说谎 —— 屏幕阅读器会一直以为弹层开着。
+   */
+  function closeComposeMenu(node) {
+    node?.classList.remove('open');
+    node?.querySelector('.context-ring-btn')?.setAttribute('aria-expanded', 'false');
+  }
+
+  /**
+   * 取一次 `/ai/context` 并重画圆环（弹层开着时连弹层一起重画）。
+   *
+   * 三种情形分开对待，别混在一起：
+   *   - 没有会话 → 空态（"还没有会话"），不要显示 0%（那会让人以为"上下文是空的"）；
+   *   - 静默刷新（每次回复结束后）失败 → 保留上一次的数字，不打扰用户；
+   *   - 用户主动点开时失败 → 在弹层里说明原因（他正等着看数字）。
+   */
+  async function refreshContextMeter({ open = false } = {}) {
+    if (!contextMeterPaint || !state.apiBase) return null;
+    if (!state.conversationId) {
+      contextMeterData = null;
+      contextMeterPaint(null);
+      return null;
+    }
+    if (open) contextMeterPaint({ loading: true });
+    try {
+      const data = await api(`/ai/context?conversationId=${encodeURIComponent(state.conversationId)}`);
+      contextMeterPaint(data);
+      return data;
+    } catch (error) {
+      contextMeterPaint(open ? { error } : null);
+      return null;
+    }
+  }
+
+  /**
+   * 「压缩上下文」——`/com` 指令与圆环弹层里那个按钮**共用这一个动作**。
+   *
+   * 它改的是"上下文里装了什么"，所以做完必须刷新三处：圆环、累计用量、以及（若开着的）弹层数字。
+   * 界面里那条系统提示条说的都是**服务端返回的事实**（压了几条、摘要多少字、覆盖到第几条），
+   * 不自己编一句"已优化上下文"这种没有信息量的话。
+   */
+  async function compactContext() {
+    const conversationId = state.conversationId;
+    if (!conversationId) {
+      systemNote('还没有对话可以压缩：先聊一句，或打开一条历史对话。', 'meta');
+      return { ok: false, reason: 'no_conversation' };
+    }
+    const pending = systemNote('正在压缩上下文…', 'pending');
+    let result = null;
+    try {
+      result = await api(`/ai/conversations/${encodeURIComponent(conversationId)}/compact`, { method: 'POST' });
+      pending.remove();
+      if (result.compacted) {
+        systemNote(
+          `已压缩上下文：把较早的 ${result.summarized} 条消息压成 ${result.summaryChars} 字摘要（覆盖到第 ${result.covered} 条）`,
+          'meta',
+        );
+      } else if (result.reason === 'empty_summary') {
+        systemNote(`压缩没有拿到可用的摘要内容：${result.detail ?? '模型这次没有返回内容'}（上下文保持原样）`, 'fail');
+      } else {
+        systemNote(
+          `没有可压缩的部分：当前只有 ${result.messages} 条消息，窗口内还放得下` +
+            `（窗口保留最近 ${result.windowTurns} 轮，待压 ${result.pending ?? 0} 条 / 阈值 ${result.minMessages ?? 6} 条）`,
+          'meta',
+        );
+      }
+    } catch (error) {
+      pending.remove();
+      // 501 = 没配置密钥（AI_UNAVAILABLE）：这不是"压缩失败"，而是这条功能还没启用，措辞要分开
+      if (error?.status === 501 || error?.payload?.error?.code === 'AI_UNAVAILABLE') {
+        systemNote('未配置密钥，无法压缩：去「设置 → AI 接入」填上 API Key 再来。', 'fail');
+      } else {
+        systemNote(`压缩失败：${error?.message ?? error}`, 'fail');
+      }
+      return { ok: false, error };
+    } finally {
+      // 圆环与累计用量都要立刻反映压缩后的状态（弹层开着时 refreshContextMeter 会一起重画）
+      await refreshContextMeter();
+      void refreshUsageBadge();
+    }
+    return result;
   }
 
   /** 静默刷新「用量」上的数字（不展开菜单）；失败就算了，点开时会重新取。 */
@@ -1659,9 +2052,22 @@
       await addFiles(dom.chatFiles.files);
       dom.chatFiles.value = ''; // 允许再次选同一个文件
     });
-    // 点空白处收起所有向上展开的菜单
+    // 点空白处收起所有向上展开的菜单（圆环那个弹层也走这条，只是多了 aria 同步）
     document.addEventListener('click', () => {
-      for (const node of document.querySelectorAll('.compose-select.open')) node.classList.remove('open');
+      for (const node of document.querySelectorAll('.compose-select.open')) closeComposeMenu(node);
+    });
+    /**
+     * Esc 收起圆环弹层并把焦点还给按钮（键盘可达性）。
+     *
+     * 监听器**只在这里注册一次**：`renderControls()` 会反复重建那一行控件，如果在 contextMeter()
+     * 里注册，点几次绘图开关就会攒下一堆指向已卸载节点的僵尸监听。
+     */
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      const meter = document.querySelector('.chat-controls .context-meter.open');
+      if (!meter) return;
+      closeComposeMenu(meter);
+      meter.querySelector('.context-ring-btn')?.focus();
     });
     dom.chatSend.addEventListener('click', submit);
     input.addEventListener('keydown', (event) => {

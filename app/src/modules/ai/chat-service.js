@@ -26,9 +26,9 @@ import { ERROR_CODES } from '../../shared/constants.js';
 import { HttpError } from '../../core/http/router.js';
 import { todayKey } from '../../shared/time.js';
 
-import { maskAiConfig } from './config.js';
+import { maskAiConfig, AI_DEFAULTS } from './config.js';
 import { extractDrafts, previewDrafts } from './drafts.js';
-import { buildChatSystemPrompt, buildCommandSystemPrompt } from './prompt.js';
+import { buildChatSystemPrompt, buildCommandSystemPrompt, describeChatPrompt, estimateTokens } from './prompt.js';
 import {
   readPages,
   searchWeb,
@@ -108,6 +108,12 @@ const MAX_ROUNDS = 8;
  */
 const SUMMARY_MIN_MESSAGES = 6;
 const SUMMARY_MAX_CHARS = 600;
+
+/**
+ * 「分类合计」用的键：system / tools 由 `describeChatPrompt` 给，history / summary 由本文件算。
+ * 顺序就是弹层里的行序（用户先看规则占多少，再看对话本身占多少）。
+ */
+const CONTEXT_BREAKDOWN_KEYS = Object.freeze(['system', 'tools', 'history', 'summary']);
 
 /**
  * 思考强度 → 官方 `reasoning_effort`。
@@ -309,15 +315,7 @@ export class AiChatService {
     //     不会被一个陈旧的 usageRounds 顶掉；3 轮以上同样一个不落；
     //   - 下面还有 `if (!raw) continue;`，所以某轮没有 usage 时不会虚增 calls。
     for (const message of messages) {
-      const rounds =
-        Array.isArray(message.usageRounds) && message.usageRounds.length
-          ? [
-              message.usage ?? message.usageRounds[0],
-              message.usageFollowup ?? message.usageRounds[1],
-              ...message.usageRounds.slice(2),
-            ]
-          : [message.usage, message.usageFollowup];
-      for (const raw of rounds) {
+      for (const raw of this.#usageRoundsOf(message)) {
         if (!raw) continue;
         calls += 1;
         const completion = Number(raw.completion_tokens) || 0;
@@ -353,6 +351,123 @@ export class AiChatService {
       },
       /** 0~1；没有任何输入 token 时为 null（而不是 0，免得显示成"命中率 0%"误导人）。 */
       cacheHitRate: inputDenominator > 0 ? sum.cached / inputDenominator : null,
+    };
+  }
+
+  /**
+   * 「上下文占用了多少」——给输入框上方那个圆环与明细弹层用（`GET /ai/context?conversationId=`）。
+   *
+   * 为什么 `used` 优先用**最近一次真实请求的 `prompt_tokens`**：
+   *   那一次请求里带的东西（系统提示词 + 工具契约 + 窗口内消息 + 摘要 + 回灌）**就是**"当前上下文有多大"，
+   *   而且是上游算的、免费拿到的（usage 已经随消息落库）。自己按字符估，只会在"到底用了几成"这种
+   *   要做决定的地方给出一个偏差很大的数 —— 圆环一偏，用户就该压的时候不压、不该压时瞎压。
+   *
+   * 为什么没 usage 时必须**标 `source: "estimate"`**：
+   *   新会话（还没有任何一次请求）或没配密钥时，真实值根本不存在。这时给一个估算是有用的
+   *   （能让用户看到"已经堆了多少"），但它和真实 token 不是一回事 —— 把它当真实值展示就是骗人，
+   *   所以来源一路带到界面上（圆环 title、弹层底部那行小字都写了来源）。
+   *
+   * 口径：
+   *   - 会话不存在 → 404；不传 conversationId → 400（这一层只管"某个会话的占用"，
+   *     全库累计用量在 `/ai/usage` 里，两者不是一回事，别在这里再算一遍）；
+   *   - `breakdown` 各分类**永远是字符估算**（真实 usage 不给分类），所以另有 `breakdownSource` 标明；
+   *   - 算不准的字段给 `null`（例如 `injection`：记忆/数据注入已经算在 system 里，单列会让分类合计对不上）。
+   */
+  async contextUsage({ conversationId } = {}) {
+    const id = String(conversationId ?? '').trim();
+    if (!id) {
+      throw HttpError.badRequest('conversationId 不能为空：本接口只报某个会话的上下文占用（全库累计用量看 /ai/usage）', {
+        field: 'conversationId',
+      });
+    }
+    const conversation = this.getConversation(id); // 未知 id 一律 404（复用服务层的判定）
+    return this.#contextPayload(conversation);
+  }
+
+  /**
+   * 「立刻压缩上下文」——`/com` 指令与圆环弹层里那个按钮走的就是这一条。
+   *
+   * 语义与**自动压缩完全同一套**（共用 `#summaryPlan` + `#writeSummary`）：
+   *   - 最近 `historyTurns` 轮（= `historyTurns * 2` 条消息）留在窗口里，一个字都不动；
+   *   - 更早、且还没进过摘要的部分并进 `summary`（累加/合并，仍受 `SUMMARY_MAX_CHARS` 约束）；
+   *   - 待压条数 < `SUMMARY_MIN_MESSAGES` 时**不调模型**（这正是"没有可压缩的部分"），
+   *     返回 `compacted:false`，省下一次真金白银的调用；
+   *   - 没配密钥 → 501（AI_UNAVAILABLE），不是 500：这不是服务出错，而是这条功能还没被启用。
+   *
+   * 返回里的 `before`/`after.used` **都用字符估算**（而不是 before 用真实 usage）：
+   *   after 的真实值要等下一次请求才存在。若 before 拿"最近一次真实请求"、after 只能估算，
+   *   两个数字口径不同，相减出来的"省了多少"就是假的；同口径估算至少让差值可用。
+   *   真实总量仍然去 `/ai/context` 看（那里 `source: "prompt_tokens"`）。
+   */
+  async compact({ conversationId } = {}) {
+    const id = String(conversationId ?? '').trim();
+    if (!id) throw HttpError.badRequest('conversationId 不能为空', { field: 'conversationId' });
+    const conversation = this.getConversation(id); // 不存在 → 404
+
+    // 未配置密钥：**不抛 500**。501 + AI_UNAVAILABLE 是"这个功能还没启用"的既有语义
+    // （与 /ai/chat、/ai/nl2command 一致），前端据此显示"未配置密钥，无法压缩"。
+    if (!this.provider.configured()) {
+      throw new HttpError(501, ERROR_CODES.AI_UNAVAILABLE, 'AI 尚未配置密钥，无法压缩上下文', {
+        hint: '在设置里填 API Key，或 POST /api/v1/ai/config {"apiKey":"sk-…"}。',
+        provider: this.config.get().provider,
+      });
+    }
+
+    const plan = this.#summaryPlan(conversation);
+    const before = await this.#contextPayload(conversation, { estimateOnly: true });
+    const base = {
+      ok: true,
+      conversationId: conversation.id,
+      messages: plan.all.length,
+      windowMessages: plan.windowMessages,
+      windowTurns: plan.turns,
+      before: {
+        messages: plan.all.length,
+        windowMessages: plan.windowMessages,
+        used: before.used,
+        source: before.source,
+        summaryChars: plan.existing.length,
+        // 最近一次真实请求的 prompt_tokens（有就带上）：与估算值并排给出，不做任何换算
+        promptTokens: before.real?.tokens ?? null,
+      },
+    };
+    if (plan.fresh.length < SUMMARY_MIN_MESSAGES) {
+      return {
+        ...base,
+        compacted: false,
+        reason: 'nothing_to_compact',
+        /** 窗口之外、还没进摘要的条数 —— 说明"为什么没压"（不是出错，是还不够压） */
+        pending: plan.fresh.length,
+        minMessages: SUMMARY_MIN_MESSAGES,
+      };
+    }
+
+    const written = await this.#writeSummary(conversation, plan);
+    if (!written.ok) {
+      if (written.error) {
+        // 用户显式要求压缩，就该看到失败原因（自动压缩那条路仍然是"悄悄沿用旧摘要"）
+        if (written.error instanceof HttpError) throw written.error;
+        throw new HttpError(502, ERROR_CODES.UPSTREAM_ERROR, `压缩上下文失败：${written.message}`, {
+          hint: '上游这次没返回可用内容；稍后再试一次即可，对话本身不受影响。',
+        });
+      }
+      return { ...base, compacted: false, reason: 'empty_summary', detail: written.message };
+    }
+
+    const saved = this.store.aiConversations.get(conversation.id) ?? conversation;
+    const after = await this.#contextPayload(saved, { estimateOnly: true });
+    // 压缩只改会话的 summary/summaryCount 两个字段，界面上没有任何列表依赖它们
+    // （与 `send` 里的自动压缩一致：那里也只广播 ai_message，不额外广播会话变更）。
+    return {
+      ...base,
+      compacted: true,
+      /** N：这次新压进去的条数 */
+      summarized: written.summarized,
+      /** K：摘要**累计**覆盖到第几条（界面上的"覆盖到第 K 条"） */
+      covered: written.covered,
+      /** M：压缩后的摘要字数 */
+      summaryChars: written.text.length,
+      after: { used: after.used, source: after.source, summaryChars: written.text.length },
     };
   }
 
@@ -1030,19 +1145,40 @@ export class AiChatService {
    *   - 已经覆盖的部分不重压（`summaryCount` 记着覆盖到第几条）。
    */
   async #ensureSummary(conversation) {
+    const plan = this.#summaryPlan(conversation);
+    if (plan.fresh.length < SUMMARY_MIN_MESSAGES) return plan.existing;
+    const written = await this.#writeSummary(conversation, plan);
+    // 压缩是"锦上添花"：失败（或模型没给出内容）就沿用旧摘要，绝不让这条消息发不出去
+    return written.ok ? written.text : plan.existing;
+  }
+
+  /**
+   * 「哪些旧消息该进摘要」——**唯一口径**，自动压缩（`#ensureSummary`）与手动 `/com`（`compact`）共用。
+   *
+   * 抽出来的原因是这两条路必须**完全一致**：如果手动压缩按另一套窗口算，
+   * 用户点一次"压缩"，压掉的可能正是模型下一秒还要用的那几条。
+   */
+  #summaryPlan(conversation) {
     const existing = String(conversation?.summary ?? '').trim();
-    const covered = Number(conversation?.summaryCount ?? 0);
-    const turns = this.config.get().historyTurns ?? 0;
-    if (turns <= 0) return existing;
-
-    const all = this.#messagesOf(conversation.id).filter(
-      (item) => (item.role === 'user' || item.role === 'assistant') && item.status !== 'failed' && item.content,
-    );
+    const covered = Math.max(0, Number(conversation?.summaryCount ?? 0) || 0);
+    const turns = Number(this.config.get().historyTurns) || 0;
+    const all = this.#contextMessages(conversation?.id);
+    // 窗口 = 最近 turns 轮（一问一答各算一条消息，所以是 turns * 2 条）；turns=0 表示不带历史
+    const windowMessages = turns > 0 ? Math.min(all.length, turns * 2) : 0;
     // 窗口之外的部分才是"该被压缩"的：窗口里的内容模型直接看得到，压了纯属浪费
-    const older = all.slice(0, Math.max(0, all.length - turns * 2));
-    if (older.length - covered < SUMMARY_MIN_MESSAGES) return existing;
-
+    const older = turns > 0 ? all.slice(0, Math.max(0, all.length - windowMessages)) : [];
+    // 已经覆盖的部分不重压 —— 这是"不重复烧 token"的关键
     const fresh = older.slice(covered);
+    return { existing, covered, turns, all, windowMessages, older, fresh };
+  }
+
+  /**
+   * 真的去调模型写摘要（自动压缩与 `/com` 共用这一份，**不要**再写第二份提示词）。
+   *
+   * 不抛异常：自动压缩那条路上"压缩失败"必须降级成"继续用旧摘要"，
+   * 所以失败以 `{ ok:false }` 返回，由调用方决定是记日志还是报错给用户。
+   */
+  async #writeSummary(conversation, { existing, older, fresh }) {
     const transcript = fresh
       .slice(-40) // 一次最多压 40 条：再长的对话也是分批压，避免单次请求过大
       .map((item) => `${item.role === 'user' ? '用户' : '助手'}：${String(item.content).slice(0, 500)}`)
@@ -1059,32 +1195,155 @@ export class AiChatService {
           },
           {
             role: 'user',
-            content:
-              (existing ? `【已有摘要】\n${existing}\n\n` : '') +
-              `【需要并入的对话】\n${transcript}`,
+            content: (existing ? `【已有摘要】\n${existing}\n\n` : '') + `【需要并入的对话】\n${transcript}`,
           },
         ],
         temperature: 0.2,
       });
       const text = String(result?.text ?? '').trim().slice(0, SUMMARY_MAX_CHARS);
-      if (!text) return existing;
+      if (!text) return { ok: false, message: '模型没有返回可用的摘要内容' };
       await this.store.aiConversations.update(conversation.id, {
         summary: text,
+        // 覆盖数是**累计**的（older.length），不是这一次压了几条：下次只压新增的部分
         summaryCount: older.length,
         summaryAt: new Date().toISOString(),
       });
-      return text;
+      return { ok: true, text, covered: older.length, summarized: fresh.length };
     } catch (error) {
-      // 压缩是"锦上添花"：失败只记日志，绝不让这条消息发不出去
       this.#log('warn', `对话摘要压缩失败（继续用旧摘要）：${error?.message ?? error}`);
-      return existing;
+      return { ok: false, error, message: error?.message ?? String(error) };
     }
+  }
+
+  /**
+   * 上下文占用的原始测量（`contextUsage` 与 `compact` 共用）。
+   *
+   * 两套口径一起给出来，由调用方决定用哪个：
+   *   - `real`：最近一次真实请求的 `prompt_tokens`（可能没有 → null）；
+   *   - `estimate`：按"下一次请求会带上的东西"逐块字符估算。
+   */
+  async #measureContext(conversation) {
+    const config = this.config.get();
+    const history = this.#history(conversation.id);
+    const summary = String(conversation?.summary ?? '').trim();
+    /**
+     * 系统提示词那段按"下一次真发出去的那份"估。
+     *
+     * **刻意不调 `buildContext()`**：记忆注入的 `inject()` 会累加命中计数（见 memory 模块），
+     * 一个"看一眼占用"的接口每次刷新都去动别人的统计是越界。代价是少算了记忆注入那几十~几百
+     * token —— 估算本来就标着 `source: 'estimate'`，不值得为它去改别的模块的状态。
+     */
+    const prompt = describeChatPrompt({
+      draw: config.drawMode !== false,
+      permission: 'manual',
+      search: 'off',
+      domainBlocks: this.domainBlocks,
+      summary,
+      recent: this.#recentSummary(todayKey()),
+    });
+    const historyText = history.map((item) => String(item.content ?? '')).join('\n');
+    const parts = {
+      system: prompt.system.tokens,
+      tools: prompt.tools.tokens,
+      history: estimateTokens(historyText),
+      summary: estimateTokens(summary),
+    };
+    const breakdown = {};
+    for (const key of CONTEXT_BREAKDOWN_KEYS) breakdown[key] = parts[key];
+    // 记忆/近期数据注入已经算在 system 里了，单列会让"分类合计"和 used 对不上。
+    // 宁可给 null（前端不显示这一行），也不编一个会重复计数的数。
+    breakdown.injection = null;
+    return {
+      real: this.#lastPromptTokens(conversation.id),
+      breakdown,
+      /** 分类合计（估算）——分类是估算，所以这个值只用来算堆叠条各段的比例 */
+      breakdownTotal: CONTEXT_BREAKDOWN_KEYS.reduce((sum, key) => sum + parts[key], 0),
+      estimateUsed: CONTEXT_BREAKDOWN_KEYS.reduce((sum, key) => sum + parts[key], 0),
+      messages: this.#contextMessages(conversation.id).length,
+      windowMessages: history.length,
+      windowTurns: Number(config.historyTurns) || 0,
+      summaryChars: summary.length,
+      summaryCovered: Math.max(0, Number(conversation?.summaryCount ?? 0) || 0),
+    };
+  }
+
+  /** 组装 `/ai/context` 的返回（见 `contextUsage` 的注释：为什么优先真实值、为什么标来源）。 */
+  async #contextPayload(conversation, { estimateOnly = false } = {}) {
+    const measured = await this.#measureContext(conversation);
+    const limit = Number(this.config.get().contextWindow) || AI_DEFAULTS.contextWindow;
+    // 有真实 usage 就用它（准确、免费）；只有 `estimateOnly`（压缩前后对比）才强制走估算
+    const useReal = !estimateOnly && Boolean(measured.real);
+    const used = useReal ? measured.real.tokens : measured.estimateUsed;
+    return {
+      ok: true,
+      conversationId: conversation.id,
+      limit,
+      used,
+      /** 一位小数；used > limit 时不截断（上限是用户填的，超过就该让百分比如实超 100） */
+      percent: Number(((used / limit) * 100).toFixed(1)),
+      source: useReal ? 'prompt_tokens' : 'estimate',
+      /** 真实值的取样时间（估算时 null：没有"哪一次请求"这回事） */
+      usedAt: useReal ? measured.real.at : null,
+      messages: measured.messages,
+      windowMessages: measured.windowMessages,
+      windowTurns: measured.windowTurns,
+      summaryChars: measured.summaryChars,
+      summaryCovered: measured.summaryCovered,
+      breakdown: measured.breakdown,
+      /** 分类**永远**是字符估算（真实 usage 不给分类），单独标出来，免得被当成真实值 */
+      breakdownSource: 'estimate',
+      breakdownTotal: measured.breakdownTotal,
+      configured: this.provider.configured(),
+    };
+  }
+
+  /**
+   * 最近一次**真实请求**的 `prompt_tokens`（一次回复有多轮时取最后一轮）。
+   *
+   * 为什么从后往前找：绝大多数会话最后一条 assistant 消息就是最新的那次调用，一次命中；
+   * 失败的回复（`status:'failed'`）不带 usage，自然被跳过。
+   */
+  #lastPromptTokens(conversationId) {
+    const messages = this.#messagesOf(conversationId).filter((item) => item.role === 'assistant');
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const rounds = this.#usageRoundsOf(messages[index]).filter((raw) => Number(raw?.prompt_tokens) > 0);
+      const last = rounds[rounds.length - 1];
+      if (last) {
+        return { tokens: Number(last.prompt_tokens), at: messages[index].createdAt ?? null, messageId: messages[index].id ?? null };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 一条 assistant 消息上**每一轮**上游调用的 usage（口径与 `usage()` 完全一致）。
+   * 抽出来是因为 `/ai/context` 也要按同一顺序取"最后一次调用"，两处各写一份迟早会漂移。
+   */
+  #usageRoundsOf(message) {
+    return Array.isArray(message?.usageRounds) && message.usageRounds.length
+      ? [
+          message.usage ?? message.usageRounds[0],
+          message.usageFollowup ?? message.usageRounds[1],
+          ...message.usageRounds.slice(2),
+        ]
+      : [message?.usage, message?.usageFollowup];
   }
 
   #messagesOf(conversationId) {
     return (this.store.aiMessages?.all?.() ?? [])
       .filter((item) => item.conversationId === conversationId)
       .sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
+  }
+
+  /**
+   * 「参与上下文的消息」——历史 / 摘要 / 占用统计**共用**这一份过滤与排序。
+   * 口径：只要 user / assistant 里**非失败**且有正文的（失败的回复不该占上下文，
+   * 空的流式占位消息也不该被算进去）。
+   */
+  #contextMessages(conversationId) {
+    return this.#messagesOf(conversationId).filter(
+      (item) => (item.role === 'user' || item.role === 'assistant') && item.status !== 'failed' && item.content,
+    );
   }
 
   /**
@@ -1102,9 +1361,7 @@ export class AiChatService {
   #history(conversationId) {
     const turns = this.config.get().historyTurns ?? 0;
     if (turns <= 0) return [];
-    const all = this.#messagesOf(conversationId).filter(
-      (item) => (item.role === 'user' || item.role === 'assistant') && item.status !== 'failed' && item.content,
-    );
+    const all = this.#contextMessages(conversationId);
     // 截断逻辑**不变**：仍然是最后 turns 轮（一问一答算一条消息，所以是 turns * 2）
     return all.slice(-turns * 2).map((item) => {
       if (item.role !== 'assistant') return { role: item.role, content: item.content };

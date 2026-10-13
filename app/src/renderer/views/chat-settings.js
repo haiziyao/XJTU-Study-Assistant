@@ -7,6 +7,10 @@
  *   - 「网络搜索最大条数」是用户明确要的一个旋钮（5–30）：它直接决定一次问答读几个网页 ——
  *     读得多结论更全但更慢、也更费 token，读得少快但可能漏。放在设置里让人自己权衡。
  *
+ * 「上下文上限」是这一块唯一一个**不影响行为、只影响读数**的旋钮：它只当"上下文用量"百分比的分母。
+ * 真正的窗口截断仍然按「最近若干轮 + 滚动摘要」走（见 modules/ai/chat-service.js），
+ * 所以它旁边那句说明必须写清这件事 —— 否则用户会以为调大它就能让模型记住更多。
+ *
  * 「试一下」是这一块最重要的按钮：联网检索最容易出现"看起来配好了、其实被拦了"的情况，
  * 所以这里直接把**诊断信息**摊开（用了哪个后端、校内域名通不通、每条为什么没抓到正文），
  * 而不是只回一句"没搜到"。它和对话里走同一个适配器，这里能搜到，对话里就能搜到。
@@ -104,6 +108,25 @@
     }
     const config = ui.config;
 
+    // ---------------------------------------------------------- 上下文
+    mount.appendChild(mk('div', 'cs-group-title', '上下文'));
+
+    // 多一个 cs-context-window：这一块有两个数字输入（上限 / 搜索条数），测试与样式都要能指名道姓
+    const contextWindow = mk('input', 'cs-input cs-number cs-context-window');
+    contextWindow.type = 'number';
+    contextWindow.min = '8000';
+    contextWindow.max = '2000000';
+    contextWindow.step = '1000';
+    contextWindow.value = String(config.contextWindow ?? 1000000);
+    mount.appendChild(
+      field(
+        '上下文上限（token）',
+        contextWindow,
+        '默认 1,000,000。它**只作为「上下文用量」百分比的分母**（对话输入框上方那个圆环），' +
+          '不改变窗口截断规则：送进模型的历史仍然是最近若干轮，更早的内容由滚动摘要带着。',
+      ),
+    );
+
     // ---------------------------------------------------------- 联网检索
     mount.appendChild(mk('div', 'cs-group-title', '联网检索'));
 
@@ -165,7 +188,16 @@
         paint();
         return;
       }
+      // 前端先拦一道（后端 assertAiConfigInput 也会拦）：范围与 config.js 的
+      // CONTEXT_WINDOW_MIN/MAX 一致，改一边记得改另一边
+      const windowValue = Number(contextWindow.value);
+      if (!Number.isInteger(windowValue) || windowValue < 8000 || windowValue > 2000000) {
+        ui.error = new Error('上下文上限必须是 8000–2000000 之间的整数（token）');
+        paint();
+        return;
+      }
       const body = {
+        contextWindow: windowValue,
         searchEnabled: enabled.checked,
         searchProvider: provider.value,
         searchMaxPages: value,

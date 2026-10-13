@@ -302,38 +302,104 @@ function summaryBlock(context = {}) {
   return `【此前对话的摘要（较早的内容已压缩，别当成用户刚说的话）】\n${summary}`;
 }
 
-export function buildChatSystemPrompt(context = {}) {
+/**
+ * 系统提示词的**分段**组装：每段标上它属于「系统提示词」还是「工具定义」。
+ *
+ * 为什么要有这张分段表（而不是只留一个拼好的字符串）：
+ *   「上下文占用」弹层要把这一大段拆开报给用户 —— 用户真正想知道的往往是
+ *   「规则本身占了多少 / 工具契约占了多少」，而不是一个笼统的 7K。
+ *   分段表与 `buildChatSystemPrompt()` 是**同一份来源**（后者就是它 join 出来的），
+ *   所以弹层里的数字永远跟着提示词一起变，不会各改各的。
+ *
+ * 分类口径（写死在这里，别在别处再解释一次）：
+ *   - `tools`  = 机器要照着填的**契约**：三个集合的字段表（DOMAIN_RULES）、
+ *                模型输出的草稿协议（DRAFT_PROTOCOL）、各模块自己声明的 target 说明
+ *                （`aiPrompt` 注入的 domainBlocks，内容就是"这个 target 有哪些字段"）、
+ *                以及开着联网时的检索协议；
+ *   - `system` = 其余全部：角色、当前时间、近期数据、记忆、摘要、权限/联网口径、
+ *                成绩呈现、公式、主动性、说话方式。
+ *   模块注入的 `aiPrompt` 归到 `tools` 而不是 `system`：它的内容就是 target 的字段契约，
+ *   归到系统提示词里会让"规则占了多少"这个数字失去意义。
+ */
+function chatPromptParts(context = {}) {
   return [
-    AI_SYSTEM_ROLE,
-    '',
-    timeBlock(context),
-    summarizeContext(context),
-    memoryBlock(context),
-    summaryBlock(context),
-    '',
-    DOMAIN_RULES,
-    domainBlocks(context),
-    '',
-    DRAFT_PROTOCOL,
-    '',
+    { kind: 'system', text: AI_SYSTEM_ROLE },
+    { kind: 'system', text: '' },
+    { kind: 'system', text: timeBlock(context) },
+    { kind: 'system', text: summarizeContext(context) },
+    { kind: 'system', text: memoryBlock(context) },
+    { kind: 'system', text: summaryBlock(context) },
+    { kind: 'system', text: '' },
+    { kind: 'tools', text: DOMAIN_RULES },
+    { kind: 'tools', text: domainBlocks(context) },
+    { kind: 'system', text: '' },
+    { kind: 'tools', text: DRAFT_PROTOCOL },
+    { kind: 'system', text: '' },
     // 写入权限 / 联网检索：都是"这一轮"的选择，必须跟着提示词走，
     // 否则模型会谎报（auto 档还在说"你确认一下"、开关开了就假装"我搜到了"）
-    permissionNote(context),
-    '',
-    searchNote(context),
+    { kind: 'system', text: permissionNote(context) },
+    { kind: 'system', text: '' },
+    { kind: 'system', text: searchNote(context) },
     // 只有真开着联网才展开工具细节：关着还讲怎么搜，模型会忍不住去试
-    ...(context.search === 'web' || context.search === 'campus' ? ['', webSearchBlock()] : []),
-    '',
-    GRADE_NOTE,
-    '',
-    MATH_NOTE,
-    '',
-    PROACTIVE_NOTE,
+    ...(context.search === 'web' || context.search === 'campus' ? [{ kind: 'tools', text: '' }, { kind: 'tools', text: webSearchBlock() }] : []),
+    { kind: 'system', text: '' },
+    { kind: 'system', text: GRADE_NOTE },
+    { kind: 'system', text: '' },
+    { kind: 'system', text: MATH_NOTE },
+    { kind: 'system', text: '' },
+    { kind: 'system', text: PROACTIVE_NOTE },
     // 绘图说明只在开用作图时注入（dschat2 也是按开关注入，省 token）
-    ...(context.draw ? ['', DRAW_NOTE] : []),
-    '',
-    '【说话方式】中文；结论先行；要建议就给具体信息（先查再答）；不确定就问，不要编造用户的课程名、老师、成绩这类事实。',
-  ].join('\n');
+    ...(context.draw ? [{ kind: 'tools', text: '' }, { kind: 'tools', text: DRAW_NOTE }] : []),
+    { kind: 'system', text: '' },
+    { kind: 'system', text: '【说话方式】中文；结论先行；要建议就给具体信息（先查再答）；不确定就问，不要编造用户的课程名、老师、成绩这类事实。' },
+  ];
+}
+
+export function buildChatSystemPrompt(context = {}) {
+  return chatPromptParts(context)
+    .map((part) => part.text)
+    .join('\n');
+}
+
+/**
+ * 字符 → token 的**粗估**（只用在「没有真实 usage」的时候，见 chat-service 的 contextUsage）。
+ *
+ * 为什么要估而不是给个固定值：新会话、或还没配密钥时，界面上仍然要显示"现在占了多少"，
+ * 否则圆环永远停在 0%，用户没法判断"要不要压缩"。而 token 数只有上游才算得出来，
+ * 这里只能按字符量级折算 —— 所以整个估算结果都带 `source: 'estimate'`，**绝不冒充**真实 usage。
+ * 折算系数取官方文档量级：中文约 1.6 字/token、英文约 4 字/token。
+ */
+const CJK_CHARS = /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/g;
+
+/** 中英混排的字符→token 估算（导出给 chat-service 与测试用）。 */
+export function estimateTokens(text) {
+  const source = String(text ?? '');
+  const cjk = (source.match(CJK_CHARS) ?? []).length;
+  const other = Math.max(0, source.length - cjk);
+  return Math.round(cjk / 1.6 + other / 4);
+}
+
+/**
+ * 把系统提示词按「系统提示词 / 工具定义」拆开算**字符数与估算 token 数**
+ * （给 `/ai/context` 的 breakdown 用）。
+ *
+ * 为什么返回估算 token 而不只是字符：分类要拿去和总量（真实 prompt_tokens）并排显示，
+ * 单位必须一致，否则用户看到的是"系统提示词 7800 字 / 总共 12000 token"这种没法比较的东西。
+ * 分段之间的换行分隔符（每段 1 个字符）没有归属，不计入任何一类 —— 它只有几十个字符，
+ * 对"这一大块占多少"的判断没有影响。
+ */
+export function describeChatPrompt(context = {}) {
+  const parts = chatPromptParts(context);
+  const out = {};
+  for (const kind of ['system', 'tools']) {
+    const text = parts
+      .filter((part) => part.kind === kind)
+      .map((part) => part.text)
+      .join('\n');
+    out[kind] = { chars: text.length, tokens: estimateTokens(text) };
+  }
+  out.total = { chars: out.system.chars + out.tools.chars, tokens: out.system.tokens + out.tools.tokens };
+  return out;
 }
 
 /**
