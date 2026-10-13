@@ -2953,3 +2953,279 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
     font-size: 16px !important;
   }
 }
+
+/* ==========================================================================
+   排队 / 停止 / 过程清单（对话运行时，见 shell/app.js 的同名小节）
+
+   这一整段刻意放在文件**最后**：它要在上面那条「手机端 16px 下限」之后生效，
+   否则排队条、清单这些辅助信息在手机上会被放大到把输入区挤没。
+   ========================================================================== */
+
+/* ------------------------------------------------------------------ 显隐 */
+
+/*
+ * 发送 / 停止 / 排队条三者靠 `hidden` 属性切换。
+ * 必须显式写 `display: none`：`.primary-btn` 那类规则带自己的 display，
+ * 会盖掉浏览器默认的 `[hidden] { display: none }` —— 表现成"两个按钮同时出现"。
+ */
+.primary-btn[hidden],
+.stop-btn[hidden],
+.chat-queue[hidden] {
+  display: none !important;
+}
+
+/* ------------------------------------------------------------------ 排队条 */
+
+/*
+ * 排队条：输入区**上方**的一条窄带。放上面是因为它是"还没发出去的东西"，
+ * 视觉上必须和输入框贴在一起；放到聊天流里，用户会以为那条消息已经说出去了。
+ */
+.chat-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 14px 0;
+  border-top: 1px solid var(--line);
+  background: var(--bg-surface);
+}
+
+.queue-count {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+/* 换行而不是横向滚动：手机上横滚的容器几乎没人会发现，换行至少看得见有几条 */
+.queue-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.queue-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 4px 2px 8px;
+  border: 1px dashed var(--line);
+  border-radius: 999px;
+  background: var(--bg-base);
+  color: var(--fg-2);
+  font-size: 12px;
+}
+
+/* 入队序号：一眼看出"这是排队里的第几条"（取消后不重排，见 app.js 的 queuePreview） */
+.queue-chip-seq {
+  flex: none;
+  min-width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--fg-3);
+  font-size: 10px;
+}
+
+.queue-chip-text {
+  min-width: 0;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-chip-x {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-3);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.queue-chip-x:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* ------------------------------------------------------------------ 停止按钮 */
+
+/*
+ * 停止按钮与发送按钮**同一个位置**（一轮在跑时顶替它出现，见 app.js 的 paintStopButton）。
+ * 44px 是手机上的点按下限（Apple HIG）：这个按钮是"我现在就要它停下"的逃生口，
+ * 点不中的话用户只会更急。
+ */
+.stop-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line));
+  background: var(--bg-elevated);
+  color: var(--red);
+  cursor: pointer;
+  transition: background var(--t), border-color var(--t), opacity var(--t);
+}
+
+.stop-btn:hover {
+  background: var(--bg-hover);
+}
+
+/* 已经点过、正在等服务端确认：按钮暗下去，避免用户以为没点上而连点 */
+.stop-btn[disabled],
+.stop-btn.pending {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 「已停止」标记：中性灰、小号，**不是**错误样式 —— 停止是用户自己的决定 */
+.bubble-stop {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.bubble-stop::before {
+  content: '■';
+  font-size: 9px;
+  opacity: 0.75;
+}
+
+/* ------------------------------------------------------------ 过程清单（todolist） */
+
+/*
+ * 紧凑清单卡：与「思考过程」同一套 op-card 折叠语言，配色偏蓝（过程信息，不是警告）。
+ */
+.plan-card {
+  border-color: color-mix(in srgb, var(--blue) 32%, var(--line));
+  background: color-mix(in srgb, var(--blue) 6%, var(--bg-surface));
+}
+
+.plan-card .op-chip {
+  color: var(--blue);
+}
+
+.plan-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+
+.plan-step-icon {
+  flex: none;
+  width: 13px;
+  text-align: center;
+  color: var(--fg-3);
+}
+
+/* 转圈的 ◐：一眼看出"这一步正在跑"，不用读文字 */
+.plan-step.running .plan-step-icon {
+  color: var(--blue);
+  animation: plan-turn 1.1s linear infinite;
+}
+
+.plan-step.done .plan-step-icon {
+  color: var(--green);
+}
+
+/* 已完成的步骤文字压暗：一眼扫过去，视线只会停在还没做完的那几行 */
+.plan-step.done .plan-step-label {
+  color: var(--fg-3);
+}
+
+.plan-step.failed .plan-step-icon {
+  color: var(--red);
+}
+
+.plan-step-label {
+  min-width: 0;
+  word-break: break-word;
+}
+
+@keyframes plan-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plan-step.running .plan-step-icon {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------------ 手机上 */
+
+@media (max-width: 760px) {
+  /* 排队条：内边距收紧一点，把宽度让给 chip 本身 */
+  .chat-queue {
+    padding: 8px 10px 0;
+  }
+
+  /* 辅助信息不跟着正文的 16px 下限走：chip 用 16px 时一行只放得下半条消息，
+     排队条会变成三四行高，把聊天区压掉一小半。13px 在手机上仍然清楚。 */
+  .chat .queue-count {
+    font-size: 12px !important;
+  }
+
+  .chat .queue-chip-text {
+    font-size: 13px !important;
+    /* 40vw：留出序号与 × 的宽度，长文本截断成省略号而不是把整条撑破 */
+    max-width: 40vw;
+  }
+
+  .chat .queue-chip-seq {
+    font-size: 11px !important;
+  }
+
+  /* × 是 chip 里的次要动作：28px 够点中，也不至于把 chip 顶成一个大方块 */
+  .chat .queue-chip-x {
+    width: 28px;
+    height: 28px;
+    font-size: 16px !important;
+  }
+
+  /* 停止按钮：点按目标 ≥44px，并保持与发送按钮同宽，位置不跳 */
+  .chat .stop-btn {
+    width: 48px;
+    min-height: 48px;
+  }
+
+  .chat .plan-step,
+  .chat .plan-step .plan-step-label {
+    font-size: 13px !important;
+  }
+
+  .chat .plan-step .plan-step-icon {
+    font-size: 14px !important;
+  }
+
+  .chat .plan-card .op-title {
+    font-size: 13px !important;
+  }
+
+  .chat .bubble-stop {
+    font-size: 12px !important;
+  }
+}

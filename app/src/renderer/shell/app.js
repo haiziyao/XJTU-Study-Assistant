@@ -87,8 +87,36 @@
     ai: { available: false, provider: null, contractVersion: null, draw: null },
     /** 当前 AI 会话 id；`null` = 下一条消息开新会话（设置页的「新对话」会把它清空）。 */
     conversationId: null,
-    /** 正在流式接收的那条回复：`{ messageId, text, node, done }`，供 WebSocket 增量更新。 */
+    /** 正在流式接收的那条回复：`{ messageId, conversationId, text, node, done, stopped }`，供 WebSocket 增量更新。 */
     streaming: null,
+    /**
+     * **排队中的消息（只在内存里，切换会话即清空）**：`{ id, seq, text, files }`。
+     *
+     * 为什么需要它：同一会话服务端是**串行**的（后到的请求会一直挂着、轮到它才返回）。
+     * 发送时不排队而是直接再发一条，屏幕上会同时出现"上一轮还在写、下一轮已经在转圈"，
+     * 而且用户想改主意时已经没有退路（HTTP 已经出去了，撤不回来）。
+     * 排在本地则把"什么时候发"留在用户手里：随时点 × 撤掉，且到达服务端的顺序由我们决定。
+     */
+    queue: [],
+    /** 入队序号的计数器：只在清空队列时归零（见 clearQueue）。 */
+    queueSeq: 0,
+    /**
+     * 当前这一轮的运行态：`{ token, ai, conversationId, text }`；`null` = 空闲（下一条可以直接发）。
+     * **排队、停止按钮、清单卡的收尾都以它为准** —— 不另设第二套"忙不忙"的判断。
+     */
+    round: null,
+    /**
+     * 被"切换会话"作废、但 HTTP 还没回来的旧回合：`{ token, conversationId }`。
+     * 它回来时如果用户已经切回那个会话，就把落库后的消息补画一遍（见 finishRound）。
+     */
+    orphan: null,
+    /** 当前这一轮的过程清单卡：`{ messageId, card, setSteps, bubble }`；同一 messageId 只维护一张。 */
+    plan: null,
+    /**
+     * 用户已经点了停止、但还没拿到会话 id（首条消息刚发出、第一片增量还没到）。
+     * 此时不能直接报错：先记下意图，delta 一到（它带着 conversationId）立刻补发停止请求。
+     */
+    stopWanted: false,
     /** 思考强度：none / low / high / max（官方 reasoning_effort 的合法取值）。默认 high（官方默认）。 */
     thinking: 'high',
     /** 正在流式接收的思维链节点（思考模式才有）。 */
@@ -541,6 +569,42 @@
    */
   window.__PC_SCROLL__ = { followBottom, isPinnedToBottom };
 
+  /**
+   * 渲染层测试用的**测试缝**（与 `__PC_SCROLL__` 同一口径：不是给视图用的 API）。
+   *
+   * 为什么需要它：排队、停止、过程清单这三件事的行为全都长在 `shell/app.js` 内部
+   * （classic script 的 IIFE，没有模块导出），不挖一条缝，`npm test` 就只能对源码做
+   * 字符串断言 —— 测不出"队列是不是按顺序发出去""停止后按钮有没有变回发送"这类真行为。
+   * 这里只暴露**已经存在的函数与状态本身**，不为测试另写一套逻辑（那测的就不是产品代码了）。
+   */
+  window.__PC_CHAT_TEST__ = {
+    state,
+    // 测试里没有 boot()：dom 引用由测试自己挂上（真实运行时是 boot() 填的）
+    attachDom(refs) {
+      dom = { ...dom, ...refs };
+      return dom;
+    },
+    send,
+    startRound,
+    finishRound,
+    stopRound,
+    handlePush,
+    // 让测试能把「停止」按钮真的接上处理器（wireChat 平时由 boot() 调）
+    wireChat,
+    paintStopButton,
+    paintQueueBar,
+    renderQueueBar,
+    createPlanCard,
+    planSummary,
+    planSteps,
+    queuePreview,
+    enqueueMessage,
+    cancelQueued,
+    clearQueue,
+    clearChatLog,
+    queueItems: () => state.queue.map((item) => ({ id: item.id, seq: item.seq, text: item.text })),
+  };
+
   function push(node) {
     dom.chatLog.appendChild(node);
     // 新消息/新卡片是用户自己触发的动作，直接跟到底（force），别让上一次的滚动位置把新内容藏起来
@@ -628,11 +692,26 @@
     writeStored(CONVERSATION_KEY, state.conversationId ?? '');
   }
 
-  /** 清空聊天栏。正在流式接收的那条也要断掉引用，否则迟到的分片会写进新会话的界面。 */
+  /**
+   * 清空聊天栏（**换会话的唯一出口**：打开历史对话、新建对话都走它）。
+   *
+   * 除了断掉流式引用（否则迟到的分片会写进新会话的界面），这里还要处理两件"跟着会话走"的东西：
+   *   1. **排队**：队列里的消息属于上一个会话，原地留着的话，新会话里会突然冒出上一段对话
+   *      没说完的话被发出去（而且是写进旧会话）。清掉并说一句，用户才知道它们去哪了。
+   *   2. **正在跑的那一轮**：HTTP 请求取消不了，服务端还在为旧会话跑。把它登记成"孤儿"：
+   *      它回来时若用户已经切回旧会话，就补画一次（见 finishRound）。
+   */
   function clearChatLog() {
+    if (state.round) state.orphan = { token: state.round.token, conversationId: state.round.conversationId ?? null };
+    state.round = null;
     state.streaming = null;
     state.reasoningNode = null;
+    state.plan = null;
+    state.stopWanted = false;
+    paintStopButton();
     dom.chatLog.textContent = '';
+    const dropped = clearQueue();
+    if (dropped) systemNote(`切换会话，已清空 ${dropped} 条排队消息`, 'meta');
   }
 
   /**
@@ -672,6 +751,15 @@
 
     const node = bubble(role, message?.content ?? '', files);
     if (message?.createdAt) node.dataset.at = message.createdAt;
+    /**
+     * 历史回放：被停止的那条消息，服务端落库时带了 `status:"stopped"` + `stoppedAt`
+     * （正文是停止前的那半段，见 chat-service 的 `#saveStopped`），所以这里能如实重画那个标记。
+     *
+     * 至于**过程清单**：落库的 assistant 消息里**没有**步骤字段（服务端只存
+     * content/drafts/executed/queried/status/usage/… ），历史回放就画不出来。
+     * 按约定"拿不到就跳过、不要编"：这里不重建一张假的清单，清单只在实时那一轮里显示。
+     */
+    if (role === 'bot' && message?.status === 'stopped') node.appendChild(mk('div', 'bubble-stop', '已停止'));
     return node;
   }
 
@@ -1221,12 +1309,79 @@
       toast('附件要配了 AI 才能解析，先去掉或去「设置 → AI 接入」填密钥');
       return;
     }
-    bubble('user', content, files);
-    // 附件所有权已经交给这条消息，清空待发区（避免下一条又带一遍）
+    // 附件所有权已经交给这条消息：**无论立刻发还是排队**，都先把待发区清掉（避免下一条又带一遍）
     state.attachments = [];
     renderAttachments();
-    if (state.ai.available) return runAiChat(content, files);
-    return runLocalRules(content);
+    /**
+     * 一轮还没跑完：**不打断它**，把这条放进队列。
+     *
+     * 为什么不直接再发一个请求：同一会话服务端本来就串行，第二条 HTTP 会一直挂着不返回，
+     * 屏幕上于是同时出现"上一轮还在写 + 下一轮在转圈"（到底哪个在跑？），
+     * 而且请求一旦发出去就撤不回来了 —— 排队则把"什么时候发"留在用户手里（chip 上的 ×）。
+     * 用户气泡也要等**真正发出**时才落，否则界面上会出现"说过了"但队列里还等着的一份。
+     */
+    if (state.round) {
+      enqueueMessage({ text: content, files });
+      return null;
+    }
+    return startRound({ text: content, files });
+  }
+
+  /**
+   * 开一轮：落用户气泡 → 交给模型或本地规则 → 无论怎么结束都走 `finishRound`（接力队列）。
+   *
+   * `state.round` 是"当前这一轮"的唯一标志：排队要不要排、停止按钮亮不亮、
+   * 队列什么时候接力，全都看它。`token` 用来识别"这还是不是我开的那一轮"
+   * —— 切换会话会把旧回合作废（见 clearChatLog），而那条 HTTP 请求取消不了。
+   */
+  async function startRound(item) {
+    const token = {};
+    state.round = { token, ai: Boolean(state.ai.available), conversationId: state.conversationId ?? null, text: item.text };
+    paintStopButton();
+    bubble('user', item.text, item.files ?? []);
+    try {
+      if (state.ai.available) await runAiChat(item.text, item.files ?? [], state.round);
+      else await runLocalRules(item.text);
+    } finally {
+      finishRound(token);
+    }
+  }
+
+  /**
+   * 收一轮：清掉运行态（停止按钮随之收起），队列非空就把**队首**接着发出去。
+   *
+   * 为什么在这里发下一条，而不是在 `chat_stopped` 那个广播里发：服务端收到停止后还要把
+   * `status:"stopped"` 的那条消息落库，紧接着发的下一条只会排在它后面干等；
+   * 而 `/ai/chat` 的响应回来时，这一轮才真的结束（顺序与到达顺序都不变）。
+   */
+  function finishRound(token) {
+    if (state.round?.token !== token) {
+      /**
+       * 被"切换会话"作废的旧回合回来了。用户可能已经切回那个会话 —— 他看到的会是
+       * "话说到一半"的旧界面，所以补画一次；还在别的会话就不打扰（那条消息下次打开自然会看到）。
+       */
+      const orphan = state.orphan;
+      if (orphan?.token === token) {
+        state.orphan = null;
+        /**
+         * 只在**当前这个会话没有别的回合在跑**时才补画：补画走的是 openConversation，
+         * 它会清空聊天栏 —— 如果此刻用户又在这个会话里问了一句（新回合正在流式输出），
+         * 这一下会把新回合的气泡和停止按钮一起抹掉，比"少画一条旧消息"严重得多。
+         */
+        if (orphan.conversationId && orphan.conversationId === state.conversationId && !state.round) {
+          void openConversation(orphan.conversationId, { silent: true });
+        }
+      }
+      return;
+    }
+    state.round = null;
+    state.plan = null;
+    state.stopWanted = false;
+    paintStopButton();
+    const next = state.queue.shift();
+    paintQueueBar();
+    // 依次发完：用户在中途点了停止也只停"正在跑的那一轮"，队列里的照发（B 的契约）
+    if (next) void startRound(next);
   }
 
   /** 本地规则解析（原路径，AI 不可用时的降级）。 */
@@ -1246,12 +1401,25 @@
   /**
    * AI 对话：先落一个空气泡，增量到达时往里追加（WebSocket `ai_delta`），
    * HTTP 返回后以最终文本定稿，再渲染草稿确认卡。
+   *
+   * `round` 是开这一轮时登记的运行态（见 startRound）：只在它**仍是当前这一轮**时，
+   * 才允许把服务端回话里的会话 id 写回界面 —— 用户中途换了会话的话，
+   * 这条迟到的响应会把界面硬拽回旧会话（"我明明点开了另一条对话，它自己跳回去了"）。
    */
-  async function runAiChat(content, files = []) {
+  async function runAiChat(content, files = [], round = state.round) {
     const card = bubble('bot', '');
     const textEl = card.querySelector('.bubble-text');
     textEl.textContent = '正在思考…';   // 尚未有内容时先给占位，第一块增量到达就被覆盖
-    const streaming = { messageId: null, text: '', node: textEl, done: false };
+    // conversationId 也记在流式对象里：停止按钮要拿它去 POST /ai/chat/stop，
+    // 而"首条消息刚发出"的那一刻 state.conversationId 还是 null（id 只在广播/响应里给）
+    const streaming = {
+      messageId: null,
+      conversationId: state.conversationId ?? null,
+      text: '',
+      node: textEl,
+      done: false,
+      stopped: false,
+    };
     state.streaming = streaming;
     try {
       const result = await api('/ai/chat', {
@@ -1274,10 +1442,24 @@
           search: state.search,
         },
       });
-      setConversationId(result.conversation?.id ?? state.conversationId);
+      const current = !round || state.round?.token === round.token;
+      if (current) {
+        setConversationId(result.conversation?.id ?? state.conversationId);
+        if (result.conversation?.id) round.conversationId = result.conversation.id;
+      }
       streaming.done = true;
       textEl.classList.remove('streaming');
-      setBubbleText(textEl, result.assistant?.content || '（模型没有返回内容）');
+      /**
+       * 被停止的这一轮：服务端返回 `stopped:true` + **停止前那半段正文**（不是错误）。
+       * 正文取"屏幕上已经有的"和"落库的那份"里更长的那个 —— 停止瞬间可能还有一片增量在飞，
+       * 用短的那份会把用户已经看到的字**吞掉**（他会以为停止把内容弄丢了）。
+       * 另外：停止是用户自己的决定，这一轮**不再补画草稿确认卡**（"别弄了"之后又冒出一个
+       * 待确认的写操作，等于没停）；已经自动执行掉的写操作仍然照常回执（那是真改了数据）。
+       */
+      const stoppedRound = result.stopped === true || result.assistant?.status === 'stopped';
+      const saved = String(result.assistant?.content ?? '');
+      if (stoppedRound) markStoppedBubble();
+      setBubbleText(textEl, (stoppedRound && streaming.text.length > saved.length ? streaming.text : saved) || '（模型没有返回内容）');
       // 思维链兜底：流式没收到（或只收到一半）就用落库的那份
       const reasoning = String(result.assistant?.reasoning ?? '').trim();
       if (reasoning && (!state.reasoningNode || state.reasoningNode.text.length < reasoning.length)) {
@@ -1286,7 +1468,13 @@
         state.reasoningNode.body.textContent = reasoning;
       }
       if (state.reasoningNode) {
-        if (card.parentNode) dom.chatLog.insertBefore(state.reasoningNode.card, card);
+        /**
+         * 思考卡要排在**清单卡之前**（顺序固定为「思考 → 清单 → 正文」）：
+         * 清单卡是先插进去的（见 handlePlan），所以这里以它为锚点，而不是直接插到正文前面
+         * —— 否则后到的思考链会把"它做了哪几步"挤到上面去。
+         */
+        const anchor = state.plan?.bubble === card ? state.plan.card : card;
+        if (card.parentNode) dom.chatLog.insertBefore(state.reasoningNode.card, anchor);
         state.reasoningNode = null;
       }
       /**
@@ -1316,13 +1504,17 @@
         if (item.error) systemNote(`自动执行失败：${item.error.message}`, 'fail');
         else resultCard({ ...item.result, explain: `${item.result.explain ?? '已自动执行'}（自动审批）` });
       }
-      const drafts = result.drafts ?? [];
+      // 被停止的那一轮不补画草稿确认卡：用户刚说"别弄了"，再给他一个待确认的写操作等于没停
+      const drafts = stoppedRound ? [] : (result.drafts ?? []);
       for (const entry of drafts) renderAiDraft(entry);
       // 这一轮刚产生真实 usage：圆环的 used 优先取它，所以必须跟着回复一起刷新
       // （与「用量」共用同一个时机，不另起定时器）
       void refreshUsageBadge();
       void refreshContextMeter();
-      if (!drafts.length && !queried.length && !(result.executed ?? []).length) {
+      if (stoppedRound) {
+        // 说清"停在哪里"：被停止不是答完，气泡里只有到这里为止的那一段
+        systemNote('已停止这一轮：上面是停止前生成的内容', 'meta');
+      } else if (!drafts.length && !queried.length && !(result.executed ?? []).length) {
         systemNote(`${state.ai.provider ?? 'AI'} · 只是聊天，没有产生任何写入`, 'meta');
       }
       keepBodyLast(card);
@@ -1379,6 +1571,329 @@
     box.appendChild(mk('div', 'cc-note', '换个说法再试一次。'));
     card.appendChild(box);
     push(card);
+  }
+
+  /* ============================================================ 排队 / 停止 / 过程清单
+   *
+   * 这三件事共用同一个事实：**"当前这一轮到底跑完没有"**（`state.round`）。
+   * 拆成三套判断（"在流式吗" / "按钮亮着吗" / "清单还转圈吗"）迟早会互相打架，
+   * 表现成"上一轮明明结束了，下一条却还在排队"这类没法复现的怪状态。
+   */
+
+  /** chip 上显示几个字：够认出是哪一条就行，再多会把排队条撑爆（手机上尤其明显）。 */
+  const QUEUE_PREVIEW = 20;
+  /** 排队上限：内存态，但也得有个顶 —— 无上限等于把"AI 已经跟不上了"这件事藏起来。 */
+  const QUEUE_LIMIT = 20;
+
+  /**
+   * chip 上的那句话：**前 20 字 + 入队序号**（序号是"第几条排队的"，取消后不重排，
+   * 否则 chip 会自己换位置，用户刚看清是哪条、一转眼号就变了）。
+   * 只有附件没有文字时如实说附件数量 —— 空白 chip 等于没给任何线索。
+   */
+  function queuePreview(item) {
+    const text = String(item?.text ?? '').replace(/\s+/g, ' ').trim();
+    const files = item?.files?.length ?? 0;
+    if (!text) return files ? `（${files} 个附件）` : '（空消息）';
+    return `${text.slice(0, QUEUE_PREVIEW)}${text.length > QUEUE_PREVIEW ? '…' : ''}`;
+  }
+
+  /**
+   * 渲染排队条。`host` / `items` / `onCancel` 都可以传进来 —— 渲染层测试不必启动整个外壳
+   * （与 `__PC_SCROLL__` 同一口径：这是给测试用的缝，不是给视图用的 API）。
+   */
+  function renderQueueBar(host, items = [], onCancel = null) {
+    if (!host) return;
+    host.textContent = '';
+    if (!items.length) {
+      host.hidden = true;
+      return;
+    }
+    host.hidden = false;
+    // 多条时给一句总数：光数 chip 数不清"到底还排着几条"（尤其换行之后）
+    if (items.length > 1) host.appendChild(mk('span', 'queue-count', `${items.length} 条排队中`));
+    const chips = mk('div', 'queue-chips');
+    for (const item of items) {
+      const chip = mk('div', 'queue-chip');
+      chip.appendChild(mk('span', 'queue-chip-seq', String(item.seq ?? '')));
+      const text = mk('span', 'queue-chip-text', queuePreview(item));
+      // chip 只显示前 20 字，鼠标停一下能看到完整原文；不做"编辑队列里的消息"（见 README 的取舍）
+      text.title = String(item.text ?? '');
+      chip.appendChild(text);
+      const cancel = mk('button', 'queue-chip-x', '×');
+      cancel.type = 'button';
+      cancel.title = '取消这条排队消息';
+      cancel.setAttribute('aria-label', `取消排队：${queuePreview(item)}`);
+      // 取消只丢这一条，**不碰正在跑的那一轮** —— 排队条里没有"停止"这个动作
+      cancel.addEventListener('click', () => (onCancel ?? cancelQueued)(item.id));
+      chip.appendChild(cancel);
+      chips.appendChild(chip);
+    }
+    host.appendChild(chips);
+  }
+
+  function paintQueueBar() {
+    renderQueueBar(dom.chatQueue, state.queue, cancelQueued);
+  }
+
+  function enqueueMessage({ text, files = [] }) {
+    if (state.queue.length >= QUEUE_LIMIT) {
+      toast(`排队最多 ${QUEUE_LIMIT} 条：先等它答完，或点掉几条再说`);
+      return null;
+    }
+    state.queueSeq += 1;
+    const item = { id: `q${state.queueSeq}`, seq: state.queueSeq, text, files };
+    state.queue.push(item);
+    paintQueueBar();
+    return item;
+  }
+
+  function cancelQueued(id) {
+    const index = state.queue.findIndex((item) => item.id === id);
+    if (index < 0) return false;
+    const [removed] = state.queue.splice(index, 1);
+    paintQueueBar();
+    toast(`已取消排队：${queuePreview(removed)}`);
+    return true;
+  }
+
+  /** 清空队列并**返回清掉几条**（切换会话要据此说一句，见 clearChatLog）。 */
+  function clearQueue() {
+    const dropped = state.queue.length;
+    state.queue = [];
+    state.queueSeq = 0;
+    paintQueueBar();
+    return dropped;
+  }
+
+  /* ------------------------------------------------------------ 停止本轮 */
+
+  /**
+   * 发送按钮 ↔ 停止按钮：**同一个位置，按"当前有没有一轮在跑"顶替**。
+   *
+   * 只按 `state.round` 画，三个隐藏时机（`/ai/chat` 响应、`ai_message`、`chat_stopped`）
+   * 各自把状态清掉就行 —— 四处各写一遍 DOM 操作，漏一处就是"按钮永远停在那儿"。
+   * 只对 AI 回合显示：没配密钥时走的是本地规则解析（毫秒级），给它一个"停止"是假按钮。
+   */
+  function paintStopButton() {
+    const active = Boolean(state.round?.ai);
+    if (dom.chatStop) {
+      dom.chatStop.hidden = !active;
+      dom.chatStop.disabled = !active || state.stopWanted;
+      dom.chatStop.classList.toggle('pending', active && state.stopWanted);
+    }
+    if (dom.chatSend) dom.chatSend.hidden = active;
+  }
+
+  /**
+   * 停止本轮：`POST /ai/chat/stop`。
+   *
+   * **"当前没有在跑的回合"不是错误**：服务端这时返回 `{ok:true, stopped:false, reason:'idle'}`，
+   * 界面顶多提示一句「当前没有正在进行的回合」。用户连点两下停止、或者消息刚好答完，
+   * 都不该看到一张红色失败卡 —— 那会让人以为"停止"这个功能坏了。
+   */
+  async function stopRound() {
+    const conversationId = state.streaming?.conversationId ?? state.round?.conversationId ?? state.conversationId ?? null;
+    if (!conversationId) {
+      /**
+       * 极窄窗口：回合已经在服务端登记，但我们还没从任何一条广播/响应里拿到会话 id
+       * （一轮的第一条消息刚发出时就是这样）。这里不能静默失败，也不能瞎编一个 id：
+       * 记下"想停"，等 `ai_delta` 到达（它带着 conversationId）立刻补发。
+       */
+      state.stopWanted = true;
+      paintStopButton();
+      return { ok: false, reason: 'no_conversation_yet' };
+    }
+    state.stopWanted = false;
+    paintStopButton();
+    try {
+      const result = await api('/ai/chat/stop', { method: 'POST', body: { conversationId } });
+      if (result?.stopped === false) toast('当前没有正在进行的回合');
+      /**
+       * 真打断了也**不在这里收尾**：服务端马上会广播 `chat_stopped`、并把这条消息落成
+       * `status:"stopped"`（保留停止前那半段正文）。界面等那两个信号再收
+       * —— 自己提前收的话，会出现"按钮已经变回发送、正文还在往外冒"。
+       */
+      return result;
+    } catch (error) {
+      state.stopWanted = false;
+      paintStopButton();
+      toast(`停止没能发出去：${error.message}`);
+      return { ok: false, error };
+    }
+  }
+
+  /**
+   * 把"被停止"画在气泡上：**中性样式的小标记「已停止」**，不是错误卡、不用红色。
+   * 停止是用户自己的决定，不是程序出事；而且服务端把那半段正文原样留着（见 chat-service 的
+   * `#saveStopped`），界面要继续显示它 —— 抹掉的话用户会觉得"我明明看到它写了半段，一按停止连话都没了"。
+   */
+  function markStoppedBubble() {
+    const streaming = state.streaming;
+    if (!streaming) return null;
+    streaming.done = true;
+    streaming.stopped = true;
+    streaming.node?.classList?.remove('streaming');
+    const bubbleEl = streaming.node?.parentNode ?? null;
+    // 幂等：`chat_stopped` 与 `/ai/chat` 的响应都会走到这里，标记只能有一个
+    if (bubbleEl && !bubbleEl.querySelector?.('.bubble-stop')) {
+      bubbleEl.appendChild(mk('div', 'bubble-stop', '已停止'));
+      followBottom();
+    }
+    return bubbleEl;
+  }
+
+  /**
+   * "这一轮在界面上结束了"：收掉停止按钮、让流式气泡不再接收迟到的分片。
+   *
+   * 契约里的三个隐藏时机（`/ai/chat` 响应、`ai_message`、`chat_stopped`）都走这一个函数。
+   * 为什么广播一到就先收：它比 HTTP 响应早几十毫秒，按钮在这段时间里还亮着，
+   * 用户会再点一次 —— 那一下打在已经收尾的回合上，只能得到 idle，看起来就是"停止不管用"。
+   */
+  function endRoundUI(payload = {}) {
+    const streaming = state.streaming;
+    const messageId = payload?.message?.id ?? payload?.messageId ?? null;
+    /**
+     * 定时任务往**当前会话**里写回复时也会广播 `ai_message`：那不是用户这一轮，
+     * 不能让它把用户的流式气泡和停止按钮一起收掉（messageId 不同就是别人那一轮）。
+     */
+    if (streaming?.messageId && messageId && messageId !== streaming.messageId) return false;
+    if (streaming) {
+      streaming.done = true;
+      streaming.node?.classList?.remove('streaming');
+    }
+    state.stopWanted = false;
+    /**
+     * 这里**不**清 `state.plan`：清单卡还要留作"思考卡插在谁前面"的锚点
+     * （`/ai/chat` 的响应可能比这条广播晚几十毫秒到，那时代码还要按「思考 → 清单 → 正文」排版）。
+     * 真正的清理在 `finishRound`（这一轮真的结束）和 `clearChatLog`（换会话）里。
+     */
+    if (dom.chatStop) {
+      dom.chatStop.hidden = true;
+      dom.chatStop.disabled = true;
+      dom.chatStop.classList.remove('pending');
+    }
+    if (dom.chatSend) dom.chatSend.hidden = false;
+    return true;
+  }
+
+  /** WS `chat_stopped`：停止这一刻的收尾（`messageId` 可能是 null，见下面的判断）。 */
+  function handleChatStopped(payload = {}) {
+    // 别的会话的停止与我无关；**是不是这一轮**用 messageId 判（可能为 null，那就当"就是这一轮"）
+    if (payload.conversationId && state.conversationId && payload.conversationId !== state.conversationId) return;
+    if (state.streaming?.messageId && payload.messageId && payload.messageId !== state.streaming.messageId) return;
+    markStoppedBubble();
+    endRoundUI();
+    // 队列**不在这里发下一条**：服务端此刻还在把 stopped 那条消息落库，
+    // 早发只会让下一条排在它后面干等；统一交给 /ai/chat 的响应收尾（见 finishRound）。
+  }
+
+  /* ------------------------------------------------------------ 过程清单（AI 的 todolist） */
+
+  /** 步骤状态 → 图标与无障碍文案（○ 待处理 / ◐ 进行中 / ✓ 已完成 / ✕ 失败）。 */
+  const PLAN_ICON = { pending: '○', running: '◐', done: '✓', failed: '✕' };
+  const PLAN_STATUS_TEXT = { pending: '待处理', running: '进行中', done: '已完成', failed: '失败' };
+  const PLAN_TERMINAL = new Set(['done', 'failed']);
+
+  /** 服务端的 steps 是**全量快照**：这里整体归一化后重画，不做增量合并（少一类"漏一条就画错"的 bug）。 */
+  function planSteps(steps) {
+    return (Array.isArray(steps) ? steps : [])
+      .filter((step) => step && typeof step === 'object')
+      .map((step, index) => ({
+        id: String(step.id ?? index),
+        label: String(step.label ?? '').trim() || '（未命名步骤）',
+        status: PLAN_ICON[step.status] ? step.status : 'pending',
+      }));
+  }
+
+  /** 收起后的那一行字：还在跑就说"正在做什么"，跑完了说"已完成 N 步"。 */
+  function planSummary(steps) {
+    const total = steps.length;
+    const done = steps.filter((step) => step.status === 'done').length;
+    const failed = steps.filter((step) => step.status === 'failed').length;
+    const running = steps.find((step) => step.status === 'running');
+    if (running) return `正在做：${running.label}`;
+    // 一步都没成（比如刚开跑就被停止）：别写"已完成 0 步"，那读起来像在敷衍
+    if (failed) return done ? `已完成 ${done} 步 · ${failed} 步失败` : `${failed} 步失败`;
+    if (total && done === total) return `已完成 ${total} 步`;
+    return `共 ${total} 步`;
+  }
+
+  /**
+   * 一张清单卡：标题行（可点）+ 明细。
+   *
+   * 为什么全部结束就**收成一行**：一轮跑完会留下五六行步骤，历史消息一多，屏幕上全是清单，
+   * 用户真正想看的正文反而要滚半天。明细没有被删掉，点一下标题就回来 —— 收起只是默认姿态。
+   * 而"用户手动开/关过"之后就**不再自动**改：他刚点收起、下一份快照又弹开，会以为点不动。
+   */
+  function createPlanCard(initial = []) {
+    const card = mk('div', 'bubble bot has-card');
+    const box = mk('div', 'chat-card op-card plan-card');
+    const head = mk('button', 'op-head');
+    head.type = 'button';
+    const title = mk('span', 'op-title', '步骤');
+    head.append(mk('span', 'op-chip', '步骤'), title, mk('span', 'op-caret', '›'));
+    const body = mk('div', 'op-body');
+    box.append(head, body);
+    card.appendChild(box);
+
+    let manual = null;
+    let current = [];
+
+    const applyOpen = (open) => {
+      box.classList.toggle('open', open);
+      head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    };
+    const setSteps = (steps) => {
+      current = planSteps(steps);
+      const terminal = current.length > 0 && current.every((step) => PLAN_TERMINAL.has(step.status));
+      applyOpen(manual ?? !terminal);
+      title.textContent = planSummary(current);
+      // 整体重画：全量快照进来就把每一行按最新状态重写（running → done 都靠这一次）
+      body.textContent = '';
+      for (const step of current) {
+        const row = mk('div', `plan-step ${step.status}`);
+        const icon = mk('span', 'plan-step-icon', PLAN_ICON[step.status]);
+        icon.title = PLAN_STATUS_TEXT[step.status];
+        row.append(icon, mk('span', 'plan-step-label', step.label));
+        body.appendChild(row);
+      }
+    };
+    head.addEventListener('click', () => {
+      const open = !box.classList.contains('open');
+      manual = open;
+      applyOpen(open);
+    });
+    setSteps(initial);
+    return { card, setSteps, isOpen: () => box.classList.contains('open'), summary: () => planSummary(current) };
+  }
+
+  /**
+   * WS `plan`：把这一轮的过程清单画进**当前正在接收的那条 assistant 消息**里。
+   *
+   * 位置固定在「思考卡之后、正文之前」：正文永远在最底下（`keepBodyLast` 那条规则），
+   * 清单是"它做了哪几步"，属于过程，不该把结论顶到屏幕外。
+   * 同一 `messageId` 只维护**一张**卡：服务端每次都是全量快照，整体重画即可。
+   */
+  function handlePlan(payload = {}) {
+    const steps = planSteps(payload.steps);
+    // 纯聊天不会有 plan（服务端契约）；空快照也不建卡，否则先冒出一个空壳再等它填
+    if (!steps.length) return;
+    if (payload.conversationId && state.conversationId && payload.conversationId !== state.conversationId) return;
+    const streaming = state.streaming;
+    if (!streaming) return; // 没有正在接收的气泡：这份清单没有地方挂（别的会话 / 定时任务那一轮）
+    // 同一个会话里可能同时有别人那一轮的清单（定时任务），messageId 不同就不是我们的
+    if (streaming.messageId && payload.messageId && payload.messageId !== streaming.messageId) return;
+    streaming.messageId = streaming.messageId ?? payload.messageId ?? null;
+    streaming.conversationId = payload.conversationId ?? streaming.conversationId ?? null;
+    if (state.plan && state.plan.messageId === streaming.messageId) {
+      state.plan.setSteps(steps);
+    } else {
+      const created = createPlanCard(steps);
+      const bubbleEl = streaming.node?.parentNode ?? null;
+      state.plan = { messageId: streaming.messageId, bubble: bubbleEl, ...created };
+      if (bubbleEl?.parentNode) dom.chatLog.insertBefore(created.card, bubbleEl);
+    }
+    followBottom();
   }
 
   /* ------------------------------------------------------------ 输入区扩展 */
@@ -2366,7 +2881,12 @@
       autoGrowInput();
       saveDraft(input.value);
     });
+    // 「停止本轮」：只发停止请求，界面收尾交给 `chat_stopped` 与 /ai/chat 的响应（见 stopRound）
+    dom.chatStop?.addEventListener('click', () => void stopRound());
     dom.panelToggle.addEventListener('click', togglePanel);
+    // 首帧：按钮与排队条都回默认态（显示发送、排队条隐藏）—— 免得重画顺序变了一次就留下残影
+    paintStopButton();
+    paintQueueBar();
   }
 
   /* ------------------------------------------------------------ 状态与推送 */
@@ -2435,30 +2955,55 @@
       } catch {
         return;
       }
-      if (message.type === 'reminder') {
-        const { title, startTime, allDay } = message.payload ?? {};
-        systemNote(`提醒：${allDay ? '全天' : startTime ?? ''} ${title}`, 'reminder');
-        toast(`提醒：${title}`);
-        return;
-      }
-      if (message.type === 'ai_delta') {
-        appendAiDelta(message.payload);
-        return;
-      }
-      // `ai_message` 是定稿广播：当前窗口的正文由 /ai/chat 的响应负责（见 runAiChat），
-      // 这里刻意不重复渲染，否则同一段回复会被画两遍。
-      if (message.type === 'data_changed') {
-        // AI 配置（换模型 / 开关绘图 / 改密钥）和右侧那些业务视图**没有任何关系**：
-        // 以前它照样走 refresh()，于是每点一次画笔，右边栏就整体重建一次 —— 看起来就是"闪一下"。
-        // 这一路只需要刷新徽标与模型列表（loadMeta 里也会重画输入区那几个开关的状态）。
-        const configOnly = message.module === 'ai' && message.payload?.target === 'ai_config';
-        clearTimeout(connectSocket._timer);
-        connectSocket._timer = setTimeout(() => {
-          if (!configOnly) refresh();
-          loadMeta();
-        }, 150);
-      }
+      handlePush(message);
     };
+  }
+
+  /**
+   * 一条推送消息 → 界面动作。**所有事件分支都在这里**（连接状态除外）：
+   * 抽成独立函数是为了让渲染层测试能直接喂一条消息进来断言界面变化，
+   * 而不必真的起一个 WebSocket（与 `__PC_SCROLL__` 同一口径）。
+   */
+  function handlePush(message) {
+    if (!message || typeof message !== 'object') return;
+    if (message.type === 'reminder') {
+      const { title, startTime, allDay } = message.payload ?? {};
+      systemNote(`提醒：${allDay ? '全天' : startTime ?? ''} ${title}`, 'reminder');
+      toast(`提醒：${title}`);
+      return;
+    }
+    if (message.type === 'ai_delta') {
+      appendAiDelta(message.payload);
+      return;
+    }
+    // 过程清单：**全量快照**，整体重画一张卡（见 handlePlan）
+    if (message.type === 'plan') {
+      handlePlan(message.payload);
+      return;
+    }
+    // 停止：被中断的那条消息马上会以 status:"stopped" 落库，界面先把这一轮收干净
+    if (message.type === 'chat_stopped') {
+      handleChatStopped(message.payload);
+      return;
+    }
+    // `ai_message` 是定稿广播：当前窗口的正文由 /ai/chat 的响应负责（见 runAiChat），
+    // 这里刻意不重复渲染，否则同一段回复会被画两遍。但**停止按钮要在这里就收**
+    // —— 广播比 HTTP 响应早几十毫秒，这段时间里按钮还亮着，用户会以为"停止没生效"再点一次。
+    if (message.type === 'ai_message') {
+      if (message.payload?.conversationId === state.conversationId) endRoundUI(message.payload);
+      return;
+    }
+    if (message.type === 'data_changed') {
+      // AI 配置（换模型 / 开关绘图 / 改密钥）和右侧那些业务视图**没有任何关系**：
+      // 以前它照样走 refresh()，于是每点一次画笔，右边栏就整体重建一次 —— 看起来就是"闪一下"。
+      // 这一路只需要刷新徽标与模型列表（loadMeta 里也会重画输入区那几个开关的状态）。
+      const configOnly = message.module === 'ai' && message.payload?.target === 'ai_config';
+      clearTimeout(connectSocket._timer);
+      connectSocket._timer = setTimeout(() => {
+        if (!configOnly) refresh();
+        loadMeta();
+      }, 150);
+    }
   }
 
   /**
@@ -2476,15 +3021,28 @@
     if (!streaming || streaming.done) return;
     if (streaming.messageId && payload.messageId && payload.messageId !== streaming.messageId) return;
     streaming.messageId = streaming.messageId ?? payload.messageId ?? null;
+    /**
+     * 增量里带着 `conversationId` —— 这是"首条消息"那条路上界面第一次知道会话 id 的时刻，
+     * 所以两件事都在这里补：
+     *   1. 停止按钮要用它（见 stopRound）：用户在这之前就点了停止的话，此刻立刻补发；
+     *   2. 回合运行态也记一份，切换会话时"孤儿回合"才知道自己属于哪个会话。
+     */
+    if (payload.conversationId) {
+      streaming.conversationId = payload.conversationId;
+      if (state.round) state.round.conversationId = payload.conversationId;
+      if (state.stopWanted) void stopRound();
+      else paintStopButton();
+    }
 
     // 思维链走单独一条通道：进「思考过程」卡，不跟正文混在一起
     if (payload.channel === 'reasoning') {
       if (!state.reasoningNode) state.reasoningNode = ensureReasoningCard();
       state.reasoningNode.text += payload.delta ?? '';
       state.reasoningNode.body.textContent = state.reasoningNode.text;
-      // 思考卡始终排在正文气泡之前（"正文永远在最底下"那条规则）
+      // 思考卡始终排在正文气泡之前（"正文永远在最底下"那条规则），清单卡在它之后
+      const anchor = state.plan?.bubble === streaming.node.parentNode ? state.plan.card : streaming.node.parentNode;
       if (streaming.node.parentNode?.parentNode === dom.chatLog) {
-        dom.chatLog.insertBefore(state.reasoningNode.card, streaming.node.parentNode);
+        dom.chatLog.insertBefore(state.reasoningNode.card, anchor);
       }
       // **每帧都会走到这里**：必须条件跟随，否则用户往上翻时会被一直拽回底部（"滚不动"）
       followBottom();
@@ -2562,6 +3120,8 @@
       chatLog: document.getElementById('chat-log'),
       chatInput: document.getElementById('chat-input'),
       chatSend: document.getElementById('chat-send'),
+      chatStop: document.getElementById('chat-stop'),
+      chatQueue: document.getElementById('chat-queue'),
       status: document.getElementById('status'),
       aiBadge: document.getElementById('ai-badge'),
       chatAttach: document.getElementById('chat-attach'),

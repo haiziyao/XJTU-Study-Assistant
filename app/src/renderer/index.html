@@ -58,6 +58,13 @@
 
         <div class="chat-log" id="chat-log"></div>
 
+        <!--
+          排队条：只在"上一轮还没答完、用户又发了消息"时出现（内存态，切会话即清空）。
+          放在输入区**上方**：它是"等待发出的东西"，视觉上必须和输入框贴在一起，
+          否则用户会以为那条消息已经发出去了。
+        -->
+        <div class="chat-queue" id="chat-queue" hidden></div>
+
         <div class="chat-compose">
           <button class="compose-plus" id="chat-attach" type="button" title="添加图片或文件">+</button>
           <textarea
@@ -69,6 +76,18 @@
             title="Enter 发送 · Shift + Enter 换行"
           ></textarea>
           <button class="primary-btn" id="chat-send" type="button">发送</button>
+          <!--
+            停止按钮：**与发送按钮同一个位置**，一轮在跑时顶替它出现。
+            单独一个（而不是把「发送」改造成停止）是为了不让"点发送"和"点停止"共用同一个
+            click 处理器 —— 一个按钮两种语义，迟早会出现"想停止却发出去一条消息"。
+            图标是**方块**（■ 的 SVG 版本）：方形在全世界的播放器里都是"停止"，
+            而且不依赖字体里有没有 ⏹ 这个字符。title/aria-label 都是「停止本轮」。
+          -->
+          <button class="stop-btn" id="chat-stop" type="button" title="停止本轮" aria-label="停止本轮" hidden>
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+              <rect x="3.5" y="3.5" width="9" height="9" rx="1.8" fill="currentColor" />
+            </svg>
+          </button>
         </div>
         <div class="chat-attachments" id="chat-attachments" hidden></div>
         <!-- 联网搜索 / 思考模式 / 权限 / 用量 / 绘图：菜单向上展开（绝对定位，展开时输入框那一行不动） -->

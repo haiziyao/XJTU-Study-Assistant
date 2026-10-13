@@ -177,6 +177,30 @@
     pagesField.appendChild(pagesHint);
     mount.appendChild(pagesField);
 
+    /**
+     * 「一次提问最多检索几次」= 一个回合内的检索**预算**（后端 `searchRetryMax`，默认 3、范围 1–6）。
+     *
+     * 为什么它和上面那个"最大条数"是两回事、还紧挨着放：
+     *   - 最大条数管**一次**检索读几个网页（一次读多还是读少）；
+     *   - 这个数字管**一次提问最多发起几次**检索（最多试几回）。
+     * 两者都会让回答更全，但代价不同：前者每次更慢，后者是"反复查"的整体耗时。
+     * 文案要写清"用完就不再发起新检索，模型会按已有结果收尾"——
+     * 否则用户会以为调大它模型就会一直查下去，或者调小之后"它怎么不查了"。
+     */
+    const retry = mk('input', 'cs-input cs-number cs-search-retry');
+    retry.type = 'number';
+    retry.min = '1';
+    retry.max = '6';
+    retry.step = '1';
+    retry.value = String(config.searchRetryMax ?? 3);
+    mount.appendChild(
+      field(
+        '一次提问最多检索几次',
+        retry,
+        '1–6（默认 3）。用完就不再发起新检索，模型会按已有结果收尾：调大更可能查到，但一次提问会更慢。',
+      ),
+    );
+
     const actions = mk('div', 'cs-actions');
     const saveBtn = mk('button', 'primary-btn', ui.busy === 'save' ? '保存中…' : '保存');
     saveBtn.type = 'button';
@@ -202,6 +226,14 @@
         searchProvider: provider.value,
         searchMaxPages: value,
       };
+      // 同上：范围与 config.js 的 SEARCH_RETRY_MIN/MAX（1–6）一致，改一边记得改另一边
+      const retryValue = Number(retry.value);
+      if (!Number.isInteger(retryValue) || retryValue < 1 || retryValue > 6) {
+        ui.error = new Error('一次提问最多检索几次必须是 1–6 之间的整数');
+        paint();
+        return;
+      }
+      body.searchRetryMax = retryValue;
       const typed = key.value.trim();
       if (typed === '-') body.searchApiKey = '';
       else if (typed) body.searchApiKey = typed;
