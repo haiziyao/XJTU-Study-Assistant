@@ -569,7 +569,13 @@
       const box2 = mk('div', 'cc-warnings');
       const lines = conflicts
         .slice(0, 3)
-        .map((item) => (typeof item === 'string' ? item : `${item.title ?? '已有安排'} ${item.date ?? ''} ${item.startTime ?? ''}${item.endTime ? `-${item.endTime}` : ''}`.trim()));
+        .map((item) => {
+          if (typeof item === 'string') return item;
+          // 冲突对象来自日程的"某一天的那一次"，字段是 `occurrenceDate`（不是 `date`）——
+          // 取错了日期会渲染成空串（标题与时刻照常，但用户看不出撞的是哪一天）
+          const day = item.occurrenceDate ?? item.date ?? '';
+          return `${item.title ?? '已有安排'} ${day} ${item.startTime ?? ''}${item.endTime ? `-${item.endTime}` : ''}`.trim();
+        });
       box2.appendChild(mk('div', 'cc-warning', `与 ${conflicts.length} 条日程时间重叠：${lines.join('；')}`));
       if (conflicts.length > lines.length) box2.appendChild(mk('div', 'cc-warning', `…另有 ${conflicts.length - lines.length} 条`));
       box.appendChild(box2);
