@@ -1,11 +1,14 @@
+import path from 'node:path';
 import { HttpError } from '../../core/http/router.js';
 import { extractImportedDocument } from './docx.js';
+import { firstImageAttachment, recognizeImageDataUrl } from './ocr.js';
 
 const SOURCES = new Set(['manual', 'snapshot', 'import']);
 const STATUSES = new Set(['draft', 'unorganized', 'processing', 'ready', 'failed', 'archived']);
 const MAX_BODY_CHARS = 200000;
 const MAX_ATTACHMENTS = 8;
 const MAX_ATTACHMENT_DATA = 9 * 1024 * 1024;
+const MAX_OCR_CHARS = 20000;
 const VERSION_LIMIT = 50;
 const AUTO_VERSION_MS = 5 * 60 * 1000;
 
@@ -47,6 +50,57 @@ function attachmentsOf(value) {
   });
 }
 
+/**
+ * 图片指纹：判断"这篇笔记里的图片还是不是上次识别的那张"。
+ *
+ * 用**文件名 + 类型 + 字节数 + dataUrl 长度**而不是整段 dataUrl 做键：
+ * 随手拍的 dataUrl 有 380 万字符，把它塞进每条笔记的摘要里只为比一下"变没变"太亏。
+ * 这四样凑起来足以区分"换了张图"与"同一张图又保存了一次正文" ——
+ * 后者不该再跑一遍 OCR（Vision 一张要几百毫秒到几秒，还很吃 CPU）。
+ * 没有图片附件时返回 `null`（明确表示"这篇没有图可识别"，与"还没识别"区分开）。
+ */
+function imageFingerprint(attachments) {
+  const images = (Array.isArray(attachments) ? attachments : []).filter((item) => String(item?.type ?? '').startsWith('image/'));
+  if (!images.length) return null;
+  return images.map((item) => `${item.name}|${item.type}|${item.size}|${String(item.dataUrl ?? '').length}`).join(';');
+}
+
+/** OCR 结果落库前的清洗：只留约定字段，文本截断，`at` 由调用方给。 */
+function normalizeOcr(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const ocr = {
+    ok: Boolean(value.ok),
+    text: String(value.text ?? '').slice(0, MAX_OCR_CHARS),
+    chars: Math.max(0, Number(value.chars) || 0),
+    engine: String(value.engine ?? '').slice(0, 60),
+    at: String(value.at ?? '').slice(0, 40),
+  };
+  if (value.error) ocr.error = String(value.error).slice(0, 200);
+  return ocr;
+}
+
+/**
+ * "还没识别"的占位值。
+ *
+ * 为什么不用 `null` 表示"排队中"：`null` 与"这篇笔记没有图片"完全同形，
+ * 模型和界面都无法区分"等一下就有"和"永远不会有"。用 `ok:false` + `error:'pending'`
+ * 把三态说清楚：排队中 / 识别失败 / 识别成功（哪怕成功但一个字都没识别出来）。
+ */
+function pendingOcr() {
+  return { ok: false, text: '', chars: 0, engine: '', at: '', error: 'pending' };
+}
+
+/**
+ * 送去检索/回答的图片文字：**只有识别成功且非空**才算数。
+ *
+ * 识别失败（没装 swiftc、超时、图里没字）时返回空串 —— 空串不会污染关键词匹配，
+ * 而"没识别到"这件事由 `ocr.ok/error` 字段告诉模型，不需要往正文里塞一句假文字。
+ */
+function ocrBody(record) {
+  const ocr = record?.ocr;
+  return ocr && ocr.ok && typeof ocr.text === 'string' ? ocr.text : '';
+}
+
 /** Parse Obsidian-style [[title]], [[title|alias]] and [[title#heading]]. */
 export function parseWikiLinks(body) {
   const links = [];
@@ -69,6 +123,8 @@ function normalized(record) {
     title: cleanText(record.title) || '未命名笔记', folder: cleanText(record.folder, 300), aliases: uniqueText(record.aliases, 20),
     body: importedBody, properties: propertiesOf(record.properties), favorite: Boolean(record.favorite), links: parseWikiLinks(importedBody),
     revision: Math.max(1, Number(record.revision) || 1), deletedAt: record.deletedAt ?? null,
+    // 图片识别结果（见 ocr.js）：识别文本同样截断，避免一条坏数据把整份笔记文件撑大
+    ocr: normalizeOcr(record.ocr),
   };
 }
 
@@ -77,7 +133,7 @@ export function noteSummary(record, matchText = '') {
   return {
     id: item.id, title: item.title, source: item.source, status: item.status, anchor: item.anchor ?? null, tags: item.tags ?? [],
     folder: item.folder, aliases: item.aliases, properties: item.properties, favorite: item.favorite, links: item.links,
-    revision: item.revision, deletedAt: item.deletedAt, mediaCount: item.mediaCount ?? 0,
+    revision: item.revision, deletedAt: item.deletedAt, mediaCount: item.mediaCount ?? 0, ocr: item.ocr,
     createdAt: item.createdAt, updatedAt: item.updatedAt,
     previewText: String(item.body ?? '').replace(/\s+/g, ' ').trim().slice(0, 180),
     ...(matchText ? { matchText } : {}),
@@ -98,9 +154,25 @@ function searchSpec(input) {
   return { phrases, include, exclude, filters };
 }
 
+/**
+ * 参与关键词匹配的全部文本。
+ *
+ * **OCR 文本在这里**：随手拍笔记的正文是空的，字全在图片里；不把识别结果并进来，
+ * "我刚拍的那张写了什么"这类查询就永远匹配不到那条笔记（这正是要修的那个 bug）。
+ * 没有识别结果时 `ocrBody()` 给空串，等于没加任何东西。
+ */
 function searchable(item) {
-  return [item.title, item.body, item.folder, ...(item.tags ?? []), ...(item.aliases ?? []), ...Object.values(item.properties ?? {}).flat()]
+  return [item.title, item.body, ocrBody(item), item.folder, ...(item.tags ?? []), ...(item.aliases ?? []), ...Object.values(item.properties ?? {}).flat()]
     .filter((value) => value !== undefined && value !== null).join(' ').toLowerCase();
+}
+
+/**
+ * 暴露给别的检索入口（`aisearch` 的 note 源按自己的评分公式召回笔记）。
+ * 各入口的打分方式不同，但"哪些文本算这篇笔记的内容"必须只有一处定义 ——
+ * 否则统一检索会搜不到笔记模块自己搜得到的东西。
+ */
+export function noteSearchText(item) {
+  return [String(item?.body ?? ''), ocrBody(item)].filter(Boolean).join('\n');
 }
 
 function matchesSearch(item, spec) {
@@ -116,9 +188,13 @@ function matchesSearch(item, spec) {
   return true;
 }
 
+/**
+ * 搜索命中处的一段摘要。正文为空但有识别文本时用识别文本（随手拍就是这种情况）——
+ * 否则列表里那条笔记会显示成"什么都没有"，而它其实是有内容的。
+ */
 function excerpt(item, spec) {
   const needle = [...spec.phrases, ...spec.include][0];
-  const text = String(item.body ?? '').replace(/\s+/g, ' ').trim();
+  const text = String(item.body ?? '').replace(/\s+/g, ' ').trim() || ocrBody(item).replace(/\s+/g, ' ').trim();
   if (!needle) return text.slice(0, 180);
   const at = text.toLowerCase().indexOf(needle);
   return at < 0 ? text.slice(0, 180) : text.slice(Math.max(0, at - 60), at + needle.length + 100);
@@ -135,9 +211,19 @@ const BUILTIN_TEMPLATES = [
 ];
 
 export class NoteService {
-  constructor({ store, broadcast }) {
+  /**
+   * @param {object} deps
+   * @param {Function} [deps.recognize] 图片文字识别实现（默认本机 Vision，见 ocr.js）。
+   *   注入点是为测试留的：CI 上没有 swiftc，用假引擎就能验证"识别 → 写回 → 广播"整条链路。
+   * @param {string} [deps.dataDir] 数据目录：编译好的 OCR 小工具放在 `<dataDir>/.ocr`。
+   */
+  constructor({ store, broadcast, recognize, dataDir }) {
     this.collection = store.notes; this.versionsCollection = store.noteVersions; this.templatesCollection = store.noteTemplates;
     this.viewsCollection = store.noteViews; this.canvasesCollection = store.noteCanvases; this.broadcast = broadcast;
+    // 属性名**不能**叫 `recognize`：那是下面同步重识别方法的原型方法名，
+    // 同名实例属性会把它整个盖掉（那个 bug 会让 POST /notes/:id/ocr 连不存在的笔记都返回 200）。
+    this.ocrEngine = typeof recognize === 'function' ? recognize : recognizeImageDataUrl;
+    this.ocrAssetDir = dataDir ? path.join(dataDir, '.ocr') : null;
   }
 
   all({ deleted = false } = {}) { return this.collection.all().map(normalized).filter((item) => deleted ? Boolean(item.deletedAt) : !item.deletedAt); }
@@ -170,14 +256,23 @@ export class NoteService {
   async create(input = {}) {
     const attachments = attachmentsOf(input.attachments);
     const body = (String(input.body ?? '') || attachments.map(extractImportedDocument).find(Boolean) || '').slice(0, MAX_BODY_CHARS);
+    const fingerprint = imageFingerprint(attachments);
     const item = await this.collection.insert({
       title: cleanText(input.title) || '未命名笔记', source: SOURCES.has(input.source) ? input.source : 'manual',
       status: STATUSES.has(input.status) ? input.status : body || attachments.length ? 'ready' : 'draft', anchor: anchorOf(input.anchor),
       tags: tagsOf(input.tags), folder: cleanText(input.folder, 300), aliases: uniqueText(input.aliases, 20), properties: propertiesOf(input.properties),
       favorite: Boolean(input.favorite), mediaCount: Math.max(0, Number(input.mediaCount) || attachments.filter((file) => file.type.startsWith('image/')).length),
       format: input.format === 'text' ? 'text' : 'markdown', body, attachments, links: parseWikiLinks(body), revision: 1, deletedAt: null,
+      // 「还没识别」的初值：`ok:false` + `error:'pending'` 明确区别于"识别过、图里没字"。
+      // 没有图片附件时留 null —— 一篇纯文字笔记不该显示"图片识别中"。
+      ocr: fingerprint ? pendingOcr() : null, ocrFingerprint: fingerprint,
     });
-    const summary = noteSummary(item); this.broadcast?.({ type: 'notes_changed', payload: { action: 'created', summary } }); return summary;
+    const summary = noteSummary(item);
+    this.broadcast?.({ type: 'notes_changed', payload: { action: 'created', summary } });
+    // 后台异步跑，**不阻塞 HTTP**：随手拍 3.8MB 的 dataUrl 走一次 Vision 要几百毫秒到几秒，
+    // 卡在响应里会让"按下快门 → 等保存"变得明显。
+    this.#scheduleOcr(item.id, fingerprint);
+    return summary;
   }
 
   async snapshot(item, reason = 'manual', force = false) {
@@ -205,13 +300,90 @@ export class NoteService {
     if (input.favorite !== undefined) patch.favorite = Boolean(input.favorite);
     if (input.format !== undefined) { if (!['markdown', 'text'].includes(input.format)) throw HttpError.badRequest('不支持的笔记格式'); patch.format = input.format; }
     if (input.status !== undefined) { if (!STATUSES.has(input.status)) throw HttpError.badRequest('不支持的笔记状态'); patch.status = input.status; }
+    /**
+     * **刻意不碰附件、也不在这里重排 OCR**（保持既有语义）：
+     * 编辑接口只允许改编辑字段，附件、来源、日历关联由创建方负责 ——
+     * `test/notes-routes.test.js` 明确断言"PATCH 传 `attachments: []` 也不会清掉已有附件"，
+     * 笔记模块是协作者的地盘，这条语义不能顺手改掉。
+     * 图片没变就没有重新识别的理由（"内容未变不重复识别"）：要重跑走 `POST /notes/:id/ocr`
+     * （`recognize()`），识别失败后的重试也在那里。
+     */
     if (!Object.keys(patch).length) return noteSummary(current);
     const rename = patch.title && patch.title !== current.title;
     await this.snapshot(current, cleanText(input.versionReason, 40) || (rename ? 'rename' : 'autosave'), rename || input.versionReason === 'manual');
     patch.revision = current.revision + 1;
     const item = await this.collection.update(String(id), patch);
     if (rename) await this.updateRenamedLinks(current.title, patch.title, id);
-    const summary = noteSummary(item); this.broadcast?.({ type: 'notes_changed', payload: { action: 'updated', summary } }); return summary;
+    const summary = noteSummary(item); this.broadcast?.({ type: 'notes_changed', payload: { action: 'updated', summary } });
+    return summary;
+  }
+
+  /* ------------------------------------------------------------ 图片文字识别（OCR） */
+
+  /**
+   * 后台排一次识别。**故意不 await、故意不把异常抛出去**：
+   * 识别是"锦上添花"的能力，失败也必须让创建/更新照常成功
+   * （真出问题时结果里会留下 `ocr.ok:false` + `error`，用户看得见、也能重试）。
+   */
+  #scheduleOcr(id, fingerprint) {
+    const noteId = String(id);
+    const source = this.ocrEngine;
+    const assetDir = this.ocrAssetDir;
+    Promise.resolve()
+      .then(async () => {
+        const note = this.get(noteId, { includeDeleted: true });
+        const image = firstImageAttachment(note.attachments);
+        if (!image) return null;
+        const raw = await source(image.dataUrl, { assetDir });
+        return { raw, fingerprint };
+      })
+      .then((outcome) => (outcome ? this.#storeOcr(noteId, outcome.raw, outcome.fingerprint) : null))
+      .catch((error) => {
+        // 走到这里说明连"取笔记 / 找图片"都失败了（笔记已被永久删除是最常见的一种）：静默记录即可
+        this.broadcast?.({ type: 'notes_ocr_failed', payload: { id: noteId, message: String(error?.message ?? error) } });
+      });
+  }
+
+  /** 把识别结果写回笔记并广播；笔记在识别期间被删掉就安静放弃。 */
+  async #storeOcr(id, raw, fingerprint) {
+    const result = raw && typeof raw === 'object' ? raw : {};
+    const text = String(result.text ?? '');
+    const ocr = normalizeOcr({
+      ok: result.ok === true,
+      text: result.ok === true ? text : '',
+      chars: result.ok === true ? (Number(result.chars) || text.length) : 0,
+      engine: result.ok === true ? (result.engine ?? 'macos-vision') : '',
+      at: new Date().toISOString(),
+      error: result.ok === true ? undefined : (result.reason ?? 'failed'),
+    });
+    try {
+      const item = await this.collection.update(String(id), { ocr, ocrFingerprint: fingerprint ?? null });
+      const summary = noteSummary(item);
+      // 与笔记其它变更同一口径（`notes_changed`）广播：渲染层据此刷新，也能看到"图片识别完成"
+      this.broadcast?.({ type: 'notes_changed', payload: { action: 'ocr', summary } });
+      return summary;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 同步重识别（`POST /notes/:id/ocr`，"重新识别"按钮走这里）。
+   *
+   * 与后台那一路共用同一套识别实现，区别只是**等它跑完再返回** —— 用户点了按钮，
+   * 就该看到明确结果，而不是"过一会儿再看列表"。
+   */
+  async recognize(id) {
+    const current = this.get(id);
+    const image = firstImageAttachment(current.attachments);
+    const fingerprint = imageFingerprint(current.attachments);
+    if (!image) {
+      return { ok: false, reason: 'bad_image', message: '这篇笔记里没有图片附件，没有可识别的文字' };
+    }
+    const raw = await this.ocrEngine(image.dataUrl, { assetDir: this.ocrAssetDir });
+    await this.#storeOcr(current.id, raw, fingerprint);
+    const stored = this.collection.get(String(current.id));
+    return { ...(stored?.ocr ?? normalizeOcr({ ...raw, at: new Date().toISOString() })), reason: raw?.reason, message: raw?.message };
   }
 
   async updateRenamedLinks(oldTitle, newTitle, targetId) {
@@ -322,6 +494,8 @@ export class NoteService {
     return this.all().filter((item) => (!wanted.size || wanted.has(item.id)) && matchesSearch(item, spec))
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, size).map((item) => ({
         id: item.id, title: item.title, format: item.format === 'text' ? 'text' : 'markdown', text: String(item.body ?? '').slice(0, 12000),
+        // 图片笔记的正文是空的，字全在 ocr.text 里；不给模型这个字段，它就只能回答"正文是空的"
+        ocr: item.ocr,
         tags: item.tags ?? [], folder: item.folder, aliases: item.aliases, properties: item.properties, links: item.links, anchor: item.anchor ?? null, updatedAt: item.updatedAt,
       }));
   }

@@ -42,6 +42,9 @@ import {
   roundRaw,
   scoreText,
 } from './scoring.js';
+// 笔记"哪些文本算内容"的口径只有一处定义（正文 + 图片识别文本，见 notes/service.js）：
+// 三路检索和笔记模块自己的搜索必须搜到同一批东西，否则"统一检索里没有"会被误当成"笔记里没有"。
+import { noteSearchText } from '../notes/service.js';
 
 /** `scope` 的合法取值：三路合起来，或只查其中一路。 */
 export const SCOPES = Object.freeze(['all', 'knowledge', 'note', 'memory']);
@@ -422,6 +425,10 @@ export class AiSearchService {
    * 为什么不用笔记模块自己的 `queryForAI()`：那是给"按 id / 关键词取正文"用的，
    * 它的关键词要求**全部词都出现**（AND），而且不给分数 —— 拿它当三路之一，
    * "转专业要什么条件"会被当成一整串去匹配，往往一条都命中不了。这里要的是**带分数的召回**。
+   *
+   * 正文用 `noteSearchText()` 取（正文 + **图片识别文本**）：随手拍笔记的正文是空的，
+   * 不带上 OCR 文本，这一路就永远召回不了"我刚拍的那张写了什么"。
+   * 阻尼按合并后的字数算 —— OCR 文本也是这篇笔记的内容，没有理由不参与长度归一。
    */
   #collectNote({ expanded, perSource, course, noteIds }) {
     if (!this.notes) return { report: this.#missing('note'), items: [] };
@@ -434,18 +441,19 @@ export class AiSearchService {
       if (wanted.size && !wanted.has(String(item.id))) continue;
       // `course` 只看某门课：笔记的课程存在 properties.course 里（接口文档的笔记字段约定）
       if (courseKey && dedupeKeyOf(item.properties?.course ?? '') !== courseKey) continue;
-      const { raw } = scoreText({ title: item.title, body: item.body }, expanded);
+      const text = noteSearchText(item);
+      const { raw } = scoreText({ title: item.title, body: text }, expanded);
       if (raw <= 0) continue;
-      scored.push({ item, raw });
+      scored.push({ item, raw, text });
     }
     // 同分按"最近改过的优先"：用户刚写的东西更可能是他问的那条
     scored.sort((a, b) => b.raw - a.raw || String(b.item.updatedAt ?? '').localeCompare(String(a.item.updatedAt ?? '')));
-    const items = scored.slice(0, perSource).map(({ item, raw }) => ({
+    const items = scored.slice(0, perSource).map(({ item, raw, text }) => ({
       source: 'note',
       id: item.id,
       noteId: item.id,
       title: item.title,
-      snippet: buildWindow(item.body, expanded.terms, SNIPPET_CHARS),
+      snippet: buildWindow(text, expanded.terms, SNIPPET_CHARS),
       score: normalizeScore(raw),
       sources: ['note'],
       meta: {

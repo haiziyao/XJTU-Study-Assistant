@@ -10,6 +10,8 @@ export function registerNoteRoutes(router, { services, apiPrefix = '/api/v1' }) 
   router.post(`${P}/ai-context`, ({ body }) => ({ items: notes.queryForAI(body ?? {}) }));
   router.post(P, async ({ body }) => ({ __status: 201, summary: await notes.create(body ?? {}) }));
   router.get(`${P}/:id/links`, ({ params }) => notes.links(params.id));
+  // 同步重跑图片文字识别（"重新识别"按钮）。笔记不存在时 `notes.recognize()` 内部的 `get()` 抛 404。
+  router.post(`${P}/:id/ocr`, async ({ params }) => ({ ocr: await notes.recognize(params.id) }));
   router.get(`${P}/:id/versions`, ({ params }) => ({ items: notes.versions(params.id) }));
   router.post(`${P}/:id/versions/:versionId/restore`, async ({ params }) => ({ summary: await notes.restoreVersion(params.id, params.versionId) }));
   router.post(`${P}/:id/restore`, async ({ params }) => ({ summary: await notes.restore(params.id) }));

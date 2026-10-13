@@ -7,6 +7,9 @@ out/
 .electron-bundle/
 
 # 运行时数据（本地用户数据，不入库；损坏备份一并忽略）
+# `data/` 整个目录都是运行时的：除了 *.json，还有 OCR 编译缓存（data/.ocr/，首次用 swiftc 编译产物）
+# 与将来可能落地的图片/附件目录 —— 一律不入库，别只挡住 *.json 让缓溜进来。
+data/
 data/*.json
 data/*.corrupt-*
 data/*.tmp

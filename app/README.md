@@ -321,7 +321,46 @@ node scripts/lms-probe.js
   本版明确不做向量检索（关键词 + 栏目够用，见接口文档 §10 的取舍）。
   怎么更新、字段含义、使用约定见 [`knowledge/dean/README.md`](knowledge/dean/README.md)。
 
-### 局域网直传（设备之间直传，不走服务器）
+### 图片笔记的本地文字识别（随手拍 → AI 能读到）
+
+随手拍进来的笔记正文是空的，字全在图片里。不做识别的话，AI 只能回答"这篇笔记正文是空的"——
+用户拍了张写满字的照片，在模型眼里等于一张白纸。这里用 **macOS 自带的 Vision 框架**
+（`VNRecognizeTextRequest`）在**本机**把字读出来，**图片不上传任何地方**，也不引任何 npm 依赖。
+
+**怎么发生**
+
+1. 创建 / 导入带 `image/*` 附件的笔记时，先写入 `ocr: { ok:false, error:'pending' }`（"排队中"），
+   HTTP 立刻返回（实测 65ms），识别在**后台串行**跑（Vision 吃 CPU，一次只跑一张）；
+2. 识别完成把结果写回该笔记的 `ocr` 字段并照常广播 `notes_changed`：
+
+   ```json
+   { "ok": true, "text": "识别出的文字…", "chars": 66, "engine": "macos-vision", "at": "2026-10-13T08:24:09.577Z" }
+   ```
+
+   识别失败也是**如实降级**，不抛异常、不影响笔记本身：
+   `error` 取 `ocr_unavailable`（本机没有 swiftc，编译不出小工具）/ `no_text`（图里没字）/
+   `bad_image`（附件不是图片）/ `timeout`（单张超过 30s）/ `failed`；整条笔记没有图片附件时 `ocr` 为 `null`。
+3. AI 侧读得到的：`aiQueryFields.note` 里有 `ocr`，笔记检索文本（`/notes?query=` 与三源检索
+   `/search?scope=note`）都包含 `ocr.text`，`notes` 模块的 `aiPrompt` 明确要求
+   "有 `ocr.text` 就直接用它回答，**绝不许因为正文为空就说里面没有内容**"；
+4. 想重跑（换了图、上次失败、第一次没装编译器）：`POST /api/v1/notes/:id/ocr`，同步等结果返回，笔记不存在 404。
+
+**小工具与缓存**
+
+- Swift 源码随模块走：`src/modules/notes/vision-ocr.swift`（约 80 行，只用 Foundation/AppKit/Vision，
+  每行结果以 `{"text","confidence"}` JSON 打到 stdout）；
+- 首次使用时用 `swiftc -O` 编译到 **`data/.ocr/vision-ocr`** 并复用（源码改了会自动重编；
+  `data/` 本就在 `.gitignore` 里，编译产物不入库）。实测：**首次 45–55s**（冷模块缓存，
+  含编译 Foundation/Vision 的 `.swiftmodule`），**之后每次识别 0.5–0.9s**；
+- CI 上通常没有 `swiftc`：此时识别一律返回 `ocr_unavailable`，笔记功能照常；单测用注入的假引擎覆盖
+  "触发时机 / 写回 / 广播"，真实识别那条用例条件 skip（见 `test/notes-ocr.test.js`）。
+
+**识别不了的（如实说明）**
+
+手写体、竖排文字、表格结构基本读不出来或读成散字；**倾斜拍摄**会明显掉准确率
+（实测那张随手拍是斜着拍的麻将截图：`环指点彩派学徒`、`铜之间•三人南`、`53000` 这类横排大字读对了，
+竖排/斜排的小字读成了 `留无你号`、`曾无称步` 这种错字），识别置信度普遍偏低。它只解决
+"照片上有没有字、大概是什么字"，不能当成精确录入。
 
 两台装了本程序的设备在同一个局域网里，**直接把数据发给对方**：没有中转服务器、没有账号、没有云。
 左侧「传输」页（`views/transfer.js`，order 66）做全部操作。
