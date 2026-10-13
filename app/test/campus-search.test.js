@@ -519,12 +519,26 @@ test('配置表：可直搜的条目字段齐全，不可用的条目必须写�
     assert.match(site.path, /\.jsp\?wbtreeid=\d+$/, `${site.id} 的搜索路径要带 wbtreeid`);
     assert.match(site.keyField, /^lucenenewssearchkey(word)?$/, `${site.id} 的字段名必须是实测过的那两种之一`);
     assert.ok(site.evidence, `${site.id} 要写明实测日期与结果条数`);
+    if (site.aliases) {
+      assert.ok(Array.isArray(site.aliases) && site.aliases.every((name) => typeof name === 'string' && name.length >= 2),
+        `${site.id} 的 aliases 必须是非空字符串（用来从问法里认站点）`);
+      assert.ok(!site.aliases.includes('学院') && !site.aliases.includes('书院'),
+        `${site.id} 的别名不能只有"学院/书院"这种通名 —— 那会把任何学院都认成同一个站`);
+    }
+    if (site.columns) {
+      assert.ok(Array.isArray(site.columns) && site.columns.length, `${site.id} 的 columns 必须是非空数组`);
+      for (const column of site.columns) {
+        assert.match(column, /\.htm$/, `${site.id} 的栏目页必须是静态 .htm（VSB 的栏目入口不是目录，实测 /info/1056/ 是 404）`);
+        assert.ok(!/^https?:/i.test(column), `${site.id} 的栏目页要写成相对本站根的路径`);
+      }
+    }
   }
-  // 优先级常量本身
-  assert.deepEqual(MATCHED_BY_RANK, { site: 0, domain: 1, mention: 2, web: 3 });
-  assert.equal(matchedByRank({ scope: 'campus', matchedBy: 'site' }), 0);
-  assert.equal(matchedByRank({ scope: 'campus' }), 1, 'campus 档没写 matchedBy 的按 domain 算');
-  assert.equal(matchedByRank({ scope: 'web', matchedBy: 'site' }), 3, '域外结果一律最低档');
+  // 优先级常量本身：`column`（栏目列表直读）> site > domain > mention > web
+  assert.deepEqual(MATCHED_BY_RANK, { column: 0, site: 1, domain: 2, mention: 3, web: 4 });
+  assert.equal(matchedByRank({ scope: 'campus', matchedBy: 'column' }), 0, '栏目直读是最高档');
+  assert.equal(matchedByRank({ scope: 'campus', matchedBy: 'site' }), 1);
+  assert.equal(matchedByRank({ scope: 'campus' }), 2, 'campus 档没写 matchedBy 的按 domain 算');
+  assert.equal(matchedByRank({ scope: 'web', matchedBy: 'site' }), 4, '域外结果一律最低档');
 });
 
 test('工具函数：base64(UTF-8) 与请求体形状（实测过的那些站点都吃这一套）', () => {

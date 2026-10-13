@@ -18,7 +18,12 @@
  * 两种模式（`mode`）
  * ----------------
  *   - `web`    ：校外，全网检索；
- *   - `campus` ：三条通道，**顺序就是优先级**（见 `searchWebDetailed` 里的执行注释）：
+ *   - `campus` ：四条通道，**顺序就是优先级**（见 `searchWebDetailed` 里的执行注释）：
+ *                ⓪ **栏目列表直读**（`readSiteNews`）：问法像"最近/最新有什么"、又能从检索词里
+ *                   认出目标站点时，直接把该站点的新闻/通知**栏目页**抓下来，取按发布日期倒序的
+ *                   前几条（`matchedBy: 'column'` + `publishedAt`）。**为什么不靠站内搜索**：
+ *                   VSB 站群的列表页常常没被站内搜索收录、或收录明显滞后，真机上"最近学院有什么
+ *                   新闻"就是因此失手的；而列表页是静态 HTML，抓下来就是最新几条；
  *                ① **站内直搜**（`searchCampusSites`）：直接打校内站点自己的检索接口，
  *                   命中的才必然是"校内的东西"；
  *                ② **公共结果页**：把检索词收窄到校内站点（`site:` + 校名，见 `campusScopedQuery`），
@@ -106,74 +111,107 @@ export const CAMPUS_PROBE_CAVEAT =
  *   - `keyField`  关键词字段名（`lucenenewssearchkey` 或 `lucenenewssearchkeyword`）
  *   - `evidence`  实测日期 + 当时的结果条数（以后站点改版，先看这一行还成不成立）
  *   - `origin`    可选，仅测试注入本地假站点时用；默认 `https://<host>`
+ *   - `aliases`   可选，**从用户问法里认站点**用的别名（`findCampusSiteForQuery`）。
+ *                只写不会误伤的：书院/学院全名 + 通用简称（"彭康""航院"），
+ *                **不写**"学院""书院"这种单独出现的通名 —— 那会把任何学院都认成同一个站。
+ *   - `columns`   可选，**实测可用**的新闻/通知栏目列表页（相对本站根的路径）。
+ *                它是"栏目列表直读"（`readSiteNews`）的兜底清单：正常情况下栏目页从首页锚文本里
+ *                现找（站点改版也能跟上），这里这份是首页找不到链接时（JS 渲染的首页、首页抓取
+ *                失败）的保底，也在候选排序里排前面（首页链接是按导航顺序排的，主新闻栏目常被
+ *                "工作动态/团委动态"挤掉）。**每条都实测过能抽出带日期的条目**，
+ *                实测日期与当时读到的最新一条见本表后面的《栏目列表直读实测结论表》。
  * 字段（`working: false` 的条目）：只有 `id/label/host/reason`，运行时**不会发请求**；
  * 留着是为了下次不用重复试 —— 都是 2026-10-13 实测确认打不通或没有检索入口的。
  */
 export const CAMPUS_SITE_SEARCH = Object.freeze([
   {
     id: 'dean', label: '教务处', host: 'dean.xjtu.edu.cn',
+    aliases: ['教务处', '教务', '教务办', '本科生院'],
+    columns: ['jxxx/jxtz2.htm', 'jxxx/jxdt.htm'],
     path: '/search.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
     evidence: '2026-10-13 实测「转专业」15 条、「通知」15 条',
   },
   {
     id: 'gs', label: '研究生院', host: 'gs.xjtu.edu.cn',
+    aliases: ['研究生院', '研招办', '研究生招生'],
+    columns: ['xwdt.htm', 'tzgg.htm'],
     path: '/ssjgy.jsp?wbtreeid=1111', keyField: 'lucenenewssearchkeyword', working: true,
     evidence: '2026-10-13 实测「转专业」15 条、「通知」17 条（字段名是全表唯一的 keyword 版）',
   },
   {
     id: 'www', label: '学校门户（覆盖整个 *.xjtu.edu.cn）', host: 'www.xjtu.edu.cn',
+    aliases: ['学校门户', '交大主页', '学校主页'],
     path: '/soso_2.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey',
     allowHosts: ['xjtu.edu.cn'], working: true,
     evidence: '2026-10-13 实测「转专业」10 条（含 news.xjtu.edu.cn 稿件）；无匹配时会返回一版默认推荐列表',
   },
   {
     id: 'sae', label: '航天航空学院', host: 'sae.xjtu.edu.cn',
+    aliases: ['航天航空学院', '航天学院', '航空航天学院', '航院', '航天航空'],
+    columns: ['index/zhxw.htm', 'index/tzgg.htm', 'index/xsjz.htm'],
     path: '/search.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
     evidence: '2026-10-13 实测「转专业」15 条（标题在 <h3> 里，日期在 <a> 内的 .a-date 块）',
   },
   {
     id: 'math', label: '数学与统计学院', host: 'math.xjtu.edu.cn',
+    aliases: ['数学与统计学院', '数学学院', '数学院', '数学系'],
+    columns: ['kxyj/kydt.htm'],
     path: '/ssjgy.jsp?wbtreeid=1213', keyField: 'lucenenewssearchkey', working: true,
     evidence: '2026-10-13 实测「转专业」18 条、「通知」18 条',
   },
   {
     id: 'news', label: '新闻网', host: 'news.xjtu.edu.cn',
+    aliases: ['新闻网', '交大新闻网', '学校新闻'],
+    columns: ['zyxw.htm', 'ywjj.htm', 'yxdt/ybdt.htm'],
     path: '/xmb/ssjgg.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
     evidence: '2026-10-13 实测「转专业」8 条（每条带摘要，链接是 ../info/… 相对路径）',
   },
   {
     id: 'pksy', label: '彭康书院', host: 'pksy.xjtu.edu.cn',
+    aliases: ['彭康书院', '彭康'],
+    columns: ['sydt/pkxw.htm', 'tzgg.htm'],
     path: '/search.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
     evidence: '2026-10-13 实测「转专业」15 条（结果容器写成大写 <UL>）',
   },
   {
     id: 'wen', label: '文治书院', host: 'wen.xjtu.edu.cn',
+    aliases: ['文治书院', '文治'],
+    columns: ['syxw.htm', 'tzgg.htm'],
     path: '/ssjg.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
     evidence: '2026-10-13 实测「转专业」15 条（日期和标题挤在同一个 <a> 里）',
   },
   {
     id: 'zlsy', label: '宗濂书院', host: 'zlsy.xjtu.edu.cn',
+    aliases: ['宗濂书院', '宗濂', '宗濂尚德书院'],
+    columns: ['sydt.htm', 'tzgg.htm'],
     path: '/ss.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
     evidence: '2026-10-13 实测「转专业」15 条',
   },
   {
     id: 'nanyang', label: '南洋书院', host: 'nanyang.xjtu.edu.cn',
+    aliases: ['南洋书院', '南洋'],
+    columns: ['xwtz/syxw.htm', 'xwtz/tzgg.htm'],
     path: '/search.jsp?wbtreeid=1047', keyField: 'lucenenewssearchkey', working: true,
     evidence: '2026-10-13 实测「转专业」15 条',
   },
   {
     id: 'lizhi', label: '励志书院', host: 'lizhi.xjtu.edu.cn',
+    aliases: ['励志书院', '励志'],
+    columns: ['xwtz.htm', 'xwtz/zxdt.htm'],
     path: '/sousuo.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
     evidence: '2026-10-13 实测「转专业」15 条',
   },
   {
     id: 'bjb', label: '钱学森学院（拔尖计划）', host: 'bjb.xjtu.edu.cn',
+    aliases: ['钱学森学院', '钱学森书院', '拔尖计划', '钱学森班'],
+    columns: ['xydt/zhxw.htm', 'xydt/tzgg.htm'],
     path: '/soso.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey', working: true,
     evidence: '2026-10-13 实测「转专业」15 条（钱学森书院的内容也在这里）',
   },
   // ---- 以下站点 2026-10-13 实测打不通/没有检索入口：运行时直接跳过，不做无谓请求 ----
   {
-    id: 'library', label: '图书馆', host: 'library.xjtu.edu.cn', working: false,
+    id: 'library', label: '图书馆', host: 'library.xjtu.edu.cn',
+    aliases: ['图书馆', '交大图书馆'], working: false,
     reason: '域名能解析（202.117.24.24）但 http/https 都 20s 超时，疑似仅校园网内可达，本轮无法确认它有没有检索入口',
   },
   {
@@ -186,11 +224,13 @@ export const CAMPUS_SITE_SEARCH = Object.freeze([
   },
   {
     id: 'eie', label: '电子与信息学部', host: 'eie.xjtu.edu.cn', working: false,
-    reason: '首页是 JS 渲染的 VSB「AI 网站」模板（jQuery + home.js 往 #app 里注入正文），HTML 里没有搜索表单，直搜抓不到结果',
+    reason: '首页是 JS 渲染的 VSB「AI 网站」模板（jQuery + home.js 往 #app 里注入正文），HTML 里没有搜索表单，直搜抓不到结果；'
+      + '但**栏目直读读得到** —— 2026-10-13 实测 `/tzgg.htm` 有 20 条带日期的通知（最新 2026-08-02）。直搜不行不等于栏目不行',
   },
   {
     id: 'cssy', label: '崇实书院', host: 'cssy.xjtu.edu.cn', working: false,
-    reason: '站点可达（首页 40KB）但整页没有 <form>、也没有 base64.js，没有可调的站内检索接口',
+    reason: '站点可达（首页 40KB）但整页没有 <form>、也没有 base64.js，没有可调的站内检索接口；'
+      + '但**栏目直读读得到** —— 2026-10-13 实测 `sydt.htm`/`tzgg.htm` 有带日期的条目，只是栏目本身停在 2023-09-07',
   },
   {
     id: 'lms', label: '思源学堂', host: 'lms.xjtu.edu.cn', working: false,
@@ -202,6 +242,42 @@ export const CAMPUS_SITE_SEARCH = Object.freeze([
   },
 ]);
 
+/**
+ * 栏目列表直读（`readSiteNews`）的**实测结论表**（2026-10-13，用本文件的代码真网跑出来的）。
+ *
+ * 留着它的用途：以后"最近怎么读不到新闻了"，先照这张表复核一遍 ——
+ * 每个站的列表页 URL、当时读到的最新日期、以及"是不是可用"。数字变了不一定是坏了
+ *（学校假期不发稿很正常），但**最新日期停在几个月前**或**整页抓不到**就要查了。
+ *
+ * | 站点 | 可用栏目页（相对本站根） | 实测最新 | 说明 |
+ * |------|--------------------------|----------|------|
+ * | sae  | `index/zhxw.htm`(综合新闻)、`index/tzgg.htm`(通知公告)、`index/xsjz.htm`(学术讲座) | 2026-10-12 | 首页栏目按导航顺序排在"工作动态/团委动态"之后，所以 `columns` 要显式给出；日期拆成 `<span>2026</span><b>10-12</b>` 与 `<b>04</b><span>2026.05</span>` 两种写法 |
+ * | dean | `jxxx/jxtz2.htm`(教学通知)、`jxxx/jxdt.htm`(教学动态) | 2026-10-12 | 日期在 `<a>` 后的裸 `<span>2026-09-18</span>` 里；`/tzgg.htm` 在这个站是 **404** |
+ * | gs   | `xwdt.htm`(新闻动态)、`tzgg.htm`(通知公告) | 2026-10-12 | 路径短好记，`/xwdt.htm` 全站群只有这个站有 |
+ * | news | `zyxw.htm`(主页新闻)、`ywjj.htm`(要闻聚焦)、`yxdt/ybdt.htm`(院部动态) | 2026-10-12 | 日期是 `<a class="y">2026-10</a><a class="r">10</a>` 两段 |
+ * | math | `kxyj/kydt.htm`(科研动态) | 2026-10-09 | 首页现找即可 |
+ * | pksy | `sydt/pkxw.htm`(书院动态)、`tzgg.htm`(通知公告) | 2026-09-15 | `sydt/xsbg.htm`(学术报告) 实测**空页**（0 条），没进 columns |
+ * | wen  | `syxw.htm`(书院新闻)、`tzgg.htm`(通知公告) | 2026-10-08 | 标题在 `<a title="…">` 里、锚文本带日期，所以取 `title` 属性；`tzgg` 停在 2026-05-14 |
+ * | zlsy | `sydt.htm`(书院动态)、`tzgg.htm`(通知公告) | 2026-09-29 | `tzgg` 停在 2024-01-03（这个栏目的通知栏很久没更新） |
+ * | nanyang | `xwtz/syxw.htm`(新闻通知)、`xwtz/tzgg.htm`(通知公告) | 2026-09-14 | `tzgg` 停在 2025-03-06 |
+ * | lizhi | `xwtz.htm`(新闻通知)、`xwtz/zxdt.htm`(最新动态) | 2026-07-23 | `sydj/djtz.htm` 实测空页 |
+ * | bjb  | `xydt/zhxw.htm`(新闻信息)、`xydt/tzgg.htm`(通知公告) | 2026-09-30 | `hzjl/jldt.htm` 实测空页 |
+ * | www  | **没有可读栏目**（首页是门户，锚文本里没有新闻/通知栏目；`/tzgg.htm`、`/xwdt.htm` 都 404） | — | 门户只适合做"搜全校"，要新闻请走 `news` |
+ * | library | **不可达**（首页 8s 超时；`/tzgg.htm`、`/xwdt.htm` 因此未尝试） | — | 与表里 `working:false` 的原因一致：疑似仅校园网内可达；校园网内是否可读**本轮没验证** |
+ * | cssy 崇实书院 | `sydt.htm`(书院动态)、`tzgg.htm`、`dyzj/tzgg.htm`（**首页现找**到的） | 2023-09-07 | **`working:false` 只代表"没有检索入口"，不代表读不到栏目**：这个站没有检索表单，但栏目页照样能读；只是它的新闻栏目本身停在 2023-09，读到的就是真实的旧日期 |
+ * | eie 电子与信息学部 | `/tzgg.htm`（**通用兜底路径**命中的，20 条） | 2026-08-02 | 又一个"搜索读不到、栏目能读到"的例子：它的首页是 JS 渲染的（没有检索表单），但通知栏目页是标准 VSB 静态页 |
+ * | ehall 师生服务大厅 | 无（`/tzgg.htm`、`/xwdt.htm` 都 200 但 0 条带日期的行） | — | JS 单页应用，HTML 里没有列表条目 → **如实报空 + 原因** |
+ * | lms 思源学堂 | 无（首页 400，两个兜底页也没有条目） | — | 整站要 jAccount 登录，匿名读不到（与 `working:false` 的原因一致） |
+ * | qianxuesen 钱学森书院 / sei 软件学院 | 未探测（域名本身连不上） | — | 与 `working:false` 的原因一致；要内容走 `www`/`bjb` 的搜索 |
+ *
+ * 诚实说明两句：
+ *   ① "最新"= **该站栏目页上列出的最新一条的发布日期**，不是"今天有新闻"；
+ *      有些栏目本来就更新慢（pksy 通知停在 2025-11、zlsy 通知停在 2024-01、cssy 新闻停在 2023-09），
+ *      这不是抓取坏了 —— `readSiteNews` 会把这些真实日期照原样返回。
+ *   ② 全是 JS 渲染的列表页（HTML 里没有条目）读不到，会**返回空 + 每页的原因**，
+ *      绝不拿导航链凑数（`ehall` 实测就是这样）。
+ */
+
 /** 站内直搜的站点级并发上限：3。再高容易触发站群 WAF，收益也有限。 */
 export const CAMPUS_SEARCH_CONCURRENCY = 3;
 /** 单个校内站点检索的超时（比公共搜索短：站点自己的检索通常 1–4s 就有响应）。 */
@@ -209,12 +285,22 @@ export const CAMPUS_SITE_TIMEOUT_MS = 6_000;
 
 /**
  * 一条结果"凭什么算校内的"——数值越小越优先（campus 档按它排序）：
- *   - `site`    站内站点自己的检索接口命中（最强：校方发布的内容页）
+ *   - `column`  **栏目列表直读**：直接把目标站点自己的新闻/通知栏目页抓下来。条目是校方原文，
+ *               而且带**发布日期**（`publishedAt`）。在"最近/最新有什么"这类问法里它排第一。
+ *   - `site`    站内站点自己的检索接口命中（校方发布的内容页）
  *   - `domain`  公共结果页给出的链接落在 `*.xjtu.edu.cn`（域名对，但页面可能是转载/跳板）
  *   - `mention` 公网结果的标题/摘要里提到本校（最弱：只是"提到了"，页面本身在校外）
  *   - `web`     其它公网结果（校内档里排在最后）
+ *
+ * **为什么 `column` 单独占最高一档，而不是和 `site` 并列**：两者回答的不是同一个问题。
+ * `site` 回答"站内搜索里谁匹配了关键词"，而真机反馈证明它恰恰在"最近有什么新闻"上失灵 ——
+ * VSB 站群的列表页常常没被站内搜索收录、或收录明显滞后（用户问「最近航天学院有什么新闻」，
+ * 站内直搜命中的全是 `/info/1035/`、`/info/1093/` 这类招生栏目，学院新闻停在年初）。
+ * `column` 回答的是"这个站点此刻最新发布的几条是什么"，**按时间**而不是按关键词，
+ * 而且直接读校方栏目页原文。用户问"最近/最新"时后者才是他要的东西。
+ * 并列（同分）的话，胜负会退化成"哪个通道先产出"，随站点表顺序漂移，不是个稳定口径。
  */
-export const MATCHED_BY_RANK = Object.freeze({ site: 0, domain: 1, mention: 2, web: 3 });
+export const MATCHED_BY_RANK = Object.freeze({ column: 0, site: 1, domain: 2, mention: 3, web: 4 });
 
 /** 取一条结果的档位序号（没有 `matchedBy` 的当公网处理）。 */
 export function matchedByRank(item) {
@@ -1185,8 +1271,9 @@ async function callApiProvider(provider, { query, limit, key, fetchImpl, endpoin
 /**
  * 统一把一条候选收敛成 `{title,url,snippet,source,scope}`，垃圾直接丢掉。
  *
- * `matchedBy`（'site' / 'domain' / 'mention'）与 `site`（站内直搜的来源站点 id）是可选字段：
- * **原条目带了才写出去** —— 这两个字段已经在 `dedupeResults` 的既有用例里被
+ * `matchedBy`（'column' / 'site' / 'domain' / 'mention'）、`site`（来源站点 id）与
+ * `publishedAt`（发布日期，栏目直读才有）是可选字段：
+ * **原条目带了才写出去** —— 这几个字段已经在 `dedupeResults` 的既有用例里被
  * `deepStrictEqual` 逐字段比对过，多写一个 `undefined` 键也会让那些断言挂掉。
  */
 function normalizeResult(raw, scope) {
@@ -1204,6 +1291,9 @@ function normalizeResult(raw, scope) {
   };
   if (raw.matchedBy) out.matchedBy = String(raw.matchedBy);
   if (raw.site) out.site = String(raw.site);
+  // 发布日期必须在这里透传：去重是所有通道的必经之路（campus 档尤其），
+  // 漏掉它，"最新这条是几月几号"会在最后一步丢掉，模型就只能含糊其辞。
+  if (raw.publishedAt) out.publishedAt = String(raw.publishedAt);
   return out;
 }
 
@@ -1682,6 +1772,721 @@ export async function searchCampusSites({
 }
 
 // ---------------------------------------------------------------------------
+// 栏目列表直读（campus 档的 ⓪ 条通道：不问站内搜索，直接读校方栏目页）
+// ---------------------------------------------------------------------------
+
+/**
+ * 这一节解决的是真机上暴露的一个具体问题。
+ *
+ * 用户问「最近我们航天学院有什么新闻吗」，AI 连着搜了两轮如实回答"学院官网的新闻列表页似乎
+ * 没被检索到，命中的多是 `/info/1035/`、`/info/1093/` 这类招生栏目""能搜到的学院新闻只到
+ * 2026 年 1 月两条"。根因**不是模型不会搜，而是通道用错了**：
+ * `searchCampusSites` 走的是各站点自己的检索接口，而 VSB 站群的新闻/通知**列表页经常没被站内
+ * 搜索收录、或者索引明显滞后**；而 `sae.xjtu.edu.cn/index/zhxw.htm` 上明明白白列着最近几个月的
+ * 学院新闻（2026-10-10 那条就在上面）。
+ *
+ * 所以这一通道**不问站内搜索，直接读栏目页**：VSB 的列表页是静态 HTML
+ * （`<li><a href="../info/1056/9993.htm"><h3>标题</h3></a><div class="tz-date"><span>2026</span><b>10-10</b></div></li>`），
+ * 抓下来就是"最新几条"，而且**带发布日期** —— 这正是"最近有什么"要的东西。
+ *
+ * 三个设计点：
+ *   ① **栏目页不硬编码**：优先从首页锚文本（新闻/要闻/动态/通知/公告/学术/讲座…）里现找，
+ *      站点改版、换栏目路径都能跟上；首页找不到（JS 渲染的首页、首页抓取失败）时再退到
+ *      `CAMPUS_SITE_SEARCH[i].columns`（逐条实测过的兜底清单）与通用兜底路径。
+ *   ② **跨域条目一律丢掉**：与 `searchCampusSites` 同一口径（`allowedHostsOf`）。
+ *      导航条、友情链接、"合作单位"常跟新闻列表同页，放松域名就等于让"北大教务处的通知"
+ *      混进"校内最新通知"里 —— 那不是"不够精确"，那是**假的**。宁可少几条。
+ *   ③ **抽不到发布日期的行一律不当条目**：`extractColumnDate` 返回空就丢，并如实记进
+ *      `fetched[].count/rows/dated` 与 `notes`。整页都是 JS 渲染、抽不出日期时返回**空 + 原因**，
+ *      绝不把导航链或标题当新闻硬塞 —— "搜不到就说搜不到"是本模块的第一原则。
+ *
+ * 另外：这里**只读列表页、不抓正文**。列表页已经给了标题+链接+日期，足够回答"最近有什么"；
+ * 要读某一篇的正文，模型可以用 `fields.url` 直读那一条（已有能力），不必在这里批量抓。
+ */
+export const COLUMN_LIMIT_DEFAULT = 10;
+/** 单个栏目页的超时：和读正文一个量级，列表页通常 0.3–1.5s 就有响应。 */
+export const COLUMN_TIMEOUT_MS = 8_000;
+/** 一次最多抓几个候选栏目页（加上首页就是 6 个请求）：再多收益很低，还会把站群 WAF 招来。 */
+export const COLUMN_CANDIDATE_MAX = 5;
+/** 候选栏目页的并发上限（沿用读正文的口径 4）。 */
+export const COLUMN_CONCURRENCY = 4;
+/** 站点表里 `columns` 最多先占几个候选位（见下面候选排序的说明）。 */
+export const COLUMN_CURATED_MAX = 3;
+/** 标题截断长度（列表页标题里有很长的讲座名）。 */
+export const COLUMN_TITLE_MAX = 120;
+
+/**
+ * 首页上"看起来是栏目入口"的锚文本。实测这些词在各站首页都能命中真正的栏目页
+ * （sae 的"综合新闻/通知公告/学术讲座"、dean 的"教学动态/教学通知"、pksy 的"书院动态"…）。
+ */
+export const COLUMN_LINK_TEXT_RE = /新闻|要闻|动态|通知|公告|学术|讲座|综合新闻/;
+
+/**
+ * "这个问法是不是想要最新列表"。
+ *
+ * 只有命中它才会去读栏目页 —— 否则每一条 campus 检索都要多花 2–6 个请求，
+ * 而"转专业学分怎么算"这种问题根本不需要最新列表。
+ */
+export const NEWS_LIST_QUERY_RE = /最新|最近|近期|新闻|要闻|动态|通知|公告|讲座|活动|资讯/;
+
+/**
+ * 通用兜底栏目路径（**这是真网逐站探测的结论，不是照模板猜的**）。
+ *
+ * 2026-10-13 对 12 个可达站点逐个 GET 了 `/xwdt.htm`、`/xyxw.htm`、`/xwzx.htm`、`/tzgg.htm`、
+ * `/news.htm`、`/xwzx/xyxw.htm`、`/index/tzgg.htm`：
+ *   - `/tzgg.htm` → **pksy / wen / zlsy / gs 四个站 200**，留下；
+ *   - `/xwdt.htm` → **gs 一个站 200**（研究生院"新闻动态"），留下；
+ *   - `/xyxw.htm`、`/xwzx.htm`、`/news.htm`、`/xwzx/xyxw.htm` → **12 个站全 404**，删掉；
+ *   - `/index/tzgg.htm` → 只有 sae 200（那是它自己的栏目路径，已写进 sae 的 `columns`），不做通用兜底；
+ *   - `/info/1056/` 这种"栏目 id 入口" → sae 上 **404**（VSB 的栏目入口是 `.htm` 页，不是目录），不做。
+ * 留着 404 的路径不只是浪费请求，还会让 `fetched[]` 里全是噪音，掩盖真正的失败原因。
+ */
+export const COLUMN_FALLBACK_PATHS = Object.freeze(['/tzgg.htm', '/xwdt.htm']);
+
+/** 明显是导航/翻页的锚文本：带日期的行里出现它们，多半是"更多"这类模板链接，不是条目。 */
+const COLUMN_NAV_LABELS = new Set([
+  '首页', '主页', '返回', '更多', '更多>', '更多>>', '查看更多', '上一页', '下一页',
+  '上一条', '下一条', '列表', '全部', '栏目首页', '网站地图', '联系我们', 'more', 'more>>', '...',
+]);
+
+/** VSB 的内容页形状（`info/1056/9993.htm`）：**内容页不是栏目页**，而首页上这两种链接长得一样。 */
+const CONTENT_PAGE_RE = /\/info\/\d+\/\d+\.htm$/i;
+
+/** 完整日期：`2026-06-20` / `2026/06/20` / `2026.06.20` / `2026年6月20日` / `[2026-06-20]`。 */
+const COLUMN_FULL_DATE_RE = /(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})\s*日?/g;
+/** 只到月份：`2026.06` / `2026-06` / `2026年6月`。 */
+const COLUMN_YEAR_MONTH_RE = /(\d{4})\s*[-/.年]\s*(\d{1,2})\s*月?/g;
+/** 只到月-日：`06-20`（年份在相邻元素里，VSB 的模板都这样拆）。 */
+const COLUMN_MONTH_DAY_RE = /(?<!\d)(\d{1,2})\s*[-/.]\s*(\d{1,2})(?!\d)/g;
+/** 行内独立出现的 4 位年份（`<span>2026</span><b>10-12</b>` 里的那个 2026）。 */
+const COLUMN_BARE_YEAR_RE = /(?<!\d)(20\d{2})(?!\d)/;
+/** 一个"日期样"的 token：清洗标题时只在头/尾剥这种 token。 */
+const COLUMN_DATE_TOKEN_RE =
+  /^(?:\d{4}|\[?\d{4}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?\]?|\[?\d{1,2}[-/.]\d{1,2}\]?|(?:\d{4}年)?\d{1,2}月(?:\d{1,2}日)?|\d{1,2}日)$/;
+
+const pad2 = (value) => String(value).padStart(2, '0');
+
+/** 月份/日期合法性：专治把"2026-2027学年"这类区间当日期。 */
+function monthDayInRange(month, day) {
+  if (!Number.isFinite(month) || month < 1 || month > 12) return false;
+  if (day === undefined || day === null) return true;
+  return Number.isFinite(day) && day >= 1 && day <= 31;
+}
+
+/**
+ * 从一行文本里抽发布日期，归一成 `YYYY-MM-DD`（只知道月份时是 `YYYY-MM`，**不补 01**：
+ * 补了就是在编造"这条是 6 月 1 日发的"）。
+ *
+ * 支持的写法（都是实测见过的模板形态）：
+ *   - `2026-06-20` / `2026/06/20` / `2026.06.20` / `2026年6月20日` / `[2026-06-20]`
+ *   - `2026.06`（sae 学术讲座：`<b>05</b><span>2023.09</span>` 去掉日就是它）
+ *   - `06-20`（年份在相邻元素里：`<span>2026</span><b>10-12</b>`、`<span class="r">10-08</span><span class="y">2026</span>`）
+ *   - `2026-10` + 相邻的 `10`（新闻网 `zyxw.htm`：`<a class="y">2026-10</a><a class="r">10</a>`）
+ *
+ * 两条"宁可抽不到"的规矩：
+ *   ① 只写 `06-20`、行里和页面里都找不到年份 → 返回空（**不猜年份**，猜错了就是编造日期）；
+ *   ② 月份/日超范围（`2026-2027学年`）→ 跳过这一段，继续找下一个候选。
+ */
+export function extractColumnDate(text, { pageYear = '' } = {}) {
+  const source = collapseInline(text);
+  if (!source) return '';
+
+  for (const match of source.matchAll(COLUMN_FULL_DATE_RE)) {
+    const [, year, month, day] = match;
+    if (!monthDayInRange(Number(month), Number(day))) continue;
+    return `${year}-${pad2(month)}-${pad2(day)}`;
+  }
+
+  for (const match of source.matchAll(COLUMN_YEAR_MONTH_RE)) {
+    if (!monthDayInRange(Number(match[2]))) continue;
+    const before = source.slice(0, match.index);
+    const after = source.slice(match.index + match[0].length);
+    const day = adjacentDayNumber(before, after);
+    return day ? `${match[1]}-${pad2(match[2])}-${pad2(day)}` : `${match[1]}-${pad2(match[2])}`;
+  }
+
+  for (const match of source.matchAll(COLUMN_MONTH_DAY_RE)) {
+    if (!monthDayInRange(Number(match[1]), Number(match[2]))) continue;
+    const year = COLUMN_BARE_YEAR_RE.exec(source)?.[1] || String(pageYear ?? '');
+    if (!year) continue;
+    return `${year}-${pad2(match[1])}-${pad2(match[2])}`;
+  }
+  return '';
+}
+
+/**
+ * `YYYY-MM` 与相邻的裸数字拼成日期（VSB 把年月和"日"拆到两个元素里）。
+ * 只看**紧邻**的空白分隔 token，且必须整 token 都是 1–2 位数字（混了别的字就不认）——
+ * 松一点就会把"报告人：龚璞林"里的数字当成"日"。
+ */
+function adjacentDayNumber(before, after) {
+  const tail = String(before).trim().split(/\s+/).pop() ?? '';
+  const head = String(after).trim().split(/\s+/).shift() ?? '';
+  for (const token of [tail, head]) {
+    if (token.length > 4 || !/^\d{1,2}$/.test(token)) continue;
+    const value = Number(token);
+    if (value >= 1 && value <= 31) return value;
+  }
+  return 0;
+}
+
+/** 这个 token 是不是"日期样"（清洗标题用）。 */
+function isDateToken(token) {
+  const cleaned = String(token ?? '').replace(/^[[(（【]+/, '').replace(/[\])）】]+$/, '');
+  return COLUMN_DATE_TOKEN_RE.test(cleaned.trim());
+}
+
+/**
+ * 列表页的标题清洗：把头/尾的日期 token 剥掉。
+ *
+ * 为什么需要它：VSB 各模板会把日期塞进 `<a>` 里（"10-08 2026 文治书院…"），不剥的话模型引用出来
+ * 就是"10-08 2026 文治书院…"这种糊成一团的标题。只剥**头尾最多 3 个** token，并且
+ * **孤立的 1–2 位数字只在紧跟另一个日期 token 时才剥** —— 否则"3 号教学楼停电通知"会被啃掉开头的 3。
+ *
+ * `publishedAt` 是这一行的发布日期，只用来处理"日期**贴在标题前面且没有空格**"的模板
+ * （崇实书院实测：锚文本是 `09-07【2023崇实"崇"你】…`）。**必须要求前缀正好等于这一行的日期**
+ * 才剥，否则"10-12月工作安排"这种真标题会被啃成"月工作安排"。
+ */
+function cleanColumnTitle(raw, publishedAt = '') {
+  let tokens = collapseInline(raw).split(' ').filter(Boolean);
+  let guard = 0;
+  while (tokens.length > 1 && guard < 3 && isDateToken(tokens[0])) {
+    if (/^\d{1,2}$/.test(tokens[0]) && !isDateToken(tokens[1] ?? '')) break;
+    tokens = tokens.slice(1);
+    guard += 1;
+  }
+  const mmdd = String(publishedAt ?? '').slice(5);
+  if (mmdd.length === 5 && tokens.length && tokens[0].startsWith(mmdd)) {
+    const rest = tokens[0].slice(mmdd.length).replace(/^[\s:：|\-–—]+/, '');
+    if (rest.length >= 6) tokens[0] = rest; // 剥完还得像个标题（"月工作安排"这种就不剥）
+  }
+  guard = 0;
+  while (tokens.length > 1 && guard < 2 && isDateToken(tokens[tokens.length - 1])) {
+    if (/^\d{1,2}$/.test(tokens[tokens.length - 1])) break; // "…第十五届 3" 这种不吃
+    tokens = tokens.slice(0, -1);
+    guard += 1;
+  }
+  return tokens.join(' ').trim();
+}
+
+/**
+ * 一行里的 `<a>`：href、`<h1..h4>` 标题、`title` 属性、锚文本。
+ *
+ * 为什么单独写一份而不是复用 `extractAnchors`：列表页的**锚文本常常带日期**
+ * （`<a href=… title="真正的标题"><span class="date">10-08</span>…</a>`，wen 的模板就是这样），
+ * 而 `title` 属性在 VSB 模板里几乎总是干净的标题 —— 这个属性 `extractAnchors` 没取。
+ */
+function columnAnchors(block) {
+  const out = [];
+  for (const match of String(block ?? '').matchAll(/<a\b([^>]*)href=["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const attrs = `${match[1]} ${match[3]}`;
+    const inner = match[4];
+    const heading = /<h[1-4]\b[^>]*>([\s\S]*?)<\/h[1-4]>/i.exec(inner);
+    out.push({
+      href: match[2],
+      heading: heading ? stripTitleTags(heading[1]) : '',
+      titleAttr: stripTitleTags(/title=["']([^"']*)["']/i.exec(attrs)?.[1] ?? ''),
+      text: stripTitleTags(inner),
+    });
+  }
+  return out;
+}
+
+/** 一个 `<a>` 的"标题候选"：`<h3>` → `title` 属性 → 锚文本，取第一个清洗后够长的。 */
+function columnAnchorLabel(anchor, publishedAt = '') {
+  for (const candidate of [anchor.heading, anchor.titleAttr, anchor.text]) {
+    const cleaned = cleanColumnTitle(candidate, publishedAt);
+    if (cleaned.length >= 4) return cleaned;
+  }
+  return '';
+}
+
+/** 模板里的"专用日期块"：`tz-date` / `a-date` / `date` / `time` / `time fr`（VSB 各站都这么标）。 */
+const COLUMN_DATE_BLOCK_RE = /<(\w+)\b[^>]*class=["'][^"']*(?:date|time)[^"']*["'][^>]*>([\s\S]*?)<\/\1\s*>/gi;
+/** 日期块**自身元素里**没写全时，往后看多少个字符找（wen 的 `<span class="date">` 里只有"10-08"，年份在下一个 span 里）。 */
+const COLUMN_DATE_WINDOW = 160;
+
+/**
+ * 一行的发布日期：**先看专用日期块（元素内容 → 紧邻的一小段），再退到整行**。
+ *
+ * 顺序不是随便定的，真网实测踩过两次：
+ *   ① sae「第二届机械与航空航天工程国际会议通知」的发布日是 `tz-date` 块里的 **2026-10-12**，
+ *      而摘要正文写着"本次会议将于 **2026年11月2日** 至 3 日举行"；
+ *   ② 文治书院那条的发布日是 `date` 块里的 **10-08**，摘要开头却是"**2026年10月7日**下午，文治书院…"。
+ * 先扫整行的话，抽出来的是**事情发生的日子**，不是**发布的日子** —— 而"最近有什么"问的正是后者。
+ *
+ * 所以匹配粒度是"**日期块元素自己的内容**优先，块后面那一小段（160 字符）次之，整行最后"。
+ * 元素内容优先这一条也是被真网逼出来的：块后面 160 字符常常已经伸进摘要里了
+ *（上面 ① 那 60 来个字的摘要里就藏着 11-02），必须先把块自己读完再往外看。
+ */
+function columnDateFromRow(row, pageYear) {
+  const source = String(row ?? '');
+  for (const match of source.matchAll(COLUMN_DATE_BLOCK_RE)) {
+    const own = collapseInline(stripTags(match[2]));
+    const fromOwn = extractColumnDate(own, { pageYear });
+    if (fromOwn) return fromOwn;
+    const nearby = collapseInline(stripTags(source.slice(match.index, match.index + COLUMN_DATE_WINDOW)));
+    const fromNearby = extractColumnDate(nearby, { pageYear });
+    if (fromNearby) return fromNearby;
+  }
+  return extractColumnDate(collapseInline(stripTags(source)), { pageYear });
+}
+
+/** 列表行：先按 `<li>`（VSB 全是 `<ul><li>`），整页没有 `<li>` 才退到 `<tr>` 表格行。 */
+function columnRows(html) {
+  const rows = [];
+  for (const match of String(html ?? '').matchAll(/<li\b[^>]*>([\s\S]*?)<\/li\s*>/gi)) rows.push(match[1]);
+  if (rows.length) return rows;
+  for (const match of String(html ?? '').matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr\s*>/gi)) rows.push(match[1]);
+  return rows;
+}
+
+/**
+ * 解析一张栏目列表页 → `{items, rows, dated}`。
+ *
+ * `rows`（页面上有多少行）与 `dated`（其中有多少行抽到了日期）是给诊断用的：
+ * 全是 JS 渲染的页面 `rows` 很大、`dated` 为 0 —— 报"抽不到日期"比报"没有新闻"诚实得多。
+ * 站点改版时这里会安静地返回 0 条（上层如实记一笔），不会编出别的东西来。
+ */
+function parseColumnRows(html, { baseUrl = '', allowHosts = [], pageYear = '' } = {}) {
+  const source = String(html ?? '');
+  const hosts = (Array.isArray(allowHosts) ? allowHosts : [allowHosts])
+    .filter(Boolean)
+    .map((host) => String(host).toLowerCase().replace(/^\./, ''));
+  const result = { items: [], rows: 0, dated: 0 };
+  if (!source || !hosts.length) return result;
+
+  const rows = columnRows(source);
+  result.rows = rows.length;
+  const seen = new Set();
+  const selfKey = canonicalUrl(baseUrl);
+  for (const row of rows) {
+    const publishedAt = columnDateFromRow(row, pageYear);
+    if (!publishedAt) continue; // 没有发布日期的行**不是条目**（导航/侧栏/JS 占位都落在这里）
+    result.dated += 1;
+    const usable = columnAnchors(row)
+      .map((anchor) => ({ ...anchor, abs: resolveAllowedUrl(anchor.href, baseUrl, hosts) }))
+      .filter((anchor) => anchor.abs)
+      .map((anchor) => ({ ...anchor, label: columnAnchorLabel(anchor, publishedAt) }))
+      .filter((anchor) => anchor.label.length >= 4 && !COLUMN_NAV_LABELS.has(anchor.label.toLowerCase()));
+    if (!usable.length) continue;
+    // 标题锚取"清洗后最长"的那个：日期锚总是短的（"10-08"），而摘要锚再长也长不过标题锚
+    const best = usable.reduce((a, b) => (b.label.length > a.label.length ? b : a));
+    const key = canonicalUrl(best.abs);
+    if (!key || key === selfKey || seen.has(key)) continue;
+    seen.add(key);
+    result.items.push({
+      title: best.label.slice(0, COLUMN_TITLE_MAX),
+      url: best.abs,
+      publishedAt,
+    });
+  }
+  return result;
+}
+
+/** 对外的列表页解析（只回条目；行数/日期数这类诊断在内部用）。 */
+export function parseColumnList(html, options = {}) {
+  return parseColumnRows(html, options).items;
+}
+
+/** 排序键：只知道月份时按"当月最早"算，免得"2026-10"排到"2026-10-08"前面、把精度当新鲜度。 */
+function columnDateSortKey(publishedAt) {
+  const text = String(publishedAt ?? '');
+  return text.length === 7 ? `${text}-00` : text;
+}
+
+/** 首页里的栏目入口：锚文本命中栏目词、同域、且**不是内容页**（`info/1056/9993.htm` 是文章）。 */
+function columnLinksFromHome(html, baseUrl, hosts) {
+  const out = [];
+  for (const match of String(html ?? '').matchAll(/<a\b([^>]*)href=["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const attrs = `${match[1]} ${match[3]}`;
+    const inner = match[4];
+    const heading = /<h[1-4]\b[^>]*>([\s\S]*?)<\/h[1-4]>/i.exec(inner);
+    const label = collapseInline(heading ? stripTitleTags(heading[1]) : stripTitleTags(inner));
+    const titleAttr = collapseInline(/title=["']([^"']*)["']/i.exec(attrs)?.[1] ?? '');
+    const text = label || titleAttr;
+    if (!text || !COLUMN_LINK_TEXT_RE.test(text)) continue;
+    // 栏目名都很短；长锚文本是"新闻标题 + 日期"（sae 首页那条"…学术讲座暨青年教师座谈会 2026-10-10"），
+    // 那是内容页的链接，抓它当列表页只会白花一次请求
+    if (text.length > 30) continue;
+    const abs = resolveAllowedUrl(match[2], baseUrl, hosts);
+    if (!abs || CONTENT_PAGE_RE.test(parseUrl(abs).pathname)) continue;
+    out.push({ url: abs, label: text.slice(0, 40) });
+  }
+  return out;
+}
+
+/** 页面级年份：`<title>` 里的 4 位年份 → URL 里的年份（只写月日的行靠它）。 */
+function columnPageYear(html, url) {
+  const title = firstText(html, /<title[^>]*>([\s\S]*?)<\/title>/i);
+  const fromTitle = COLUMN_BARE_YEAR_RE.exec(title)?.[1];
+  if (fromTitle) return fromTitle;
+  return /((?:19|20)\d{2})/.exec(String(url ?? ''))?.[1] ?? '';
+}
+
+/** 把公开 URL 映射成真正要请求的 URL（只有测试注入 `origin` 时才不同，见 CAMPUS_SITE_SEARCH）。 */
+function toColumnFetchUrl(raw, { publicOrigin, fetchOrigin }) {
+  if (!fetchOrigin || fetchOrigin === publicOrigin) return raw;
+  try {
+    const url = new URL(raw);
+    if (url.origin === publicOrigin) return new URL(`${url.pathname}${url.search}`, fetchOrigin).toString();
+  } catch {
+    /* 解析不了就原样发出去，让 requestText 去报错（它的错误信息更有用） */
+  }
+  return raw;
+}
+
+/** 把 `site` 参数（id / 条目对象 / 主机名）解成站点表里的条目。 */
+function resolveColumnSite(site, sites) {
+  if (site && typeof site === 'object') return site;
+  const list = Array.isArray(sites) && sites.length ? sites : CAMPUS_SITE_SEARCH;
+  const key = String(site ?? '').trim().toLowerCase();
+  if (!key) return null;
+  return list.find((entry) => String(entry?.id ?? '').toLowerCase() === key
+    || String(entry?.host ?? '').toLowerCase() === key) ?? null;
+}
+
+/** 空的栏目直读结果（形状固定，调用方不用做防御）。 */
+function emptyColumnResult({
+  site = null, label = '', host = '', url = '', notes = [], error = null, fetched = [], home = null,
+}) {
+  return { site, label, host, url, source: '', items: [], newest: '', fetched, home, notes, error };
+}
+
+/** 抓一个候选栏目页。**永远不 throw**：失败折叠成 `{ok:false, count:0, error}`。 */
+async function readOneColumnPage(candidate, { hosts, publicOrigin, fetchOrigin, timeoutMs, fetchImpl }) {
+  const fetchUrl = toColumnFetchUrl(candidate.url, { publicOrigin, fetchOrigin });
+  const report = {
+    url: candidate.url,
+    label: candidate.label ?? '',
+    ok: false,
+    status: 0,
+    count: 0,
+    rows: 0,
+    dated: 0,
+    items: [],
+    error: null,
+  };
+  const response = await requestText(fetchImpl, fetchUrl, { timeoutMs, accept: 'text/html' });
+  report.status = response.status;
+  if (!response.ok) {
+    report.error = response.error ?? `HTTP ${response.status}`;
+    return report;
+  }
+  // 解析基准 URL 必须是**公开地址**（`../info/1056/9993.htm` 要解到 sae.xjtu.edu.cn 上）；
+  // 只有没做测试映射时才用 response.url，那样能跟上真实的 301 跳转
+  const baseUrl = fetchOrigin === publicOrigin ? (response.url || candidate.url) : candidate.url;
+  let parsed = { items: [], rows: 0, dated: 0 };
+  try {
+    parsed = parseColumnRows(response.body, {
+      baseUrl,
+      allowHosts: hosts,
+      pageYear: columnPageYear(response.body, baseUrl),
+    });
+  } catch (error) {
+    report.ok = true;
+    report.error = `解析栏目页时抛错：${error?.message ?? error}`;
+    return report;
+  }
+  report.ok = true;
+  report.rows = parsed.rows;
+  report.dated = parsed.dated;
+  report.items = parsed.items.map((item) => ({ ...item, source: candidate.url }));
+  report.count = report.items.length;
+  if (!report.count) {
+    report.error = `页面上 ${parsed.rows} 行，其中 ${parsed.dated} 行抽到日期但没拼出可用条目`
+      + '（可能是 JS 渲染的列表，或模板已改版）';
+  }
+  return report;
+}
+
+/**
+ * 读一个校内站点的新闻/通知栏目列表，返回**按发布日期倒序**的前 `limit` 条。
+ *
+ * @param {object} options
+ * @param {string|object} [options.site] 站点 id（`CAMPUS_SITE_SEARCH` 里的 `id`/`host`）或站点条目对象
+ * @param {string} [options.url] 也可以直接给一个入口页 URL（首页）——给 URL 时按该 URL 的域名做白名单
+ * @param {number} [options.limit] 最多返回几条（默认 10）
+ * @param {Function} [options.fetchImpl] 注入的 fetch（测试用本地假站点）
+ * @param {Function|object} [options.log] 日志
+ * @param {number} [options.timeoutMs] 单个页面的超时（默认 8s）
+ * @param {Array} [options.sites] 覆盖站点表（测试用；形状同 `CAMPUS_SITE_SEARCH`）
+ * @param {number} [options.candidateLimit] 最多抓几个候选栏目页
+ * @param {number} [options.concurrency] 候选页并发（收敛到 1–4）
+ * @returns {Promise<{site:string|null,label:string,host:string,url:string,source:string,items:Array,
+ *   newest:string,fetched:Array,home:object,notes:string[],error:string|null}>}
+ *   `items[i] = {title,url,publishedAt,source}`，`source` 是**抽到它的那个栏目页 URL**（便于核对）；
+ *   抓不到就是空 `items` + `error`，并且 `fetched` 里逐页写着失败原因。
+ */
+export async function readSiteNews({
+  site,
+  url,
+  limit,
+  fetchImpl,
+  log,
+  timeoutMs = COLUMN_TIMEOUT_MS,
+  sites,
+  candidateLimit,
+  concurrency,
+} = {}) {
+  const warn = makeLogger(log);
+  const notes = [];
+  const note = (message, level = 'info') => {
+    notes.push(message);
+    warn(message, level);
+  };
+
+  try {
+    const entry = resolveColumnSite(site, sites);
+    const entryUrl = String(url ?? '').trim();
+    if (!entry && !entryUrl) {
+      note('栏目直读：既没给 site（站点 id/条目）也没给 url，未发起任何请求', 'warn');
+      return emptyColumnResult({ notes, error: '栏目直读需要 site 或 url' });
+    }
+
+    const host = entry?.host ? String(entry.host).toLowerCase() : (parseUrl(entryUrl)?.hostname ?? '');
+    if (!host) {
+      note(`栏目直读：给的入口不是 http(s) URL，无法确定站点域名（${entryUrl}）`, 'warn');
+      return emptyColumnResult({ notes, error: '入口 URL 无效（需要 http/https 地址）' });
+    }
+    const publicOrigin = entry ? `https://${host}` : new URL(entryUrl).origin;
+    const fetchOrigin = String(entry?.origin ?? publicOrigin).replace(/\/+$/, '');
+    const hosts = entry ? allowedHostsOf(entry) : [host];
+    const siteId = entry?.id ?? null;
+    const label = entry?.label ?? host;
+    const homeUrl = entryUrl || `${publicOrigin}/`;
+
+    const perList = clamp(limit, 1, 50, COLUMN_LIMIT_DEFAULT);
+    const cap = clamp(candidateLimit, 1, 12, COLUMN_CANDIDATE_MAX);
+    const curatedCap = Math.min(cap, COLUMN_CURATED_MAX);
+    const pool = clamp(concurrency, 1, COLUMN_CONCURRENCY, COLUMN_CONCURRENCY);
+
+    // ---- ① 首页：既是"栏目入口清单"的来源，也是判断站点是否可达的那个请求 ----------------
+    // 首页抓不到不是致命错误：`columns` 与通用兜底路径照样能试（JS 渲染的首页也属于这一类）
+    const homeResponse = await requestText(fetchImpl, toColumnFetchUrl(homeUrl, { publicOrigin, fetchOrigin }), {
+      timeoutMs,
+      accept: 'text/html',
+    });
+    const homeBase = fetchOrigin === publicOrigin ? (homeResponse.url || homeUrl) : homeUrl;
+    const home = {
+      url: homeUrl,
+      ok: homeResponse.ok,
+      status: homeResponse.status,
+      error: homeResponse.ok ? null : (homeResponse.error ?? `HTTP ${homeResponse.status}`),
+    };
+    if (!home.ok) {
+      note(`栏目直读：${label} 首页抓取失败（${home.error}）→ 只用实测过的栏目路径兜底`, 'warn');
+    }
+
+    // ---- ② 候选栏目页：站点表里实测过的（最多 3 个）→ 首页现找的 → 通用兜底路径 ----------
+    // 为什么把站点表放最前：首页上的栏目链接是**按导航顺序**排的，主新闻栏目常常排在若干个
+    // "工作动态/团委动态/工会动态"后面，只按首页顺序取前 5 个会把"综合新闻"挤掉
+    //（sae 实测就是这样）。站点表那份是人工核过的"这个站的新闻/通知栏目到底是哪几个"。
+    const candidates = [];
+    const seen = new Set();
+    const homeKey = canonicalUrl(homeUrl);
+    const pushCandidate = (raw, from, { self = false } = {}) => {
+      const key = canonicalUrl(raw);
+      if (!key || seen.has(key)) return;
+      // 首页自己默认不当候选（见下面"入口页"那段的理由），除非调用方明确把它当入口页传进来
+      if (!self && key === homeKey) return;
+      seen.add(key);
+      candidates.push({ url: raw, label: from });
+    };
+    let curated = 0;
+    for (const path of entry?.columns ?? []) {
+      if (curated >= curatedCap) break;
+      const abs = resolveAllowedUrl(path, publicOrigin, hosts);
+      if (!abs) continue;
+      pushCandidate(abs, '站点表');
+      curated += 1;
+    }
+    // 调用方给的入口**本身就是一页栏目**时（`readSiteNews({url})` 直接指向 `…/zhxw.htm`），
+    // 它当然要算一个候选；是站点根（`/`）时不算 —— 把首页当列表页解析会把首页那几块"推荐位"
+    // 当成栏目全量条目，那是另一回事。
+    const entryPath = parseUrl(homeUrl)?.pathname ?? '';
+    if (entryPath && entryPath !== '/') pushCandidate(homeUrl, '入口页', { self: true });
+    if (home.ok) {
+      // 首页里只找**本站自己**的栏目入口（`[host]`，而不是站点表的 allowHosts）：
+      // 门户 `www` 的 allowHosts 是整个 `*.xjtu.edu.cn`（那是给它的"搜全校"用的），
+      // 拿它去首页找栏目会走到 `meeting.xjtu.edu.cn`、`news.xjtu.edu.cn` 的首页上，
+      // 把别人家的首页当列表页解析出上百条 —— "读这个站点的栏目"就该读它自己的。
+      for (const found of columnLinksFromHome(homeResponse.body, homeBase, [host])) {
+        pushCandidate(found.url, `首页：${found.label}`);
+      }
+    }
+    for (const path of COLUMN_FALLBACK_PATHS) {
+      const abs = resolveAllowedUrl(path, publicOrigin, hosts);
+      if (abs) pushCandidate(abs, '通用兜底');
+    }
+    const list = candidates.slice(0, cap);
+    if (!list.length) {
+      note(`栏目直读：${label} 首页里没找到栏目入口，也没有可用的兜底路径`, 'warn');
+      return emptyColumnResult({
+        site: siteId, label, host, url: publicOrigin, notes, home, error: '没有找到任何候选栏目页',
+      });
+    }
+
+    // 首页**根本连不上**（超时 / DNS 失败 / 拒连，`status === 0`）→ 同一台主机上的栏目页
+    // 基本也是同样的下场，不再白等一轮（图书馆实测：不早退要 16s，早退 8s）。
+    // 但绝不静默：每个候选页都如实记一条"因为主机不可达所以没试"。
+    if (!home.ok && homeResponse.status === 0) {
+      const skippedReports = list.map((candidate) => ({
+        url: candidate.url,
+        label: candidate.label ?? '',
+        ok: false,
+        status: 0,
+        count: 0,
+        rows: 0,
+        dated: 0,
+        items: [],
+        error: `未尝试：${label} 首页就不可达（${home.error}），同一主机上的栏目页大概率同样失败`,
+      }));
+      note(`栏目直读：${label} 主机不可达 → 不再尝试 ${list.length} 个候选栏目页（原因逐页记在 fetched 里）`, 'warn');
+      return emptyColumnResult({
+        site: siteId, label, host, url: publicOrigin, notes, home, fetched: skippedReports,
+        error: `${label} 站点不可达（${home.error}）：${publicOrigin} 上的栏目页抓不到，不代表这个站没有新闻`,
+      });
+    }
+
+    // ---- ③ 并发抓候选页（上限 4），单个失败只影响它自己 -------------------------------
+    const fetched = new Array(list.length);
+    let cursor = 0;
+    const worker = async () => {
+      for (;;) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= list.length) return;
+        const candidate = list[index];
+        try {
+          fetched[index] = await readOneColumnPage(candidate, {
+            hosts,
+            publicOrigin,
+            fetchOrigin,
+            timeoutMs,
+            fetchImpl,
+          });
+        } catch (error) {
+          // readOneColumnPage 已经吞了绝大多数异常；这里再兜一层，保证"一个栏目页绝不拖垮整批"
+          fetched[index] = {
+            url: candidate.url,
+            label: candidate.label ?? '',
+            ok: false,
+            status: 0,
+            count: 0,
+            rows: 0,
+            dated: 0,
+            items: [],
+            error: `抓栏目页时发生未预期错误：${error?.message ?? error}`,
+          };
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(pool, list.length) }, () => worker()));
+
+    const reports = fetched.filter(Boolean);
+    const okPages = reports.filter((report) => report.ok);
+    const failedPages = reports.filter((report) => !report.ok);
+    const emptyPages = okPages.filter((report) => !report.count);
+
+    // ---- ④ 合并 + 按日期倒序（同 URL 去重，保留先出现的那条） -------------------------
+    const items = [];
+    const seenUrl = new Set();
+    for (const report of reports) {
+      for (const item of report.items) {
+        const key = canonicalUrl(item.url);
+        if (!key || seenUrl.has(key)) continue;
+        seenUrl.add(key);
+        items.push(item);
+      }
+    }
+    items.sort((a, b) => columnDateSortKey(b.publishedAt).localeCompare(columnDateSortKey(a.publishedAt)));
+    const limited = items.slice(0, perList);
+    const newest = limited[0]?.publishedAt ?? '';
+
+    if (limited.length) {
+      note(
+        `栏目直读（${label}）从 ${okPages.length} 个栏目页读到 ${limited.length} 条带日期的条目`
+        + `（原始 ${items.length} 条），最新 ${newest}；来源：`
+        + okPages.filter((report) => report.count).map((report) => report.url).join('、'),
+      );
+    } else {
+      const reasons = reports
+        .map((report) => `${report.url} → ${report.error ?? '未解析出条目'}`)
+        .join('；');
+      note(`栏目直读（${label}）没读到任何带日期的条目：${reasons}`, 'warn');
+    }
+    for (const report of failedPages) {
+      note(`栏目直读跳过：${report.url} → ${report.error}`, 'warn');
+    }
+    if (emptyPages.length && limited.length) {
+      note(`栏目直读里有 ${emptyPages.length} 个页面没解析出条目：${emptyPages.map((report) => report.url).join('、')}`);
+    }
+
+    return {
+      site: siteId,
+      label,
+      host,
+      url: publicOrigin,
+      source: limited[0]?.source ?? '',
+      items: limited,
+      newest,
+      fetched: reports.map((report) => ({
+        url: report.url,
+        label: report.label,
+        ok: report.ok,
+        count: report.count,
+        rows: report.rows,
+        dated: report.dated,
+        error: report.error,
+      })),
+      home,
+      notes,
+      error: limited.length
+        ? null
+        : `没有从 ${label} 的 ${reports.length} 个候选栏目页里抽到带发布日期的条目（原因逐页写在 fetched 里）`,
+    };
+  } catch (error) {
+    // 对外承诺"永远不 throw"：栏目直读是**加分项**，它出问题不该让整轮校园检索失败
+    const message = `栏目直读发生未预期错误：${error?.message ?? error}`;
+    note(message, 'warn');
+    return emptyColumnResult({ notes, error: message });
+  }
+}
+
+/**
+ * 从问法里认出目标站点（"最近我们**航天航空学院**有什么新闻" → `sae`）。
+ *
+ * 用 `label` + `aliases` + `host` 做**子串匹配、取最长命中**：
+ * "彭康书院"同时命中"彭康书院"(4) 与"彭康"(2)，取长的不容易认错；
+ * 别名表里刻意**不写**"学院""书院"这类通名 —— 那会把任何学院都认成同一个站。
+ */
+export function findCampusSiteForQuery(query, sites) {
+  const text = String(query ?? '').trim().toLowerCase();
+  if (!text) return null;
+  const list = (Array.isArray(sites) && sites.length ? sites : CAMPUS_SITE_SEARCH)
+    .filter((entry) => entry?.id && entry?.host);
+  let best = null;
+  let bestLength = 0;
+  for (const entry of list) {
+    const names = [entry.label, ...(Array.isArray(entry.aliases) ? entry.aliases : []), entry.host]
+      .filter(Boolean)
+      .map((name) => String(name).toLowerCase());
+    for (const name of names) {
+      if (name.length <= bestLength || !text.includes(name)) continue;
+      best = entry;
+      bestLength = name.length;
+    }
+  }
+  return best;
+}
+
+/** 这个问法是不是"要最新列表"（决定 campus 档要不要多走一次栏目直读）。 */
+export function looksLikeNewsQuery(query) {
+  return NEWS_LIST_QUERY_RE.test(String(query ?? ''));
+}
+
+// ---------------------------------------------------------------------------
 // 对外主函数
 // ---------------------------------------------------------------------------
 
@@ -1712,12 +2517,13 @@ export function campusScopedQuery(query, { school = '西安交通大学' } = {})
  *
  * @param {object} options
  * @param {string} options.query 检索词
- * @param {'web'|'campus'} [options.mode='web'] web=校外全网；campus=校内站点直搜优先（再公共结果页、最后 mention 兜底）
+ * @param {'web'|'campus'} [options.mode='web'] web=校外全网；campus=校内优先（"最近/最新"这类问法先直读校方栏目列表，再站内直搜、公共结果页、mention 兜底）
  * @param {number} [options.limit] 最多返回几条（收敛到 5–30，默认取 `config.searchMaxPages`）
  * @param {object} [options.config] AI 配置切片（searchEnabled/searchMaxPages/searchProvider/searchApiKey/searchApiKeys）
  * @param {Function} [options.fetchImpl] 注入的 fetch（测试用本地假服务器）
  * @param {Function|object} [options.log] 日志：函数或 `{warn}` 形状
- * @returns {Promise<Array<{title:string,url:string,snippet:string,source:string,scope:'web'|'campus'}>>}
+ * @returns {Promise<Array<{title:string,url:string,snippet:string,source:string,scope:'web'|'campus',
+ *   matchedBy?:'column'|'site'|'domain'|'mention', publishedAt?:string}>>}
  */
 export async function searchWeb(options = {}) {
   const detailed = await searchWebDetailed(options);
@@ -1727,6 +2533,9 @@ export async function searchWeb(options = {}) {
 /**
  * 与 `searchWeb` 相同，但额外返回诊断信息（后端选择、campus 探测、逐条说明）。
  * 对话层建议用这个：`notes` 可以直接回灌给模型，让它如实说明"为什么没搜到"。
+ *
+ * 返回值里的 `siteSearch` 与 `columnRead` 分别是**站内直搜**与**栏目列表直读**的报告
+ * （逐页 `ok/count/rows/dated/error`）：界面与模型据此说明"这次读了哪些页面、哪一页坏了"。
  */
 export async function searchWebDetailed({
   query,
@@ -1771,22 +2580,63 @@ export async function searchWebDetailed({
   const campusProbeList = probes ?? config?.campusProbes;
   const campusSiteList = sites ?? config?.campusSites;
 
-  // ---- campus 档第 ① 条通道：站内直搜（三条通道的顺序就是优先级） ----------
-  // 为什么它排最前：这是唯一"命中了就必然是校内的东西"的通道 —— 结果直接来自校内站点
+  // ---- campus 档第 ⓪ 条通道：栏目列表直读 + ① 站内直搜（通道顺序就是优先级） ----------
+  // 为什么站内直搜排最前：这是"命中了就必然是校内的东西"的通道 —— 结果直接来自校内站点
   // 自己的检索接口，不可能像公共搜索引擎那样把北大/北航的教务处塞进来。
   // 真网实测（2026-10-13）：12 个站点可直搜，单站 0.3–6.5s，站点级并发 3。
+  //
+  // 但真机反馈证明它**在"最近有什么新闻"上会失手**（列表页没被站内搜索收录/收录滞后），
+  // 所以多一条 ⓪：问法像"要最新列表"、又能从问法里认出目标站点时，**并行**去读那个站点的
+  // 栏目列表（`readSiteNews`）。两路并行是为了不把校园档的等待时间再加一份。
   const collected = [];
   let siteSearch = null;
+  let columnRead = null;
+  let columnSite = null;
   if (scope === 'campus') {
-    siteSearch = await searchCampusSites({
+    columnSite = looksLikeNewsQuery(text) ? findCampusSiteForQuery(text, campusSiteList) : null;
+    const siteSearchJob = searchCampusSites({
       query: text,
       limit: max,
       fetchImpl,
       log: warn,
       sites: campusSiteList,
     });
-    // searchCampusSites 内部已经逐条 log 过，这里只把 notes 收进本轮结果，避免同一句话打两遍日志
+    const columnJob = columnSite
+      ? readSiteNews({
+        site: columnSite,
+        sites: campusSiteList,
+        limit: COLUMN_LIMIT_DEFAULT,
+        fetchImpl,
+        log: warn,
+      })
+      : null;
+    // searchCampusSites / readSiteNews 内部已经逐条 log 过，这里只把 notes 收进本轮结果，
+    // 避免同一句话打两遍日志
+    siteSearch = await siteSearchJob;
     notes.push(...siteSearch.notes);
+    if (columnJob) {
+      columnRead = await columnJob;
+      notes.push(...columnRead.notes);
+    } else if (looksLikeNewsQuery(text)) {
+      note('问法像"要最新列表"，但没能从检索词里认出具体是哪个站点 → 不做栏目直读（认出站点才读，免得读错站）');
+    }
+
+    // 栏目条目排在站内直搜前面入池：同 URL 时去重会保留**先出现的这条**，
+    // 而栏目那条带 `publishedAt`（站内直搜的条目没有发布日期）—— 留它可以少丢信息。
+    if (columnRead) {
+      collected.push(...columnRead.items.map((item) => ({
+        title: item.title,
+        url: item.url,
+        // 列表页已经给了标题+日期，**不再抓正文**（要读正文，模型可以按 fields.url 直读那一条）。
+        // snippet 只写清"这条是从哪个栏目页读到的"，供模型和用户核对来源。
+        snippet: `来自${columnRead.label ?? columnSite?.label ?? ''}栏目列表：${item.source}`,
+        source: 'campus-column',
+        scope: 'campus',
+        matchedBy: 'column',
+        site: columnRead.site ?? undefined,
+        publishedAt: item.publishedAt,
+      })));
+    }
     collected.push(...siteSearch.results);
   }
 
@@ -1847,11 +2697,24 @@ export async function searchWebDetailed({
    * 于是航院的结果全被教务处的竞赛/学籍通知挤出去 —— 模型看到的就是"只搜到教务处，跟来访无关"。
    *
    * 排序口径：相关度（标题命中权重更高，见 relevanceScore）降序 →
-   * 命中来源（站内 > 域名 > 文本提到本校）→ 原顺序（稳定，保证同分不抖）。
+   * 命中来源（栏目直读 > 站内 > 域名 > 文本提到本校）→ 原顺序（稳定，保证同分不抖）。
+   *
+   * **栏目直读的条目在"新闻类查询"里直接给满分相关**（见 `scoreOf`）。两个理由：
+   *   ① 它们不是"碰巧命中关键词"，而是目标站点**当前最新的几条**，用户问的就是这个。
+   *      按关键词覆盖率算分反而会把它们压下去：标题里往往没有"最近"这类词，而招生栏目标题里
+   *      恰好有"转专业"这种查询词 —— "最新新闻"于是输给"招生通知"，正是真机上出现过的错位；
+   *   ② 给满分后它们同分，而 `Array#sort` 是稳定的 ⇒ `readSiteNews` 的**日期倒序被原样保住**，
+   *      模型看到的顺序就是时间顺序（若在同分档里再按相关度重排，时间顺序就乱了）。
+   * 只有**问法像"要最新列表"且真的读到了栏目条目**时才这样（`columnBoost`）；别的查询
+   *（"转专业学分怎么算"）里栏目条目仍按相关度参与排序。
    */
   const terms = queryTerms(text);
+  const columnBoost = Boolean(columnRead?.items?.length) && Boolean(columnSite);
+  const scoreOf = (item) => (
+    columnBoost && item.matchedBy === 'column' ? 1 : relevanceScore(terms, item)
+  );
   const ranked = dedupeResults(collected)
-    .map((item, index) => ({ item, index, score: relevanceScore(terms, item) }))
+    .map((item, index) => ({ item, index, score: scoreOf(item) }))
     .sort((a, b) => b.score - a.score || matchedByRank(a.item.matchedBy) - matchedByRank(b.item.matchedBy) || a.index - b.index)
     .map((entry) => entry.item);
   const deduped = ranked;
@@ -1876,20 +2739,25 @@ export async function searchWebDetailed({
       if (!SCHOOL_RE.test(haystack)) return item;
       return { ...item, scope: 'campus', matchedBy: 'mention' };
     });
-    // 排序：`matchedBy` site > domain > mention > web。`Array#sort` 是稳定的，
-    // 所以同一档内保持各通道产出的原有顺序（站内直搜 → 公共结果页 → 公网 mention → 其它公网）。
-    // 为什么 site 最优先：站内直搜命中的是校内站点自己发布的内容页；
-    // domain 只是"域名看着像校内的"，mention 更是"标题里提了校名" —— 证据强度依次递减。
+    // 排序：`matchedBy` column > site > domain > mention > web。`Array#sort` 是稳定的，
+    // 所以同一档内保持各通道产出的原有顺序（栏目直读 → 站内直搜 → 公共结果页 → 公网 mention → 其它公网）。
+    // 为什么 column 最优先：它是校方栏目页上**当前最新的几条**（还带发布日期）；
+    // site 只保证"是校内的、且匹配了关键词"，domain 只是"域名看着像校内的"，
+    // mention 更是"标题里提了校名" —— 证据强度依次递减（详见 MATCHED_BY_RANK 的注释）。
     results.sort((a, b) => matchedByRank(a) - matchedByRank(b));
     const count = (name) => results.filter((item) => matchedByRank(item) === MATCHED_BY_RANK[name]).length;
     note(
-      `校内档分桶（本次候选 ${results.length} 条）：站内直搜 ${count('site')} 条`
+      `校内档分桶（本次候选 ${results.length} 条）：栏目直读 ${count('column')} 条`
+      + ` / 站内直搜 ${count('site')} 条`
       + ` / 公共结果页校内域名 ${count('domain')} 条`
       + ` / 公网提到本校 ${count('mention')} 条`
       + ` / 其它公网 ${count('web')} 条`,
     );
     if (count('mention')) {
       note('其中"公网提到本校"那批是按标题/摘要文本认定的，不是站内页面，引用时要说清来源');
+    }
+    if (count('column')) {
+      note('栏目直读那批带 publishedAt（发布日期）："最新的是哪条"按它回答；要读某一篇正文就用 fields.url 直读那一条');
     }
   }
   if (results.length > max) {
@@ -1904,7 +2772,11 @@ export async function searchWebDetailed({
     note(`原始候选 ${collected.length} 条，去重/过滤（广告、站内跳转、非 http 链接）后为空`);
   }
 
-  return { query: text, mode: scope, limit: max, backend, campus, siteSearch, results, notes };
+  // `siteSearch`/`columnRead` 分别是站内直搜与栏目列表直读的**诊断报告**（含逐页 ok/count/error），
+  // 对话层用它如实解释"哪条通道出了什么问题"，界面也能显示"这次读的是哪个栏目页"
+  return {
+    query: text, mode: scope, limit: max, backend, campus, siteSearch, columnRead, results, notes,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2325,8 +3197,9 @@ export const WEB_SEARCH_TOOL = Object.freeze({
   description:
     '联网检索网页：先搜到候选结果（标题 / 真实链接 / 摘要），再抓取正文。'
     + '两种模式：web=校外全网（按相关度自动在搜狗/360/Bing/百度之间选引擎）；'
-    + 'campus=校内优先（先直搜校内站点自己的检索接口，再公共结果页，最后把提到本校的公网结果并入，'
-    + '每条都标 matchedBy=site|domain|mention）。'
+    + 'campus=校内优先（问"最近/最新有什么"时会**同时直读校方栏目列表页**，'
+    + '拿到最新几条的标题+链接+发布日期；再直搜校内站点自己的检索接口，再公共结果页，'
+    + '最后把提到本校的公网结果并入；每条都标 matchedBy=column|site|domain|mention）。'
     + '返回的都是**真实抓到的**内容；抓不到会明确报错，绝不能凭空写链接。',
   mutates: false,
   params: {
@@ -2345,6 +3218,7 @@ export const WEB_SEARCH_PROMPT = `【联网检索（web_search）】
 - **绝对不许编造链接、标题、日期或引文**。编一个看起来很像的校内链接，比"没查到"糟糕得多。
 - **搜不到就直说**：没有结果或检索失败时，如实告诉用户"这次没搜到 / 检索被拦截了"，可以说明你试过什么（例如"没配置搜索 API 密钥、结果页被反爬挡住"），并给出可行的下一步（换个说法再搜、自己打开某网址、等会儿再试）。**不要**用"根据我的知识"来掩盖一次失败的检索。
 - **正文与摘要要分清**：每条结果都带 \`textSource\` —— \`container\`/\`body\` 是**抓到的正文**，\`meta-description\` 表示**只拿到了页面摘要**（此时 \`note\` 会写明"这是摘要，不是正文全文"）。看到 \`meta-description\` 就说"这条只看到标题与摘要"，只按摘要里确实出现的信息回答，**不要补充摘要之外的细节，也不要说"全文里还写了…"**。没有正文（\`ok:false\`）的条目同样如实说明。
+- **问"最近/最新有什么"时**：campus 档会**自动同时直读校方栏目列表页**（该站的新闻/通知/讲座栏目），这些条目 \`matchedBy\` 是 \`column\`、**带 \`publishedAt\`（发布日期）**。回答"最新的是哪条""最近有什么"就**按 \`publishedAt\` 排序**说，并把日期写出来（例如"最新的一条是 6 月 20 日的《…》"）；\`publishedAt\` 只有 \`YYYY-MM\` 时说明"只标到月份"，**不要补一个具体日子**。栏目条目只给了标题+链接+日期（没有正文），**不要假装读过正文细节**；需要正文就用 \`{"action":"query","target":"web","fields":{"url":"<那条的 url>"}}\` 直读那一篇（这一步同样会真的去抓，抓不到会如实报错）。
 - **校内信息的边界**：campus 档只保证把检索收窄到校内站点，**不等于**登录了校内系统。需要登录才能看到的成绩、作业、课表，仍然要用本地已同步的数据回答，不要假装看到了网页。`;
 
 /** 三档检索开关对应的提示词（可直接替换 prompt.js 里的 SEARCH_NOTES）。 */
@@ -2356,10 +3230,14 @@ export const WEB_SEARCH_MODE_NOTES = Object.freeze({
   web: `${WEB_SEARCH_PROMPT}
 - 当前档位：**校外网（全网检索）**。`,
   campus: `${WEB_SEARCH_PROMPT}
-- 当前档位：**校内网（校内优先）**。检索按三条通道依次做：① 直接打校内站点自己的检索接口
-  （教务处/研究生院/学院/书院等，命中的必然是校方页面）；② 公共结果页（\`site:\` + 校名收窄）；
-  ③ 把公网结果里提到本校的并入。每条结果的 \`matchedBy\` 会标明它是怎么被认出来的
-  （\`site\` 站内直搜 / \`domain\` 校内域名 / \`mention\` 只是提到了校名），引用时按这个如实说明来源。
+- 当前档位：**校内网（校内优先）**。检索按四条通道依次做：⓪ 问法像"最近/最新有什么"、又能认出站点时，
+  **直接读该站的栏目列表页**（新闻/通知/讲座栏目），条目 \`matchedBy: 'column'\` 并带 \`publishedAt\`；
+  ① 直接打校内站点自己的检索接口（教务处/研究生院/学院/书院等，命中的必然是校方页面）；
+  ② 公共结果页（\`site:\` + 校名收窄）；③ 把公网结果里提到本校的并入。
+  每条结果的 \`matchedBy\` 会标明它是怎么被认出来的
+  （\`column\` 校方栏目列表直读 / \`site\` 站内直搜 / \`domain\` 校内域名 / \`mention\` 只是提到了校名），
+  引用时按这个如实说明来源。**"最近/最新"这类问题按 \`publishedAt\` 排序作答**；
+  没有 \`publishedAt\` 的条目不要替它编日期，栏目条目只给了标题+链接+日期、不要假装读过正文。
   **校内域名可达 ≠ 已登录校内系统、也不等于确认在校园网内**，
   涉及需要登录的成绩/作业/课表，仍然用本地已同步的数据回答。`,
 });
@@ -2371,6 +3249,11 @@ export default {
   readPages,
   detectCampusNetwork,
   searchCampusSites,
+  readSiteNews,
+  parseColumnList,
+  extractColumnDate,
+  findCampusSiteForQuery,
+  looksLikeNewsQuery,
   parseVsbSearchResults,
   buildCampusSiteSearchBody,
   buildCampusSiteSearchUrl,
