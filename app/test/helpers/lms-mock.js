@@ -47,8 +47,66 @@ function homeHtml(user) {
 </script></body></html>`;
 }
 
+/* ------------------------------------------------------------ 相对日期工具 */
+
+/**
+ * 活动日期一律**相对今天**生成，不再写死具体日期。
+ *
+ * 为什么必须这样：同步计划按「今天」过滤过期条目（`!includePast && date < today`），
+ * 而 `runAutoSyncOnce` 用的是真实时钟 —— 写死的日期一旦变成过去时，
+ * 「未提交的作业 / 直播会建出日程」这类用例就会在某个日历日之后**永久变红**，
+ * 与代码是否被改坏无关。相对日期让用例在任何一天跑都成立。
+ *
+ * 偏移量在此集中定义，供 test/lms.test.js 引用（断言不再抄字面日期）。
+ */
+export const ACTIVITY_DAY_OFFSETS = {
+  /** 未提交、未来截止的作业 -> 待办。 */
+  homework: 1,
+  /** 已提交的作业：未来截止，但默认因「已提交」被跳过。 */
+  submittedHomework: 8,
+  /** 已过期的作业：默认被跳过，勾选「包含过期」才进来。 */
+  expiredHomework: -10,
+  /** 未来的直播：有起止时刻 -> 时段日程。 */
+  lectureLive: 2,
+  /** 过去的回放：默认被跳过，勾选后才作为时段日程进来。 */
+  lesson: -4,
+  /** 修改截止日时往后挪的天数（相对 activity 5001 原本的截止日）。 */
+  homeworkPostpone: 2,
+};
+
+/** 今天（本机时区）的 `YYYY-MM-DD`。 */
+function dayKey(offsetDays = 0) {
+  const date = new Date();
+  date.setDate(date.getDate() + offsetDays);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** 生成「今天 + offsetDays」的 `YYYY-MM-DD HH:MM:SS`（思源学堂返回的本地时间格式）。 */
+export function activityDateTime(offsetDays, time) {
+  return `${dayKey(offsetDays)} ${time}`;
+}
+
+/** 生成「今天 + offsetDays」的 `YYYY-MM-DD`（同步后写进待办/日程的日期）。 */
+export function activityDate(offsetDays) {
+  return dayKey(offsetDays);
+}
+
+/** 生成「今天 + offsetDays」的北京时间 ISO 串，如 `2026-10-15T23:59:00+08:00`。 */
+export function activityIso(offsetDays, time) {
+  return `${dayKey(offsetDays)}T${time}+08:00`;
+}
+
+/** 活动 5001（未提交作业）的截止日；改期用例要基于它往后挪，不能另写字面量。 */
+export const HOMEWORK_DEADLINE_DATE = activityDate(ACTIVITY_DAY_OFFSETS.homework);
+
 /** 默认数据集：覆盖「未提交作业 / 已提交作业 / 过期作业 / 直播 / 回放 / 资料」。 */
 export function defaultDataset() {
+  const home = ACTIVITY_DAY_OFFSETS.homework;
+  const expired = ACTIVITY_DAY_OFFSETS.expiredHomework;
+  const submitted = ACTIVITY_DAY_OFFSETS.submittedHomework;
+  const live = ACTIVITY_DAY_OFFSETS.lectureLive;
+  const lesson = ACTIVITY_DAY_OFFSETS.lesson;
   return {
     user: { id: 602, name: '张三', userNo: '2021001', department: '电子与信息学部' },
     courses: [
@@ -85,14 +143,14 @@ export function defaultDataset() {
     ],
     activities: {
       1001: [
-        { id: 5001, course_id: 1001, type: 'homework', title: '第一次作业：链表', start_time: '2026-10-05T08:00:00+08:00', end_time: '2026-10-14T23:59:00+08:00', published: true, submit_by_group: false },
-        { id: 5002, course_id: 1001, type: 'homework', title: '第二次作业：二叉树', start_time: '2026-10-20T08:00:00+08:00', end_time: '2026-11-02T23:59:00+08:00', published: true, submit_by_group: false },
-        { id: 5003, course_id: 1001, type: 'homework', title: '开学摸底测验', start_time: '2026-09-01T08:00:00+08:00', end_time: '2026-09-05T23:59:00+08:00', published: true, submit_by_group: false },
-        { id: 5004, course_id: 1001, type: 'lecture_live', title: '第 6 周直播课', start_time: '2026-10-13T10:00:00+08:00', end_time: '2026-10-13T11:40:00+08:00', published: true },
+        { id: 5001, course_id: 1001, type: 'homework', title: '第一次作业：链表', start_time: activityIso(home - 9, '08:00:00'), end_time: activityIso(home, '23:59:00'), published: true, submit_by_group: false },
+        { id: 5002, course_id: 1001, type: 'homework', title: '第二次作业：二叉树', start_time: activityIso(submitted - 1, '08:00:00'), end_time: activityIso(submitted, '23:59:00'), published: true, submit_by_group: false },
+        { id: 5003, course_id: 1001, type: 'homework', title: '开学摸底测验', start_time: activityIso(expired - 4, '08:00:00'), end_time: activityIso(expired, '23:59:00'), published: true, submit_by_group: false },
+        { id: 5004, course_id: 1001, type: 'lecture_live', title: '第 6 周直播课', start_time: activityIso(live, '10:00:00'), end_time: activityIso(live, '11:40:00'), published: true },
         { id: 5005, course_id: 1001, type: 'material', title: '课件：第 6 章', published: true },
-        { id: 5007, course_id: 1001, type: 'lesson', title: '第 5 周回放', start_time: '2026-10-06T10:00:00+08:00', end_time: '2026-10-06T11:40:00+08:00', lesson_start: '2026-10-06T10:00:00+08:00', lesson_end: '2026-10-06T11:40:00+08:00', replay_code: 'rc-5007', published: true },
+        { id: 5007, course_id: 1001, type: 'lesson', title: '第 5 周回放', start_time: activityIso(lesson, '10:00:00'), end_time: activityIso(lesson, '11:40:00'), lesson_start: activityIso(lesson, '10:00:00'), lesson_end: activityIso(lesson, '11:40:00'), replay_code: 'rc-5007', published: true },
       ],
-      1002: [{ id: 5006, course_id: 1002, type: 'homework', title: 'Unit 3 作文', start_time: '2026-10-10T08:00:00+08:00', end_time: '2026-10-18T22:00:00+08:00', published: true, submit_by_group: false }],
+      1002: [{ id: 5006, course_id: 1002, type: 'homework', title: 'Unit 3 作文', start_time: activityIso(live, '08:00:00'), end_time: activityIso(live + 3, '22:00:00'), published: true, submit_by_group: false }],
     },
     details: {
       5001: { description: '<p>实现单链表并提交源码</p>', user_submit_count: 0, highest_score: 100, lowest_score: 60, average_score: 82 },
