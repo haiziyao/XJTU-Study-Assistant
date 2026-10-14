@@ -33,6 +33,8 @@
     <link rel="stylesheet" href="views/review.css" />
     <link rel="stylesheet" href="views/transfer.css" />
     <link rel="stylesheet" href="views/account.css" />
+    <!-- 「设置 → 多端同步」：账号数据在桌面/服务器/手机之间双向同步（见 views/sync.js） -->
+    <link rel="stylesheet" href="views/sync.css" />
   </head>
   <body>
     <div class="app">
@@ -141,6 +143,8 @@
     <script src="views/transfer.js"></script>
     <!-- 账号登录只往「设置」里加一块卡片：后端做桥，页面拿不到会话令牌（见 views/account.js） -->
     <script src="views/account.js"></script>
+    <!-- 多端同步同样只占「设置」里一块：立即同步 / 各集合条数 / 敏感数据开关（见 views/sync.js） -->
+    <script src="views/sync.js"></script>
 
     <script src="shell/icons.js"></script>
     <script src="shell/message.js"></script>
