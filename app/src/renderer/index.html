@@ -43,7 +43,17 @@
         <div class="brand">
           <span class="brand-name">智学</span>
         </div>
+        <!-- 常驻项（用户可排序）。放不下时这一块自己滚动，设置与主题开关钉在底部 -->
         <nav class="nav" id="nav"></nav>
+        <!--
+          「更多」：收起来的入口都从这里展开。**刻意放在 `.nav` 外面**——
+          放进去就会被上面那层的滚动一起卷走，弹层也会被滚动容器裁掉。
+          没有收起项时由 buildNav() 置 hidden，首次运行看不到它。
+          ★ 标签文字留空：内容（图标 + 「更多」两个字）由 buildNav() 建，
+            与其他导航项走同一条路。这里写字会变成**两行「更多」**。
+        -->
+        <button type="button" id="nav-more" class="nav-item nav-more" hidden></button>
+        <div class="nav-more-pop" id="nav-more-pop" hidden></div>
         <div class="nav-grow"></div>
         <button type="button" id="theme-toggle" class="theme-toggle">☾ 夜间模式</button>
         <nav class="nav nav-bottom" id="nav-bottom"></nav>
@@ -148,7 +158,11 @@
 
     <script src="shell/icons.js"></script>
     <script src="shell/message.js"></script>
+    <!-- 左栏布局的纯逻辑（排序合并 / 拖动落点 / 点击状态机），不碰 DOM，单测直接求值 -->
+    <script src="shell/sidebar-layout.js"></script>
     <script src="shell/settings.js"></script>
+    <!-- 「设置 → 侧边栏」：自定义排序与「更多」，本身只加一块设置卡片 + 一个弹窗 -->
+    <script src="shell/sidebar-customize.js"></script>
     <script src="shell/app.js"></script>
   </body>
 </html>

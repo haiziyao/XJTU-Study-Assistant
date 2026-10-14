@@ -149,6 +149,46 @@ test('视图注册表：顺序、插槽与跨模块服务符合外壳约定', as
   }
 });
 
+test('左栏自定义：纯逻辑与外壳服务都挂上了（设置卡片靠它们工作）', async () => {
+  const { app, origin, scripts } = await loadRenderer();
+  try {
+    const context = makeSandbox(origin);
+    vm.runInContext(scripts.map((s) => s.text).join('\n;\n'), context, { filename: 'renderer-bundle.js' });
+
+    // 1) 纯逻辑：判断全在这里，外壳与弹窗只调它。缺一个函数 = 左栏直接坏掉。
+    const layout = context.window.PCSidebarLayout;
+    assert.ok(layout, '应挂载 window.PCSidebarLayout');
+    for (const name of ['parse', 'stringify', 'defaults', 'resolve', 'move', 'dropTarget', 'resolveNavClick', 'isNavActive']) {
+      assert.equal(typeof layout[name], 'function', `PCSidebarLayout.${name} 应是函数`);
+    }
+    assert.equal(layout.STORAGE_KEY, 'potato.sidebar');
+
+    // 2) 默认布局必须等于"加这个功能之前的样子"：全部常驻、没有一个收进「更多」。
+    //    这是"首次运行零变化"的保证 —— 一上线就把别人的入口藏起来是不可接受的。
+    const views = Array.from(context.window.PCModules.list());
+    const resolved = layout.resolve(null, views);
+    assert.deepEqual(Array.from(resolved.more), [], '默认不该有任何一项被收进「更多」');
+    assert.deepEqual(
+      Array.from(resolved.main),
+      views.filter((v) => (v.slot ?? 'main') !== 'bottom').map((v) => v.id),
+      '默认顺序应等于注册表顺序',
+    );
+
+    // 3) 外壳服务：设置卡片与弹窗只通过这些动作改左栏，不碰 state
+    const sidebar = context.window.PCModules.getService('sidebar');
+    assert.ok(sidebar, "应登记 'sidebar' 服务");
+    for (const name of ['getLayout', 'getMovable', 'apply', 'reset', 'describe']) {
+      assert.equal(typeof sidebar[name], 'function', `sidebar.${name} 应是函数`);
+    }
+    // describe 要能按 id 画出与左栏一致的一行
+    const described = sidebar.describe('settings');
+    assert.equal(described.id, 'settings');
+    assert.ok(described.label, 'describe 应给出 label');
+  } finally {
+    await app.close();
+  }
+});
+
 test('静态资源不暴露 renderer 目录之外的文件', async () => {
   const { app, origin } = await loadRenderer();
   try {

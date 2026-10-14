@@ -183,6 +183,10 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
   background: var(--bg-surface);
   border-right: 1px solid var(--line);
   min-width: 0;
+  /* 「更多」弹层要相对左栏定位（`position: absolute`），所以这里得有定位上下文 */
+  position: relative;
+  /* 作为 grid 子项允许被压缩，否则下面的 .nav 永远不滚动、直接把设置挤出屏幕 */
+  min-height: 0;
 }
 
 .brand {
@@ -202,6 +206,13 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* 常驻项放不下时这一块自己滚动。
+     这样底部的主题开关与「设置」始终钉在屏幕上 —— 窗口再矮也不会够不着设置。
+     `min-height: 0` 是让 flex 子项真的能被压到比内容更矮（否则它撑住不缩，滚动条永远不出现）。 */
+  min-height: 0;
+  overflow-y: auto;
+  /* 细滚动条，别在 80px 宽的栏里再占掉一条明显的灰边 */
+  scrollbar-width: thin;
 }
 
 .nav-grow {
@@ -262,6 +273,62 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
 
 .nav-item.active .nav-label {
   color: var(--fg);
+}
+
+/* ----------------------------------------------------- 左栏「更多」与它的弹层 */
+
+/* 「更多」按钮复用 .nav-item 的全部观感，只在位置上"不属于滚动区"——
+   它刻意放在 .nav 外面，所以放不下时其他项滚动、它不动。 */
+.nav-more {
+  flex: 0 0 auto;
+}
+
+.nav-more[hidden] {
+  display: none;
+}
+
+/*
+  收起区弹层：贴着左栏右缘展开。
+  绝对定位到 .sidebar 上，所以不会被 .nav 的滚动裁掉。
+  `top` 由 openMorePop() 按「更多」按钮的真实位置算出来（顶边齐平），
+  这里的 bottom 只是**拿不到几何时的兜底**（老内核 / 无布局环境）。
+*/
+.nav-more-pop {
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 45%;
+  bottom: auto;
+  z-index: 60;
+  min-width: 132px;
+  max-width: 220px;
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-2);
+}
+
+.nav-more-pop[hidden] {
+  display: none;
+}
+
+/* 弹层里的项横排（图标 + 名字），与左栏竖排的按钮区分开，读起来像一份菜单 */
+.nav-more-pop .nav-item {
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.nav-more-pop .nav-label {
+  color: var(--fg);
+  font-size: 12px;
 }
 
 
@@ -1293,6 +1360,207 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
 
 .modal-foot .spacer {
   flex: 1;
+}
+
+/* ------------------------------------------------- 弹层：自定义侧边栏 */
+
+/*
+  结构是"上面能滚、下面钉住"：
+    .sc-body  = [说明][.sc-zones ← 只有这块滚][.sc-fixed ← 设置行，不滚]
+  所以「设置」无论有多少行都停在最下方，不会被滚走（需求原话：设置永远在最下方）。
+*/
+.sc-modal {
+  width: min(520px, 100%);
+}
+
+.sc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* 覆盖 .modal-body 默认的滚动：滚动交给里面的 .sc-zones，否则设置行会一起被卷走 */
+  overflow: hidden;
+}
+
+.sc-desc {
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.sc-zones {
+  flex: 1;
+  min-height: 0;
+  /* 兜底滚动：两个分区各自封顶之后，如果连它们都放不下（窗口很矮），
+     这一层才出现滚动条。平时它不滚 —— 滚动发生在下面每个分区里。 */
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 2px;
+}
+
+.sc-zone {
+  /* 空区必须仍有高度，否则指针没有地方可以"放进去"（纯逻辑那边用 rect 判断落点） */
+  min-height: 76px;
+  padding: 8px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sc-zone.drop-into {
+  border-color: var(--blue);
+  background: var(--bg-hover);
+}
+
+.sc-zone-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.sc-zone-hint {
+  font-size: 11px;
+  color: var(--fg-2);
+}
+
+/*
+  行列表：**每个分区各自一条滚动条**。
+  不分的话，两边加起来一多就只能整块滚，用户看不到"另一区里还有什么"，
+  拖动时也没法把行放到看不见的那一区里去。
+
+  `max-height` 用 vh 而不是固定 px：弹窗高度本来就随窗口变，
+  写死会让矮窗口下两个分区把「设置」那一行挤出可视范围。
+*/
+.sc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: min(26vh, 200px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  /* 拖动时要在这个列表边缘能看清落点线，留一点右侧空间给滚动条 */
+  padding-right: 2px;
+}
+
+/* 空区的占位文案：靠 data 属性画，不必再建一个会被 replaceChildren 清掉的节点 */
+.sc-list[data-empty='1']::after {
+  content: '把行拖到这里';
+  display: block;
+  padding: 10px 8px;
+  font-size: 11px;
+  color: var(--fg-2);
+  text-align: center;
+}
+
+.sc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.sc-row.dragging {
+  opacity: 0.45;
+}
+
+/* 落点提示：一条 2px 的蓝线，插在上面还是下面一眼能看出 */
+.sc-row.drop-before {
+  box-shadow: 0 -2px 0 var(--blue);
+}
+
+.sc-row.drop-after {
+  box-shadow: 0 2px 0 var(--blue);
+}
+
+/* 设置行：不可拖动，样式上明确弱化，别让人以为漏画了手柄 */
+.sc-row-fixed {
+  background: var(--bg-base);
+  border-style: dashed;
+}
+
+.sc-note {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--fg-2);
+}
+
+.sc-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sc-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--fg-2);
+}
+
+.sc-icon svg {
+  display: block;
+}
+
+/* 拖动手柄：够大才好按（触摸下尤其），但视觉上只是一条"抓痕" */
+.sc-handle {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  cursor: grab;
+  touch-action: none; /* 触摸拖动时不要被浏览器当成滚动手势抢走 */
+}
+
+.sc-handle:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.sc-handle:focus-visible {
+  border-color: var(--blue);
+  color: var(--fg);
+}
+
+.sc-handle:active {
+  cursor: grabbing;
+}
+
+.sc-grip {
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* 「设置」卡片里的按钮行与摘要 */
+.sc-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sc-summary {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--fg-2);
+  line-height: 1.6;
 }
 
 /* --------------------------------------------------------------- Toast */
@@ -2364,6 +2632,39 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
     line-height: 1.2;
     white-space: normal;
     overflow-wrap: anywhere;
+  }
+
+  /* 「更多」弹层：手机上左栏只有 60px，必须从**屏幕左缘**展开，
+     否则 left:100% 会让它有一半跑到屏幕外。
+     `top` 不在这里定：openMorePop() 会按「更多」按钮的真实位置写内联样式
+     （内联优先于这里的任何规则），所以宽窄屏的"顶边齐平"是同一条逻辑。 */
+  .nav-more-pop {
+    left: calc(var(--sidebar-w) + 4px);
+    right: 8px;
+    min-width: 0;
+    max-width: none;
+  }
+
+  /* 弹层里的项恢复成竖排大字：手机上没有 hover，点按目标要够大 */
+  .nav-more-pop .nav-item {
+    flex-direction: row;
+    min-height: 44px;
+    padding: 10px 12px;
+  }
+
+  .nav-more-pop .nav-label {
+    font-size: 13px;
+  }
+
+  /* 弹层里的手柄/图标在手机上放大一点 */
+  .sc-handle {
+    width: 36px;
+    height: 32px;
+  }
+
+  .sc-icon {
+    width: 20px;
+    height: 20px;
   }
 
   /* ---------------------------------------------------- 中：聊天（默认那一屏） */
