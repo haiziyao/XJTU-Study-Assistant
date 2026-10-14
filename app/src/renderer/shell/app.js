@@ -400,12 +400,39 @@
       if (view) dom.navMorePop.appendChild(navButton(view));
     }
     dom.navMorePop.hidden = false;
+    positionMorePop();
     // 弹层是后建的，高亮要按当前状态补一次
     syncNavActive();
     // 点弹层之外的任何地方都该关掉它。用 capture 阶段：外层的按钮可能在冒泡阶段
     // stopPropagation，等到冒泡就来不及了（会表现为"点别处关不掉"）。
     document.addEventListener('click', onDocumentClickCloseMore, true);
     document.addEventListener('keydown', onMorePopKeydown);
+  }
+
+  /**
+   * 让弹层**顶边与「更多」按钮齐平**，并保证它不会捅出窗口底部。
+   *
+   * 为什么不能写成固定的 `bottom: Npx`：「更多」按钮在左栏里的高度是不固定的 ——
+   * 常驻项多了它就被往下推，窗口矮了它又被往上挤。写死一个偏移，换个窗口尺寸就错位。
+   * 这里按按钮的真实位置算一次，所以任何窗口高度下都对得上。
+   *
+   * 兜底：拿不到几何（老内核 / 无布局的测试环境）时清掉内联样式，退回 CSS 里的默认值。
+   */
+  function positionMorePop() {
+    const pop = dom.navMorePop;
+    if (!pop?.style) return;
+    const buttonRect = dom.navMore?.getBoundingClientRect?.();
+    const sidebar = dom.navMore?.closest?.('.sidebar') ?? document.querySelector('.sidebar');
+    const sidebarRect = sidebar?.getBoundingClientRect?.();
+    if (!buttonRect || !sidebarRect) {
+      pop.style.top = '';
+      pop.style.maxHeight = '';
+      return;
+    }
+    pop.style.top = `${Math.round(buttonRect.top - sidebarRect.top)}px`;
+    // 给底部留 12px 呼吸位；至少留 120px，免得窗口很矮时被压成一条缝
+    const room = (window.innerHeight || sidebarRect.height) - buttonRect.top - 12;
+    pop.style.maxHeight = `${Math.max(120, Math.round(room))}px`;
   }
 
   function closeMorePop() {

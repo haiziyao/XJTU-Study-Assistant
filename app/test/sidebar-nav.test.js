@@ -299,6 +299,27 @@ test('「更多」区空掉后按钮消失；「恢复默认」回到初始排�
   }
 });
 
+test('「更多」按钮只有一行标签（曾经出现两行「更多」）', async () => {
+  const ctx = await bootNav();
+  try {
+    const sidebar = ctx.sandbox.window.PCModules.getService('sidebar');
+    sidebar.apply(ctx.sandbox.window.PCSidebarLayout.move(sidebar.getLayout(), 'transfer', 'more', 0));
+
+    const texts = (node) => node.childNodes.map((child) => child.textContent).filter((text) => text.trim());
+    const labels = texts(ctx.refs.navMore).filter((text) => text.includes('更多'));
+    assert.equal(
+      labels.length,
+      1,
+      `★ 「更多」按钮上应当只有一行「更多」，实际 ${labels.length} 行 —— ` +
+        'HTML 里的静态文字和 buildNav() 加的 .nav-label 会各占一行',
+    );
+    // 图标 + 标签两项，与其它导航项结构一致
+    assert.equal(ctx.refs.navMore.childNodes.length, 2, '应当是「图标 + 标签」两项');
+  } finally {
+    await ctx.app.close();
+  }
+});
+
 test('窄屏：点导航仍是"切到那一屏"，不做收起', async () => {
   const ctx = await bootNav({ mobile: true });
   try {

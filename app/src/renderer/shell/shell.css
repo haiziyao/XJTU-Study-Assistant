@@ -288,13 +288,16 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
 }
 
 /*
-  收起区弹层：贴着左栏右缘展开，向上对齐「更多」按钮。
+  收起区弹层：贴着左栏右缘展开。
   绝对定位到 .sidebar 上，所以不会被 .nav 的滚动裁掉。
+  `top` 由 openMorePop() 按「更多」按钮的真实位置算出来（顶边齐平），
+  这里的 bottom 只是**拿不到几何时的兜底**（老内核 / 无布局环境）。
 */
 .nav-more-pop {
   position: absolute;
   left: calc(100% + 6px);
-  bottom: 96px;
+  top: 45%;
+  bottom: auto;
   z-index: 60;
   min-width: 132px;
   max-width: 220px;
@@ -1387,6 +1390,8 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
 .sc-zones {
   flex: 1;
   min-height: 0;
+  /* 兜底滚动：两个分区各自封顶之后，如果连它们都放不下（窗口很矮），
+     这一层才出现滚动条。平时它不滚 —— 滚动发生在下面每个分区里。 */
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -1422,10 +1427,23 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
   color: var(--fg-2);
 }
 
+/*
+  行列表：**每个分区各自一条滚动条**。
+  不分的话，两边加起来一多就只能整块滚，用户看不到"另一区里还有什么"，
+  拖动时也没法把行放到看不见的那一区里去。
+
+  `max-height` 用 vh 而不是固定 px：弹窗高度本来就随窗口变，
+  写死会让矮窗口下两个分区把「设置」那一行挤出可视范围。
+*/
 .sc-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  max-height: min(26vh, 200px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  /* 拖动时要在这个列表边缘能看清落点线，留一点右侧空间给滚动条 */
+  padding-right: 2px;
 }
 
 /* 空区的占位文案：靠 data 属性画，不必再建一个会被 replaceChildren 清掉的节点 */
@@ -2617,16 +2635,14 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
   }
 
   /* 「更多」弹层：手机上左栏只有 60px，必须从**屏幕左缘**展开，
-     否则 left:100% 会让它有一半跑到屏幕外。 */
+     否则 left:100% 会让它有一半跑到屏幕外。
+     `top` 不在这里定：openMorePop() 会按「更多」按钮的真实位置写内联样式
+     （内联优先于这里的任何规则），所以宽窄屏的"顶边齐平"是同一条逻辑。 */
   .nav-more-pop {
     left: calc(var(--sidebar-w) + 4px);
     right: 8px;
-    bottom: auto;
-    top: 50%;
-    transform: translateY(-50%);
     min-width: 0;
     max-width: none;
-    max-height: 70vh;
   }
 
   /* 弹层里的项恢复成竖排大字：手机上没有 hover，点按目标要够大 */
