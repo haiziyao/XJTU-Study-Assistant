@@ -84,7 +84,7 @@
 .notes-trash-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .danger { color: var(--red) !important; }
 @media (max-width:1180px) { .notes-workspace { grid-template-columns: 1fr; overflow: auto; } .notes-list,.notes-detail { overflow: visible; } .notes-list { border-right: 0; border-bottom: 1px solid var(--line); } }
-@media (max-width:760px) { .notes-toolbar .toolbar-row { flex-wrap: wrap; } .notes-toolbar .seg { max-width: 100%; overflow-x: auto; } .notes-trash-row { grid-template-columns: 1fr auto auto; }.notes-trash-row .notes-meta { grid-column: 1/-1; } }
+@media (max-width:900px) { .notes-toolbar .toolbar-row { flex-wrap: wrap; } .notes-toolbar .seg { max-width: 100%; overflow-x: auto; } .notes-trash-row { grid-template-columns: 1fr auto auto; }.notes-trash-row .notes-meta { grid-column: 1/-1; } }
 .notes-viewer-attachments { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .notes-viewer-attachments strong { width: 100%; }
 .notes-viewer-attachments a { text-decoration: none; }

@@ -2259,7 +2259,7 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
    -------------------------------------------------------------------------- */
 
 /* 只在窄屏生效的尺寸令牌。放在媒体查询里，宽屏根本读不到，桌面端逐像素不变。 */
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   :root {
     /* 窄导航：56–64px 之间取 60px。图标仍是 22px（不缩小图标），
        多出来的宽度用来把文字标签放大到 12px 并留出左右内边距。 */
@@ -2874,7 +2874,7 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
      这不是"偷懒压样式"：它是"手机端字号下限"这条产品约束的**唯一落点**。
    -------------------------------------------------------------------------- */
 
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   /* 下限的三块地盘：
        .view-content  绝大多数视图自己建的那层滚动容器；
        .settings      设置页是直接挂进 .panel-body 的，没有 .view-content（见 settings.js）；
@@ -3177,7 +3177,7 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
 
 /* ------------------------------------------------------------------ 手机上 */
 
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   /* 排队条：内边距收紧一点，把宽度让给 chip 本身 */
   .chat-queue {
     padding: 8px 10px 0;
@@ -3227,5 +3227,181 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
 
   .chat .bubble-stop {
     font-size: 12px !important;
+  }
+}
+
+/* ==========================================================================
+   窄屏可用性修复
+   ==========================================================================
+
+   append-only：上面的 900px 媒体查询已经定好了骨架（两栏 / 单屏切换）、字号下限
+   和大部分控件尺寸。这里只修"实测下来仍然不可用"的几处，全部只在窄屏生效。
+
+   实测依据（390×844，Chrome CDP `Emulation.setDeviceMetricsOverride`）。
+   注意：headless 的 `--window-size` 在 Windows 上会被最小窗口宽度（约 500px）夹住，
+   量不出真实的 390 —— 用它截图会得到"看起来三栏溢出"的假象，据此改样式必然改错。
+
+     修复前  .chat-head      67px  —— 「对话」被挤成 25×50 的竖排两行
+             .chat-controls 102px  —— 7 个控件折成两行
+             #theme-toggle         —— 文字被裁（white-space 被 theme.css 覆盖成 nowrap）
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  /* ---------- 1. 顶栏：一行放得下，放不下就省略，绝不折行 ----------
+     .chat-title 早先是 flex 默认的 `0 1 auto`，被同行的徽标和状态挤到只剩 25px，
+     「对话」于是折成竖排两行、顶栏被顶到 67px。标题必须不可压缩。 */
+  .chat-head {
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+
+  .chat-title {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  /* 徽标（模型选择器）和状态是"可牺牲"的那两个。但**牺牲的必须是状态，不是徽标**：
+     .compose-select 被 flex 压窄后，内层的 `span.badge` 是 inline 元素、宽度由内容决定，
+     并不会跟着变窄，而是**溢出父级、盖住右边的状态文字** —— 实测父级 112px 里装着
+     145px 的徽标，正好压掉「已连接」的「已」。所以徽标保持内容宽度（放不下时由下面
+     的 max-width 兜底），让本来就有 min-width:0 + 省略号的 .status-pill 去收缩。 */
+  .chat-head .compose-select {
+    min-width: 0;
+    flex: 0 0 auto;
+    max-width: 52vw;
+    overflow: hidden;
+  }
+
+  .chat-head .badge {
+    display: inline-block;
+    max-width: 100%;
+    vertical-align: middle;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ---------- 2. 控件行：单行横向滚动，不折行 ----------
+     联网 / 思考模式 / 权限 / 上下文 / 用量 / 绘图 在 390px 下总宽约 406px，
+     可用宽度只有 329px；折行会把这块从 44px 顶到 102px，白吃掉屏幕高度。
+     改成 dschat 顶栏那一套：`nowrap + overflow-x: auto`，装不下就横滑。
+
+     .spacer 的 `margin-left: auto` **保留**：内容装得下时它把右侧那组推到最右，
+     装不下时 flex 的 auto 边距自动为 0、正好接着排 —— 两种情况都对。 */
+  .chat-controls {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding: 0 10px 6px;
+    gap: 6px;
+  }
+
+  .chat-controls::-webkit-scrollbar {
+    display: none;
+  }
+
+  .chat-controls > .compose-select {
+    flex: 0 0 auto;
+  }
+
+  /* ---------- 3. 输入框：手机上别一上来就占三行 ----------
+     桌面的 min-height 58px 是按 780px 宽的面板定的；落到约 200px 宽的输入框里，
+     那句长 placeholder 会折成三行，autoGrow 于是把框撑到 108px。
+     窄屏收到 **62px = 恰好两行**（16px × 1.5 行高 × 2 + 上下内边距 14px），
+     并配合 app.js 里同步换短的窄屏 placeholder（两行以内，正好放得下）。 */
+  .chat-compose textarea {
+    min-height: 62px;
+    max-height: 108px;
+  }
+
+  /* ---------- 5. 工具条：放开收缩下限，分段控件改横滑 ----------
+     "待办"页实测：`.toolbar-row` 明明写了 `flex-wrap: wrap`，实际宽度却还是 524px，
+     于是面板横向溢出 206px；而 `.panel-body` 是 `overflow-x: hidden` ——
+     被切掉的「已完成」「工时」**滚不回来，等于不可用**。
+
+     根因不是 wrap 失效，而是 `.toolbar-row { flex: 1 1 100% }` 的 `min-width: auto`：
+     它的 min-content 被子元素 `.quick-add` 的 `flex-basis: 380px` 撑到约 524px，
+     容器再窄也压不下去（wrap 只在"放不下"时换行，压不住 min-content）。
+     给工具条这一族统一放开收缩下限，让 flex 真正能压窄它们。 */
+  .toolbar,
+  .toolbar.wrap,
+  .toolbar-row {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .toolbar-row > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* 分段控件（月/周/日/年、全部/今天/本周…）：桌面按内容宽度排，是 `flex: none`。
+     手机上内容比屏幕宽，改成横向滚动 —— 而不是被 `overflow-x: hidden` 裁掉。
+     notes.css 里对笔记工具栏已经用了同样的办法（`.notes-toolbar .seg{overflow-x:auto}`）。
+
+     里面的按钮必须 `flex: 0 0 auto`：否则它们会先被压窄，把「全部」挤成上下两行的
+     「全 / 部」——那是"看起来没坏但其实更难读"的坏法，比横向滚动差得多。 */
+  .seg {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .seg > * {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .seg::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* "待办"页的快速添加行：桌面排成一行（标题 + 日期 + 工时 + 新建）共约 426px，
+     手机上可用宽度只有 306px，而它是 `flex-wrap: nowrap` 且标题输入框有
+     `min-width: 120px` 下限 —— 于是整行溢出到 516px 被裁掉。
+     窄屏让它换行：标题独占一行，日期/工时/新建排第二行。 */
+  .quick-add {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .quick-add > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .quick-add .qa-title {
+    flex: 1 1 100%;
+  }
+
+  /* 日期 / 工时 / 快速添加 排第二行。basis 按"刚好放得下"给：
+     140 + 56 + 约98 + 2×6 间距 = 306 = 390px 屏的可用宽度。
+     日期框给足 140px，否则会把「2026/10/14」裁成「2026/10/1」（末位"4"看不到）。 */
+  .quick-add .qa-date {
+    flex: 1 1 140px;
+  }
+
+  .quick-add .qa-hours {
+    flex: 0 1 56px;
+  }
+
+  .quick-add .primary-btn {
+    flex: 0 0 auto;
+  }
+
+  /* ---------- 4. 主题开关：修层叠顺序 ----------
+     theme.css 在 index.html 里**最后**加载，它有 `.theme-toggle{white-space:nowrap}`，
+     与 shell.css 移动端块里的 `.theme-toggle{white-space:normal}` 同优先级，
+     靠"后加载"取胜 —— 于是 51px 宽的按钮里塞 70px 的「☾ 夜间模式」，直接被裁。
+     这里加 `.sidebar` 前缀把优先级提到 (0,2,0)，从此与加载顺序无关。 */
+  .sidebar .theme-toggle {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    font-size: 11px;
+    line-height: 1.2;
   }
 }
