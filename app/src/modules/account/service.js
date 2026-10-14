@@ -23,6 +23,15 @@
  * 服务端版里页面与 `/auth` **同源**，连桥都不需要——但同一份模块代码照样能跑：
  * 把模块配置的 `defaultServerUrl` 设为空串即可，此时 `serverUrl` 为空 -> 一律走**相对路径**
  * （`new URL('/auth/login', base)` 里空 base 会抛错，所以此处直接拼相对 URL）。
+ *
+ * 真机上踩过的两个地址坑（改动都在这个文件里）
+ * --------------------------------------------
+ *   1. **不写协议的域名要补 https**：公网服务端（如 `https://study.xjtuwhy.com`）基本都是
+ *      https，补成 http 会先挨一次 nginx 的 301；
+ *   2. **301/302 会把 POST 改写成 GET**（fetch 规范如此），于是登录请求变成一次读 HTML 的
+ *      GET —— 服务端根本没收到用户名密码，用户只看到"连不上/看不懂"。所以这里
+ *      `redirect: 'manual'` 自己跟跳转，且**只跟同一 host**（登录 body 里是明文密码）。
+ *      详见 `#assertRedirectAllowed` 与 `#request`。
  */
 
 import { promises as fs } from 'node:fs';
@@ -64,34 +73,117 @@ export const ERROR_MESSAGES = {
   INTERNAL: '服务器内部出错了，稍后再试',
 };
 
-/** 连不上时的措辞（网络层失败：DNS / 拒绝连接 / 超时 / TLS）。 */
-export const UNREACHABLE_MESSAGE = '连不上这个服务器（检查地址，或对方没在跑）';
+/**
+ * 连不上时的措辞（网络层失败：DNS 解析不了 / 拒绝连接 / 超时 / TLS）。
+ *
+ * 必须同时点出"检查地址**与端口**"：真机上把域名写对、端口写错（或忘了写端口）
+ * 是最常见的形态，只说"连不上"用户不知道该动哪里。
+ */
+export const UNREACHABLE_MESSAGE = '连不上这个服务器：检查地址与端口，确认对方在跑';
+
+/**
+ * 连上了、但对面不是本项目服务端时的措辞。
+ *
+ * 典型场景：地址填成了博客/公司首页，或者 nginx 只反代了网页没反代 `/auth/**`。
+ * 这句话必须说清"能打开 ≠ 是智学服务端"，否则用户会以为是自己网络的问题。
+ */
+export const NOT_POTATO_SERVER_MESSAGE =
+  '这个地址能打开，但它不是「AI 智学」的服务端（缺少 /auth/config）';
+
+/** 跳转被拒时的兜底措辞（具体原因见抛错处，都会带上是哪台主机）。 */
+export const REDIRECT_REFUSED_MESSAGE = '服务器要求跳转到别处，为了不把密码发错地方已经停下';
+
+/** 面板要展示的示例地址：错误文案里必须给例子，用户才知道"写对"长什么样。 */
+export const SERVER_URL_EXAMPLE = 'https://study.xjtuwhy.com';
 
 /** 地址栏为空且没有默认值时的措辞。 */
 const NO_SERVER_MESSAGE = '请先填服务器地址';
 
+/** 地址格式不对时的中文人话（`reason` 说明"哪里不对"，尾巴固定带示例）。 */
+export function badServerUrlMessage(reason) {
+  return `服务器地址看起来不对：${reason}（示例：${SERVER_URL_EXAMPLE}）`;
+}
+
+/** 构造一个"地址格式不对"的 400：**调用方拿到它就不该再发请求**。 */
+function badServerUrl(reason) {
+  return new HttpError(400, 'BAD_SERVER_URL', badServerUrlMessage(reason));
+}
+
 const clone = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
 
+/** 只有 `scheme://` 才算"写了协议"—— `localhost:8866` 里那个冒号**不是**协议分隔符。 */
+const SCHEME_RE = /^([a-z][a-z0-9+.-]*):\/\//i;
+
 /**
- * 把用户填的地址规格化成 `http://host:port`（无尾斜杠）。
+ * 是不是本机/内网直连地址（这些地址默认按 `http://` 试）。
  *
- * 宽容处理：不写协议时补 `http://`（校内/本机服务器基本都是 http，写 https 反而连不上）。
- * @returns {string} 规格化后的地址
- * @throws {HttpError} 地址不是合法 URL 时
+ * 只认字面量：`localhost`（含 `*.localhost`）、`127.0.0.1`、`[::1]`、纯 IP 字面量。
+ * 不做 DNS 解析 —— 归一化必须是**纯函数**，不能因为网络状况给出不同结果。
  */
-export function normalizeServerUrl(input) {
+function isLocalHostname(hostname) {
+  const host = String(hostname ?? '').trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
+  if (!host) return false;
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '::1') return true;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return true; // 纯 IPv4 字面量
+  return host.includes(':'); // 纯 IPv6 字面量
+}
+
+/**
+ * 归一化服务器地址 —— **本模块解析 `serverUrl` 的唯一口径**。
+ *
+ * 规则（每条都对应真机上真踩过的形态）：
+ *   1. 去掉首尾空白与末尾多余的 `/`；
+ *   2. **没写协议时按主机名补**：`localhost` / `127.0.0.1` / `[::1]` / 纯 IP 补 `http://`，
+ *      其余域名补 `https://`。为什么不是一律补 http：公网服务器基本都是 https，
+ *      补成 http 会先挨一次 301，而 **301 会把 POST 变成 GET**（见 `#assertRedirectAllowed`），
+ *      用户看到的是"响应看不懂"而不是"地址写错了"；本机开发服务器则通常没有证书，补 https 直接连不上；
+ *   3. 允许 `host:port`，允许带子路径（`https://x.com/study` 保留 `/study` 作为**前缀**）——
+ *      服务端挂在子路径后面（nginx 反代）是合法部署，把路径吃掉会 404；
+ *   4. 空串是合法的"同源"哨兵（服务端版把 `defaultServerUrl` 配成空串），返回空串而不是报错。
+ *
+ * @param {string} input 用户填的地址
+ * @param {{defaultScheme?: 'http'|'https'}} [options] 强制"没写协议时"用的协议（测试/特殊部署用；
+ *   写了协议时以用户写的为准）
+ * @returns {string} 归一化后的地址（无尾斜杠，保留子路径前缀）
+ * @throws {HttpError} 400 `BAD_SERVER_URL`（格式不对；调用方**不要**发请求）
+ */
+export function normalizeServerUrl(input, { defaultScheme } = {}) {
   const raw = String(input ?? '').trim();
-  if (!raw) return '';
-  const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+  if (!raw) return ''; // 空 = 同源（服务端版），不是错误
+  if (/\s/.test(raw)) throw badServerUrl('中间不能有空格');
+
+  const explicit = SCHEME_RE.exec(raw);
+  let scheme;
+  if (explicit) {
+    scheme = explicit[1].toLowerCase();
+    if (scheme !== 'http' && scheme !== 'https') {
+      throw badServerUrl(`只认得 http:// 与 https://，不认得 ${scheme}://`);
+    }
+  } else {
+    // 借 http:// 先解析一次，只为拿到主机名来判断"要不要补 http"。
+    // （http 与 https 的主机名语法完全一样，所以这次试探不影响结论。）
+    let probe;
+    try {
+      probe = new URL(`http://${raw}`);
+    } catch {
+      throw badServerUrl('看不懂这个地址');
+    }
+    const forced = String(defaultScheme ?? '').toLowerCase();
+    scheme = forced === 'http' || forced === 'https' ? forced : isLocalHostname(probe.hostname) ? 'http' : 'https';
+  }
+
   let url;
   try {
-    url = new URL(withScheme);
+    url = new URL(explicit ? raw : `${scheme}://${raw}`);
   } catch {
-    throw HttpError.badRequest('服务器地址看起来不对：例如 http://localhost:8866');
+    throw badServerUrl('看不懂这个地址');
   }
-  if (!url.hostname) throw HttpError.badRequest('服务器地址看起来不对：例如 http://localhost:8866');
-  // 只留 origin：用户可能顺手粘了 `/auth/login` 或查询串，留着会拼出双份路径
-  return url.origin;
+  if (!url.hostname) throw badServerUrl('缺了主机名');
+  // 地址里塞用户名密码：既可能是误粘贴，也会被原样写进日志/凭据文件，直接拒绝更安全
+  if (url.username || url.password) throw badServerUrl('不要在这里写用户名和密码');
+  // 查询串与锚点不可能是 base 的一部分（留着只会拼出畸形地址）
+  return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, '')}`;
 }
 
 /** 去掉地址尾部的斜杠，返回不带斜杠的基址（空串表示同源）。 */
@@ -100,18 +192,59 @@ const trimBase = (serverUrl) => String(serverUrl ?? '').trim().replace(/\/+$/, '
 /**
  * 按基址拼出上游 URL。
  *
- * - 有 base：`new URL('/auth/login', base)` —— 绝对路径，会丢掉 base 里可能存在的子路径
- *   （这正是我们要的：`/auth/**` 挂在服务器根上）；
- * - 无 base（服务端版同源）：直接返回相对路径，交给 fetch 按当前 origin 解析。
+ * - 有 base：**字符串直接拼**（base 已经过 `normalizeServerUrl`：无尾斜杠、保留子路径前缀）。
+ *   为什么不用 `new URL(pathname, base)`：那会把 base 里的子路径吃掉
+ *   （`https://x.com/study` + `/auth/login` → `https://x.com/auth/login`），
+ *   而"服务端挂在子路径下"是合法部署；
+ * - 无 base（服务端版同源）：返回相对路径，交给调用方按当前 origin 解析。
+ *
+ * @throws {HttpError} 400 `BAD_SERVER_URL` 拼出来的地址不是合法 URL 时
  */
 export function resolveUpstream(serverUrl, pathname) {
   const base = trimBase(serverUrl);
-  if (!base) return pathname;
+  const suffix = String(pathname ?? '');
+  if (!base) return suffix;
+  const joined = `${base}${suffix}`;
   try {
-    return new URL(pathname, `${base}/`).toString();
+    new URL(joined);
   } catch {
-    throw HttpError.badRequest('服务器地址看起来不对：例如 http://localhost:8866');
+    throw badServerUrl('看不懂这个地址');
   }
+  return joined;
+}
+
+/**
+ * 会"改写请求方法"的重定向状态码。
+ *
+ * 301/302 在 fetch 规范里会被改写成 GET（哪怕原来是 POST）；307/308 才是"原样重发"。
+ * 不管哪一种，我们**都按同一方法、同一 body 自己重发**：登录的 body 里是明文密码，
+ * 让运行库替我们决定"变成 GET"就会把用户名密码丢在半路上（真机上 nginx 的
+ * `http -> https` 跳转正是这个形态）。303 的语义是"改用 GET 去取那个地址"，
+ * 绝不能带着密码 body 跟，所以**不在名单里**。
+ */
+const REDIRECT_STATUSES = new Set([301, 302, 307, 308]);
+
+/** 最多跟几跳。真机上 `http -> https` 只需要一跳，给 3 跳是留出多级反代的余地。 */
+export const MAX_REDIRECTS = 3;
+
+/**
+ * 跳转之后的**新 base** 是什么。
+ *
+ * 归一化后的最终 base 会被写进 `data/account.json`、并回给面板（"下次就填这个"），
+ * 所以必须算准：把这次请求的路径后缀从跳转目标上摘掉，剩下的就是新 base。
+ *
+ * 例：base `http://study.xjtuwhy.com` + `/auth/login`
+ *     --301--> `https://study.xjtuwhy.com/auth/login`
+ *     -> 新 base `https://study.xjtuwhy.com`
+ *
+ * 摘不掉（对方跳到了完全不同的路径）就退回 origin —— 宁可显示 origin，也别拼出畸形地址。
+ */
+function rebaseAfterRedirect(next, pathname) {
+  const origin = `${next.protocol}//${next.host}`;
+  const suffix = String(pathname ?? '');
+  let href = `${origin}${next.pathname}`;
+  if (suffix && href.endsWith(suffix)) href = href.slice(0, -suffix.length);
+  return href.replace(/\/+$/, '') || origin;
 }
 
 /** 从 `Set-Cookie`（可能是数组，也可能只有一个）里取出会话令牌。 */
@@ -239,11 +372,17 @@ export class AccountService {
     };
   }
 
-  /** 最终要用的服务器地址：请求里给的优先，其次上次登录的，最后是默认值。 */
+  /**
+   * 最终要用的服务器地址：请求里给的优先，其次上次登录的，最后是默认值。
+   *
+   * **三个来源都过 `normalizeServerUrl`**：老版本 `account.json` 里可能留着带尾斜杠的地址，
+   * 配置文件里的默认值也可能被人手写成 `localhost:8866`。解析只留这一处口径，
+   * 别的地方一律拿归一化后的字符串拼 URL。
+   */
   resolveServerUrl(input) {
     const raw = input === undefined || input === null ? '' : String(input).trim();
     if (raw) return normalizeServerUrl(raw);
-    if (this.session?.serverUrl) return this.session.serverUrl;
+    if (this.session?.serverUrl) return normalizeServerUrl(this.session.serverUrl);
     return normalizeServerUrl(this.defaultServerUrl);
   }
 
@@ -273,71 +412,143 @@ export class AccountService {
   /* ------------------------------------------------------------ 上游请求 */
 
   /**
-   * 调一次上游，返回 `{status, body, token}`。
+   * 把 base + pathname 变成 fetch 认得的绝对地址。
    *
-   * 错误分两层：
-   *   - **连不上 / 超时** -> `HttpError` 502 + 中文人话（`UNREACHABLE_MESSAGE`）；
-   *   - **上游返回了错误状态** -> 不抛，交给调用方按 `body.error.code` 映射，
-   *     这样"登录失败"能拿到 401 语义，而不是被包成 502。
+   * 同源模式（`serverUrl` 为空 -> 拿到的是相对路径）下 Node 的 fetch 认不出相对 URL；
+   * 同源语义是"本进程自己监听的那个地址"，所以用 `this.origin` 补全 ——
+   * 服务端版会把 origin 设成自己的监听地址，相对路径这一语义因此得以保留。
+   *
+   * 注意区分两类失败：**地址本身不合法**（用户填错 -> 400 `BAD_SERVER_URL`，明确让他改地址）
+   * 与**地址合法但连不上**（-> 502 `SERVER_UNREACHABLE` + "连不上这个服务器"）。
+   * 若是把前者也吞成后者，用户会一直以为"服务器没开"，其实只是地址打错了。
+   */
+  #absoluteUrl(base, pathname) {
+    const joined = resolveUpstream(base, pathname);
+    if (/^https?:\/\//i.test(joined)) return joined;
+    try {
+      return new URL(joined, this.origin).toString();
+    } catch {
+      throw badServerUrl('看不懂这个地址');
+    }
+  }
+
+  /** 发一次请求（**单跳**，不跟跳转）。网络层失败统一翻成 502 + 人话。 */
+  async #fetchOnce(target, { method, headers, payload }) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      return await this.fetchImpl(target, {
+        method,
+        headers,
+        body: payload,
+        signal: controller.signal,
+        // **必须手动跟跳转**（理由见 #assertRedirectAllowed）：fetch 的 `follow`
+        // 会在 301/302 上把 POST 改写成 GET，而我们要的是"同一方法、同一 body 再发一次"。
+        redirect: 'manual',
+      });
+    } catch (error) {
+      // 网络层失败：DNS 解析不了、对方没监听、TLS 失败、超时被 abort……
+      // 统一成一句人话，原因留在 details 里给排查用（不进 message）。
+      const reason = error?.name === 'AbortError' ? `等待超过 ${Math.round(this.timeoutMs / 1000)} 秒` : error?.message;
+      throw new HttpError(502, 'SERVER_UNREACHABLE', UNREACHABLE_MESSAGE, { hint: reason });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 这一跳能不能跟。
+   *
+   * 为什么必须手动跟、而不是把跳转交给 fetch（真机踩到的就是这件事）：
+   *   - **301/302 会把 POST 改写成 GET**（fetch 规范如此，浏览器与 Node 一致）。
+   *     nginx 一句 `return 301 https://…` 就能把登录 POST 变成一次读登录页的 GET：
+   *     服务端根本没收到用户名密码，而用户看到的只是"响应看不懂 / 连不上"。
+   *     只有手动跟，才能保证"同一方法、同一 body"重发。
+   *   - 登录请求的 body 里是**明文密码**。跟着 `Location` 走到任意地址 = 把密码交给对方，
+   *     所以只允许跳到**同一个 host**（同机才谈得上同一个信任域），别的 host 一律拒绝。
+   *   - 公网域名只允许跳到 `https://`：明文 http 跳转等于把密码撒在路上。
+   *     本机/回环地址（localhost、127.0.0.1、[::1]、IP 字面量）例外 —— 本地开发与自动化
+   *     测试跑的就是 http，而且这类地址不会把凭据交给别人。
+   */
+  #assertRedirectAllowed(current, next) {
+    const from = new URL(current);
+    if (next.hostname.toLowerCase() !== from.hostname.toLowerCase()) {
+      throw new HttpError(
+        502,
+        'REDIRECT_REFUSED',
+        `服务器要把请求转到另一台主机（${next.host}），为了不把密码发错地方已经停下`,
+      );
+    }
+    if (next.protocol !== 'https:' && !isLocalHostname(next.hostname)) {
+      throw new HttpError(
+        502,
+        'REDIRECT_REFUSED',
+        `服务器要把请求转到明文 http://（${next.host}），为了不把密码明文发出去已经停下`,
+      );
+    }
+  }
+
+  /**
+   * 调一次上游，返回 `{status, body, token, base}`。
+   *
+   * - **`base` 是"跳转之后的最终 base URL"**：用户填 `http://study.xjtuwhy.com` 而 nginx
+   *   301 到 https 时，调用方把 `base` 落盘 / 回给面板，用户下次就知道该填哪个地址；
+   * - 错误分两层：**连不上 / 超时** -> `HttpError` 502 + 中文人话（`UNREACHABLE_MESSAGE`）；
+   *   **上游返回了错误状态** -> 不抛，交给调用方按 `body.error.code` 映射，
+   *   这样"登录失败"能拿到 401 语义，而不是被包成 502。
    *
    * `Authorization: Bearer` 与 `X-Potato-Token` 都带上：服务端版三种令牌载体都认
    * （Cookie / Bearer / 头），桌面端起见多发两个头，省得将来换载体又要改这里。
    */
   async #request(serverUrl, pathname, { method = 'GET', body, token } = {}) {
-    const url = resolveUpstream(serverUrl, pathname);
+    let base = trimBase(serverUrl);
+    let target = this.#absoluteUrl(base, pathname);
     const headers = { Accept: 'application/json' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (token) {
       headers.Authorization = `Bearer ${token}`;
       headers['X-Potato-Token'] = token;
     }
-    // 同源模式（`serverUrl` 为空 -> 这里拿到的是相对路径）下 Node 的 fetch 认不出相对 URL。
-    // 同源语义是"本进程自己监听的那个地址"，所以用 this.origin 补全；服务端版会在模块配置里
-    // 把 origin 设成自己的监听地址，相对路径这一语义因此得以保留。
-    //
-    // 注意区分两类失败：**地址本身不合法**（用户填错了 -> 400，明确告诉他改地址）与
-    // **地址合法但连不上**（-> 502 + "连不上这个服务器"）。若是把前者也吞成后者，
-    // 用户会一直以为"服务器没开"，其实只是地址打错了。
-    let target = url;
-    if (!/^https?:\/\//i.test(url)) {
-      try {
-        target = new URL(url, this.origin).toString();
-      } catch {
-        throw HttpError.badRequest('服务器地址看起来不对：例如 http://localhost:8866');
-      }
-    }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    let response;
-    try {
-      response = await this.fetchImpl(target, {
-        method,
-        headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: controller.signal,
-        redirect: 'follow',
-      });
-    } catch (error) {
-      // 网络层失败：DNS 解析不了、对方没监听、TLS 失败、超时被 abort……
-      // 统一成一句人话，原因留在 details 里给排查用（不进 message）。
-      const reason = error?.name === 'AbortError' ? `等待超过 ${Math.round(this.timeoutMs / 1000)} 秒` : error?.message;
-      throw new HttpError(502, 'UPSTREAM_UNREACHABLE', UNREACHABLE_MESSAGE, { hint: reason });
-    } finally {
-      clearTimeout(timer);
-    }
+    // body 只序列化一次、每一跳复用同一个字符串：跟跳转时"同一 body"才有保证
+    const payload = body === undefined ? undefined : JSON.stringify(body);
 
-    const text = await response.text().catch(() => '');
-    let parsed = null;
-    try {
-      parsed = text ? JSON.parse(text) : null;
-    } catch {
-      parsed = null; // 非 JSON（反代登录页、网关 HTML）—— 调用方按 status 处理
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+      const response = await this.#fetchOnce(target, { method, headers, payload });
+
+      if (!REDIRECT_STATUSES.has(response.status)) {
+        const text = await response.text().catch(() => '');
+        let parsed = null;
+        try {
+          parsed = text ? JSON.parse(text) : null;
+        } catch {
+          parsed = null; // 非 JSON（反代登录页、网关 HTML）—— 调用方按状态码处理
+        }
+        return {
+          status: response.status,
+          body: parsed,
+          token: tokenFromSetCookie(response.headers?.getSetCookie?.() ?? response.headers?.get?.('set-cookie')),
+          base,
+        };
+      }
+
+      // 跳转：先把响应体读干再去下一跳（不读干会占着这条连接，下一跳可能读到脏数据）
+      await response.text().catch(() => {});
+      const location = response.headers?.get?.('location') ?? null;
+      if (!location) {
+        throw new HttpError(502, 'REDIRECT_REFUSED', '服务器要求跳转，但没说跳到哪（缺少 Location），已经停下');
+      }
+      let next;
+      try {
+        next = new URL(location, target);
+      } catch {
+        throw new HttpError(502, 'REDIRECT_REFUSED', '服务器给的跳转地址看不懂，为了不把密码发错地方已经停下');
+      }
+      this.#assertRedirectAllowed(target, next);
+      // 跳转后的新 base：登录成功要落盘的是**它**（用户下次就该填这个）
+      base = rebaseAfterRedirect(next, pathname);
+      target = next.toString();
     }
-    return {
-      status: response.status,
-      body: parsed,
-      token: tokenFromSetCookie(response.headers?.getSetCookie?.() ?? response.headers?.get?.('set-cookie')),
-    };
+    throw new HttpError(502, 'REDIRECT_REFUSED', `服务器连续跳转超过 ${MAX_REDIRECTS} 次，地址可能配错了，已经停下`);
   }
 
   /**
@@ -353,6 +564,13 @@ export class AccountService {
       // 用上游的状态码（401/403/409/429 都是契约里冻结的语义），让前端能区分
       const status = response.status >= 400 && response.status < 500 ? response.status : fallbackStatus;
       return new HttpError(status, code, message);
+    }
+    // 连上了、但对面给的不是本项目的 JSON（HTML 登录页 / nginx 的 404 页 / 空响应）：
+    // 这是"地址填到了别的服务"的典型形态，说清楚它比"看不懂的响应"有用得多。
+    // 5xx 不在此列：那更像"服务端自己出问题了"，宁可说"稍后再试"，也别冤枉成"地址填错"。
+    const notPotatoShape = response.status === 404 || response.status === 405 || (!response?.body && response.status < 500);
+    if (notPotatoShape) {
+      return new HttpError(502, 'NOT_POTATO_SERVER', NOT_POTATO_SERVER_MESSAGE);
     }
     return new HttpError(fallbackStatus, code || 'UPSTREAM_ERROR', '服务器返回了看不懂的响应，请确认地址填的是「智学公开服务端」');
   }
@@ -373,7 +591,10 @@ export class AccountService {
     if (!token) throw new HttpError(502, 'UPSTREAM_ERROR', '服务器没有返回会话令牌，可能是版本不匹配');
 
     const session = await this.#save({
-      serverUrl: base,
+      // **跳转之后的 base**：用户填 `http://study.xjtuwhy.com`、nginx 301 到 https 时，
+      // 落盘的是 `https://study.xjtuwhy.com` —— 下次登录不必再挨一次跳转，
+      // 面板也会把它显示出来（用户于是知道"该填什么"）。
+      serverUrl: response.base,
       token,
       user: response.body.user,
       loginAt: new Date(this.now()).toISOString(),
@@ -401,7 +622,7 @@ export class AccountService {
     if (!token) throw new HttpError(502, 'UPSTREAM_ERROR', '注册成功但服务器没有返回会话令牌，请直接登录一次');
 
     const session = await this.#save({
-      serverUrl: base,
+      serverUrl: response.base, // 同登录：存跳转之后的最终 base
       token,
       user: response.body.user,
       loginAt: new Date(this.now()).toISOString(),
@@ -409,42 +630,75 @@ export class AccountService {
     return { ok: true, user: clone(session.user), serverUrl: session.serverUrl };
   }
 
-  /** 探测服务器：永远是 `reachable:false` 而不是抛错——它的用途就是"帮用户判断填对没有"。 */
+  /**
+   * 探测服务器：永远是 `reachable:false` 而不是抛错——它的用途就是"帮用户判断填对没有"。
+   *
+   * 判定"这是不是本项目的服务端"的口径：`<base>/auth/config` 返回 200，
+   * 且 JSON 里带 `serverName` 或 `registration`。不满足就说 `NOT_POTATO_SERVER` ——
+   * 真机上"地址能打开但填成了别的站点"与"服务器没在跑"是两种完全不同的错，
+   * 面板只显示 message，所以必须在这里分清。
+   */
   async probe({ serverUrl } = {}) {
     let base;
     try {
       base = this.resolveServerUrl(serverUrl);
     } catch (error) {
-      return { reachable: false, serverUrl: String(serverUrl ?? ''), serverName: null, version: null, features: null, error: error.message };
+      // 地址格式不对：当"不可达"回给面板，但 message 要说清是地址的问题
+      return {
+        reachable: false,
+        serverUrl: String(serverUrl ?? ''),
+        serverName: null,
+        version: null,
+        features: null,
+        errorCode: error.code ?? null,
+        error: error.message,
+      };
     }
     if (!this.#hasServer({ serverUrl })) {
-      return { reachable: false, serverUrl: '', serverName: null, version: null, features: null, error: NO_SERVER_MESSAGE };
+      return { reachable: false, serverUrl: '', serverName: null, version: null, features: null, errorCode: null, error: NO_SERVER_MESSAGE };
     }
     try {
       const response = await this.#request(base, '/auth/config');
-      if (response.status !== 200 || !response.body) {
+      const config = response.body;
+      const looksLikePotato =
+        response.status === 200 &&
+        Boolean(config) &&
+        typeof config === 'object' &&
+        (config.serverName !== undefined || config.registration !== undefined);
+      if (!looksLikePotato) {
         return {
           reachable: false,
-          serverUrl: base,
+          serverUrl: response.base,
           serverName: null,
           version: null,
           features: null,
-          error: `服务器回了个 ${response.status}（地址对，但对面好像不是智学服务端）`,
+          errorCode: 'NOT_POTATO_SERVER',
+          error: NOT_POTATO_SERVER_MESSAGE,
         };
       }
       return {
         reachable: true,
-        serverUrl: base,
-        serverName: response.body.serverName ?? null,
-        version: response.body.version ?? null,
+        // 归一化（含跳转）之后的地址：面板把它显示出来，用户下次照抄就行
+        serverUrl: response.base,
+        serverName: config.serverName ?? null,
+        version: config.version ?? null,
         // 只挑面板要显示的几项，别把上游整包原样转出去
-        features: response.body.features ? { lms: Boolean(response.body.features.lms) } : null,
-        registration: response.body.registration ?? null,
-        firstUserBecomesAdmin: Boolean(response.body.firstUserBecomesAdmin),
+        features: config.features ? { lms: Boolean(config.features.lms) } : null,
+        registration: config.registration ?? null,
+        firstUserBecomesAdmin: Boolean(config.firstUserBecomesAdmin),
+        errorCode: null,
       };
     } catch (error) {
-      // 连不上 / 超时 / 地址不合法：都算"不可达"，由面板显示一句人话
-      return { reachable: false, serverUrl: base, serverName: null, version: null, features: null, error: error.message };
+      // 连不上 / 超时 / 跳转被拒 / 地址不合法：都算"不可达"，由面板显示一句人话
+      return {
+        reachable: false,
+        serverUrl: base,
+        serverName: null,
+        version: null,
+        features: null,
+        errorCode: error.code ?? null,
+        error: error.message,
+      };
     }
   }
 

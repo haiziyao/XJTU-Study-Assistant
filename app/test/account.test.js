@@ -10,7 +10,12 @@
  *   - 令牌是 `HttpOnly` Cookie，**不在响应体里** —— 桥必须从 Set-Cookie 里取；
  *   - `GET /account` 绝不回传 token（用 JSON.stringify 断言不含明文）；
  *   - `data/account.json` 权限必须是 0600（凭据文件）；
- *   - 上游错误码 -> 中文人话（401/403/409/429/连不上）；
+ *   - 上游错误码 -> 中文人话（401/403/409/429）；
+ *   - **地址归一化**：不写协议按主机名补（域名 https / 本机 http）、去尾斜杠、保留子路径前缀；
+ *   - **跳转不丢方法**：301/302/307/308 之后必须仍用 POST 且 body 完整（fetch 自己跟会把 POST 变成 GET，
+ *     真机上 nginx 的 `http -> https` 就是这么把登录搞坏的）；
+ *   - 跳到**别的 host** 一律拒绝（`REDIRECT_REFUSED`），且密码一个字节都没发过去；
+ *   - 四种错误分得清：`BAD_SERVER_URL` / `SERVER_UNREACHABLE` / `NOT_POTATO_SERVER` / 上游错误码；
  *   - 服务器不可达时 `probe` 是 `reachable:false` 而不是 500；
  *   - 退出登录在服务器不可达时也要清掉本地文件。
  */
@@ -23,7 +28,14 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { createServer } from '../src/server/index.js';
-import { AccountService, ERROR_MESSAGES, SESSION_COOKIE, UNREACHABLE_MESSAGE } from '../src/modules/account/service.js';
+import {
+  AccountService,
+  ERROR_MESSAGES,
+  NOT_POTATO_SERVER_MESSAGE,
+  SESSION_COOKIE,
+  UNREACHABLE_MESSAGE,
+  normalizeServerUrl,
+} from '../src/modules/account/service.js';
 import { bootRenderer } from './helpers/renderer-dom.js';
 
 /** 假 auth 服务器认的令牌（写在 Set-Cookie 里，用来断言它没有泄漏到页面上）。 */
@@ -45,9 +57,25 @@ const INVITES = new Set(['INVITE-OK-1']);
  * @param {boolean} [options.tokenInBody] 把令牌同时放进响应体（真实服务端**不这么做**，
  *   用来验证桥的兼容分支；默认 false 才符合契约）
  * @param {number}  [options.rateLimitAfter] 密码连错几次后开始 429（默认 5，与契约一致）
+ * @param {string}  [options.prefix] 把 `/auth/**` 挂在哪个子路径下（默认根路径）。
+ *   用来验证"地址带子路径时保留它作为前缀"（服务端挂在反代子路径后面是合法部署）
+ * @param {Array<{status:number, location:string}>} [options.loginRedirects] 头几次
+ *   `POST /auth/login` 先按给的状态码 + Location 顶回去（Location 里的 `{self}` 会替换成
+ *   本服务器的 origin）。这是为了复刻真机上 nginx 的 `http -> https` 跳转 ——
+ *   也是"301 之后到底还是不是 POST"这句断言的证据来源
+ * @param {boolean} [options.configHtml] `/auth/config` 回一段 HTML（模拟"这个地址不是智学服务端"）
+ * @param {object}  [options.configBody] `/auth/config` 回指定 JSON（测"JSON 里没有 serverName/registration"）
  */
-async function startFakeAuth({ cors = false, tokenInBody = false, rateLimitAfter = 5 } = {}) {
-  const state = { requests: [], badPasswordCount: 0 };
+async function startFakeAuth({
+  cors = false,
+  tokenInBody = false,
+  rateLimitAfter = 5,
+  prefix = '',
+  loginRedirects = [],
+  configHtml = false,
+  configBody = null,
+} = {}) {
+  const state = { requests: [], badPasswordCount: 0, redirectsLeft: [...loginRedirects] };
   const accounts = new Map(Object.entries(ACCOUNTS).map(([name, info]) => [name, { ...info }]));
   const invites = new Set(INVITES);
 
@@ -80,11 +108,22 @@ async function startFakeAuth({ cors = false, tokenInBody = false, rateLimitAfter
         return fail(res, 400, 'BAD_REQUEST', '请求体不是合法 JSON');
       }
     }
-    state.requests.push({ method: req.method, url: req.url, headers: req.headers, body });
+    // `raw` 也记下来：断言"跟跳转时 body 完整"必须看原始字符串，光看解析结果不够
+    state.requests.push({ method: req.method, url: req.url, headers: req.headers, body, raw });
 
     const url = new URL(req.url, 'http://127.0.0.1');
+    /** 路由挂载点：默认根路径，`prefix` 非空时整组挪到子路径下 */
+    const at = (p) => `${prefix}${p}`;
 
-    if (req.method === 'GET' && url.pathname === '/auth/config') {
+    if (req.method === 'GET' && url.pathname === at('/auth/config')) {
+      if (configHtml) {
+        // 一个"能打开、但不是智学服务端"的地址：200 + HTML（真实世界里就是别人的首页/门户）
+        const html = '<!doctype html><html><head><title>某个站点</title></head><body>欢迎光临</body></html>';
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(html) });
+        res.end(html);
+        return;
+      }
+      if (configBody) return send(res, 200, configBody);
       return send(res, 200, {
         serverName: '智学公开服务端',
         version: '0.3.0',
@@ -94,7 +133,15 @@ async function startFakeAuth({ cors = false, tokenInBody = false, rateLimitAfter
       });
     }
 
-    if (req.method === 'POST' && url.pathname === '/auth/login') {
+    if (req.method === 'POST' && url.pathname === at('/auth/login')) {
+      const jump = state.redirectsLeft.shift();
+      if (jump) {
+        // 仿 nginx：301/302 + 一段 HTML 正文（真机上"登录拿到 HTML"就是这么来的）
+        const location = String(jump.location ?? at('/auth/login')).replaceAll('{self}', origin);
+        res.writeHead(jump.status, { 'Content-Type': 'text/html; charset=utf-8', Location: location });
+        res.end('<html><body>301 Moved Permanently</body></html>');
+        return;
+      }
       if (state.badPasswordCount >= rateLimitAfter) {
         return fail(res, 429, 'RATE_LIMITED', '密码连续错误 5 次，已锁定 60 秒');
       }
@@ -108,7 +155,7 @@ async function startFakeAuth({ cors = false, tokenInBody = false, rateLimitAfter
       return send(res, 200, { ok: true, user, ...(tokenInBody ? { token: TOKEN } : {}) }, { 'Set-Cookie': sessionCookie });
     }
 
-    if (req.method === 'POST' && url.pathname === '/auth/register') {
+    if (req.method === 'POST' && url.pathname === at('/auth/register')) {
       const username = String(body.username ?? '').trim();
       const code = String(body.inviteCode ?? '').trim();
       if (accounts.has(username)) return fail(res, 409, 'USER_EXISTS', `用户名「${username}」已被占用`);
@@ -119,12 +166,12 @@ async function startFakeAuth({ cors = false, tokenInBody = false, rateLimitAfter
       return send(res, 201, { ok: true, user, ...(tokenInBody ? { token: TOKEN } : {}) }, { 'Set-Cookie': sessionCookie });
     }
 
-    if (req.method === 'POST' && url.pathname === '/auth/logout') {
+    if (req.method === 'POST' && url.pathname === at('/auth/logout')) {
       // 幂等：没带令牌也回 200（契约如此）
       return send(res, 200, { ok: true }, { 'Set-Cookie': `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0` });
     }
 
-    if (req.method === 'GET' && url.pathname === '/auth/me') {
+    if (req.method === 'GET' && url.pathname === at('/auth/me')) {
       const token = req.headers['x-potato-token'] ?? (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
       if (token !== TOKEN) return fail(res, 401, 'UNAUTHORIZED', '需要先登录');
       return send(res, 200, { ok: true, user: { id: 'u-alice', username: 'alice', role: 'admin' } });
@@ -139,6 +186,36 @@ async function startFakeAuth({ cors = false, tokenInBody = false, rateLimitAfter
     origin,
     state,
     /** 关掉服务器：用来测"连不上"（端口随即无人监听）。 */
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+/**
+ * 起一个"按你的脚本回话"的假服务器：只负责记录请求，回复完全交给 `handler`。
+ *
+ * 用途是构造**需要两台服务器**才能验证的场景（"跳转到别的 host 被拒"那一类）：
+ * 一台负责给出 301，另一台等着看自己有没有收到密码。
+ * 默认 `listen(0)` **不带 host = 双栈监听**，于是 `localhost` / `127.0.0.1` / `[::1]`
+ * 三种写法都会落到同一个端口上 —— "有没有泄漏"这句断言才不会被 DNS 解析顺序骗过去。
+ *
+ * @param {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void} handler
+ * @param {{host?: string}} [options] 指定监听地址（默认双栈）
+ */
+async function startRawServer(handler, { host } = {}) {
+  const state = { requests: [] };
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    // 必须先把请求体读干再回话：否则带 body 的请求可能让客户端拿到 ECONNRESET
+    const raw = Buffer.concat(chunks).toString('utf8');
+    state.requests.push({ method: req.method, url: req.url, headers: req.headers, raw });
+    handler(req, res);
+  });
+  await new Promise((resolve) => (host ? server.listen(0, host, resolve) : server.listen(0, resolve)));
+  return {
+    origin: `http://127.0.0.1:${server.address().port}`,
+    port: server.address().port,
+    state,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
@@ -260,20 +337,286 @@ test('账号：重启后仍记得登录态（token 从文件读回，仍然不�
   }
 });
 
-test('账号：服务器地址容错（缺协议补 http、多余斜杠与子路径被去掉）', async () => {
+/* ================================================================ 地址归一化 */
+
+test('账号：normalizeServerUrl 是纯函数 —— 补协议/去尾斜杠/保留子路径/非法地址报 BAD_SERVER_URL', () => {
+  // 真机踩到的形态全在这张表里：用户可能只敲了域名（不带协议）。
+  // 为什么这条必须做成纯函数单测：这里没有任何真实外网，https 的补法根本没法用
+  // 本地假服务器（只能是 http）验证 —— 所以补协议这一步必须能脱离网络被断言。
+  const table = [
+    ['study.xjtuwhy.com', undefined, 'https://study.xjtuwhy.com'],
+    ['  study.xjtuwhy.com/  ', undefined, 'https://study.xjtuwhy.com'],
+    ['localhost:8866', undefined, 'http://localhost:8866'],
+    ['127.0.0.1:8866', undefined, 'http://127.0.0.1:8866'],
+    ['[::1]:8866', undefined, 'http://[::1]:8866'],
+    ['https://x.com/', undefined, 'https://x.com'],
+    ['https://x.com/study/', undefined, 'https://x.com/study'],
+    ['example.com', { defaultScheme: 'http' }, 'http://example.com'],
+    ['', undefined, ''], // 空串 = 同源哨兵（服务端版），不是错误
+  ];
+  for (const [input, options, expected] of table) {
+    assert.equal(normalizeServerUrl(input, options), expected, `${JSON.stringify(input)} 应当归一化成 ${expected}`);
+  }
+
+  for (const bad of ['a b', 'study xjtuwhy.com', 'http://[不是地址', 'ftp://x.com', 'http://user:pw@x.com']) {
+    assert.throws(
+      () => normalizeServerUrl(bad),
+      (error) => {
+        assert.equal(error.code, 'BAD_SERVER_URL', `${bad} 应当报 BAD_SERVER_URL`);
+        assert.match(error.message, /^服务器地址看起来不对：/);
+        assert.match(error.message, /示例：https:\/\/study\.xjtuwhy\.com/, 'message 里必须给出一个能照抄的示例');
+        return true;
+      },
+      `${bad} 应当被拒`,
+    );
+  }
+});
+
+test('账号：不写协议也能登录（纯 IP 默认 http），落盘与回给面板的是归一化后的地址', async () => {
   const auth = await startFakeAuth();
   const { app, call, accountFile } = await startApp();
   try {
-    const bare = auth.origin.replace(/^http:\/\//, '');
+    const bare = auth.origin.replace(/^http:\/\//, ''); // 例：127.0.0.1:53421
     const logged = await call('POST', '/account/login', {
-      // 用户从浏览器地址栏复制时常见的样子：没协议 + 结尾斜杠 + 顺手带上了路径
-      serverUrl: `${bare}/auth/login/`,
+      // 用户从浏览器地址栏复制时常见的样子：没协议 + 结尾多一个斜杠
+      serverUrl: `${bare}/`,
       username: 'alice',
       password: 'correct-horse-battery',
     });
     assert.equal(logged.status, 200);
-    assert.equal(logged.body.serverUrl, auth.origin, '只保留 origin，不留子路径与尾斜杠');
-    assert.equal((await readAccountFile(accountFile)).serverUrl, auth.origin);
+    assert.equal(logged.body.serverUrl, auth.origin, '回给面板的是归一化后的地址');
+    assert.equal((await readAccountFile(accountFile)).serverUrl, auth.origin, 'account.json 里也是归一化后的地址');
+
+    const status = await call('GET', '/account');
+    assert.equal(status.body.serverUrl, auth.origin);
+    assert.equal(JSON.stringify(status.body).includes(TOKEN), false, 'GET /account 仍然不含 token');
+  } finally {
+    await app.close();
+    await auth.close();
+  }
+});
+
+test('账号：地址带子路径时保留它当前缀（服务端挂在反代子路径后面）', async () => {
+  const auth = await startFakeAuth({ prefix: '/study' });
+  const { app, call } = await startApp();
+  try {
+    const logged = await call('POST', '/account/login', {
+      serverUrl: `${auth.origin}/study`,
+      username: 'alice',
+      password: 'correct-horse-battery',
+    });
+    assert.equal(logged.status, 200, '子路径前缀必须被保留，否则请求会打到根路径上 404');
+    assert.equal(logged.body.serverUrl, `${auth.origin}/study`);
+    assert.deepEqual(auth.state.requests.map((item) => item.url), ['/study/auth/login']);
+
+    const probe = await call('GET', `/account/probe?serverUrl=${encodeURIComponent(`${auth.origin}/study`)}`);
+    assert.equal(probe.body.reachable, true);
+    assert.ok(auth.state.requests.some((item) => item.url === '/study/auth/config'));
+  } finally {
+    await app.close();
+    await auth.close();
+  }
+});
+
+/* ================================================================ 跳转（301 不许把 POST 变成 GET） */
+
+// 契约里会出现的四种跳转状态码。**301/302 才是真机上那个坑**（fetch 会把 POST 改写成 GET），
+// 307/308 语义上要求原样重发 —— 我们对四种一视同仁：同一方法、同一 body。
+for (const status of [301, 302, 307, 308]) {
+  test(`账号：服务器回 ${status} 时手动跟跳转，第二跳仍然是 POST 且 body 完整`, async () => {
+    const auth = await startFakeAuth({ loginRedirects: [{ status, location: '{self}/auth/login' }] });
+    const { app, call, accountFile } = await startApp();
+    try {
+      const logged = await call('POST', '/account/login', {
+        serverUrl: auth.origin,
+        username: 'alice',
+        password: 'correct-horse-battery',
+      });
+      assert.equal(logged.status, 200, '跟完跳转后应当正常登录成功');
+
+      const methods = auth.state.requests.map((item) => item.method);
+      assert.deepEqual(methods, ['POST', 'POST'], `跳转前后都必须是 POST（fetch 自己跟会把第二跳变成 GET），实际：${methods.join(',')}`);
+
+      const latest = auth.state.requests.at(-1);
+      assert.deepEqual(latest.body, { username: 'alice', password: 'correct-horse-battery' }, '第二跳的 body 必须完整');
+      assert.match(latest.raw, /correct-horse-battery/, '原始请求体里必须真的带着密码（不是空 body）');
+      assert.equal(await readAccountFile(accountFile) !== null, true, '跟完跳转后照常落盘');
+    } finally {
+      await app.close();
+      await auth.close();
+    }
+  });
+}
+
+test('账号：跟完跳转后，account.json 与面板拿到的是**跳转之后的最终地址**', async () => {
+  const real = await startFakeAuth();
+  // 仿 nginx：老地址（比如 80 端口那一跳）把请求 301 到真正的服务端。
+  // 这里用"同一台机器的另一个端口"来模拟 http→https 那一跳 —— 真正要验证的是
+  // **跳转后的最终 base 会被记下来**（真机上就是从 http://study.xjtuwhy.com 变成 https://…）。
+  const front = await startRawServer((req, res) => {
+    res.writeHead(301, { 'Content-Type': 'text/html; charset=utf-8', Location: `${real.origin}${req.url}` });
+    res.end('<html><body>301 Moved Permanently</body></html>');
+  });
+  const { app, call, accountFile } = await startApp();
+  try {
+    const logged = await call('POST', '/account/login', {
+      serverUrl: front.origin.replace(/^http:\/\//, ''), // 用户还少写了协议
+      username: 'alice',
+      password: 'correct-horse-battery',
+    });
+    assert.equal(logged.status, 200);
+    assert.equal(logged.body.serverUrl, real.origin, '回给面板的是最终地址');
+    assert.equal((await readAccountFile(accountFile)).serverUrl, real.origin, 'account.json 里存的也是最终地址');
+
+    const status = await call('GET', '/account');
+    assert.equal(status.body.serverUrl, real.origin);
+    assert.equal(JSON.stringify(status.body).includes(TOKEN), false, 'GET /account 仍然不含 token');
+
+    const latest = real.state.requests.at(-1);
+    assert.equal(latest.method, 'POST');
+    assert.deepEqual(latest.body, { username: 'alice', password: 'correct-horse-battery' });
+  } finally {
+    await app.close();
+    await front.close();
+    await real.close();
+  }
+});
+
+test('账号：跳到别的 host 一律拒绝（REDIRECT_REFUSED），密码一个字节都没发过去', async () => {
+  // "受害者"服务器：双栈监听，localhost / 127.0.0.1 / [::1] 都能打到它身上。
+  // 万一桥真的跟跳转了，无论 DNS 先解析到哪个地址，这里都会记下那一发请求。
+  const victim = await startRawServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  const auth = await startFakeAuth({
+    // Location 的 hostname（localhost）与请求的 hostname（127.0.0.1）不同 -> 必须拒绝
+    loginRedirects: [{ status: 301, location: `http://localhost:${victim.port}/auth/login` }],
+  });
+  const { app, call, accountFile } = await startApp();
+  try {
+    const response = await call('POST', '/account/login', {
+      serverUrl: auth.origin,
+      username: 'alice',
+      password: 'correct-horse-battery',
+    });
+    assert.equal(response.status, 502);
+    assert.equal(response.body.error.code, 'REDIRECT_REFUSED');
+    assert.match(response.body.error.message, /另一台主机/);
+    assert.equal(victim.state.requests.length, 0, '别的 host 一个请求都不该收到（尤其不能收到密码）');
+    assert.equal(await readAccountFile(accountFile), null, '被拒的登录不该落盘');
+  } finally {
+    await app.close();
+    await auth.close();
+    await victim.close();
+  }
+});
+
+test('账号：一直跳个不停时最多跟 3 跳就停下（不会无限绕圈）', async () => {
+  const loop = await startRawServer((req, res) => {
+    res.writeHead(302, { Location: '/auth/login' });
+    res.end('again');
+  });
+  const { app, call } = await startApp();
+  try {
+    const response = await call('POST', '/account/login', { serverUrl: loop.origin, username: 'alice', password: 'correct-horse-battery' });
+    assert.equal(response.status, 502);
+    assert.equal(response.body.error.code, 'REDIRECT_REFUSED');
+    assert.match(response.body.error.message, /超过 3 次/);
+    assert.equal(loop.state.requests.length, 4, '首次 + 3 跳，一共 4 次请求就停手');
+  } finally {
+    await app.close();
+    await loop.close();
+  }
+});
+
+/* ================================================================ 地址错 / 不是智学服务端 */
+
+test('账号：地址里有空格 -> 400 BAD_SERVER_URL，而且一个请求都不发', async () => {
+  const auth = await startFakeAuth();
+  const { app, call } = await startApp();
+  try {
+    const response = await call('POST', '/account/login', {
+      serverUrl: `${auth.origin}/a b`,
+      username: 'alice',
+      password: 'correct-horse-battery',
+    });
+    assert.equal(response.status, 400, '地址不合法是"用户填错了"，不是"服务器没开"');
+    assert.equal(response.body.error.code, 'BAD_SERVER_URL');
+    assert.match(response.body.error.message, /服务器地址看起来不对/);
+    assert.match(response.body.error.message, /示例：https:\/\/study\.xjtuwhy\.com/);
+    assert.equal(auth.state.requests.length, 0, '地址都不合法，不该发任何请求出去');
+
+    // probe 也不发请求，而是把这句话原样带回来给面板
+    const probe = await call('GET', `/account/probe?serverUrl=${encodeURIComponent(`${auth.origin}/a b`)}`);
+    assert.equal(probe.status, 200);
+    assert.equal(probe.body.reachable, false);
+    assert.equal(probe.body.errorCode, 'BAD_SERVER_URL');
+    assert.match(probe.body.error, /服务器地址看起来不对/);
+    assert.equal(auth.state.requests.length, 0);
+  } finally {
+    await app.close();
+    await auth.close();
+  }
+});
+
+test('账号：/auth/config 回一段 HTML -> NOT_POTATO_SERVER（"能打开但不是智学服务端"）', async () => {
+  const auth = await startFakeAuth({ configHtml: true });
+  const { app, call } = await startApp();
+  try {
+    const response = await call('GET', `/account/probe?serverUrl=${encodeURIComponent(auth.origin)}`);
+    assert.equal(response.status, 200, 'probe 是"帮用户试地址"，不是智学服务端也算一种正常回答');
+    assert.equal(response.body.reachable, false);
+    assert.equal(response.body.errorCode, 'NOT_POTATO_SERVER');
+    assert.equal(response.body.error, NOT_POTATO_SERVER_MESSAGE);
+    assert.match(response.body.error, /不是「AI 智学」的服务端/);
+    assert.match(response.body.error, /缺少 \/auth\/config/);
+  } finally {
+    await app.close();
+    await auth.close();
+  }
+});
+
+test('账号：/auth/config 回 JSON 但没有 serverName/registration -> 也是 NOT_POTATO_SERVER', async () => {
+  const auth = await startFakeAuth({ configBody: { ok: true, hello: 'world' } });
+  const { app, call } = await startApp();
+  try {
+    const response = await call('GET', `/account/probe?serverUrl=${encodeURIComponent(auth.origin)}`);
+    assert.equal(response.body.reachable, false);
+    assert.equal(response.body.errorCode, 'NOT_POTATO_SERVER');
+    assert.equal(response.body.error, NOT_POTATO_SERVER_MESSAGE);
+  } finally {
+    await app.close();
+    await auth.close();
+  }
+});
+
+test('账号：登录时对面回 HTML（地址填到了别的服务）-> NOT_POTATO_SERVER，不落盘', async () => {
+  const blog = await startRawServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><html><body>这里是某个站点首页</body></html>');
+  });
+  const { app, call, accountFile } = await startApp();
+  try {
+    const response = await call('POST', '/account/login', { serverUrl: blog.origin, username: 'alice', password: 'correct-horse-battery' });
+    assert.equal(response.status, 502);
+    assert.equal(response.body.error.code, 'NOT_POTATO_SERVER');
+    assert.equal(response.body.error.message, NOT_POTATO_SERVER_MESSAGE);
+    assert.equal(await readAccountFile(accountFile), null);
+  } finally {
+    await app.close();
+    await blog.close();
+  }
+});
+
+test('账号：probe 成功时回的是归一化后的地址（面板拿它提示"下次就填这个"）', async () => {
+  const auth = await startFakeAuth();
+  const { app, call } = await startApp();
+  try {
+    const bare = `${auth.origin.replace(/^http:\/\//, '')}/`; // 没协议 + 尾斜杠
+    const response = await call('GET', `/account/probe?serverUrl=${encodeURIComponent(bare)}`);
+    assert.equal(response.body.reachable, true);
+    assert.equal(response.body.serverUrl, auth.origin);
   } finally {
     await app.close();
     await auth.close();
@@ -387,7 +730,7 @@ test('账号：注册成功 -> 201 直接进入已登录', async () => {
   }
 });
 
-test('账号：连不上服务器 -> 502 人话（不是 500），本地不落盘', async () => {
+test('账号：端口没人监听 -> 502 SERVER_UNREACHABLE（不是 500），本地不落盘', async () => {
   const auth = await startFakeAuth();
   const origin = auth.origin;
   // 先关掉服务器：端口随即无人监听（拿到端口再关，保证这个地址确实是"连不上"）
@@ -397,18 +740,23 @@ test('账号：连不上服务器 -> 502 人话（不是 500），本地不落�
   try {
     const response = await call('POST', '/account/login', { serverUrl: origin, username: 'alice', password: 'correct-horse-battery' });
     assert.equal(response.status, 502, '连不上是网关语义，不该是 500');
-    assert.equal(response.body.error.message, '连不上这个服务器（检查地址，或对方没在跑）');
+    assert.equal(response.body.error.code, 'SERVER_UNREACHABLE');
+    assert.equal(response.body.error.message, UNREACHABLE_MESSAGE);
+    // message 必须同时点出"地址与端口"和"对方在不在跑"，否则用户不知道该动哪里
+    assert.match(response.body.error.message, /检查地址与端口/);
+    assert.match(response.body.error.message, /确认对方在跑/);
     assert.equal(await readAccountFile(accountFile), null);
   } finally {
     await app.close();
   }
 });
 
-test('账号：地址写错（不是 URL）-> 400 人话，不抛 500', async () => {
+test('账号：地址写错（不是 URL）-> 400 BAD_SERVER_URL，不抛 500', async () => {
   const { app, call } = await startApp();
   try {
     const response = await call('POST', '/account/login', { serverUrl: 'http://[不是地址', username: 'alice', password: 'x' });
     assert.equal(response.status, 400);
+    assert.equal(response.body.error.code, 'BAD_SERVER_URL');
     assert.match(response.body.error.message, /地址/);
   } finally {
     await app.close();
@@ -445,7 +793,7 @@ test('账号：probe 在服务器可达时报出服务名/版本/特性，LMS �
   }
 });
 
-test('账号：probe 在服务器不可达时 reachable:false（不抛错）', async () => {
+test('账号：probe 在服务器不可达时 reachable:false（不抛错，也不报成"不是智学服务端"）', async () => {
   const auth = await startFakeAuth();
   const origin = auth.origin;
   await auth.close();
@@ -457,22 +805,29 @@ test('账号：probe 在服务器不可达时 reachable:false（不抛错）', a
     assert.equal(response.body.ok, true);
     assert.equal(response.body.reachable, false);
     assert.equal(response.body.serverName, null);
-    assert.equal(response.body.error, '连不上这个服务器（检查地址，或对方没在跑）');
+    assert.equal(response.body.errorCode, 'SERVER_UNREACHABLE');
+    assert.equal(response.body.error, UNREACHABLE_MESSAGE);
   } finally {
     await app.close();
   }
 });
 
-test('账号：probe 遇到不是本程序的服务器（回 404）也是 reachable:false，并说清原因', async () => {
+test('账号：probe 遇到回 404 的普通 HTTP 服务 -> NOT_POTATO_SERVER（与"连不上"分得清）', async () => {
+  // 一个"能打开、但不是智学服务端"的 HTTP 服务：/auth/config 回 404 + HTML
+  const otherSite = await startRawServer((req, res) => {
+    res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><html><body>404 Not Found</body></html>');
+  });
   const { app, call } = await startApp();
   try {
-    // 本机后端自己就是个"不是智学服务端的 HTTP 服务"：/auth/config 会 404
-    const response = await call('GET', `/account/probe?serverUrl=${encodeURIComponent('http://127.0.0.1:8866')}`);
-    // 8866 上可能真有服务端在跑，也可能没有 —— 两种都必须 reachable 字段存在且不抛错
+    const response = await call('GET', `/account/probe?serverUrl=${encodeURIComponent(otherSite.origin)}`);
     assert.equal(response.status, 200);
-    assert.equal(typeof response.body.reachable, 'boolean');
+    assert.equal(response.body.reachable, false);
+    assert.equal(response.body.errorCode, 'NOT_POTATO_SERVER');
+    assert.equal(response.body.error, NOT_POTATO_SERVER_MESSAGE);
   } finally {
     await app.close();
+    await otherSite.close();
   }
 });
 
@@ -622,12 +977,22 @@ test('账号：凭据文件损坏时当作未登录启动（不拖垮启动、�
   }
 });
 
-test('账号：错误码映射表覆盖契约里冻结的几种', () => {
+test('账号：错误码映射表覆盖契约里冻结的几种（外加三种"地址类"人话）', () => {
   assert.equal(ERROR_MESSAGES.BAD_CREDENTIALS, '用户名或密码不对');
   assert.equal(ERROR_MESSAGES.INVITE_INVALID, '邀请码无效或已被使用');
   assert.equal(ERROR_MESSAGES.USER_EXISTS, '这个用户名已经被注册了');
   assert.equal(ERROR_MESSAGES.RATE_LIMITED, '失败次数太多，请等 60 秒再试');
-  assert.equal(UNREACHABLE_MESSAGE, '连不上这个服务器（检查地址，或对方没在跑）');
+  // 三种"地址类"错误：面板只显示 message，所以这三句必须自己把真因说清楚
+  assert.equal(UNREACHABLE_MESSAGE, '连不上这个服务器：检查地址与端口，确认对方在跑');
+  assert.equal(NOT_POTATO_SERVER_MESSAGE, '这个地址能打开，但它不是「AI 智学」的服务端（缺少 /auth/config）');
+  assert.throws(
+    () => normalizeServerUrl('a b'),
+    (error) => {
+      assert.match(error.message, /^服务器地址看起来不对：/);
+      assert.match(error.message, /示例：https:\/\/study\.xjtuwhy\.com/);
+      return true;
+    },
+  );
 });
 
 test('账号：模块声明了 id/order 且没有给 AI 任何工具或查询入口', async () => {
@@ -694,6 +1059,88 @@ test('账号：面板未登录时给出地址/用户名/密码与测试连接，
   // 默认地址写在界面上，用户不用猜
   assert.ok(inputs.some((node) => node.value === 'http://localhost:8866'), '服务器地址要预填默认值');
   assert.match(mount.textContent, /服务器地址/);
+  // placeholder 给的是公网示例，输入框下面还要有一句"哪种地址该写哪种协议"
+  const serverInput = inputs.find((node) => node.value === 'http://localhost:8866');
+  assert.equal(serverInput.placeholder, 'https://study.xjtuwhy.com', 'placeholder 要写成公网示例地址');
+  assert.match(mount.textContent, /国内服务器请填 https:\/\//);
+  assert.match(mount.textContent, /本机开发填 http:\/\/localhost:8866/);
+});
+
+test('账号：测试连接成功后显示后端归一化后的地址（用户下次照抄）', async () => {
+  const { PCModules, El } = bootRenderer({
+    state: {},
+    api: async (url) => {
+      if (url === '/account') return { ok: true, connected: false, serverUrl: 'http://localhost:8866', user: null, loginAt: null };
+      if (String(url).startsWith('/account/probe')) {
+        // 用户填 `study.xjtuwhy.com/`，后端补成 https 并去掉了尾斜杠
+        return { ok: true, reachable: true, serverUrl: 'https://study.xjtuwhy.com', serverName: '智学公开服务端', version: '0.3.0', features: { lms: false } };
+      }
+      return { ok: true };
+    },
+  });
+  const section = PCModules.settingsSections().find((item) => item.id === 'account.login');
+  const mount = new El('div');
+  section.render(mount);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  mount.querySelectorAll('button').find((node) => node.textContent === '测试连接').listeners.click[0]();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.match(mount.textContent, /地址已确认：https:\/\/study\.xjtuwhy\.com/);
+});
+
+test('账号：BAD_SERVER_URL 用人话显示（沿用既有错误样式）', async () => {
+  const { PCModules, El } = bootRenderer({
+    state: {},
+    api: async (url) => {
+      if (url === '/account') return { ok: true, connected: false, serverUrl: 'http://localhost:8866', user: null, loginAt: null };
+      if (url === '/account/login') {
+        const error = new Error('服务器地址看起来不对：中间不能有空格（示例：https://study.xjtuwhy.com）');
+        error.status = 400;
+        error.payload = { ok: false, error: { code: 'BAD_SERVER_URL', message: error.message } };
+        throw error;
+      }
+      return { ok: true };
+    },
+  });
+  const section = PCModules.settingsSections().find((item) => item.id === 'account.login');
+  const mount = new El('div');
+  section.render(mount);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  mount.querySelectorAll('button').find((node) => node.textContent === '登录').listeners.click[0]();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const alert = mount.querySelectorAll('.acct-alert')[0];
+  assert.ok(alert, '要用既有的错误块显示');
+  assert.match(alert.textContent, /服务器地址不对/, '标题要说清是地址问题，而不是笼统的"没成功"');
+  assert.match(alert.textContent, /示例：https:\/\/study\.xjtuwhy\.com/, 'message 里的示例要原样显示出来');
+});
+
+test('账号：测试连接说"不是智学服务端"时，面板原样显示后端那句人话', async () => {
+  const { PCModules, El } = bootRenderer({
+    state: {},
+    api: async (url) => {
+      if (url === '/account') return { ok: true, connected: false, serverUrl: 'http://localhost:8866', user: null, loginAt: null };
+      if (String(url).startsWith('/account/probe')) {
+        return {
+          ok: true,
+          reachable: false,
+          serverUrl: 'https://example.com',
+          errorCode: 'NOT_POTATO_SERVER',
+          error: '这个地址能打开，但它不是「AI 智学」的服务端（缺少 /auth/config）',
+        };
+      }
+      return { ok: true };
+    },
+  });
+  const section = PCModules.settingsSections().find((item) => item.id === 'account.login');
+  const mount = new El('div');
+  section.render(mount);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  mount.querySelectorAll('button').find((node) => node.textContent === '测试连接').listeners.click[0]();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.match(mount.textContent, /不是「AI 智学」的服务端/);
+  assert.match(mount.textContent, /缺少 \/auth\/config/);
 });
 
 test('账号：展开注册后注册密码框用 new-password', async () => {
@@ -852,7 +1299,7 @@ test('账号：重画之后表单里仍是用户敲的内容（输入不会被�
   const findInputs = () => {
     const all = mount.querySelectorAll('input');
     return {
-      server: all.find((n) => n.type === 'text' && n.placeholder === 'http://localhost:8866'),
+      server: all.find((n) => n.type === 'text' && n.placeholder === 'https://study.xjtuwhy.com'),
       user: all.find((n) => n.placeholder === '用户名'),
       password: all.find((n) => n.type === 'password'),
     };
