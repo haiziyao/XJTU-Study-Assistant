@@ -15,6 +15,12 @@ data/*.corrupt-*
 data/*.tmp
 data/*.pid
 
+# 服务端版（公开网页）的运行时数据：账号库 + 每用户数据目录。**绝不入库**。
+# 这里面有：users.json（密码哈希与 salt）、sessions.json（活的会话令牌）、invites.json，
+# 以及 users/<userId>/ 下每个账号自己的对话/笔记/日程/AI key —— 一次误提交等于把所有账号交出去。
+data-www/
+data-www/**
+
 # 本地凭据与侦察产物：绝不入库
 # （敏感串本身从不写进任何文件，这里是防止有人手工把凭据/会话存到仓库里）
 *credential*

@@ -35,6 +35,9 @@ cd app
 npm run start:server          # http://127.0.0.1:3210/api/v1
 npm run dev:server            # 带 --watch 自动重启
 
+# 1') 跑「服务端版」：公开网页 + 账号登录（多账号，各自的数据与 AI Key 互相隔离）
+npm run www                   # http://127.0.0.1:8866/  ，详见下文「服务端版（公开网页）」
+
 # 2) 跑 Electron 测试窗口（需先装依赖）
 npm install                   # electron 为 devDependency
 npm run dev:app
@@ -622,11 +625,143 @@ curl -s localhost:3210/api/v1/lms/status | jq
 curl -s -X POST localhost:3210/api/v1/lms/sync/preview -H 'Content-Type: application/json' -d '{}' | jq
 ```
 
+## 服务端版（公开网页）
+
+> 一句话：把本程序放到一台公网服务器上，**朋友注册账号后各自用各自的网页**，数据与 AI Key 按账号隔离。
+> 入口是 `node bin/www.js`（默认 **8866**），不是 `bin/server.js`。
+
+```bash
+cd app
+npm run www                    # = node bin/www.js，监听 127.0.0.1:8866
+# 打开 http://localhost:8866/  → 注册（第一个账号即管理员）→ 自动进入 /app/ 应用页面
+```
+
+环境变量（都可选）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `POTATO_WWW_PORT` | `8866` | 监听端口（也认 `PORT`） |
+| `POTATO_WWW_HOST` | `127.0.0.1` | 监听地址。**默认只听本机**：对外请用反向代理/隧道；确实要让 Node 直接对公网监听时才设 `0.0.0.0` |
+| `POTATO_WWW_DIR` | `<app>/data-www` | 账号库与每用户数据目录 |
+| `POTATO_WWW_TRUST_PROXY=1` | 关 | 信任 `X-Forwarded-For`（**只有在前面确实挂了反代/隧道时才打开**，见下文"登录限速"） |
+| `POTATO_WWW_SECURE_COOKIES=1` | 关 | 给会话 Cookie 加 `Secure`（反代终止 TLS 时打开） |
+| `POTATO_WWW_IDLE_MS` | `1800000` | 每用户后端实例的空闲回收阈值（毫秒；`0` = 不回收） |
+
+### 账号怎么来
+
+1. **第一个注册的账号自动成为管理员**（`role: 'admin'`）。原因很实际：一台新部署的服务器
+   没有任何带外的建号通道（没有命令行、没有配置文件），如果不让第一个注册者当管理员，
+   它就**永远发不出邀请码**，等于谁也进不来。这个窗口只在空库时存在一次。
+2. 之后**注册必须持邀请码**。管理员在应用里（或直接调接口）发码：
+
+```bash
+# 第一个账号：不需要邀请码
+curl -s -X POST localhost:8866/auth/register -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"password-1"}' -c /tmp/alice.txt | jq
+
+# 管理员发一个邀请码（形如 K7Q3-M9XW，去掉了 0/O/1/I 这些易混字符）
+curl -s -X POST localhost:8866/auth/invites -b /tmp/alice.txt | jq
+
+# 用邀请码注册第二个账号
+curl -s -X POST localhost:8866/auth/register -H 'Content-Type: application/json' \
+  -d '{"username":"bob","password":"password-2","inviteCode":"K7Q3-M9XW"}' -c /tmp/bob.txt | jq
+```
+
+账号接口（**契约**，前端与 iOS/Android 都照这个写；响应是项目统一的 `{ok:true, …}` / `{ok:false, error:{code,message}}`
+外壳，契约里的字段都在顶层）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/auth/config` | **公开**。`{serverName, version, registration:'invite', firstUserBecomesAdmin:true, features:{lms:false}}` |
+| POST | `/auth/register` | `{username,password,inviteCode?}` → `201 {user}` + `Set-Cookie: potato_session=…; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000`。密码 <8 位 → 400、重名 → 409 `USER_EXISTS`、无效/已用邀请码 → 403 `INVITE_INVALID` |
+| POST | `/auth/login` | `{username,password}` → `200 {user}` + 同一个 Cookie；密码错 → 401 `BAD_CREDENTIALS` |
+| POST | `/auth/logout` | `200 {ok:true}` + 清 Cookie（**服务端真的删会话**） |
+| GET | `/auth/me` | `200 {user}` / 401 `UNAUTHORIZED` |
+| POST | `/auth/password` | `{currentPassword,newPassword}` → `200 {ok:true}`，并作废该用户**其它**会话 |
+| POST/GET | `/auth/invites` | 仅管理员。发码 / 列表（含 `createdAt`、`usedBy`） |
+| DELETE | `/auth/invites/:id` | 仅管理员 |
+
+会话令牌三种带法都认：Cookie（浏览器）、`Authorization: Bearer <token>`、`X-Potato-Token: <token>`
+（手机客户端）；WebSocket 额外认 `?token=<token>`（浏览器的 WebSocket API 不能自定义请求头）。
+
+### 数据放在哪、怎么隔离的
+
+```
+data-www/                     ← 整个目录都在 .gitignore 里，**绝不入库**
+├── users.json                # {id, username, passwordHash(PBKDF2-SHA256×12万), salt, role, createdAt}
+├── invites.json              # 邀请码（一次性）
+├── sessions.json             # {token, userId, createdAt, expiresAt, lastSeenAt, ua, ip}
+└── users/<userId>/           # ← 这个账号自己的 data/：对话、笔记、日程、卡片、**AI Key**
+    ├── ai-config.json        #   AI 密钥在这里，天然按账号隔离
+    └── notes.json / schedules.json / …
+```
+
+**为什么是"每账号一个后端实例"**：现有模块全是单用户假设（JsonStore 直接读写 `data/*.json`，
+AI Key 存在 `data/ai-config.json`），做多租户要么把 `userId` 透传进十几个模块的每个调用点
+（每加一个新模块都要重审一遍"漏没漏租户过滤"），要么让每个账号**拥有自己的一份 dataDir 和一台后端**。
+后者把隔离从"代码里的纪律"变成"文件系统与端口上的事实"：A 的进程根本看不到 B 的目录，
+现有模块**一行都不用改**。代价是每账号一份常驻内存（几十 MB），换来的是不可能串数据。
+
+实例的边界：**只绑 `127.0.0.1` 的随机空闲端口**（端口号不落盘、不下发），懒启动、按账号复用、
+空闲（默认 30 分钟）自动回收，公网上没有任何路径能直接到达它。
+
+### 为什么 LMS（思源学堂）在服务端版禁用
+
+思源学堂要拿你的**学校账号密码**去换 CAS 票据。本地客户端上这是"密码不出你这台电脑"；
+放到一台公网服务器上就变成"把学校账号托管给一个陌生人运维的站点"，这件事我们不做，
+所以服务端版**不加载 `lms` 模块**，`/api/v1/lms/**` 直接回 `403 LMS_DISABLED` 并说明原因。
+需要学堂同步请用本地客户端（`npm run dev:app` / `bin/server.js`）——那边功能完好。
+
+同时禁用的还有 `transfer`（局域网直传）：它会在 `start()` 里起 UDP 广播与 8886 端口，
+那是**局域网**语义，公网服务器上既广播不出去，也等于多开一个没人看着的端口。
+
+### 安全口径（都写进了测试）
+
+- Cookie `HttpOnly` + `SameSite=Lax`（同源部署，不需要 CORS + credentials）；
+- 密码 PBKDF2-SHA256 12 万次迭代 + 每用户 salt，**恒定时间比较**；账号库里没有明文密码；
+- 登录限速：**同一个 IP + 同一个用户名**连错 5 次锁 60 秒（第 5 次就回 429，锁定期内正确密码也拒）；
+  只按 IP 会误伤 NAT 后的邻居，只按用户名等于给攻击者一个"锁死别人账号"的按钮，所以两者一起当键；
+- 令牌恒定时间比较；日志里用户名可以留，**密码/令牌一律不进日志**（令牌只出现前 6 位）；
+- 静态托管挡路径穿越（编码过的 `..` 也挡），只发 `src/renderer/**` 与 `src/www/public/**` 两个根目录里的文件；
+- 未登录时 `/api/**`、`/ws` 一律 **401**，`/app/**` 302 回登录页；登录页是纯静态文件，不含任何用户数据。
+
+### TLS / 反代（需要你自己配）
+
+对外是**普通 HTTP**，TLS 交给反向代理或隧道，和 dschat 一样：
+
+```bash
+# 例子：cloudflared 隧道（本机 8866 不动）
+cloudflared tunnel --url http://127.0.0.1:8866
+# 例子：Caddy 反代（自动 HTTPS）
+#   study.example.com { reverse_proxy 127.0.0.1:8866 }
+```
+
+反代后面请这样起服务，否则**登录限速会把所有人算成同一个 IP**、Cookie 也不会带 `Secure`：
+
+```bash
+POTATO_WWW_TRUST_PROXY=1 POTATO_WWW_SECURE_COOKIES=1 npm run www
+```
+
+反过来，**直连（没有反代）时不要打开 `POTATO_WWW_TRUST_PROXY`**：那时候任何人都能伪造
+`X-Forwarded-For`，等于给限速开了一扇万能后门。
+
+### 服务端版的测试
+
+```bash
+npx node --test test/www-auth.test.js test/www-proxy.test.js
+```
+
+覆盖：未登录 401 与登录页；首个注册者即管理员；邀请码一次性与 403；密码错 401 / 连错 5 次 429；
+改密码作废旧会话；`/auth/me`；登录后代理 200（**真的通到该账号自己的后端**）；
+**A/B 两个账号的数据互不可见**（HTTP 与 WebSocket 两侧）；`/app/**` 按登录态放行；
+路径穿越被挡；LMS 403 且模块未加载；实例懒启动/复用/回收。
+
 ## 目录结构
 
 ```
 app/
 ├── bin/server.js               # 独立启动后端（联调 / 自动化）
+├── bin/www.js                  # 服务端版宿主（8866：账号 + 登录页 + 每用户后端代理）
 ├── docs/
 │   ├── 模块开发指南.md          # ★ 要加功能先读这个
 │   └── 接口文档.md              # 框架 + 各模块的接口契约
@@ -645,14 +780,22 @@ app/
 │   │   ├── calendar/           #   日历与待办（module/service/routes/parser/commands…）
 │   │   └── lms/                #   思源学堂（CAS 登录 / API 归一化 / 同步映射 / 工具清单）
 │   ├── server/index.js         # 装配：注册表驱动，只做装配不含业务
+│   ├── www/                    # ★ 服务端版宿主（公开网页 + 账号）：见下文「服务端版（公开网页）」
+│   │   ├── server.js           #   路由分发：/auth、/login、/app、/api 代理、/ws 升级
+│   │   ├── accounts.js         #   账号库：PBKDF2、会话、邀请码、登录限速
+│   │   ├── backends.js         #   每账号一台后端实例（127.0.0.1 随机端口，懒启动 + 回收）
+│   │   ├── proxy.js            #   反向代理 + WebSocket 代理（与 transfer/gateway.js 同一套口径）
+│   │   ├── static.js           #   静态托管（两个根目录 + 路径穿越防护）
+│   │   └── public/             #   公开登录/介绍页（index.html + login.css + login.js，零构建）
 │   └── renderer/               # 测试窗口（classic script，无构建步骤）
 │       ├── index.html          #   入口 + 资源清单
 │       ├── shell/              #   外壳：app.js / planned.js / message.js / settings.js / shell.css
 │       ├── kit/                #   公共积木：registry.js / util.js / labels.js / dom.js
 │       └── views/              # ★ 一人一个 .js + .css
 ├── data/                       # 运行时数据（集合文件由各模块声明）
+├── data-www/                   # 服务端版运行时数据（账号库 + 每用户目录；**绝不入库**）
 ├── scripts/                    # run-electron-macos.sh + seed-demo.js + lms-probe.js + mock-lms-server.js
-└── test/                       # node:test 用例（接口 / 兼容层 / 思源学堂 / 农历 / 分类 / 渲染层，145 个）
+└── test/                       # node:test 用例（接口 / 兼容层 / 思源学堂 / 农历 / 分类 / 渲染层 / 服务端版，145 个）
 ```
 
 ## 架构
