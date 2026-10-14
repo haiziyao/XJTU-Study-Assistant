@@ -1,0 +1,204 @@
+/* 「设置 → 多端同步」区块的样式。
+   外壳已经把内容包在 .card / .card-title / .card-body 里，这里只补卡片内部排布。
+   两条硬约束：
+     1. **颜色只用主题令牌**（--fg-2 / --fg-3 / --line / --blue / --green / --orange / --red），
+        白天/夜间切换时这一块跟着变，不新造主题色；
+     2. **窄屏（≤760px，与 shell.css/account.css 同一个断点）不溢出、不重叠**：
+        所有网格都是 `minmax(0, 1fr)` + `overflow-wrap: anywhere`（长设备名/长标题不会把
+        卡片撑破），按钮行 flex-wrap，条数网格在窄屏降到两列。
+   类名统一 `sync-` 前缀（本区块独占）。**一个 inline style 都没有**（CSP 禁）。 */
+
+.sync {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sync-loading {
+  font-size: 12px;
+  color: var(--fg-3);
+}
+
+/* ---------------------------------------------------------------- 账号 / 设备 */
+
+.sync-account { display: flex; flex-direction: column; gap: 8px; }
+
+.sync-kv {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sync-note {
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+.sync-note.is-warn { color: var(--orange); }
+
+.sync-hint {
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- 各集合条数 */
+
+.sync-collections {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.sync-collection {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+
+.sync-collection-name {
+  font-size: 11.5px;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+.sync-collection-count {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.sync-collection-tag {
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--orange);
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- 动作 */
+
+.sync-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ---------------------------------------------------------------- 报告 */
+
+.sync-report {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.sync-report-title { font-size: 12.5px; font-weight: 600; color: var(--fg-2); }
+
+.sync-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 8px;
+}
+.sync-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+.sync-stat-value { font-size: 15px; font-weight: 600; color: var(--fg); }
+.sync-stat-label { font-size: 10.5px; color: var(--fg-3); }
+
+.sync-list { display: flex; flex-direction: column; gap: 6px; }
+.sync-list-title { font-size: 11.5px; font-weight: 600; color: var(--fg-2); }
+.sync-list-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--line);
+}
+.sync-list-main {
+  font-size: 11.5px;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+.sync-list-sub {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+.sync-list-more { font-size: 11px; color: var(--fg-3); }
+
+/* ---------------------------------------------------------------- 敏感数据开关 */
+
+.sync-secrets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.sync-group-title { font-size: 12.5px; font-weight: 600; color: var(--fg-2); }
+
+.sync-secret {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  cursor: pointer;
+}
+/* 复选框自己一格，说明文字占满剩下的宽度：窄屏也不会把文字挤成一条线 */
+.sync-secret-box { margin: 2px 0 0; }
+.sync-secret-label { font-size: 12px; color: var(--fg-2); }
+.sync-secret > .sync-hint { grid-column: 2; }
+
+/* ---------------------------------------------------------------- 错误 */
+
+.sync-alert {
+  padding: 10px 12px;
+  border: 1px solid var(--red);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.sync-alert.is-warn { border-color: var(--orange); }
+.sync-alert-title {
+  margin-bottom: 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--red);
+}
+.sync-alert.is-warn .sync-alert-title { color: var(--orange); }
+.sync-alert-msg {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+.sync-alert-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- 窄屏（≤760px） */
+
+@media (max-width: 760px) {
+  /* 条数网格降到两列：手机上 132px 起跳的自适应列会挤出屏幕 */
+  .sync-collections { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* 按钮占满整行：好点，也不会和文字提示挤在一行 */
+  .sync-actions > button { flex: 1 1 100%; }
+  .sync-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
