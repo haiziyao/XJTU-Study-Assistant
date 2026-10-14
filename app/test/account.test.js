@@ -1207,7 +1207,7 @@ test('账号：登录成功后面板显示已登录、服务器地址与登录�
   assert.match(mount.textContent, /登录时间/);
   // 诚实说明：登录不做同步
   assert.match(mount.textContent, /登录只解决身份/);
-  assert.match(mount.textContent, /不会自动上传或覆盖你的本地数据/);
+  assert.match(mount.textContent, /默认不会上传任何数据/);
   assert.ok(calls.some((line) => line === 'POST /account/login'));
 });
 
