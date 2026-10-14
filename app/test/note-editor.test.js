@@ -6,7 +6,7 @@ import { El } from './helpers/renderer-dom.js';
 
 const script = readFileSync(new URL('../src/renderer/views/notes/editor.js', import.meta.url), 'utf8');
 const flush = () => new Promise((resolve) => setImmediate(resolve));
-function setup(fetchImpl, id = '') {
+function setup(fetchImpl, id = '', options = {}) {
   const nodes = new Map();
   const get = (id) => {
     if (!nodes.has(id)) nodes.set(id, new El(id === 'note-body' ? 'textarea' : 'div'));
@@ -18,19 +18,21 @@ function setup(fetchImpl, id = '') {
     return nodes.get(id);
   };
   const events = {};
+  const timers = [];
   const context = {
     URL, URLSearchParams, console,
     location: { href: `http://127.0.0.1:3210/app/views/notes/editor.html${id ? `?id=${id}` : ''}`, search: id ? `?id=${id}` : '', origin: 'http://127.0.0.1:3210', protocol: 'http:' },
-    document: { title: '', getElementById: get, createElement: (tag) => new El(tag), querySelectorAll: () => [], addEventListener: (name, handler) => { events[name] = handler; } },
+    document: { title: '', body: options.enhancedUi ? new El('body') : null, getElementById: get, createElement: (tag) => new El(tag), querySelectorAll: () => [], addEventListener: (name, handler) => { events[name] = handler; } },
     fetch: fetchImpl,
-    setTimeout(handler) { handler(); return 0; }, clearTimeout() {}, requestAnimationFrame(handler) { handler(); },
+    setTimeout(handler, delay = 0) { if (!options.captureTimers) { handler(); return 0; } const timer = { handler, delay, cleared: false }; timers.push(timer); return timers.length; },
+    clearTimeout(timerId) { if (options.captureTimers && timers[timerId - 1]) timers[timerId - 1].cleared = true; }, requestAnimationFrame(handler) { handler(); },
     history: { replaceState(state, unused, href) { context.location.href = href; } },
     addEventListener: (name, handler) => { events[name] = handler; },
     PCRichText: { render(node, text) { node.textContent = text; }, escapeHtml(text) { return text.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]); } },
   };
   context.window = context;
   vm.runInNewContext(script, context);
-  return { get, context, events, input(id, text) { get(id).value = text; get(id).listeners.input[0](); }, save: () => get('save-note').listeners.click[0]() };
+  return { get, context, events, timers, input(id, text) { get(id).value = text; get(id).listeners.input[0](); }, save: () => get('save-note').listeners.click[0]() };
 }
 const ok = (payload) => ({ ok: true, json: async () => payload });
 
@@ -66,18 +68,18 @@ test('编辑页首次保存创建笔记，再次保存更新同一 ID，刷新�
   assert.equal(new URL(app.context.location.href).searchParams.get('id'), 'note-1');
   assert.equal(new URL(app.get('back-to-notes').href).searchParams.get('note'), 'note-1', '返回列表时必须携带当前笔记 ID');
   app.input('note-body', '## 修改后的正文');
-  app.input('note-workflow-status', 'unorganized');
   await app.save();
   assert.equal(calls[1].method, 'PATCH'); assert.ok(calls[1].url.endsWith('/notes/note-1'));
   assert.equal(calls[1].body.expectedUpdatedAt, 'version-1');
-  assert.equal(calls[1].body.status, 'unorganized', '用户选择的未整理状态必须持久化');
+  assert.equal('status' in calls[1].body, false, '正文编辑器不得覆盖右键属性面板管理的笔记状态');
+  assert.equal('properties' in calls[1].body, false, '正文编辑器不得覆盖笔记属性');
+  assert.equal('tags' in calls[1].body, false, '标签改由列表右键属性面板管理');
   assert.equal(app.get('save-status').dataset.state, 'saved');
 
   const reopened = setup(async () => ok({ note: { title: '学习笔记', body: '## 修改后的正文', tags: ['复习'], updatedAt: 'version-2', attachments: [] } }), 'note-1');
   await flush();
   assert.equal(reopened.get('note-body').value, '## 修改后的正文');
   assert.equal(new URL(reopened.get('back-to-notes').href).searchParams.get('note'), 'note-1');
-  assert.equal(reopened.get('note-tags').value, '复习');
   assert.equal(reopened.get('save-note').disabled, false);
 
   let attachmentUpdate;
@@ -87,7 +89,19 @@ test('编辑页首次保存创建笔记，再次保存更新同一 ID，刷新�
     return ok({ summary: { id: 'note-file', updatedAt: 'version-2' } });
   }, 'note-file');
   await flush(); attachmentOnly.input('note-title', '课件说明'); await attachmentOnly.save();
-  assert.equal(attachmentUpdate.status, 'ready', '只有附件的已整理笔记不能因编辑标题而退回草稿');
+  assert.equal('status' in attachmentUpdate, false, '只有附件的已整理笔记不能因编辑标题而退回草稿');
+});
+
+test('自动保存每五分钟最多安排一次，手动保存会取消等待中的自动保存', async () => {
+  let requests = 0;
+  const app = setup(async (url, requestOptions) => { if (requestOptions.method) { requests += 1; return ok({ summary: { id: 'note-1', updatedAt: `version-${requests}` } }); } return ok({ items: [] }); }, '', { enhancedUi: true, captureTimers: true });
+  app.input('note-title', '五分钟草稿'); app.input('note-body', '还没有决定是否保留');
+  const pendingAutosaves = () => app.timers.filter((timer) => timer.delay === 5 * 60 * 1000 && !timer.cleared);
+  assert.equal(pendingAutosaves().length, 1, '持续编辑时不应反复重置或堆积自动保存计时器');
+  assert.match(app.get('save-status').textContent, /每 5 分钟自动保存/);
+  assert.equal(requests, 0, '五分钟到期前新笔记不得被创建');
+  await app.save();
+  assert.equal(requests, 1); assert.equal(pendingAutosaves().length, 0, '手动保存后必须取消尚未触发的自动保存');
 });
 
 test('慢保存期间继续输入不会被标成已保存，也不会发起重复创建', async () => {

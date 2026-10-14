@@ -2,10 +2,10 @@
 (function () {
   'use strict';
   const params = new URLSearchParams(location.search);
+  const AUTOSAVE_DELAY = 5 * 60 * 1000;
   const enhancedUi = Boolean(document.body);
   const apiBase = (params.get('api') || (location.protocol.startsWith('http') ? `${location.origin}/api/v1` : 'http://127.0.0.1:3210/api/v1')).replace(/\/$/, '');
   const title = document.getElementById('note-title');
-  const tags = document.getElementById('note-tags');
   const body = document.getElementById('note-body');
   const preview = document.getElementById('note-preview');
   const saveButton = document.getElementById('save-note');
@@ -18,17 +18,6 @@
   const undoButton = document.getElementById('undo-note');
   const redoButton = document.getElementById('redo-note');
   const editor = document.getElementById('note-editor');
-  const properties = document.getElementById('note-properties');
-  const folder = document.getElementById('note-folder');
-  const aliases = document.getElementById('note-aliases');
-  const course = document.getElementById('note-course');
-  const chapter = document.getElementById('note-chapter');
-  const noteType = document.getElementById('note-type');
-  const studyStatus = document.getElementById('note-study-status');
-  const mastery = document.getElementById('note-mastery');
-  const reviewDate = document.getElementById('note-review-date');
-  const favorite = document.getElementById('note-favorite');
-  const workflowStatus = document.getElementById('note-workflow-status');
   const suggestions = document.getElementById('wiki-suggestions');
   const outline = document.getElementById('note-outline');
   const linksPanel = document.getElementById('note-links');
@@ -47,12 +36,18 @@
   let past = [];
   let future = [];
   let previousBody = { text: body.value, start: 0, end: 0 };
-  const snapshot = () => JSON.stringify({
-    title: title.value, tags: tags.value, body: body.value, folder: folder.value, aliases: aliases.value,
-    course: course.value, chapter: chapter.value, type: noteType.value, studyStatus: studyStatus.value,
-    mastery: mastery.value, reviewDate: reviewDate.value, favorite: favorite.checked, workflowStatus: workflowStatus.value,
-  });
+  const snapshot = () => JSON.stringify({ title: title.value, body: body.value });
   const dirty = () => snapshot() !== saved;
+
+  function cancelAutosave() {
+    if (autosaveTimer === undefined || autosaveTimer === null) return;
+    clearTimeout(autosaveTimer); autosaveTimer = undefined;
+  }
+
+  function scheduleAutosave() {
+    if (!enhancedUi || !loaded || !dirty() || saving || autosaveTimer !== undefined) return;
+    autosaveTimer = setTimeout(() => { autosaveTimer = undefined; if (dirty()) save('autosave'); }, AUTOSAVE_DELAY);
+  }
 
   // Keep explicit API routing and the active note when returning to the workspace.
   function updateReturnUrl() {
@@ -132,10 +127,9 @@
   function changed(record = true) {
     if (record) rememberEdit();
     renderSource();
-    if (!saving) setStatus(dirty() ? '有未保存的更改' : id ? '所有更改已保存' : '新笔记 · 尚未保存', dirty() ? 'dirty' : id ? 'saved' : '');
+    if (!saving) setStatus(dirty() ? '有未保存的更改 · 每 5 分钟自动保存' : id ? '所有更改已保存' : '新笔记 · 尚未保存', dirty() ? 'dirty' : id ? 'saved' : '');
     clearTimeout(previewTimer); previewTimer = setTimeout(renderPreview, 100);
-    clearTimeout(autosaveTimer);
-    if (enhancedUi && loaded && dirty()) autosaveTimer = setTimeout(() => save('autosave'), 800);
+    if (dirty()) scheduleAutosave(); else cancelAutosave();
     renderWikiSuggestions();
   }
   async function request(path, options = {}) {
@@ -153,17 +147,13 @@
     const submitted = snapshot();
     const fields = {
       title: title.value.trim() || '未命名笔记', body: body.value,
-      tags: tags.value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean).slice(0, 12),
-      folder: folder.value.trim(), aliases: aliases.value.split(/[,，]/).map((value) => value.trim()).filter(Boolean), favorite: favorite.checked,
-      properties: {
-        course: course.value.trim(), chapter: chapter.value.trim(), type: noteType.value,
-        status: studyStatus.value, mastery: mastery.value === '' ? null : Number(mastery.value), reviewDate: reviewDate.value || null,
-      },
-      format: 'markdown', status: workflowStatus.value || 'draft',
+      format: 'markdown',
       versionReason: reason,
     };
+    if (!id) fields.status = 'draft';
     if (id) fields.expectedUpdatedAt = updatedAt;
     let succeeded = false;
+    cancelAutosave();
     saving = true; saveButton.disabled = true; showError(); setStatus('正在保存…');
     try {
       const result = await request(id ? `/notes/${encodeURIComponent(id)}` : '/notes', { method: id ? 'PATCH' : 'POST', body: fields });
@@ -173,7 +163,7 @@
       const url = new URL(location.href); url.searchParams.set('id', id); history.replaceState(null, '', url.href);
       // Edits typed during a slow request remain dirty; only the submitted snapshot was saved.
       if (snapshot() === submitted) {
-        title.value = fields.title; tags.value = fields.tags.join('，'); saved = snapshot();
+        title.value = fields.title; saved = snapshot();
       } else saved = submitted;
       setStatus(dirty() ? '有未保存的更改' : '所有更改已保存', dirty() ? 'dirty' : 'saved');
       renderPreview();
@@ -182,12 +172,11 @@
     } catch (error) { showError(`保存失败：${error.message}`); setStatus('保存失败，正文仍在当前页面', 'error'); return false; }
     finally {
       saving = false; saveButton.disabled = false;
-      if (enhancedUi && succeeded && dirty()) { clearTimeout(autosaveTimer); autosaveTimer = setTimeout(() => save('autosave'), 800); }
+      if (enhancedUi && succeeded && dirty()) scheduleAutosave();
     }
   }
   saveButton.addEventListener('click', () => save('manual'));
-  workflowStatus.value ||= 'draft';
-  for (const input of [title, tags, body, folder, aliases, course, chapter, noteType, workflowStatus, studyStatus, mastery, reviewDate, favorite]) input.addEventListener('input', () => changed(input === body));
+  for (const input of [title, body]) input.addEventListener('input', () => changed(input === body));
   body.addEventListener('beforeinput', captureSelection);
   body.addEventListener('scroll', syncSource);
   undoButton.addEventListener('click', () => restoreEdit(past, future));
@@ -197,10 +186,6 @@
     document.querySelectorAll('button[data-view]').forEach((item) => item.setAttribute('aria-pressed', String(item === button)));
     if (button.dataset.view === 'read') renderPreview();
   }));
-  document.addEventListener('click', (event) => {
-    if (properties.open && !properties.contains(event.target)) properties.open = false;
-  });
-  properties.addEventListener('keydown', (event) => { if (event.key === 'Escape') { properties.open = false; properties.querySelector('summary')?.focus(); } });
   document.addEventListener('keydown', (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); save('manual'); }
   });
@@ -268,14 +253,10 @@
   saved = snapshot(); resetHistory(); renderPreview();
   async function load() {
     if (!id) { title.focus(); return; }
-    saveButton.disabled = true; title.disabled = tags.disabled = body.disabled = true; setStatus('正在读取笔记…');
+    saveButton.disabled = true; title.disabled = body.disabled = true; setStatus('正在读取笔记…');
     try {
       const { note } = await request(`/notes/${encodeURIComponent(id)}`);
-      title.value = note.title; tags.value = (note.tags || []).join('，'); body.value = note.body || '';
-      workflowStatus.value = note.status || 'draft';
-      folder.value = note.folder || ''; aliases.value = (note.aliases || []).join('，'); favorite.checked = Boolean(note.favorite);
-      course.value = note.properties?.course || ''; chapter.value = note.properties?.chapter || ''; noteType.value = note.properties?.type || '';
-      studyStatus.value = note.properties?.status || ''; mastery.value = note.properties?.mastery ?? ''; reviewDate.value = note.properties?.reviewDate || '';
+      title.value = note.title; body.value = note.body || '';
       updatedAt = note.updatedAt; saved = snapshot(); loaded = true;
       resetHistory();
       hasAttachments = Boolean(note.attachments?.length);
@@ -291,7 +272,7 @@
       renderAttachmentPreviews(note.attachments ?? []);
       setStatus('所有更改已保存', 'saved'); renderPreview();
       if (enhancedUi) await refreshRelations();
-      title.disabled = tags.disabled = body.disabled = false; saveButton.disabled = false;
+      title.disabled = body.disabled = false; saveButton.disabled = false;
     } catch (error) {
       showError(`读取失败：${error.message}。请返回笔记列表后重新打开。`); setStatus('读取失败', 'error');
     }
