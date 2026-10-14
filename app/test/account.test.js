@@ -286,7 +286,10 @@ test('账号：登录成功后把会话写进 account.json（0600），GET /acco
 
     // 落盘的凭据文件：权限 0600
     const stats = await stat(accountFile);
-    assert.equal(stats.mode & 0o777, 0o600, 'account.json 必须是 0600');
+    // Windows 的 stat().mode 只反映只读位：0600 与 0666 都是 0o666（README「已知限制」）
+    if (process.platform !== 'win32') {
+          assert.equal(stats.mode & 0o777, 0o600, 'account.json 必须是 0600');
+    }
 
     const saved = await readAccountFile(accountFile);
     assert.equal(saved.serverUrl, auth.origin);
@@ -720,7 +723,10 @@ test('账号：注册成功 -> 201 直接进入已登录', async () => {
     const saved = await readAccountFile(accountFile);
     assert.equal(saved.token, TOKEN);
     assert.equal(saved.user.username, 'carol');
-    assert.equal((await stat(accountFile)).mode & 0o777, 0o600);
+    // Windows 的 stat().mode 只反映只读位：0600 与 0666 都是 0o666（README「已知限制」）
+    if (process.platform !== 'win32') {
+          assert.equal((await stat(accountFile)).mode & 0o777, 0o600);
+    }
 
     const status = await call('GET', '/account');
     assert.equal(status.body.connected, true);

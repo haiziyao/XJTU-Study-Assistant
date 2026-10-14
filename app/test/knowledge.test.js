@@ -18,8 +18,24 @@ const DIR = path.join(ROOT, 'knowledge', 'dean');
 const INDEX_FILE = path.join(DIR, 'index.json');
 
 const readIndex = () => JSON.parse(fs.readFileSync(INDEX_FILE, 'utf8'));
-const bodyOf = (file) => fs.readFileSync(file, 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').trim();
+// 剥 front matter 必须认 `\r?\n`：只写 `\n` 的话 CRLF 文件根本剥不掉，
+// 正文里混进 front matter，哈希必然不对（Windows 检出下整库会"对不上"）。
+const bodyOf = (file) =>
+  fs.readFileSync(file, 'utf8')
+    .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '')
+    .trim();
 const sha256 = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16);
+
+/**
+ * 索引里的哈希是否与正文对得上（容忍两种换行）。
+ *
+ * 索引的 `sha256` 是按**仓库里的内容**算的，而 `core.autocrlf=true` 的检出会把一部分
+ * 文件的 LF 变成 CRLF —— 同一份语料在两台机器上哈希不同。实测：原样匹配 65 条、
+ * 归一成 LF 后匹配 83 条，`65 + 83 = 148` 恰好互补（仓库里本来就有一部分是混合换行）。
+ * 取其一即通过；**真被改过内容的文件两种都对不上**，判据没有被放宽。
+ */
+const hashMatches = (body, expected) =>
+  sha256(body) === expected || sha256(body.replace(/\r\n/g, '\n')) === expected;
 
 test('教务处语料：index.json 存在且结构完整', () => {
   assert.ok(fs.existsSync(INDEX_FILE), 'knowledge/dean/index.json 应该存在（node scripts/crawl-dean.js）');
@@ -49,8 +65,11 @@ test('教务处语料：索引里的每一篇都对得上磁盘上的文件', ()
       }
       checked += 1;
       const body = bodyOf(file);
-      if (sha256(body) !== item.sha256) problems.push(`内容与索引不一致：${item.path}`);
-      if (body.length !== item.chars) problems.push(`字符数与索引不一致：${item.path}`);
+      if (!hashMatches(body, item.sha256)) problems.push(`内容与索引不一致：${item.path}`);
+      // 字符数同样要容忍两种换行：`chars` 是按**仓库里的内容**算的，
+      // 而 CRLF 检出会让正文每行多一个 `\r`。两种长度命中其一即可（与哈希同一口径）。
+      const charsOk = body.length === item.chars || body.replace(/\r\n/g, '\n').length === item.chars;
+      if (!charsOk) problems.push(`字符数与索引不一致：${item.path}`);
     }
   }
   assert.deepEqual(problems, [], problems.join('\n'));
@@ -61,7 +80,9 @@ test('教务处语料：每篇都有 YAML 头，且标了来源 URL', () => {
   const index = readIndex();
   const files = index.categories.flatMap((category) => category.items.filter((item) => item.path).map((item) => item.path));
   for (const relative of files.slice(0, 200)) {
-    const raw = fs.readFileSync(path.join(ROOT, relative), 'utf8');
+    // 先把 CRLF 归一成 LF 再断言：YAML 头是抓取器按 `\n` 写的，
+    // 直接拿 CRLF 原文去匹配 `/^---\n/` 会整库报"缺少 front matter"。
+    const raw = fs.readFileSync(path.join(ROOT, relative), 'utf8').replace(/\r\n/g, '\n');
     assert.match(raw, /^---\n/, `${relative} 缺少 front matter`);
     assert.match(raw, /\ntitle: /, `${relative} 缺少 title`);
     assert.match(raw, /\ncategorySlug: /, `${relative} 缺少 categorySlug`);

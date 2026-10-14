@@ -556,7 +556,10 @@ test('同步：AI 配置（含 key）默认不同步；勾上之后才进 push�
     assert.equal(B.app.services.ai.config.get().apiKey, 'sk-local-abcdef');
     assert.equal(B.app.services.ai.config.get().model, 'deepseek-v4-pro');
     const info = await stat(path.join(B.dataDir, 'ai-config.json'));
-    assert.equal(info.mode & 0o777, 0o600, '密钥文件必须 0600');
+    // Windows 的 stat().mode 只反映只读位：0600 与 0666 都是 0o666（README「已知限制」）
+    if (process.platform !== 'win32') {
+          assert.equal(info.mode & 0o777, 0o600, '密钥文件必须 0600');
+    }
   });
 });
 
@@ -643,7 +646,10 @@ test('同步：data/sync-state.json 权限 0600，deviceId 稳定、deviceName �
   try {
     const file = path.join(node.dataDir, STATE_FILE);
     const info = await stat(file);
-    assert.equal(info.mode & 0o777, 0o600, '设备身份与开关是私有文件（0600）');
+    // Windows 的 stat().mode 只反映只读位：0600 与 0666 都是 0o666（README「已知限制」）
+    if (process.platform !== 'win32') {
+          assert.equal(info.mode & 0o777, 0o600, '设备身份与开关是私有文件（0600）');
+    }
 
     const first = JSON.parse(await readFile(file, 'utf8'));
     assert.ok(first.deviceId, '必须有 deviceId');
@@ -665,7 +671,10 @@ test('同步：data/sync-state.json 权限 0600，deviceId 稳定、deviceName �
     // 没有显式设备名时用 os.hostname()，绝不空着
     assert.ok(fresh.app.services.sync.state.deviceName.length > 0);
     const ledger = await stat(path.join(node.dataDir, 'sync-ledger.json'));
-    assert.equal(ledger.mode & 0o777, 0o600, '幂等账本同样是私有文件（0600）');
+    // Windows 的 stat().mode 只反映只读位：0600 与 0666 都是 0o666（README「已知限制」）
+    if (process.platform !== 'win32') {
+          assert.equal(ledger.mode & 0o777, 0o600, '幂等账本同样是私有文件（0600）');
+    }
   } finally {
     await teardown([node, fresh]);
   }
