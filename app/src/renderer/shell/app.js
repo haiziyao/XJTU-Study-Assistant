@@ -17,6 +17,8 @@
 
   const U = window.PCUtil;
   const Modules = window.PCModules;
+  /** 左栏布局的纯逻辑（排序合并 / 拖动落点 / 点击状态机），见 shell/sidebar-layout.js。 */
+  const SidebarLayout = window.PCSidebarLayout;
 
   const EXAMPLES = [
     '添加日程 明天 15:00-16:00 项目周会 提前10分钟提醒',
@@ -171,6 +173,12 @@
   let dom = {};
 
   /**
+   * 当前生效的左栏布局：`{ main: [id…], more: [id…], bottom: [id…] }`。
+   * 由 `buildNav()` 从「存下来的偏好」+「注册表」合并出来；「更多」弹层与高亮都读它。
+   */
+  let navLayout = { main: [], more: [], bottom: [] };
+
+  /**
    * 窄屏断点，与 `shell.css` 里 `@media (max-width: 760px)` **必须一致**。
    *
    * 两边各写一份是无奈之举：CSS 的媒体查询条件 JavaScript 读不到，而"要不要给
@@ -241,15 +249,215 @@
     button.type = 'button';
     button.dataset.view = item.id;
     button.append(navIcon(item.icon), mk('span', 'nav-label', item.label));
-    button.addEventListener('click', () => selectView(item.id));
+    button.addEventListener('click', () => onNavClick(item.id));
     return button;
   }
 
+  /**
+   * 按用户布局重排左栏。
+   *
+   * 布局本身（哪些常驻、哪些收进「更多」、什么顺序）由 `PCSidebarLayout.resolve()`
+   * 从「存下来的偏好」+「当前注册表」合并出来 —— 这里只负责把结果摆进 DOM。
+   * 每次重排都整份重建：条目只有十来个，重建比做差量简单得多，也不会留下旧节点。
+   */
   function buildNav() {
-    for (const item of Modules.list()) {
-      const host = item.slot === 'bottom' ? dom.navBottom : dom.nav;
-      host.appendChild(navButton(item));
+    navLayout = SidebarLayout.resolve(parseStoredLayout(), Modules.list());
+    dom.nav.replaceChildren();
+    dom.navBottom.replaceChildren();
+    for (const id of navLayout.main) {
+      const view = Modules.get(id);
+      if (view) dom.nav.appendChild(navButton(view));
     }
+    for (const id of navLayout.bottom) {
+      const view = Modules.get(id);
+      if (view) dom.navBottom.appendChild(navButton(view));
+    }
+    // 「更多」只在真有收起项时出现：空的时候留一个点开什么都没有的按钮只会让人困惑
+    if (dom.navMore) {
+      dom.navMore.hidden = navLayout.more.length === 0;
+      if (!dom.navMore.dataset.wired) {
+        dom.navMore.dataset.wired = '1';
+        dom.navMore.append(navIcon('⋯'), mk('span', 'nav-label', '更多'));
+        dom.navMore.addEventListener('click', (event) => {
+          event.stopPropagation();
+          toggleMorePop();
+        });
+      }
+    }
+    if (navLayout.more.length === 0) closeMorePop();
+    syncNavActive();
+  }
+
+  /** 读存下来的布局（坏数据/读不到都返回 null，`resolve()` 会退回默认）。 */
+  function parseStoredLayout() {
+    return SidebarLayout.parse(readStored(SidebarLayout.STORAGE_KEY));
+  }
+
+  /**
+   * 高亮的**唯一出口** —— 宽屏与窄屏、点导航与点收起按钮，全都走这里。
+   *
+   * 不变式只有一条：`高亮 ⇔ (那一项正在被看见)`。宽屏看的是"面板展开且 view 命中"，
+   * 窄屏看的是"当前这一屏是功能页且 view 命中"，两种判断都在
+   * `PCSidebarLayout.isNavActive()` 里，这里不再自己算一遍 ——
+   * 以前宽屏与窄屏各写一个循环，任何一处漏改就会出现"高亮在日历、面板还是待办"。
+   */
+  function syncNavActive() {
+    for (const button of document.querySelectorAll('.nav-item')) {
+      const id = button.dataset.view;
+      if (!id) continue; // 「更多」按钮没有 dataset.view，它的高亮单独算
+      button.classList.toggle(
+        'active',
+        SidebarLayout.isNavActive({
+          mobile: isMobile(),
+          screen: state.mobileScreen,
+          collapsed: state.panelCollapsed,
+          view: state.view,
+          id,
+        }),
+      );
+    }
+    // 「更多」自身：宽屏上面板展开、且当前视图正落在收起区里时点亮
+    if (dom.navMore) {
+      const active = !isMobile() && !state.panelCollapsed && navLayout.more.includes(state.view);
+      dom.navMore.classList.toggle('active', active);
+    }
+  }
+
+  /**
+   * 点左栏一项之后该发生什么。
+   *
+   * 判断全在 `PCSidebarLayout.resolveNavClick()`（纯函数、有单测），这里只执行结果：
+   *   · 点的是**已高亮**的那一项 → 收起面板，且**不重画**（内容留在 DOM 里，展开时立刻回来）；
+   *   · 其余情况 → 切到被点的项并展开。
+   *
+   * `state.view` 在收起时**不清空**，所以再展开还是同一个功能。
+   */
+  function onNavClick(id) {
+    closeMorePop();
+    if (isMobile()) {
+      // 窄屏没有"收起面板"这回事（面板就是当前整屏），语义保持"切到那一屏"
+      selectView(id);
+      return;
+    }
+    const next = SidebarLayout.resolveNavClick({
+      collapsed: state.panelCollapsed,
+      view: state.view,
+      clicked: id,
+    });
+    state.view = next.view;
+    if (id !== 'notes') document.body.classList.remove('notes-focus');
+    // 显隐一律走 setPanelCollapsed（它负责状态、body 类、按钮外观、高亮四件事）；
+    // `render: false` 表示"重画与否由下面按状态机的结论决定"，别让它替我们多画一次。
+    setPanelCollapsed(next.collapsed, { render: false });
+    // 收起时不重画：内容留在 DOM 里，再展开就是原样（要求 10 与"不要重复动画"）
+    if (next.render) renderPanel({ keepScroll: false });
+  }
+
+  /** 面板收起按钮的外观：文字方向与 title 一起改，别让它们各说各话。 */
+  function syncPanelToggle() {
+    if (!dom.panelToggle) return;
+    dom.panelToggle.textContent = state.panelCollapsed ? '⟨' : '⟩';
+    dom.panelToggle.title = state.panelCollapsed ? '展开右侧视图' : '收起右侧视图';
+  }
+
+  /**
+   * 面板显隐的唯一出口：状态 → body 类 → 按钮外观 → 导航高亮，一次改完。
+   *
+   * 为什么必须合成一个函数：这四件事本来就是同一个状态的不同投影，
+   * 分散在事件回调里写，漏一处就会出现"面板收起来了、图标还亮着"这种鬼状态。
+   */
+  function setPanelCollapsed(collapsed, options = {}) {
+    if (isMobile()) return; // 窄屏忽略这个状态，否则会出现"聊天列被隐藏、面板又被收起"的死局
+    const was = state.panelCollapsed;
+    state.panelCollapsed = Boolean(collapsed);
+    document.body.classList.toggle('panel-collapsed', state.panelCollapsed);
+    syncPanelToggle();
+    syncNavActive();
+    if (was && !state.panelCollapsed && options.render !== false) renderPanel();
+  }
+
+  /* ------------------------------------------------------------ 「更多」弹层 */
+
+  /**
+   * 展开/收起「更多」。
+   *
+   * 每次打开都**重建**列表（而不是建一次改显隐）：收起区的内容会随自定义随时变，
+   * 重建能让高亮天然跟着 `state.view` 走，不必再写一套增量更新。
+   */
+  function toggleMorePop() {
+    if (dom.navMorePop && !dom.navMorePop.hidden) {
+      closeMorePop();
+      return;
+    }
+    openMorePop();
+  }
+
+  function openMorePop() {
+    if (!dom.navMorePop || !navLayout.more.length) return;
+    dom.navMorePop.replaceChildren();
+    for (const id of navLayout.more) {
+      const view = Modules.get(id);
+      if (view) dom.navMorePop.appendChild(navButton(view));
+    }
+    dom.navMorePop.hidden = false;
+    // 弹层是后建的，高亮要按当前状态补一次
+    syncNavActive();
+    // 点弹层之外的任何地方都该关掉它。用 capture 阶段：外层的按钮可能在冒泡阶段
+    // stopPropagation，等到冒泡就来不及了（会表现为"点别处关不掉"）。
+    document.addEventListener('click', onDocumentClickCloseMore, true);
+    document.addEventListener('keydown', onMorePopKeydown);
+  }
+
+  function closeMorePop() {
+    if (!dom.navMorePop || dom.navMorePop.hidden) return;
+    dom.navMorePop.hidden = true;
+    dom.navMorePop.replaceChildren();
+    document.removeEventListener('click', onDocumentClickCloseMore, true);
+    document.removeEventListener('keydown', onMorePopKeydown);
+  }
+
+  /** 点弹层内部不关（按钮自己的 click 会先切换视图再关），点外面才关。 */
+  function onDocumentClickCloseMore(event) {
+    if (dom.navMorePop?.contains?.(event.target)) return;
+    if (dom.navMore === event.target || dom.navMore?.contains?.(event.target)) return;
+    closeMorePop();
+  }
+
+  function onMorePopKeydown(event) {
+    if (event.key === 'Escape') closeMorePop();
+  }
+
+  /**
+   * 把左栏布局开放给「设置 → 侧边栏」（`shell/sidebar-customize.js`）。
+   *
+   * 在**模块作用域**就登记，而不是等 `boot()`：设置页与它的存在与否不该依赖启动时机，
+   * 而且测试里 `boot()` 是刻意不跑的（`readyState === 'loading'`），
+   * 放在 boot 里就等于这个契约永远没人测。
+   * 这里只碰 `navLayout` 与存储；`buildNav()` 要到用户真的改布局时才会用到 `dom`，
+   * 那时候早就启动完了。
+   */
+  function registerSidebarService() {
+    Modules.service('sidebar', {
+      /** 当前生效的布局快照（只读副本，调用方改它不影响外壳）。 */
+      getLayout: () => ({ main: [...navLayout.main], more: [...navLayout.more], bottom: [...navLayout.bottom] }),
+      /** 可拖动的那部分（不含 bottom），自定义面板用它渲染行。 */
+      getMovable: () => [...navLayout.main, ...navLayout.more],
+      /** 存一份新布局并立刻重排左栏。 */
+      apply: (next) => {
+        writeStored(SidebarLayout.STORAGE_KEY, SidebarLayout.stringify(next));
+        buildNav();
+      },
+      /** 清掉偏好，回到默认布局。 */
+      reset: () => {
+        writeStored(SidebarLayout.STORAGE_KEY, '');
+        buildNav();
+      },
+      /** 视图的 label/icon：自定义面板要按 id 画出与左栏一致的一行。 */
+      describe: (id) => {
+        const view = Modules.get(id);
+        return view ? { id, label: view.label, icon: view.icon } : null;
+      },
+    });
   }
 
   /**
@@ -327,19 +535,23 @@
     }
   }
 
+  /**
+   * 面板上的 `⟩/⟨` 按钮：展开/收起。
+   *
+   * 收起时**不重画** —— 视图内容留在 DOM 里被 CSS 隐藏，再展开就是原样，
+   * 既没有多余的加载闪烁，也保证了"和收回之前打开的是同一个功能"。
+   * 只有从收起状态**展开**时才重画一次（`setPanelCollapsed` 内部判断 `was`）。
+   */
   function togglePanel() {
     // 窄屏没有"收起面板"这回事：面板就是当前那一整屏，收起等于把屏幕变空。
     // 按钮本身已经在 CSS 里隐藏，这里再挡一次 —— 免得将来有人用脚本调它。
     if (isMobile()) return;
-    state.panelCollapsed = !state.panelCollapsed;
-    document.body.classList.toggle('panel-collapsed', state.panelCollapsed);
-    dom.panelToggle.textContent = state.panelCollapsed ? '⟨' : '⟩';
-    dom.panelToggle.title = state.panelCollapsed ? '展开右侧视图' : '收起右侧视图';
-    if (state.panelCollapsed && state.view === 'calendar' && state.calendar.mode === 'week') {
+    const collapsing = !state.panelCollapsed;
+    if (collapsing && state.view === 'calendar' && state.calendar.mode === 'week') {
       state.calendar.mode = 'month';
       toast('周视图需要展开右侧视图，已切回月视图');
     }
-    renderPanel();
+    setPanelCollapsed(collapsing);
   }
 
   /* ------------------------------------------------------ 窄屏（手机）布局 */
@@ -427,13 +639,17 @@
    * 为什么把三件事写在一个函数里：状态（state.view）、导航高亮、面板内容，
    * 加上窄屏的"切到哪一屏"与 hash 持久化 —— 它们本来就该同步变化。
    * 分散在事件监听里写，只要漏一处就会出现"高亮在日历、面板还是待办"这种鬼状态。
+   *
+   * ⚠️ 与 `onNavClick()` 的分工：那个是"用户点了左栏图标"（可能是**收起**面板），
+   * 这个是"程序要求切到某个视图"（`PC.openView`、hash、返回按钮），语义是**一定展开**。
+   * 高亮不在这里自己算，统一交给 `syncNavActive()`。
    */
   function selectView(view) {
     state.view = view;
     if (view !== 'notes') document.body.classList.remove('notes-focus');
-    for (const button of document.querySelectorAll('.nav-item')) {
-      button.classList.toggle('active', button.dataset.view === view);
-    }
+    // 主动切视图 = 一定展开面板（收起态下点「学业」里的跳转按钮，不该跳进一个看不见的面板）
+    setPanelCollapsed(false, { render: false });
+    syncNavActive();
     // 主动切视图要回到顶部：新视图是"新的一页"，沿用上一个视图的滚动位置会停在半空中。
     // 这与「重画保住位置」是两回事，所以走参数而不是复制一份 renderPanel。
     // ⚠️ 顺序要紧：窄屏要先决定"给不给功能页"，否则点「对话」会白白重画一次面板
@@ -482,12 +698,10 @@
     // 导航高亮跟着"当前这一屏"走，而不是只跟着 state.view：
     // 手机上刚打开时是"视图=日历（桌面端的默认值）、屏幕=聊天"，此时**不该**有任何模块被高亮
     // （一旦点亮「日历」，用户会以为已经在看日历了）。窄屏显示功能页时才按 state.view 点亮。
-    if (mobile) {
-      const active = chat ? null : state.view;
-      for (const button of document.querySelectorAll('.nav-item')) {
-        button.classList.toggle('active', button.dataset.view === active);
-      }
-    }
+    //
+    // 判断本身在 `PCSidebarLayout.isNavActive()`（纯函数、有单测），宽屏与窄屏共用一处 ——
+    // 以前这里与 selectView 各写一个循环，两边规则一旦漂移就会出现"高亮与面板对不上"。
+    syncNavActive();
     // 窄屏下 hash 是**状态的一部分**（刷新要靠它回到同一屏），所以首屏就补上，
     // 而不是等用户点一次导航才开始记。宽屏不写：地址栏干净，也不给桌面端引入新行为。
     if (mobile && !readHashView()) syncHashForScreen(state.mobileScreen);
@@ -536,8 +750,12 @@
     // state.view / state.mobileScreen **不动**：宽屏有三栏本来就同时显示两者，
     // 拖宽再拖窄时用户应该回到原来那一屏，而不是被重置。
     window.addEventListener('resize', () => {
+      // 跨断点时把「更多」弹层收掉：它是按宽屏的左栏位置摆的，窄屏下留在屏幕上会飘在别处。
+      closeMorePop();
       if (isMobile()) ensureBackButton();
       else applyLayoutMode();
+      // 布局模式变了，高亮规则也跟着变（窄屏看"哪一屏"、宽屏看"面板开不开"），必须重算一次
+      syncNavActive();
     });
   }
 
@@ -603,6 +821,35 @@
     clearQueue,
     clearChatLog,
     queueItems: () => state.queue.map((item) => ({ id: item.id, seq: item.seq, text: item.text })),
+  };
+
+  /**
+   * 左栏的测试缝（与 `__PC_CHAT_TEST__` 同一口径：暴露**已经存在的函数与状态本身**，
+   * 不为测试另写一套逻辑）。
+   *
+   * 为什么需要它：需求里"点已高亮的项要收起、再展开要回到同一个功能"这条不变式
+   * 只有一半在纯逻辑里（`PCSidebarLayout.resolveNavClick`），另一半是外壳把它落到
+   * `state.panelCollapsed` / `body.panel-collapsed` / `.nav-item.active` 这三处动作 ——
+   * 不挖缝就只能靠肉眼看浏览器，回归时第一个坏掉的就是它。
+   */
+  window.__PC_NAV_TEST__ = {
+    state,
+    /** 测试里没有 boot()：dom 引用由测试自己挂上（真实运行时是 boot() 填的）。 */
+    attachDom(refs) {
+      dom = { ...dom, ...refs };
+      return dom;
+    },
+    buildNav,
+    syncNavActive,
+    onNavClick,
+    selectView,
+    setPanelCollapsed,
+    togglePanel,
+    toggleMorePop,
+    openMorePop,
+    closeMorePop,
+    /** 当前生效的布局（只读快照）。 */
+    layout: () => ({ main: [...navLayout.main], more: [...navLayout.more], bottom: [...navLayout.bottom] }),
   };
 
   function push(node) {
@@ -3113,6 +3360,8 @@
     dom = {
       nav: document.getElementById('nav'),
       navBottom: document.getElementById('nav-bottom'),
+      navMore: document.getElementById('nav-more'),
+      navMorePop: document.getElementById('nav-more-pop'),
       panelTitle: document.getElementById('panel-title'),
       panelBody: document.getElementById('panel-body'),
       panelHead: document.querySelector('.panel-head'),
@@ -3163,6 +3412,9 @@
       sendMessage: (text) => send(text),
       showWelcome: () => welcome(),
     });
+
+    // 左栏布局给「设置 → 侧边栏」用（shell/sidebar-customize.js）。
+    // 见文件末尾的 registerSidebarService()：它在**加载时**就登记，不依赖这里。
 
     buildNav();
     wireChat();
@@ -3266,6 +3518,11 @@
       }
     });
   }
+
+  // ★ 在**加载时**就登记，而不是等 boot()：
+  //   设置页「侧边栏」那块可能先于一次完整启动被渲染，而且测试里 boot() 是刻意不跑的
+  //   （`document.readyState` 一直是 'loading'）—— 放进 boot 就等于这份契约永远没人测。
+  registerSidebarService();
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
   else start();
