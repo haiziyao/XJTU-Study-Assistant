@@ -17,9 +17,16 @@ import { normalizeCourse } from '../src/modules/lms/api.js';
 import { ACTIVITY_TYPE_LABEL, activityTypesOf } from '../src/modules/lms/config.js';
 import { buildSyncPlan, refineActivityTitle } from '../src/modules/lms/sync.js';
 import { parseLmsTime } from '../src/modules/lms/time.js';
-import { startMockLms } from './helpers/lms-mock.js';
+import { ACTIVITY_DAY_OFFSETS, HOMEWORK_DEADLINE_DATE, activityDate, activityIso, startMockLms } from './helpers/lms-mock.js';
 
 const TODAY = '2026-10-11';
+
+/**
+ * mock 的活动日期是**相对今天**生成的（见 helpers/lms-mock.js 的 ACTIVITY_DAY_OFFSETS），
+ * 这里据此推出期望值，而不是抄一份字面日期 —— 抄一次就等于把用例绑死在某个日历日上：
+ * 「自动同步设置与执行」按真实时钟过滤过期条目，写死的未来日期迟早会变成过去时。
+ */
+const HOMEWORK_POSTPONE_DAYS = ACTIVITY_DAY_OFFSETS.homework + ACTIVITY_DAY_OFFSETS.homeworkPostpone;
 
 /** 起一套「后端 + 指向 mock 的思源学堂客户端」。 */
 async function startApp(mock, { dataDir, downloadDir } = {}) {
@@ -268,7 +275,7 @@ test('思源学堂：同步预览的映射规则', async () => {
     const first = byKey.get('lms:activity:5001');
     assert.equal(first.action, 'create');
     assert.equal(first.kind, 'todo', '没有时刻的作业落到待办集合');
-    assert.equal(first.payload.deadline, '2026-10-14');
+    assert.equal(first.payload.deadline, HOMEWORK_DEADLINE_DATE);
     assert.equal(first.payload.allDay, undefined, '待办没有 allDay');
     assert.equal(first.payload.status, undefined, '待办用 completed，没有 status');
     assert.equal(first.payload.category, undefined, '待办没有分类');
@@ -283,7 +290,7 @@ test('思源学堂：同步预览的映射规则', async () => {
     const live = byKey.get('lms:activity:5004');
     assert.equal(live.action, 'create');
     assert.equal(live.kind, 'schedule');
-    assert.equal(live.payload.date, '2026-10-13');
+    assert.equal(live.payload.date, activityDate(ACTIVITY_DAY_OFFSETS.lectureLive));
     assert.equal(live.payload.startTime, '10:00');
     assert.equal(live.payload.endTime, '11:40');
     assert.equal(live.payload.allDay, undefined, '日程没有 allDay');
@@ -321,7 +328,7 @@ test('思源学堂：同步预览的映射规则', async () => {
     assert.equal(byKey.has('lms:activity:5007'), false, '回放默认被跳过');
     const lesson = wide.body.items.find((item) => item.key === 'lms:activity:5007');
     assert.equal(lesson.kind, 'schedule', '回放有时刻 -> 时段日程');
-    assert.equal(lesson.payload.date, '2026-10-06');
+    assert.equal(lesson.payload.date, activityDate(ACTIVITY_DAY_OFFSETS.lesson));
     assert.equal(lesson.payload.startTime, '10:00');
     assert.equal(lesson.payload.category, 'class');
 
@@ -364,7 +371,7 @@ test('思源学堂：应用同步是幂等的，可重复执行', async () => {
     const createdTodos = todos.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:'));
     assert.equal(createdTodos.length, 2);
     assert.deepEqual(createdTodos.map((item) => item.externalId).sort(), ['lms:activity:5001', 'lms:activity:5006']);
-    assert.equal(createdTodos.find((item) => item.externalId === 'lms:activity:5001').deadline, '2026-10-14');
+    assert.equal(createdTodos.find((item) => item.externalId === 'lms:activity:5001').deadline, HOMEWORK_DEADLINE_DATE);
     assert.ok(createdTodos.every((item) => item.source === 'import' && item.completed === false));
 
     // 再同步一次：全部跳过，不产生重复记录
@@ -396,7 +403,7 @@ test('思源学堂：作业改期 -> 更新；作业消失 -> stale', async () =
     mock.mutate((dataset) => {
       const activity = dataset.activities[1001].find((item) => item.id === 5001);
       activity.title = '第一次作业：链表（改）';
-      activity.end_time = '2026-10-16T23:59:00+08:00';
+      activity.end_time = activityIso(HOMEWORK_POSTPONE_DAYS, '23:59:00');
     });
 
     const preview = await call('POST', '/lms/sync/preview', { today: TODAY, refresh: true });
@@ -410,7 +417,7 @@ test('思源学堂：作业改期 -> 更新；作业消失 -> stale', async () =
     assert.equal(applied.body.updated, 1);
     const todos = await call('GET', '/todos');
     const updated = todos.body.items.find((item) => item.externalId === 'lms:activity:5001');
-    assert.equal(updated.deadline, '2026-10-16');
+    assert.equal(updated.deadline, activityDate(HOMEWORK_POSTPONE_DAYS));
     assert.equal(updated.title, '[数据结构] 第一次作业：链表（改）');
 
     // 学校删掉了直播活动 -> 已同步的记录变成 stale，可选清理
