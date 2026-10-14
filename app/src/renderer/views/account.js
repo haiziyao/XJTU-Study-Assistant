@@ -21,6 +21,10 @@
   const SECTION_ID = 'account.login';
   /** 与后端 modules/account/service.js 的 DEFAULT_SERVER_URL 保持一致。 */
   const DEFAULT_SERVER_URL = 'http://localhost:8866';
+  /** placeholder 里的示例：公网服务端长什么样（与后端错误文案里的示例同一个地址）。 */
+  const EXAMPLE_SERVER_URL = 'https://study.xjtuwhy.com';
+  /** 输入框下方那句提示（后端会替用户补协议，这里告诉他该写哪种）。 */
+  const SERVER_HINT = '国内服务器请填 https://；本机开发填 http://localhost:8866';
 
   /** 当前已渲染的输入框引用（paint 重建时被覆盖）。 */
   const formInputs = { serverUrl: null, username: null, password: null, inviteCode: null };
@@ -98,12 +102,21 @@
   /**
    * 错误提示。
    *
-   * 后端已经把上游错误码翻成了中文人话（`error.message`），这里**原样显示**即可；
-   * 认不出来的错误至少给出 HTTP 状态码，方便对日志。
+   * 后端已经把错误码翻成了中文人话（`error.message`），这里**原样显示**即可。
+   * 标题按错误码换个说法：`BAD_SERVER_URL`（地址格式不对）与 `NOT_POTATO_SERVER`
+   * （地址能打开但不是智学服务端）最容易被误读成"网络坏了"，直接写在标题上，
+   * 用户一眼就知道该改哪里。认不出来的仍用通用标题。
    */
   function errorBox(error) {
+    const titles = {
+      BAD_SERVER_URL: '服务器地址不对',
+      NOT_POTATO_SERVER: '这个地址不是「AI 智学」的服务端',
+      REDIRECT_REFUSED: '服务器要求跳到别处，已停下',
+    };
+    // 外壳的 PC.api 抛的是普通 Error：错误码在 `payload.error.code` 里（也可能被测试桩直接放在 code 上）
+    const code = error?.code ?? error?.payload?.error?.code ?? null;
     const box = mk('div', 'acct-alert');
-    box.appendChild(mk('div', 'acct-alert-title', '没成功'));
+    box.appendChild(mk('div', 'acct-alert-title', titles[code] ?? '没成功'));
     box.appendChild(mk('div', 'acct-alert-msg', error?.message ?? '未知错误'));
     return box;
   }
@@ -177,7 +190,8 @@
   function loginForm() {
     const box = mk('div', 'acct-form');
     const serverUrl = boundInput('serverUrl', 'acct-input', {
-      placeholder: DEFAULT_SERVER_URL,
+      // placeholder 用公网示例：绝大多数用户填的是"别人给的服务器"，本机开发是少数
+      placeholder: EXAMPLE_SERVER_URL,
       autocomplete: 'off',
       // 默认填上次/默认地址，但**用户改过就以用户为准**（重画不能把它抹掉）
       value: ui.form.serverUrl || ui.status?.serverUrl || DEFAULT_SERVER_URL,
@@ -186,7 +200,7 @@
     const password = boundInput('password', 'acct-input', { type: 'password', placeholder: '密码', autocomplete: 'current-password', value: ui.form.password });
 
     box.append(
-      field('服务器地址', serverUrl, '填服务端版跑在哪台机器上。本机自己跑就是 http://localhost:8866；用别人的服务器就填对方给的地址。'),
+      field('服务器地址', serverUrl, SERVER_HINT),
       field('用户名', username),
       field('密码', password),
     );
@@ -205,7 +219,10 @@
       captureForm();
       void run('login', async () => {
         const result = await PC.api('/account/login', { method: 'POST', body: payload });
-        PC.toast(`已登录：${result?.user?.username ?? payload.username}`);
+        // 把**后端归一化（含跳转）之后的地址**报给用户：他填 `http://…` 被 301 到 https 时，
+        // 下次照着这句填就不用再挨一次跳转
+        const where = result?.serverUrl ? `（服务器 ${result.serverUrl}）` : '';
+        PC.toast(`已登录：${result?.user?.username ?? payload.username}${where}`);
       });
     }, 'login');
     actions.appendChild(login);
@@ -234,15 +251,20 @@
     return box;
   }
 
-  /** 「测试连接」的结果：服务器名 / 版本 / 该服务器上 LMS 不可用。 */
+  /** 「测试连接」的结果：地址 / 服务器名 / 版本 / 该服务器上 LMS 不可用。 */
   function probeResult(result) {
     const box = mk('div', `acct-probe ${result.reachable ? 'is-ok' : 'is-off'}`);
     if (!result.reachable) {
-      box.appendChild(mk('div', 'acct-probe-line', result.error || '连不上这个服务器（检查地址，或对方没在跑）'));
-      box.appendChild(mk('div', 'acct-probe-note', '地址要写到端口，例如 http://localhost:8866。'));
+      box.appendChild(mk('div', 'acct-probe-line', result.error || '连不上这个服务器：检查地址与端口，确认对方在跑'));
+      box.appendChild(mk('div', 'acct-probe-note', '写地址可以不写协议：域名按 https:// 试，本机（localhost / 127.0.0.1）按 http:// 试。'));
       return box;
     }
     box.appendChild(mk('div', 'acct-probe-line is-ok', `服务器可达：${result.serverName ?? '（没报名字）'}${result.version ? ` · 版本 ${result.version}` : ''}`));
+    if (result.serverUrl) {
+      // 显示**归一化之后的地址**（后端可能补了协议、也可能跟过 http→https 跳转）：
+      // 用户下次直接填这个，就不会再踩"301 把 POST 变 GET"那一脚
+      box.appendChild(mk('div', 'acct-probe-note is-ok', `地址已确认：${result.serverUrl}（下次就填这个）`));
+    }
     if (result.features && result.features.lms === false) {
       // 如实说明：服务端版出于凭据托管的考虑不提供学堂同步，这不是"还没做"
       box.appendChild(mk('div', 'acct-probe-line warn', '该服务器上思源学堂不可用（服务端版不代持学校账号密码，桌面端才有学堂同步）'));
@@ -258,13 +280,13 @@
     const box = mk('div', 'acct-register');
     box.appendChild(mk('div', 'acct-group-title', '用邀请码注册'));
 
-    const serverUrl = boundInput('serverUrl', 'acct-input', { value: ui.form.serverUrl || serverUrlValue || DEFAULT_SERVER_URL, autocomplete: 'off' });
+    const serverUrl = boundInput('serverUrl', 'acct-input', { placeholder: EXAMPLE_SERVER_URL, value: ui.form.serverUrl || serverUrlValue || DEFAULT_SERVER_URL, autocomplete: 'off' });
     const username = boundInput('username', 'acct-input', { placeholder: '用户名（3–32 位字母/数字/._-）', autocomplete: 'username', value: ui.form.username || usernameValue || '' });
     const password = boundInput('password', 'acct-input', { type: 'password', placeholder: '密码（至少 8 位）', autocomplete: 'new-password', value: ui.form.password });
     const inviteCode = boundInput('inviteCode', 'acct-input', { placeholder: '邀请码', autocomplete: 'off', value: ui.form.inviteCode });
 
     box.append(
-      field('服务器地址', serverUrl, '要和上面登录用的是同一台。'),
+      field('服务器地址', serverUrl, SERVER_HINT),
       field('用户名', username),
       field('密码', password, '服务端只存密码的哈希，不存明文。'),
       field('邀请码', inviteCode, '找服务器管理员要；一次性使用。'),
@@ -282,7 +304,8 @@
         captureForm();
         void run('register', async () => {
           const result = await PC.api('/account/register', { method: 'POST', body: payload });
-          PC.toast(`已注册并登录：${result?.user?.username ?? payload.username}`);
+          const where = result?.serverUrl ? `（服务器 ${result.serverUrl}）` : '';
+          PC.toast(`已注册并登录：${result?.user?.username ?? payload.username}${where}`);
         });
       }, 'register'),
     );

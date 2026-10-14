@@ -145,6 +145,9 @@
   color: var(--fg-3);
   overflow-wrap: anywhere;
 }
+/* "地址已确认：…（下次就填这个）"—— 它是给用户抄的，比普通提示更值得注意 */
+.acct-probe-note.is-ok { color: var(--fg-2); }
+.acct-probe-note.is-ok::before { content: '✓ '; color: var(--green); }
 
 /* ---------------------------------------------------------------- 错误 */
 
