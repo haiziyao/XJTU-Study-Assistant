@@ -716,6 +716,20 @@
   overflow-wrap: anywhere;
 }
 
+/* 直播详情里的「去看这次直播的回放」：按钮 + 时间说明一行排开 */
+.lms-related {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* 回放视频行里的「在线播放」是个 <a>，要按按钮的观感走（它开的是外链，不是 api） */
+.lms-replay-play {
+  text-decoration: none;
+  white-space: nowrap;
+}
+
 /* 窄屏：附件行改为竖排，按钮不掉到屏幕外 */
 @media (max-width: 760px) {
   .lms-file-row {

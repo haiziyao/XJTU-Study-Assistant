@@ -31,7 +31,7 @@ const PAGE = {
       { id: 5002, type: 'homework', title: '第二次作业：二叉树', userSubmitCount: 1 },
     ],
     material: [{ id: 5005, type: 'material', title: '课件：第 6 章' }],
-    replay: [{ id: 5007, type: 'lesson', title: '第 5 周回放', replayCode: 'rc-5007' }],
+    replay: [{ id: 5007, type: 'lesson', title: '第 5 周回放', replayCode: 'rc-5007', lessonStart: '2026-10-13T10:00:00+08:00' }],
     live: [{ id: 5004, type: 'lecture_live', title: '第 6 周直播课', startTime: '2026-10-13T10:00:00+08:00' }],
     other: [],
   },
@@ -46,7 +46,7 @@ const DETAIL = {
       id: 5001,
       type: 'homework',
       title: '第一次作业：链表',
-      description: '实现单链表并提交源码',
+      description: '<p>实现单链表并提交源码</p><ul><li>用 C 语言</li><li>不要用库函数</li></ul>',
       userSubmitCount: 0,
       averageScore: 82,
       uploads: [
@@ -65,7 +65,7 @@ const DETAIL = {
     },
   },
   5007: { item: { id: 5007, type: 'lesson', title: '第 5 周回放', replayCode: 'rc-5007', uploads: [] } },
-  5004: { item: { id: 5004, type: 'lecture_live', title: '第 6 周直播课', startTime: '2026-10-13T10:00:00+08:00', uploads: [] } },
+  5004: { item: { id: 5004, type: 'lecture_live', title: '第 6 周直播课', startTime: '2026-10-13T10:00:00+08:00', lessonStart: '2026-10-13T10:00:00+08:00', uploads: [] } },
 };
 
 const SUBMISSION = {
@@ -120,7 +120,7 @@ async function wire(app) {
       if (route.startsWith('/lms/activities')) {
         const id = Number((/\/lms\/activities\/(\d+)/.exec(route) ?? [])[1]);
         if (route.endsWith('/submission')) return SUBMISSION;
-        if (route.endsWith('/replays')) return { videos: [] };
+        if (route.endsWith('/replays')) return { videos: [{ label: 'hd', labelText: '高清', size: 1048576, sizeText: '1.0 MB', downloadUrl: 'https://rms/download/1', playUrl: 'https://rms/play/1' }] };
         return DETAIL[id] ?? { item: null };
       }
       if (route.startsWith('/lms/downloads')) return { items: [], dir: '/tmp' };
@@ -271,6 +271,103 @@ test('回放详情复用视频下载行（不是重造一套）', async () => {
     const text = ctx.texts(ctx.mount);
     assert.ok(text.includes('第 5 周回放'));
     assert.ok(text.includes('取视频'), '回放详情应有「取视频」按钮（复用 lmsReplayRow）');
+  } finally {
+    await ctx.app.close();
+  }
+});
+
+/* ------------------------- 说明是 HTML / 回放在线播放 / 直播跳回放 */
+
+test('★ 作业说明是 HTML，但页面上不该出现标签', async () => {
+  const ctx = await bootView();
+  try {
+    ctx.seam.openActivity(5001);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const text = ctx.texts(ctx.mount);
+    assert.ok(text.includes('实现单链表并提交源码'), '正文要显示出来');
+    assert.ok(!text.includes('<p>'), '★ 不该显示 <p> 标签（用户报的就是这个）');
+    assert.ok(!text.includes('</p>'), '★ 不该显示闭合标签');
+    assert.ok(!text.includes('<li>'), '不该显示 <li>');
+    // 列表要变成项目符号，而不是被压成一行
+    assert.ok(text.includes('• 用 C 语言'), '列表项应变成项目符号');
+    assert.ok(text.includes('• 不要用库函数'));
+  } finally {
+    await ctx.app.close();
+  }
+});
+
+test('HTML 说明转文本：段落/列表/表格/实体', async () => {
+  const ctx = await bootView();
+  try {
+    const toText = ctx.seam.htmlToText;
+    assert.equal(toText('<p>实现单链表并提交源码</p>'), '实现单链表并提交源码');
+    assert.equal(
+      toText('<p>要求：</p><ul><li>用 C 语言</li><li>不要用库函数</li></ul>'),
+      '要求：\n• 用 C 语言\n• 不要用库函数',
+    );
+    assert.equal(toText('第一行<br>第二行'), '第一行\n第二行');
+    assert.equal(toText('<p>见 <a href="x">附件</a>&nbsp;&amp;&nbsp;注意</p>'), '见 附件 & 注意');
+    assert.equal(toText('<table><tr><td>权重</td><td>30%</td></tr></table>'), '权重 30%');
+    // 已经是纯文本的别误伤（正文里可能有 "<"）
+    assert.equal(toText('纯文本没有标签 < 这里'), '纯文本没有标签 < 这里');
+    assert.equal(toText(''), '');
+    assert.equal(toText(null), '');
+  } finally {
+    await ctx.app.close();
+  }
+});
+
+test('回放的每个视频都给「在线播放」和「下载」两个出口', async () => {
+  const ctx = await bootView();
+  try {
+    ctx.seam.openActivity(5007);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await ctx.seam.loadReplays({ id: 5007, type: 'lesson', title: '第 5 周回放' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const play = ctx.byClass('lms-replay-play');
+    assert.equal(play.length, 1, '★ 应有「在线播放」');
+    assert.equal(play[0].href ?? play[0].getAttribute('href'), 'https://rms/play/1', '播放地址应来自 playUrl');
+    assert.equal(play[0].target, '_blank', '在线播放应开新标签页，不在页面里内嵌');
+    const labels = ctx.byClass('ghost-btn').map((node) => ctx.texts(node));
+    assert.ok(labels.includes('下载'), '下载按钮应同时存在');
+  } finally {
+    await ctx.app.close();
+  }
+});
+
+test('★ 直播详情能一键跳到对应回放', async () => {
+  const ctx = await bootView();
+  try {
+    ctx.seam.openActivity(5004);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(ctx.texts(ctx.mount).includes('关联回放'), '直播详情应有「关联回放」一块');
+
+    const jump = ctx.byClass('primary-btn').find((node) => ctx.texts(node).includes('回放'));
+    assert.ok(jump, '★ 应给出跳到回放的按钮');
+
+    jump.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(ctx.seam.ui.page, 'activity');
+    assert.equal(ctx.seam.ui.activityId, '5007', '★ 应当跳到 5007 那条回放');
+    assert.ok(ctx.texts(ctx.mount).includes('第 5 周回放'), '落地页应是那条回放');
+  } finally {
+    await ctx.app.close();
+  }
+});
+
+test('直播没有对应录像时不给按钮，只说明去处', async () => {
+  const ctx = await bootView();
+  try {
+    // 把回放清空 —— 匹配不到就不该出现"点了没反应"的按钮
+    ctx.seam.setCoursePage({ ...PAGE, groups: { ...PAGE.groups, replay: [] } });
+    ctx.seam.openActivity(5004);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const text = ctx.texts(ctx.mount);
+    assert.ok(text.includes('关联回放'));
+    assert.ok(text.includes('去「课程回放」板块找'), '应说明去哪找');
+    const jump = ctx.byClass('primary-btn').filter((node) => ctx.texts(node).includes('回放'));
+    assert.equal(jump.length, 0, '★ 匹配不到就不该给按钮');
   } finally {
     await ctx.app.close();
   }

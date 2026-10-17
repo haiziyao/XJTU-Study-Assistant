@@ -951,6 +951,23 @@ function lmsReplayRow(item) {
       const line = mk('div', 'lms-replay-video');
       line.appendChild(mk('span', 'lms-replay-name', `${video.labelText}${video.sizeText ? ` · ${video.sizeText}` : ''}`));
       if (video.isBestAudio) line.appendChild(mk('span', 'tag', '音质更好'));
+
+      /*
+       * 「在线播放」：直接开录播站给的播放地址（带签名，浏览器能直接放）。
+       *
+       * 为什么是 `target="_blank"` 而不是内嵌 `<video>`：播放地址在录播站那个域上，
+         * 内嵌要处理跨域与票据，而**打开新标签页**是浏览器原生就会做的事，
+         * 不经过我们这一层，也就不会把票据泄漏到页面里。
+       * 没有 `playUrl` 的录像不显示这个按钮（有些只给了下载直链）。
+       */
+      if (video.playUrl) {
+        const play = mk('a', 'ghost-btn lms-replay-play', '在线播放');
+        play.href = video.playUrl;
+        play.target = '_blank';
+        play.rel = 'noopener';
+        line.appendChild(play);
+      }
+
       const job = lmsJobFor(item.id, video);
       if (job) {
         line.appendChild(lmsDownloadStatus(job));
@@ -1271,6 +1288,74 @@ function lmsDetailSection(title, body, tag) {
 }
 
 /**
+ * 把学堂返回的 **HTML 说明**转成可读纯文本。
+ *
+ * 为什么必须转：作业/资料的 `description` 是 HTML（`<p>实现单链表并提交源码</p>`），
+ * 直接 `textContent` 写进去就会把标签原样显示出来（用户报的就是这个）。
+ *
+ * 为什么是"转文本"而不是"直接渲染 HTML"：
+ *   · 输出是**纯文本**、仍旧用 `textContent` 挂上去，**在结构上就没有注入风险** ——
+ *     不需要引入净化库、也不需要信任学校页面的 HTML；
+ *   · 代价是丢掉粗体/链接等样式。说明文字通常是几句要求和一两个链接，
+ *     可读性不受影响；真需要富文本再单独做白名单渲染。
+ *
+ * 保留结构：块级标签与新行标签转成换行，`<li>` 变成项目符号 ——
+ * 否则一条条要求会被压成一行，反而更难读。
+ */
+function lmsHtmlToText(raw) {
+  const html = String(raw ?? '');
+  if (!html.trim()) return '';
+  // 已经是纯文本（没有标签）就别动了，避免把正文里的 "<" 误伤
+  if (!/<[a-z!/][^>]*>/i.test(html)) return html.trim();
+  let text = html
+    // 列表项：转成项目符号，换行由后面的规则补
+    .replace(/<li[^>]*>/gi, '\n• ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|tr|h[1-6]|section|blockquote|pre)>/gi, '\n')
+    .replace(/<hr\s*\/?>/gi, '\n———\n')
+    // 表格单元格之间给个分隔，否则几列会连成一串
+    .replace(/<\/(td|th)>/gi, '  ')
+    // 其余标签一律剥掉（注释也一起）
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<[^>]+>/g, '');
+  // 常见实体解码（顺序要紧：&amp; 最后解，否则 &amp;lt; 会被解成 <）
+  text = text
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&amp;/gi, '&');
+  // 收敛空行与行首尾空白
+  return text
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    // 项目符号前面不留空行：`</p>` 与 `<li>` 各补了一个换行，会变成一条空行一条要点
+    .replace(/\n+(?=• )/g, '\n')
+    .trim();
+}
+
+/**
+ * 找出这次直播对应的回放活动。
+ *
+ * 学堂把"直播"和"它的录像"当成两条独立的活动，靠 `lesson_start` 关联
+ * （参考项目也是这么做的：`relatedLessonRequested(lesson_start_time)`）。
+ * 先按时间戳精确匹配；匹配不到再退回"同一天"，因为两边的秒级写法并不总是完全一致。
+ */
+function lmsFindRelatedReplay(detail) {
+  const start = detail?.lessonStart;
+  if (!start) return null;
+  const replays = lmsUi.coursePage?.groups?.replay ?? [];
+  const exact = replays.find((item) => item.lessonStart && String(item.lessonStart) === String(start));
+  if (exact) return exact;
+  const day = String(start).slice(0, 10);
+  return replays.find((item) => item.lessonStart && String(item.lessonStart).slice(0, 10) === day) ?? null;
+}
+
+/**
  * 详情页主体 —— **按类型给各自的内容**，这是"每个板块点进去都有自己的东西"的落点：
  *   作业：描述 + 分数概况 + 附件 + 我的提交
  *   资料：描述 + 附件（下载/预览）
@@ -1281,8 +1366,10 @@ function lmsActivityDetailBody(detail) {
   const wrap = mk('div', 'lms-detail');
   const type = detail.type;
 
-  if (detail.description) {
-    wrap.appendChild(lmsDetailSection('说明', mk('div', 'lms-description', detail.description)));
+  // 说明是 HTML（`<p>…</p>`），必须转成纯文本再挂 —— 否则标签会原样显示出来
+  const description = lmsHtmlToText(detail.description);
+  if (description) {
+    wrap.appendChild(lmsDetailSection('说明', mk('div', 'lms-description', description)));
   }
 
   if (type === 'homework') {
@@ -1322,9 +1409,23 @@ function lmsActivityDetailBody(detail) {
     }
     wrap.appendChild(lmsDetailSection('直播时间', rows));
     if (detail.uploads?.length) wrap.appendChild(lmsDetailSection('直播资料', lmsAttachmentList(detail.uploads)));
-    if (detail.lessonStart) {
+
+    // 关联回放：能定位到具体那场录像就给个按钮直接跳过去（参考项目也是这么做的）
+    const related = lmsFindRelatedReplay(detail);
+    if (related) {
+      const box = mk('div', 'lms-related');
+      const jump = mk('button', 'primary-btn', '去看这次直播的回放');
+      jump.type = 'button';
+      jump.addEventListener('click', () => lmsOpenActivity(related.id));
+      box.append(jump, mk('span', 'lms-hint', lmsFormatTime(related.startTime ?? related.lessonStart) ?? ''));
+      wrap.appendChild(lmsDetailSection('关联回放', box));
+    } else if (detail.lessonStart) {
+      // 有关联时间但当前缓存里没有那场录像 —— 说清"去哪找"，别给一个点了没反应的按钮
       wrap.appendChild(
-        lmsDetailSection('关联回放', mk('div', 'lms-hint', `这节课的回放起始于 ${lmsFormatTime(detail.lessonStart)}，可在「课程回放」板块找到`)),
+        lmsDetailSection(
+          '关联回放',
+          mk('div', 'lms-hint', `这节课的回放起始于 ${lmsFormatTime(detail.lessonStart)}，去「课程回放」板块找`),
+        ),
       );
     } else {
       wrap.appendChild(lmsDetailSection('关联回放', mk('div', 'lms-hint', '这次直播没有关联的录像')));
@@ -1482,6 +1583,12 @@ window.__PC_LMS_TEST__ = {
   backToCourse: lmsBackToCourse,
   selectTab: lmsSelectTab,
   loadCoursePage: lmsLoadCoursePage,
+  /** 取回放的视频列表（详情页里"在线播放/下载"那一行的数据来源）。 */
+  loadReplays: lmsLoadReplays,
+  /** 直播 → 对应回放活动的匹配（纯函数，便于直接断言）。 */
+  findRelatedReplay: lmsFindRelatedReplay,
+  /** 学堂 HTML 说明 → 纯文本（纯函数）。 */
+  htmlToText: lmsHtmlToText,
   /** 直接塞一份课程页数据（省掉一次网络往返）。 */
   setCoursePage: (page) => {
     lmsUi.coursePage = page;
