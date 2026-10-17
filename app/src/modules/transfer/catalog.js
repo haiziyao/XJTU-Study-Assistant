@@ -180,6 +180,12 @@ export const COLLECTIONS = {
         description: item.description,
         tags: item.tags,
         completed: item.completed,
+        // **分类可以传，父子关系不能传**：接收侧是走 `todos.create()` 落库的，**会生成新 id**，
+        // 而 `parentId` 指向的是发送端的 id —— 直接搬过去必然悬空，被服务层以 PARENT_NOT_FOUND 拒掉，
+        // 表现就是"子任务传过去以后没了"（比丢分类更糟，所以宁可显式不传）。
+        // 要支持带层级传输，得在接收侧做"发送端 id → 新 id"的重映射（同一 bundle 内父先子后），
+        // 那是另一件事，见 README 的说明。
+        category: item.category ?? '',
         completedAt: item.completedAt ?? null,
         source: 'import',
       };

@@ -610,6 +610,12 @@ export class GoalService {
     if (todoService && typeof todoService.list === 'function') {
       for (const todo of safeCall(() => todoService.list({ completed: false })) ?? []) {
         if (!todo?.deadline) continue; // 没有 deadline 的待办无法进入"按时间排"的清单
+        /**
+         * **子待办不重复计数**：一个"期末复习"拆成 4 个子任务时，父任务的截止日已经代表这件事；
+         * 把父与子都塞进"接下来要面对什么"，用户会看到 5 条一模一样的截止日 —— 数量虚高、
+         * 真正要关心的事被稀释。子任务的进度通过父任务的 childDoneCount 体现（待办页里有 2/3）。
+         */
+        if (todo.parentId) continue;
         const date = todo.deadline;
         if (date > until) continue; // 逾期项 date < today 自动保留
         // 待办没有 course 字段（见接口文档 §2.3），因此课程筛选对它不生效：
