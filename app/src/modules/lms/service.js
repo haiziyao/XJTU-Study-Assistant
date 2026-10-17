@@ -10,6 +10,8 @@
  * - 所有面向 HTTP 的失败都翻译成带状态码的 HttpError，路由层不再判断。
  */
 
+import { constants } from 'node:fs';
+import { access, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
 import { HttpError } from '../../core/http/router.js';
@@ -101,6 +103,8 @@ export class LmsService {
       lastSyncAt: null,
       autoSync: false,
       autoSyncIntervalHours: 6,
+      /** 回放下载目录（null = 用 dataDir/downloads）。改它要同步给下载器。 */
+      downloadDir: null,
       lastAutoSyncAt: null,
     };
     this.autoSyncTimer = undefined;
@@ -164,6 +168,7 @@ export class LmsService {
     return {
       status: this.state.status,
       user: this.state.user,
+        downloadDir: this.state.downloadDir ?? null,
       mfa: this.state.mfa,
       captchaRequired: Boolean(this.sharedAuth?.status?.().captchaRequired),
       error: this.state.error,
@@ -202,6 +207,9 @@ export class LmsService {
     this.state.autoSync = Boolean(meta.autoSync);
     this.state.autoSyncIntervalHours = Number(meta.autoSyncIntervalHours) > 0 ? Number(meta.autoSyncIntervalHours) : 6;
     this.state.lastAutoSyncAt = meta.lastAutoSyncAt ?? null;
+    // 下载目录是用户设置过的，重启后要接着用（下载器持有自己那份路径，一并同步）
+    this.state.downloadDir = typeof meta.downloadDir === 'string' && meta.downloadDir ? meta.downloadDir : null;
+    if (this.state.downloadDir) this.downloads.downloadDir = this.state.downloadDir;
     // 用户名等展示信息跟着本模块的元信息走（0644 业务数据）。
     // 它**不再**随会话票据走 —— 票据归 auth 管，且票据文件里刻意不放 PII。
     // 存下来是为了重启后界面能立刻显示"谁登录着"，而不必先发一次网络请求。
@@ -609,7 +617,7 @@ export class LmsService {
   // ---------------------------------------------------------------- 设置 / 自动同步
 
   /** 修改同步设置（目前只有自动同步开关与间隔）。 */
-  async updateSettings({ autoSync, autoSyncIntervalHours } = {}) {
+  async updateSettings({ autoSync, autoSyncIntervalHours, downloadDir } = {}) {
     if (autoSync !== undefined) this.state.autoSync = Boolean(autoSync);
     if (autoSyncIntervalHours !== undefined) {
       const hours = Number(autoSyncIntervalHours);
@@ -617,6 +625,26 @@ export class LmsService {
         throw HttpError.badRequest('autoSyncIntervalHours 必须是 1~168 之间的小时数');
       }
       this.state.autoSyncIntervalHours = hours;
+    }
+    if (downloadDir !== undefined) {
+      // 校验在**这里**做，而且必须是绝对路径：相对路径会跟着进程工作目录跑，
+      // 用户以为下到 D:\课件、实际落在 app\ 下面，事后很难找。
+      const target = String(downloadDir ?? '').trim();
+      if (!target) throw HttpError.badRequest('下载目录不能为空', { field: 'downloadDir' });
+      if (!path.isAbsolute(target)) {
+        throw HttpError.badRequest('下载目录必须填绝对路径（例如 D:\\课件\\思源学堂）', { field: 'downloadDir' });
+      }
+      try {
+        // 不存在就建出来；建不出来（盘符不对、没权限）就在这一步明确报错，
+        // 而不是等下载跑到写入时才失败。
+        await mkdir(target, { recursive: true });
+        await access(target, constants.W_OK);
+      } catch (error) {
+        throw HttpError.badRequest(`这个目录不可用：${error.message}`, { field: 'downloadDir' });
+      }
+      this.state.downloadDir = target;
+      // 下载器持有自己的那份路径，改设置要同步过去（否则要重启才生效）
+      this.downloads.downloadDir = target;
     }
     await this.#persistMeta();
     if (this.state.autoSync) this.startAutoSync();
@@ -828,6 +856,7 @@ export class LmsService {
       lastAutoSyncAt: this.state.lastAutoSyncAt,
       /** 展示用的账号信息 —— 不是凭据，凭据在 auth-session.json（0600）。 */
       user: this.state.user,
+        downloadDir: this.state.downloadDir ?? null,
     });
   }
 

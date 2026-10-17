@@ -64,6 +64,9 @@ const lmsUi = {
   /** 自动同步小卡的忙碌态与错误。 */
   autoSyncBusy: false,
   autoSyncError: null,
+  /** 下载目录设置（`POST /lms/settings`）的忙碌/错误态；路径本身从 `/lms/downloads` 带回。 */
+  downloadDirBusy: false,
+  downloadDirError: null,
   /** 回放：已取到的视频列表（按活动 id 缓存）与展开/忙碌状态。 */
   replays: new Map(),
   replayOpen: null,
@@ -459,8 +462,51 @@ function lmsAutoSyncCard() {
   hoursInput.addEventListener('change', apply);
 
   if (lmsUi.autoSyncError) body.appendChild(mk('div', 'lms-error', `自动同步设置失败：${lmsUi.autoSyncError}`));
+
+  /*
+   * 「下载到」：回放下载落盘的位置。
+   *
+   * 为什么是**可编辑的路径输入框**而不是系统的"选择文件夹"对话框：
+   * 下载是**后端**做的（字节由服务进程写盘），浏览器的文件夹选择器选的是浏览器
+   * 自己的沙箱目录，后端根本拿不到那个路径 —— 那样做会是一个骗人的按钮。
+   * Electron 里本可以调原生对话框，但那要新开一条 IPC 通道，本次先不做。
+   */
+  const dirRow = mk('div', 'lms-dir-row');
+  const dirInput = mk('input', 'lms-dir-input');
+  dirInput.type = 'text';
+  dirInput.value = lmsUi.downloadDir ?? '';
+  dirInput.placeholder = '例如 D:\\课件\\思源学堂';
+  dirInput.title = '回放下载保存到哪个目录（绝对路径）';
+  const dirSave = mk('button', 'ghost-btn', '保存目录');
+  dirSave.type = 'button';
+  dirSave.disabled = Boolean(lmsUi.downloadDirBusy);
+  dirSave.addEventListener('click', () => void lmsSaveDownloadDir(dirInput.value));
+  dirRow.append(mk('span', 'lms-dir-label', '下载到'), dirInput, dirSave);
+  body.appendChild(dirRow);
+  body.appendChild(mk('div', 'lms-hint', '填绝对路径，目录不存在会自动创建。'));
+  if (lmsUi.downloadDirError) body.appendChild(mk('div', 'lms-error', `下载目录设置失败：${lmsUi.downloadDirError}`));
+
   card.appendChild(body);
   return card;
+}
+
+/** 保存下载目录（后端会校验绝对路径 + 可写，失败原因原样显示）。 */
+async function lmsSaveDownloadDir(value) {
+  if (lmsUi.downloadDirBusy) return;
+  lmsUi.downloadDirBusy = true;
+  lmsUi.downloadDirError = null;
+  lmsPaint();
+  try {
+    const status = await PC.api('/lms/settings', { method: 'POST', body: { downloadDir: String(value ?? '').trim() } });
+    lmsUi.status = status ?? lmsUi.status;
+    lmsUi.downloadDir = status?.downloadDir ?? lmsUi.downloadDir;
+    PC.toast?.(`回放将保存到 ${lmsUi.downloadDir}`);
+  } catch (error) {
+    lmsUi.downloadDirError = error.message ?? String(error);
+  } finally {
+    lmsUi.downloadDirBusy = false;
+    lmsPaint();
+  }
 }
 
 /**
@@ -880,6 +926,37 @@ function lmsCourseActivityRow(item) {
   return row;
 }
 
+/**
+ * 打开一个外部地址（回放在线播放）。
+ *
+ * 为什么是 `window.open` 而不是 `<a target="_blank">`：
+ *   · `<a>` 的跳转由壳自己处理 —— Electron 里会走主进程的 `setWindowOpenHandler`
+ *     → `shell.openExternal`，把地址交给操作系统，用户实测会弹确认框、确认后连浏览器都关掉；
+ *   · `window.open` 是仓库里**已经验证过**的那条路（联网检索结果的「打开」也用它）。
+ *
+ * 并且**先校验再打开**：只放行 http/https。录播站的某些路会给一个非 http 的地址
+ * （自定义协议、相对路径），交给系统去猜就会出现"弹一个看不懂的确认框"。
+ */
+function lmsOpenExternal(url) {
+  const raw = String(url ?? '').trim();
+  if (!raw) {
+    PC.toast?.('这个视频没有可播放的地址');
+    return;
+  }
+  let parsed;
+  try {
+    parsed = new URL(raw, location.href);
+  } catch {
+    PC.toast?.('播放地址不合法，打不开');
+    return;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    PC.toast?.(`播放地址不是网页地址（${parsed.protocol}），无法在浏览器里打开`);
+    return;
+  }
+  window.open(parsed.href, '_blank', 'noreferrer');
+}
+
 /** 体积文案（1024 进制），和后端 humanSize 保持一致的口径。 */
 function lmsSizeText(bytes) {
   const value = Number(bytes);
@@ -898,7 +975,13 @@ function lmsSizeText(bytes) {
 /** 找一个回放视频对应的下载任务（按 活动 + 标签 匹配）。 */
 function lmsJobFor(activityId, video) {
   return (lmsUi.downloads?.items ?? []).find(
-    (job) => String(job.activityId ?? '') === String(activityId ?? '') && job.labelText === (video.labelText || '视频'),
+    (job) =>
+      String(job.activityId ?? '') === String(activityId ?? '') &&
+      job.labelText === (video.labelText || '视频') &&
+      // ★ 「已取消」「失败」不该永久占住这一行：否则按钮会永远显示"已取消"，
+      //   用户再也点不到「下载」—— 想重下只能刷新页面。它们只在任务列表里留痕。
+      job.status !== 'cancelled' &&
+      job.status !== 'failed',
   );
 }
 
@@ -953,20 +1036,22 @@ function lmsReplayRow(item) {
       if (video.isBestAudio) line.appendChild(mk('span', 'tag', '音质更好'));
 
       /*
-       * 「在线播放」：优先用录播站给的播放地址；没有就退回下载直链 ——
-       * 录播站很多路只有 `download_url`（实测如此），而 mp4 直链浏览器本来就能直接播，
-       * 退回去比"什么都不给"有用得多。
+       * 「在线播放」：**用按钮 + window.open**，不用 `<a target="_blank">`。
        *
-       * 为什么是 `target="_blank"` 而不是内嵌 `<video>`：播放地址在录播站那个域上，
-       * 内嵌要处理跨域与票据；**打开新标签页**是浏览器原生就会做的事，
-       * 不经过我们这一层，票据也就不会落到页面里。
+       * 为什么改：`<a>` 的跳转由浏览器/Electron 自己处理 —— 在 Electron 里会走主进程的
+       * `setWindowOpenHandler` → `shell.openExternal`，把地址甩给操作系统；
+       * 用户实测会弹一个确认框、确认后连浏览器都被关掉。
+       * `window.open` 走的是仓库里已经验证过的那条路（联网检索的「打开」也是它），
+       * 而且**我们能先校验地址**：不是 http(s) 就明说，不要交给系统去猜。
+       *
+       * 地址优先用播放地址；没有就退回下载直链（录播站很多路只给 download_url，
+       * 而 mp4 直链浏览器本来就能直接播）。
        */
       const playHref = video.playUrl || video.downloadUrl;
       if (playHref) {
-        const play = mk('a', 'ghost-btn lms-replay-play', '在线播放');
-        play.href = playHref;
-        play.target = '_blank';
-        play.rel = 'noopener';
+        const play = mk('button', 'ghost-btn lms-replay-play', '在线播放');
+        play.type = 'button';
+        play.addEventListener('click', () => lmsOpenExternal(playHref));
         line.appendChild(play);
       }
 

@@ -745,3 +745,34 @@
     padding: 8px 10px;
   }
 }
+
+/* 「下载到」一行：标签 + 路径输入 + 保存按钮 */
+.lms-dir-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.lms-dir-label {
+  flex: none;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+
+.lms-dir-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--fg);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.lms-dir-input:focus {
+  outline: none;
+  border-color: var(--blue);
+}

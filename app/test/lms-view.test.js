@@ -94,6 +94,8 @@ async function wire(app) {
   for (const asset of assets) scripts.push(await (await fetch(`${origin}/app/${asset}`)).text());
 
   const dom = makeDom();
+  /** 被 window.open 打开过的地址（在线播放走这条路）。 */
+  const opened = [];
   const sandbox = {
     console, setTimeout, clearTimeout, URL, URLSearchParams, Date, Math, JSON, Promise, Error, TypeError,
     Number, String, Boolean, Array, Object, RegExp, Map, Set, Intl, isNaN, parseInt, parseFloat,
@@ -103,6 +105,8 @@ async function wire(app) {
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
     document: dom.document,
+    // window.open 替身：lmsOpenExternal 走的就是它（不是 <a>），这里记下开了什么
+    open: (url) => { opened.push(String(url)); return null; },
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
@@ -159,7 +163,7 @@ async function wire(app) {
   const all = (cls) => dom.document.querySelectorAll(`.${cls}`);
   const byClass = (cls) => all(cls);
 
-  return { app, dom, sandbox, calls, seam, mount, texts, byClass };
+  return { app, dom, sandbox, calls, seam, mount, texts, byClass, opened };
 }
 
 /* ================================================================== 用例 */
@@ -327,8 +331,11 @@ test('回放的每个视频都给「在线播放」和「下载」两个出口',
 
     const play = ctx.byClass('lms-replay-play');
     assert.equal(play.length, 1, '★ 应有「在线播放」');
-    assert.equal(play[0].href ?? play[0].getAttribute('href'), 'https://rms/play/1', '播放地址应来自 playUrl');
-    assert.equal(play[0].target, '_blank', '在线播放应开新标签页，不在页面里内嵌');
+    // 它是按钮而不是 <a>：点一下走 window.open（与联网检索的「打开」同一条路），
+    // 不是把地址交给浏览器/系统去处理 —— 后者在 Electron 里会弹确认框。
+    assert.equal(play[0].tagName, 'BUTTON', '在线播放应是按钮，不是 <a>');
+    play[0].click();
+    assert.deepEqual(ctx.opened, ['https://rms/play/1'], '★ 点击应打开 playUrl 指向的地址');
     const labels = ctx.byClass('ghost-btn').map((node) => ctx.texts(node));
     assert.ok(labels.includes('下载'), '下载按钮应同时存在');
   } finally {
