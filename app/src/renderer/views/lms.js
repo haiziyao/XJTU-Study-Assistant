@@ -64,6 +64,9 @@ const lmsUi = {
   /** 自动同步小卡的忙碌态与错误。 */
   autoSyncBusy: false,
   autoSyncError: null,
+  /** 正在内嵌播放的那条视频：`{ key, url, title }`；null = 没有播放器。 */
+  playing: null,
+  playingError: null,
   /** 下载目录设置（`POST /lms/settings`）的忙碌/错误态；路径本身从 `/lms/downloads` 带回。 */
   downloadDirBusy: false,
   downloadDirError: null,
@@ -481,13 +484,43 @@ function lmsAutoSyncCard() {
   dirSave.type = 'button';
   dirSave.disabled = Boolean(lmsUi.downloadDirBusy);
   dirSave.addEventListener('click', () => void lmsSaveDownloadDir(dirInput.value));
-  dirRow.append(mk('span', 'lms-dir-label', '下载到'), dirInput, dirSave);
+  dirRow.append(mk('span', 'lms-dir-label', '录播视频下载到'), dirInput);
+
+  /*
+   * 「浏览…」只在 Electron 里出现：它调主进程的原生对话框（`potatoCalendar.pickDirectory`）。
+   * 纯浏览器里没有这座桥，按钮藏起来比点了没反应好。
+   */
+  if (typeof window.potatoCalendar?.pickDirectory === 'function') {
+    const browse = mk('button', 'ghost-btn', '浏览…');
+    browse.type = 'button';
+    browse.disabled = Boolean(lmsUi.downloadDirBusy);
+    browse.title = '用系统的「选择文件夹」对话框挑一个目录';
+    browse.addEventListener('click', () => void lmsBrowseDownloadDir(dirInput.value));
+    dirRow.appendChild(browse);
+  }
+  dirRow.appendChild(dirSave);
   body.appendChild(dirRow);
-  body.appendChild(mk('div', 'lms-hint', '填绝对路径，目录不存在会自动创建。'));
+  body.appendChild(mk('div', 'lms-hint', '回放会保存到这个目录（不存在会自动创建）。'));
   if (lmsUi.downloadDirError) body.appendChild(mk('div', 'lms-error', `下载目录设置失败：${lmsUi.downloadDirError}`));
 
   card.appendChild(body);
   return card;
+}
+
+/** 打开系统原生「选择文件夹」对话框，选中后直接填进输入框并保存。 */
+async function lmsBrowseDownloadDir(current) {
+  if (lmsUi.downloadDirBusy) return;
+  const bridge = window.potatoCalendar?.pickDirectory;
+  if (typeof bridge !== 'function') return;
+  try {
+    const picked = await bridge({ title: '选择录播视频下载到的文件夹', defaultPath: String(current ?? '').trim() });
+    // 用户点了取消：什么都不改，别把他已经填好的路径抹掉
+    if (!picked || picked.canceled || !picked.path) return;
+    await lmsSaveDownloadDir(picked.path);
+  } catch (error) {
+    lmsUi.downloadDirError = error?.message ?? String(error);
+    lmsPaint();
+  }
 }
 
 /** 保存下载目录（后端会校验绝对路径 + 可写，失败原因原样显示）。 */
@@ -927,34 +960,61 @@ function lmsCourseActivityRow(item) {
 }
 
 /**
- * 打开一个外部地址（回放在线播放）。
+ * 「在线播放」：**在页面里内嵌 <video> 播放**，不再把地址交给系统浏览器。
  *
- * 为什么是 `window.open` 而不是 `<a target="_blank">`：
- *   · `<a>` 的跳转由壳自己处理 —— Electron 里会走主进程的 `setWindowOpenHandler`
- *     → `shell.openExternal`，把地址交给操作系统，用户实测会弹确认框、确认后连浏览器都关掉；
- *   · `window.open` 是仓库里**已经验证过**的那条路（联网检索结果的「打开」也用它）。
+ * 这条路走得不容易，记录一下为什么不能用外链：
+ *   应用（Electron）把 URL 交给操作系统时，Windows 会比对两边的**权限等级**；
+ *   本程序若以管理员身份运行、而 Edge 不是（或反过来），就会弹出
+ *   「Microsoft Edge 未响应，因为现有实例正在以提升的权限运行…是否用普通权限重启现有实例？」
+ *   —— 用户点「是」，Edge 就被重启，看起来就是"浏览器被关掉了"。
+ *   这不是我们能修的：只要还走 `shell.openExternal`，就一定会撞上权限比对。
  *
- * 并且**先校验再打开**：只放行 http/https。录播站的某些路会给一个非 http 的地址
- * （自定义协议、相对路径），交给系统去猜就会出现"弹一个看不懂的确认框"。
+ * 所以改成内嵌播放：地址由渲染层直接交给 `<video>`，不经过操作系统，也就没有权限问题。
+ * 录播站给的播放地址自带签名（token），`<video>` 跨域播放**不需要** CORS（只有读像素才需要）。
  */
-function lmsOpenExternal(url) {
-  const raw = String(url ?? '').trim();
-  if (!raw) {
+function lmsTogglePlay(item, video) {
+  const key = `${item.id}:${video.labelText ?? video.label ?? ''}`;
+  const url = video.playUrl || video.downloadUrl;
+  if (!url) {
     PC.toast?.('这个视频没有可播放的地址');
     return;
   }
-  let parsed;
-  try {
-    parsed = new URL(raw, location.href);
-  } catch {
-    PC.toast?.('播放地址不合法，打不开');
-    return;
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    PC.toast?.(`播放地址不是网页地址（${parsed.protocol}），无法在浏览器里打开`);
-    return;
-  }
-  window.open(parsed.href, '_blank', 'noreferrer');
+  const playing = lmsUi.playing;
+  // 再点一次同一条 = 收起播放器
+  lmsUi.playing = playing && playing.key === key ? null : { key, url, title: item.title ?? '' };
+  lmsPaint();
+}
+
+/** 页面顶部的内嵌播放器（有正在播的内容时才渲染）。 */
+function lmsPlayerBlock() {
+  const playing = lmsUi.playing;
+  if (!playing) return null;
+  const box = mk('div', 'lms-player');
+  const head = mk('div', 'lms-player-head');
+  head.append(mk('span', 'card-title', '在线播放'), mk('span', 'spacer'), mk('span', 'lms-hint', playing.title));
+
+  const close = mk('button', 'ghost-btn', '关闭播放器');
+  close.type = 'button';
+  close.addEventListener('click', () => {
+    lmsUi.playing = null;
+    lmsPaint();
+  });
+  head.appendChild(close);
+
+  const video = mk('video', 'lms-player-video');
+  video.controls = true;
+  video.autoplay = true;
+  video.setAttribute('controls', 'controls');
+  video.src = playing.url;
+  // 播不了要说清原因，而不是留一块黑屏
+  video.addEventListener('error', () => {
+    lmsUi.playingError = '这个地址播不了（可能是签名过期，或它不是可直接播放的视频流）';
+    lmsPaint();
+  });
+
+  box.append(head, video);
+  if (lmsUi.playingError) box.appendChild(mk('div', 'lms-error', lmsUi.playingError));
+  return box;
 }
 
 /** 体积文案（1024 进制），和后端 humanSize 保持一致的口径。 */
@@ -1051,7 +1111,7 @@ function lmsReplayRow(item) {
       if (playHref) {
         const play = mk('button', 'ghost-btn lms-replay-play', '在线播放');
         play.type = 'button';
-        play.addEventListener('click', () => lmsOpenExternal(playHref));
+        play.addEventListener('click', () => lmsTogglePlay(item, video));
         line.appendChild(play);
       }
 
@@ -1583,6 +1643,8 @@ function lmsActivityView() {
     wrap.appendChild(mk('div', 'loading', lmsUi.activityBusy ? '加载中…' : '没有数据，点「刷新」'));
     return wrap;
   }
+  const player = lmsPlayerBlock();
+  if (player) wrap.appendChild(player);
   wrap.appendChild(lmsActivityDetailBody(detail));
   return wrap;
 }

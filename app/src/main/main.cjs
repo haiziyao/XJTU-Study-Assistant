@@ -15,7 +15,7 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
-const { app, BrowserWindow, Notification, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Notification, dialog, ipcMain, shell } = require('electron');
 
 const CURRENT_DIR = __dirname;
 const RENDERER_ENTRY = path.join(CURRENT_DIR, '..', 'renderer', 'index.html');
@@ -188,6 +188,26 @@ function createWindow() {
     return { action: 'deny' };
   });
 }
+
+/**
+ * 让用户挑一个文件夹（系统原生对话框）。
+ *
+ * 为什么必须放在主进程：渲染层是浏览器环境，`<input type="file" webkitdirectory>`
+ * 拿到的是**浏览器自己的沙箱路径**，后端（另一个进程）根本访问不了那个目录；
+ * 而回放下载是**后端**写盘，所以路径只能由主进程用系统对话框问用户要。
+ *
+ * 返回 `{ canceled, path }`：`canceled` 为真时调用方不该改动现有设置。
+ */
+ipcMain.handle('potato:pickDirectory', async (_event, options = {}) => {
+  const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
+    title: typeof options?.title === 'string' && options.title ? options.title : '选择文件夹',
+    // createDirectory：让用户能在对话框里直接新建目录（Windows / macOS 都支持）
+    properties: ['openDirectory', 'createDirectory'],
+    defaultPath: typeof options?.defaultPath === 'string' && options.defaultPath ? options.defaultPath : undefined,
+  });
+  if (result.canceled || !result.filePaths?.length) return { canceled: true, path: null };
+  return { canceled: false, path: result.filePaths[0] };
+});
 
 ipcMain.handle('potato:info', async () => {
   if (!esm) await loadEsm();

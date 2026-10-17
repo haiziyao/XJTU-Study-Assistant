@@ -331,11 +331,16 @@ test('回放的每个视频都给「在线播放」和「下载」两个出口',
 
     const play = ctx.byClass('lms-replay-play');
     assert.equal(play.length, 1, '★ 应有「在线播放」');
-    // 它是按钮而不是 <a>：点一下走 window.open（与联网检索的「打开」同一条路），
-    // 不是把地址交给浏览器/系统去处理 —— 后者在 Electron 里会弹确认框。
+    // ★ 它必须在**页面里**播，不能把地址交给系统浏览器：
+    //   Electron 把 URL 交给操作系统时会比对权限等级，用户那边弹的
+    //   「Edge 未响应，因为现有实例正在以提升的权限运行」就是这么来的（点"是"会重启 Edge）。
     assert.equal(play[0].tagName, 'BUTTON', '在线播放应是按钮，不是 <a>');
     play[0].click();
-    assert.deepEqual(ctx.opened, ['https://rms/play/1'], '★ 点击应打开 playUrl 指向的地址');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(ctx.opened, [], '★ 不能把地址交给浏览器/系统');
+    const player = ctx.byClass('lms-player-video');
+    assert.equal(player.length, 1, '★ 应当在页面里出现播放器');
+    assert.equal(player[0].src, 'https://rms/play/1', '播放器应指向 playUrl');
     const labels = ctx.byClass('ghost-btn').map((node) => ctx.texts(node));
     assert.ok(labels.includes('下载'), '下载按钮应同时存在');
   } finally {

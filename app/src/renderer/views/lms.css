@@ -776,3 +776,27 @@
   outline: none;
   border-color: var(--blue);
 }
+
+/* 内嵌播放器：地址直接在页面里放，不走系统浏览器（避开权限提升的确认框） */
+.lms-player {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-base);
+}
+
+.lms-player-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lms-player-video {
+  width: 100%;
+  max-height: 52vh;
+  background: #000;
+  border-radius: var(--radius-sm);
+}
