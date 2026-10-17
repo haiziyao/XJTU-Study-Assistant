@@ -12,9 +12,22 @@
       桌面窗口是固定尺寸的 BrowserWindow，这些 meta 对宽屏三栏布局没有任何影响。
     -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!--
+      CSP 要点（改之前先读完这条注释）：
+
+      这份页面有两种加载方式，**`'self'` 在两边不是同一个意思**：
+        · Web UI：由后端在 http://127.0.0.1:PORT 提供 → `'self'` 就是那个源；
+        · Electron：主进程用 `loadFile()` 加载 → 页面是 `file://` → `'self'` 是 file://，
+          **任何 http 地址都不匹配**。
+      所以凡是"渲染层直接去取本机后端的某种资源"，都必须**显式**允许 http://127.0.0.1:*，
+      否则只有 Web UI 能跑、桌面端静默失败。已经踩过两次：
+        · connect-src / img-src —— 早先就有（接口与图片）；
+        · **media-src —— 回放的 `<video>`**。缺了它 <video> 会回落到 `default-src 'self'`，
+          在 Electron 里被拦掉：Web UI 能播、桌面端报"这个地址播不了"。
+    -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; style-src 'self'; img-src 'self' data: http://127.0.0.1:* http://localhost:*; object-src 'self' data: blob:; frame-src 'self' data: blob:"
+      content="default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; style-src 'self'; img-src 'self' data: http://127.0.0.1:* http://localhost:*; media-src 'self' http://127.0.0.1:* http://localhost:*; object-src 'self' data: blob:; frame-src 'self' data: blob:"
     />
     <title>AI 智学 · 测试窗口</title>
     <script src="kit/theme.js"></script>
