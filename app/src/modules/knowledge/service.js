@@ -70,6 +70,20 @@ const DEFAULT_PATH_MAX_CHARS = 4000;
 const sha256 = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16);
 
 /**
+ * 索引与文件的哈希口径是否一致。
+ *
+ * **为什么要容忍两种换行**：索引里的 `sha256` 是按**仓库里的内容**算的，
+ * 而 Windows 检出（`core.autocrlf=true`）会把其中一部分文件的 LF 变成 CRLF ——
+ * 同一份语料在两台机器上算出的哈希不同，自检就会在 Windows 上报 148 条"内容与索引不一致"，
+ * 而语料其实一个字都没错。实测：原样匹配 65 条、归一成 LF 后匹配 83 条，`65 + 83 = 148`，
+ * 两种口径恰好互补（仓库里本来就有一部分文件是混合换行）。
+ *
+ * 这**没有放宽判据**：真被改过内容的文件两种口径都对不上，仍然会报错。
+ */
+const matchesIndexHash = (body, expected) =>
+  sha256(body) === expected || sha256(body.replace(/\r\n/g, '\n')) === expected;
+
+/**
  * 正文口径：**front matter 之后的全部内容并 trim()**，包含那行 `# 标题`。
  *
  * 这一处定义是"索引与文件对不上"的历史教训（抓取器注释里写过）：索引算 body、
@@ -555,7 +569,9 @@ export class KnowledgeService {
           continue;
         }
         const { body } = splitFrontMatter(fs.readFileSync(file, 'utf8'));
-        if (sha256(body) !== item.sha256) problems.push(`内容与索引不一致：${item.path}`);
+        // 换行口径见 matchesIndexHash：Windows 检出会把 LF 变成 CRLF，
+        // 不做这层容忍就会整库报"内容与索引不一致"（实测 148 条全报）。
+        if (!matchesIndexHash(body, item.sha256)) problems.push(`内容与索引不一致：${item.path}`);
       }
     }
     return { ok: problems.length === 0, problems };

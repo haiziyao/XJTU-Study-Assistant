@@ -3,6 +3,8 @@
   'use strict';
 
   const CACHE_PREFIX = 'ai-study.notes.summary.v1.';
+  const GRAPH_STYLE_KEY = 'ai-study.notes.graph-style.v1';
+  const GRAPH_LEVEL_PALETTE = ['#4776e6', '#2fb779', '#9b66df', '#ed923c', '#e65b65', '#20a7bd', '#d95f9f', '#c99a18', '#6f7fe5', '#3d9b91', '#b86b42', '#7c71b8'];
   const CACHE_TTL = 7 * 86400000;
   const CACHE_LIMIT = 100;
   const IMPORT_ACCEPT = '.md,.markdown,.txt,.html,.htm,.pdf,.doc,.docx,.ppt,.pptx,.png,.jpg,.jpeg,.webp,.gif';
@@ -36,12 +38,16 @@
     autoConnecting: false,
     mode: 'notes',
     baseLayout: 'table',
-    graphScope: 'local',
+    graphScope: 'global',
+    graphDimension: '3d',
     graphData: null,
     graphFrame: null,
     graphPositions: new Map(),
     graphCamera: { yaw: -0.45, pitch: 0.18, zoom: 1 },
-    graphSettings: { edgeLength: 135, edgeWidth: 1.4, lineStyle: 'solid', repulsion: 8500, edgeColor: 'blue', motion: 1, nodeSize: 1 },
+    graphSettings: { edgeLength: 135, edgeWidth: 1.4, lineStyle: 'solid', repulsion: 8500, edgeColor: 'blue', motion: 1 },
+    graphNodeStyles: new Map(),
+    graphLevelColors: new Map(),
+    graphStylesLoaded: false,
     canvases: [],
     canvasId: null,
     canvasSelected: new Set(),
@@ -50,6 +56,23 @@
   const localStore = () => { try { return window.localStorage ?? null; } catch { return null; } };
   const today = () => window.PCUtil?.todayKey?.() ?? new Date().toISOString().slice(0, 10);
   const cacheKey = () => state.namespace ? `${CACHE_PREFIX}${encodeURIComponent(state.namespace)}` : null;
+
+  function loadGraphStyles() {
+    if (state.graphStylesLoaded) return;
+    state.graphStylesLoaded = true;
+    try {
+      const raw = localStore()?.getItem(GRAPH_STYLE_KEY); if (!raw) return;
+      const saved = JSON.parse(raw);
+      state.graphNodeStyles = new Map(Object.entries(saved.nodes || {}).map(([id, style]) => [id, { size: Number(style?.size) || 1, color: /^#[0-9a-f]{6}$/i.test(style?.color || '') ? style.color : '' }]));
+      state.graphLevelColors = new Map(Object.entries(saved.levels || {}).filter(([, color]) => /^#[0-9a-f]{6}$/i.test(color)).map(([level, color]) => [Number(level), color]));
+    } catch { /* 损坏的本地外观设置不应阻止图谱打开。 */ }
+  }
+
+  function saveGraphStyles() {
+    try { localStore()?.setItem(GRAPH_STYLE_KEY, JSON.stringify({ nodes: Object.fromEntries(state.graphNodeStyles), levels: Object.fromEntries(state.graphLevelColors) })); } catch { /* 隐私模式下允许只在本次页面生效。 */ }
+  }
+
+  const defaultGraphLevelColor = (level) => GRAPH_LEVEL_PALETTE[Math.abs(Number(level) || 0) % GRAPH_LEVEL_PALETTE.length];
 
   function readFile(file, mode) {
     if (mode === 'text' && typeof file?.text === 'function') return file.text();
@@ -507,7 +530,13 @@
       card.append(head, mk('div', 'notes-anchor', item.folder ? `${item.folder} · ${anchorText(item)}` : anchorText(item)));
       if (item.tags.length) { const tags = mk('div', 'notes-tags'); item.tags.slice(0, 4).forEach((tag) => tags.appendChild(mk('span', 'tag notes-tag', tag))); card.appendChild(tags); }
       card.appendChild(mk('div', 'notes-meta', `${SOURCE[item.source]} · ${item.mediaCount} 张图片 · ${formatTime(item.updatedAt)}`));
-      card.addEventListener('click', () => { state.selected = item.id; render(); });
+      const selectItem = (loadBody = true) => { state.selected = item.id; for (const node of list.querySelectorAll('.notes-card')) node.classList.toggle('active', node === card); host.querySelector('.notes-detail')?.remove(); renderDetail(host, item, loadBody); };
+      card.addEventListener('click', () => selectItem(true));
+      card.addEventListener('dblclick', () => open(item.id).catch((error) => state.ctx?.toast?.(`打开失败：${error.message}`)));
+      card.addEventListener('contextmenu', (event) => {
+        event.preventDefault(); event.stopPropagation?.(); selectItem(false); openNoteContextMenu(event, item, card);
+      });
+      card.title = '单击预览；双击编辑；右击管理笔记';
       list.appendChild(card);
     }
     host.appendChild(list);
@@ -550,32 +579,41 @@
     }
   }
 
-  function renderDetail(host, item) {
+  function renderDetail(host, item, loadBody = false) {
     const detail = mk('div', 'notes-detail');
     if (!item) { detail.appendChild(emptyBox('选择一条笔记查看挂载信息。正文由 AI 智学主程序打开。')); host.appendChild(detail); return; }
     const head = mk('div', 'notes-detail-head'); head.append(mk('div', 'notes-detail-title', item.title), pill(item)); detail.appendChild(head);
-    if (item.previewText) detail.appendChild(mk('p', 'notes-preview', item.previewText));
-    const facts = mk('div', 'notes-facts');
-    for (const [label, value] of [['目录', item.folder || '未分类'], ['课程', item.properties?.course || '—'], ['类型', item.properties?.type || '普通笔记'], ['来源', SOURCE[item.source]], ['关联', anchorText(item)], ['知识链接', `${item.links?.length || 0} 条`], ['图片', `${item.mediaCount} 张`], ['创建', formatTime(item.createdAt)], ['更新', formatTime(item.updatedAt)]]) {
-      const row = mk('div', 'kv'); row.append(mk('span', 'kv-key', label), mk('span', 'kv-val', value)); facts.appendChild(row);
+    const preview = mk('div', 'notes-detail-preview richtext'); detail.appendChild(preview);
+    const canRead = (state.caps.view && state.provider?.readNote) || (state.caps.markdown && state.provider?.renderMarkdown);
+    if (!loadBody) preview.appendChild(mk('p', 'notes-preview-placeholder', item.previewText || '单击左侧笔记卡片预览正文；双击直接进入编辑。'));
+    else if (!canRead || state.offline) preview.appendChild(mk('p', 'notes-preview-placeholder', item.previewText || '当前无法读取正文，可以双击笔记尝试打开。'));
+    else {
+      preview.appendChild(mk('div', 'loading', '正在读取笔记内容…'));
+      read(item.id).then((result) => { if (!preview.parentNode || state.selected !== item.id) return; preview.innerHTML = ''; if (result.format === 'markdown' && window.PCRichText?.render) window.PCRichText.render(preview, result.text || '（空白笔记）'); else preview.textContent = result.text || '（空白笔记）'; }).catch((error) => { if (!preview.parentNode) return; preview.innerHTML = ''; preview.appendChild(errorBox(`预览失败：${error.message}`)); });
     }
-    detail.appendChild(facts);
-    const actions = mk('div', 'notes-actions');
-    const openButton = mk('button', 'primary-btn', state.caps.edit ? '编辑笔记' : '在 AI 智学中打开'); openButton.type = 'button'; openButton.disabled = !state.provider?.openNote || state.offline;
-    openButton.addEventListener('click', () => open(item.id).catch((error) => state.ctx?.toast?.(`打开失败：${error.message}`))); actions.appendChild(openButton);
-    if ((state.caps.view && state.provider?.readNote) || (state.caps.markdown && state.provider?.renderMarkdown)) { const button = mk('button', 'ghost-btn', '查看笔记'); button.type = 'button'; button.disabled = state.offline; button.addEventListener('click', () => openNoteViewer(item, button)); actions.appendChild(button); }
-    if (state.caps.export && state.provider?.exportNote) { const button = mk('button', 'ghost-btn', '导出'); button.type = 'button'; button.addEventListener('click', () => state.provider.exportNote(item.id, 'markdown')); actions.appendChild(button); }
-    if (state.provider?.updateNote) {
-      const favorite = mk('button', 'ghost-btn', item.favorite ? '取消收藏' : '收藏'); favorite.type = 'button';
-      favorite.addEventListener('click', async () => { const next = await state.provider.updateNote(item.id, { favorite: !item.favorite, expectedUpdatedAt: item.updatedAt }); merge(next); render(); }); actions.appendChild(favorite);
-    }
-    if (state.provider?.deleteNote) {
-      const remove = mk('button', 'ghost-btn danger', '移到回收站'); remove.type = 'button';
-      remove.addEventListener('click', async () => { if (!confirm(`将“${item.title}”移到回收站？`)) return; await state.provider.deleteNote(item.id); state.items = state.items.filter((one) => one.id !== item.id); state.selected = state.items[0]?.id ?? null; saveCache(); render(); }); actions.appendChild(remove);
-    }
-    if (item.status === 'failed' && state.provider?.retryProcessing) { const button = mk('button', 'ghost-btn', '重新识别'); button.type = 'button'; button.addEventListener('click', async () => { await state.provider.retryProcessing(item.id); merge({ ...item, status: 'processing' }); render(); }); actions.appendChild(button); }
-    detail.append(actions, mk('div', 'notes-boundary', '正文按需读取；编辑器支持 Markdown、属性、双向链接、历史版本与自动保存。'));
     host.appendChild(detail);
+  }
+
+  function openNoteContextMenu(event, item, trigger) {
+    document.body.querySelector('.notes-card-menu')?.remove();
+    const menu = mk('div', 'notes-card-menu'); menu.setAttribute('role', 'menu');
+    const viewportWidth = Number(window.innerWidth) || 1200; const viewportHeight = Number(window.innerHeight) || 800;
+    menu.style.left = `${Math.max(8, Math.min(event.clientX || 8, viewportWidth - 308))}px`; menu.style.top = `${Math.max(8, Math.min(event.clientY || 8, viewportHeight - 628))}px`;
+    const close = () => menu.remove();
+    const action = (label, handler, className = '') => { const button = mk('button', className, label); button.type = 'button'; button.setAttribute('role', 'menuitem'); button.addEventListener('click', async () => { try { await handler(); } catch (error) { state.ctx?.toast?.(`${label}失败：${error.message}`); } }); menu.appendChild(button); return button; };
+    menu.append(mk('strong', 'notes-card-menu-title', item.title), mk('span', 'notes-card-menu-subtitle', `${item.folder || '未分类'} · ${STATUS[item.status] || item.status}`));
+    action('编辑笔记', () => { close(); return open(item.id); }).disabled = !state.provider?.openNote || state.offline;
+    action('查看或修改属性', () => { close(); openNoteProperties(item, trigger); });
+    if (state.provider?.updateNote) action(item.favorite ? '取消收藏' : '收藏', async () => { close(); const next = await state.provider.updateNote(item.id, { favorite: !item.favorite, expectedUpdatedAt: item.updatedAt }); merge(next); render(); }).disabled = state.offline;
+    if (state.caps.export && state.provider?.exportNote) action('导出 Markdown', () => { close(); return state.provider.exportNote(item.id, 'markdown'); });
+    if (item.status === 'failed' && state.provider?.retryProcessing) action('重新识别', async () => { close(); await state.provider.retryProcessing(item.id); merge({ ...item, status: 'processing' }); render(); });
+    const facts = mk('div', 'notes-card-menu-facts');
+    for (const [label, value] of [['目录', item.folder || '未分类'], ['课程', item.properties?.course || '—'], ['类型', item.properties?.type || '普通笔记'], ['来源', SOURCE[item.source]], ['关联', anchorText(item)], ['知识链接', `${item.links?.length || 0} 条`], ['图片', `${item.mediaCount} 张`], ['创建', formatTime(item.createdAt)], ['更新', formatTime(item.updatedAt)]]) { const row = mk('div'); row.append(mk('span', '', label), mk('strong', '', value)); facts.appendChild(row); }
+    menu.appendChild(facts);
+    if (state.provider?.deleteNote) action('移至回收站', async () => { if (!confirm(`将“${item.title}”移到回收站？`)) return; close(); await state.provider.deleteNote(item.id); state.items = state.items.filter((one) => one.id !== item.id); state.selected = state.items[0]?.id ?? null; saveCache(); render(); }, 'danger').disabled = state.offline;
+    document.body.appendChild(menu);
+    const outside = (pointerEvent) => { if (pointerEvent.target?.closest?.('.notes-card-menu')) return; close(); document.removeEventListener?.('pointerdown', outside); };
+    setTimeout(() => document.addEventListener?.('pointerdown', outside), 0); menu.querySelector('button')?.focus?.();
   }
 
   function modal(title, trigger) {
@@ -583,6 +621,79 @@
     const body = mk('div', 'modal-body'); const foot = mk('div', 'modal-foot');
     const close = () => { mask.remove(); trigger?.focus?.(); };
     head.append(mk('div', 'modal-title', title), iconBtn('关闭', '×', close)); box.append(head, body, foot); mask.appendChild(box); document.body.appendChild(mask); mask._close = close; return mask;
+  }
+
+  /**
+   * 笔记属性归列表工作区管理：右击卡片即可查看和修改，不必先进入正文编辑器。
+   * `properties` 可能含模板或未来版本写入的自定义键，保存时只覆盖界面负责的学习字段，
+   * 其余键原样保留，避免一次属性编辑悄悄丢数据。
+   */
+  function openNoteProperties(item, trigger) {
+    const mask = modal(`笔记属性 · ${item.title}`, trigger);
+    const body = mask.querySelector('.modal-body');
+    const foot = mask.querySelector('.modal-foot');
+    mask.querySelector('.notes-modal')?.classList.add('notes-properties-modal');
+    const editable = Boolean(state.provider?.updateNote) && !state.offline;
+
+    const title = mk('input', 'notes-properties-title'); title.value = item.title;
+    const tags = mk('input', 'notes-properties-tags'); tags.value = (item.tags || []).join('，'); tags.placeholder = '用逗号分隔';
+    const folder = mk('input', 'notes-properties-folder'); folder.value = item.folder || ''; folder.placeholder = '例如：大二上/高等数学';
+    const aliases = mk('input', 'notes-properties-aliases'); aliases.value = (item.aliases || []).join('，'); aliases.placeholder = '用逗号分隔';
+    const workflow = mk('select', 'notes-properties-workflow');
+    for (const [value, label] of Object.entries(STATUS)) workflow.appendChild(option(value, label, value === item.status));
+    const course = mk('input', 'notes-properties-course'); course.value = item.properties?.course || '';
+    const chapter = mk('input', 'notes-properties-chapter'); chapter.value = item.properties?.chapter || '';
+    const type = mk('select', 'notes-properties-type');
+    for (const value of ['', '课堂笔记', '错题', '实验报告', '论文阅读', '每日笔记']) type.appendChild(option(value, value || '普通笔记', value === (item.properties?.type || '')));
+    const studyStatus = mk('select', 'notes-properties-study-status');
+    for (const value of ['', '学习中', '待复习', '已掌握']) studyStatus.appendChild(option(value, value || '未设置', value === (item.properties?.status || '')));
+    const mastery = mk('input', 'notes-properties-mastery'); mastery.type = 'number'; mastery.min = '0'; mastery.max = '5'; mastery.placeholder = '0–5'; mastery.value = item.properties?.mastery ?? '';
+    const reviewDate = mk('input', 'notes-properties-review-date'); reviewDate.type = 'date'; reviewDate.value = item.properties?.reviewDate || '';
+    const favorite = mk('input', 'notes-properties-favorite'); favorite.type = 'checkbox'; favorite.checked = Boolean(item.favorite);
+    const favoriteLabel = mk('label', 'check-field notes-properties-favorite-field'); favoriteLabel.append(favorite, mk('span', '', '收藏这篇笔记'));
+    const error = mk('div', 'modal-error hidden');
+    const grid = mk('div', 'notes-properties-grid');
+    grid.append(
+      field('标题', title), field('笔记状态', workflow), field('标签', tags), field('目录', folder),
+      field('别名', aliases), field('课程', course), field('章节', chapter), field('类型', type),
+      field('学习进度', studyStatus), field('掌握程度', mastery), field('复习日期', reviewDate), favoriteLabel,
+    );
+    body.append(grid, mk('p', 'notes-properties-hint', editable ? '保存后列表、数据库视图和知识图谱会同步更新。' : '当前处于只读或离线状态，仅可查看属性。'), error);
+    const inputs = [title, tags, folder, aliases, workflow, course, chapter, type, studyStatus, mastery, reviewDate, favorite];
+    inputs.forEach((input) => { input.disabled = !editable; });
+
+    const close = mk('button', 'ghost-btn', editable ? '取消' : '关闭'); close.type = 'button'; close.addEventListener('click', mask._close); foot.appendChild(close);
+    if (!editable) return;
+    const save = mk('button', 'primary-btn notes-properties-save', '保存属性'); save.type = 'button'; foot.appendChild(save);
+    save.addEventListener('click', async () => {
+      error.classList.add('hidden');
+      const masteryValue = mastery.value === '' ? null : Number(mastery.value);
+      if (masteryValue !== null && (!Number.isFinite(masteryValue) || masteryValue < 0 || masteryValue > 5)) {
+        error.textContent = '掌握程度只能填写 0–5。'; error.classList.remove('hidden'); mastery.focus(); return;
+      }
+      save.disabled = close.disabled = true;
+      try {
+        const updated = await state.provider.updateNote(item.id, {
+          title: title.value.trim() || '未命名笔记',
+          status: workflow.value,
+          tags: tags.value.split(/[,，]/).map((value) => value.trim()).filter(Boolean).slice(0, 24),
+          folder: folder.value.trim(),
+          aliases: aliases.value.split(/[,，]/).map((value) => value.trim()).filter(Boolean).slice(0, 20),
+          favorite: favorite.checked,
+          properties: {
+            ...(item.properties || {}),
+            course: course.value.trim(), chapter: chapter.value.trim(), type: type.value,
+            status: studyStatus.value, mastery: masteryValue, reviewDate: reviewDate.value || null,
+          },
+          expectedUpdatedAt: item.updatedAt,
+          versionReason: 'manual',
+        });
+        merge(updated); mask._close(); render(); state.ctx?.toast?.('笔记属性已保存');
+      } catch (reason) {
+        error.textContent = `保存失败：${reason.message}`; error.classList.remove('hidden'); save.disabled = close.disabled = false;
+      }
+    });
+    title.focus();
   }
 
   function openComposer(source, trigger) {
@@ -665,76 +776,124 @@
     const controls = mk('div', 'notes-special-controls');
     const scope = mk('select'); [['local', '当前笔记 · 两层'], ['global', '全部笔记']].forEach(([value, label]) => scope.appendChild(option(value, label, value === state.graphScope)));
     scope.addEventListener('change', () => { state.graphScope = scope.value; state.graphData = null; render(); });
+    const dimension = mk('select', 'notes-graph-dimension'); [['3d', '三维星系'], ['2d', '二维海洋']].forEach(([value, label]) => dimension.appendChild(option(value, label, value === state.graphDimension)));
+    dimension.addEventListener('change', () => { state.graphDimension = dimension.value; state.graphPositions.clear(); state.graphCamera = { yaw: -0.45, pitch: 0.18, zoom: 1 }; render(); });
     const canvasButton = mk('button', 'ghost-btn', '将图谱放入 Canvas'); canvasButton.type = 'button'; canvasButton.disabled = !state.graphData?.nodes?.length;
     canvasButton.addEventListener('click', async () => {
       const nodes = state.graphData.nodes.map((node, index) => ({ id: `n-${node.id}`, type: 'file', noteId: node.id, x: 80 + index % 4 * 190, y: 70 + Math.floor(index / 4) * 130, width: 160, height: 84 }));
       const edges = state.graphData.edges.map((edge, index) => ({ id: `e-${index}`, fromNode: `n-${edge.source}`, toNode: `n-${edge.target}` }));
       const item = await state.provider.createCanvas({ name: `知识图谱 ${today()}`, nodes, edges }); state.canvasId = item.id; state.mode = 'canvas'; render();
     });
-    controls.append(scope, canvasButton); shell.appendChild(controls);
+    controls.append(scope, dimension, canvasButton); shell.appendChild(controls);
     const layout = mk('div', 'notes-graph-layout'); const stage = mk('div', 'notes-graph-stage'); stage.appendChild(mk('div', 'loading', '正在生成知识图谱…')); layout.appendChild(stage); shell.appendChild(layout); host.appendChild(shell);
-    if (state.graphData) return drawGraph(stage, state.graphData, layout);
+    if (state.graphData) { stage.innerHTML = ''; return drawGraph(stage, state.graphData, layout); }
     const filters = state.graphScope === 'local' && state.selected ? { id: state.selected, depth: 2 } : {};
     state.provider.graph(filters).then((data) => { if (state.mode !== 'graph') return; state.graphData = data; stage.innerHTML = ''; drawGraph(stage, data, layout); canvasButton.disabled = !data.nodes.length; }).catch((error) => { stage.innerHTML = ''; stage.appendChild(errorBox(`图谱读取失败：${error.message}`)); });
   }
 
   function drawGraph(stage, data, layout = stage.parentNode) {
     if (!data.nodes.length) return stage.appendChild(emptyBox('还没有知识链接。在正文中输入 [[另一篇笔记]] 后，关系会显示在这里。'));
+    loadGraphStyles();
+    const is2d = state.graphDimension === '2d';
     if (state.graphFrame !== null && window.cancelAnimationFrame) { window.cancelAnimationFrame(state.graphFrame); state.graphFrame = null; }
-    stage.classList.add('notes-graph-space');
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('viewBox', '0 0 900 560'); svg.setAttribute('class', 'notes-graph-svg'); svg.setAttribute('aria-label', '可旋转缩放的三维知识星系');
+    stage.classList.add('notes-graph-space'); stage.classList.toggle('is-ocean', is2d);
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('viewBox', '0 0 900 560'); svg.setAttribute('class', 'notes-graph-svg'); svg.setAttribute('aria-label', is2d ? '可漂流缩放的二维知识海洋' : '可旋转缩放的三维知识星系');
     const defs = document.createElementNS(svg.namespaceURI, 'defs'); defs.innerHTML = '<filter id="knowledge-glow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>'; svg.appendChild(defs);
     const hash = (text) => { let value = 2166136261; for (const char of String(text)) value = Math.imul(value ^ char.charCodeAt(0), 16777619); return value >>> 0; };
     const adjacency = new Map(data.nodes.map((node) => [node.id, new Set()])); for (const edge of data.edges || []) { adjacency.get(edge.source)?.add(edge.target); adjacency.get(edge.target)?.add(edge.source); }
-    const root = data.nodes.some((node) => node.id === state.selected) ? state.selected : [...data.nodes].sort((a, b) => (adjacency.get(b.id)?.size || 0) - (adjacency.get(a.id)?.size || 0))[0].id;
-    const levels = new Map([[root, 0]]); const queue = [root]; while (queue.length) { const id = queue.shift(); for (const next of adjacency.get(id) || []) if (!levels.has(next)) { levels.set(next, levels.get(id) + 1); queue.push(next); } } for (const node of data.nodes) if (!levels.has(node.id)) levels.set(node.id, 3);
+    const mostConnected = [...data.nodes].sort((a, b) => (adjacency.get(b.id)?.size || 0) - (adjacency.get(a.id)?.size || 0))[0].id;
+    const root = state.graphScope === 'local' && data.nodes.some((node) => node.id === state.selected) ? state.selected : mostConnected;
+    const levels = new Map([[root, 0]]); const queue = [root]; while (queue.length) { const id = queue.shift(); for (const next of adjacency.get(id) || []) if (!levels.has(next)) { levels.set(next, levels.get(id) + 1); queue.push(next); } }
+    const orbitingIds = new Set(levels.keys());
+    const unlinkedLevel = Math.max(0, ...levels.values()) + 1; for (const node of data.nodes) if (!levels.has(node.id)) levels.set(node.id, unlinkedLevel);
     const stars = document.createElementNS(svg.namespaceURI, 'g'); stars.setAttribute('class', 'notes-graph-stars'); const starEls = []; for (let i = 0; i < 82; i += 1) { const star = document.createElementNS(svg.namespaceURI, 'circle'); const baseX = (i * 137.5 + 31) % 900; const baseY = (i * 83.7 + 19) % 560; star.setAttribute('cx', baseX); star.setAttribute('cy', baseY); star.setAttribute('r', i % 11 === 0 ? 1.25 : 0.65); star.setAttribute('opacity', 0.18 + (i % 5) * 0.1); stars.appendChild(star); starEls.push({ star, baseX, baseY, phase: i * 0.73 }); } svg.appendChild(stars);
-    const maxLevel = Math.min(4, Math.max(...levels.values()));
+    const graphLevels = [...new Set(levels.values())].sort((a, b) => a - b);
     const edgeLayer = document.createElementNS(svg.namespaceURI, 'g'); const edgeEls = []; for (const edge of data.edges || []) { const line = document.createElementNS(svg.namespaceURI, 'line'); line.setAttribute('class', 'notes-graph-edge'); edgeLayer.appendChild(line); edgeEls.push({ edge, line }); } svg.appendChild(edgeLayer);
     const nodeLayer = document.createElementNS(svg.namespaceURI, 'g'); const nodeEls = new Map(); const nodeIds = new Set(data.nodes.map((node) => node.id)); for (const id of [...state.graphPositions.keys()]) if (!nodeIds.has(id)) state.graphPositions.delete(id);
-    const velocities = new Map(data.nodes.map((node) => [node.id, { x: 0, y: 0, z: 0 }])); const levelColors = ['var(--graph-level-0)', 'var(--graph-level-1)', 'var(--graph-level-2)', 'var(--graph-level-3)', 'var(--graph-level-4)'];
+    const velocities = new Map(data.nodes.map((node) => [node.id, { x: 0, y: 0, z: 0 }]));
+    const nodeColor = (id, level) => state.graphNodeStyles.get(id)?.color || state.graphLevelColors.get(level) || defaultGraphLevelColor(level);
     data.nodes.forEach((node, index) => {
-      const level = Math.min(4, levels.get(node.id) || 0); if (!state.graphPositions.has(node.id)) { const seed = hash(node.id); const angle = index * 2.399963229728653 + (seed % 1000) / 1000; const shell = 78 + level * 58 + (seed % 21); const tilt = ((seed % 120) - 60) / 160; state.graphPositions.set(node.id, { x: Math.cos(angle) * shell, y: Math.sin(angle * 1.37) * shell * 0.52 + tilt * 20, z: Math.sin(angle) * shell }); }
-      const group = document.createElementNS(svg.namespaceURI, 'g'); group.setAttribute('class', `notes-graph-node notes-graph-level-${level}${node.id === state.selected ? ' active' : ''}`); group.setAttribute('tabindex', '0'); group.setAttribute('role', 'button'); group.setAttribute('aria-label', `预览笔记：${node.title}`); group.dataset.level = String(level); group.dataset.noteId = node.id;
-      const degree = adjacency.get(node.id)?.size || 0; const size = 5.5 + Math.min(5, degree * 0.8) + (node.favorite ? 2 : 0); const hit = document.createElementNS(svg.namespaceURI, 'circle'); hit.setAttribute('class', 'notes-graph-node-hit'); const halo = document.createElementNS(svg.namespaceURI, 'circle'); halo.setAttribute('class', 'notes-graph-node-halo'); halo.style.setProperty('fill', levelColors[level]); const circle = document.createElementNS(svg.namespaceURI, 'circle'); circle.setAttribute('r', size); circle.style.setProperty('fill', levelColors[level]); const text = document.createElementNS(svg.namespaceURI, 'text'); text.setAttribute('text-anchor', 'middle'); text.textContent = node.title.slice(0, 14); group.append(hit, halo, circle, text); nodeLayer.appendChild(group); nodeEls.set(node.id, { node, group, hit, halo, circle, text, size, level, phase: (hash(node.id) % 628) / 100 });
+      const level = levels.get(node.id) || 0; if (!state.graphPositions.has(node.id)) { const seed = hash(node.id); const angle = index * 2.399963229728653 + (seed % 1000) / 1000; const linked = orbitingIds.has(node.id); const shell = linked ? 78 + level * 58 + (seed % 21) : 175 + (seed % 48); const tilt = ((seed % 120) - 60) / 160; state.graphPositions.set(node.id, node.id === root ? { x: 0, y: 0, z: 0 } : { x: Math.cos(angle) * shell, y: is2d ? Math.sin(angle) * shell * 0.72 : Math.sin(angle * 1.37) * shell * (linked ? 0.52 : 0.38) + tilt * 20, z: is2d ? 0 : Math.sin(angle) * shell }); }
+      const group = document.createElementNS(svg.namespaceURI, 'g'); group.setAttribute('class', `notes-graph-node notes-graph-level-${level}${node.id === state.selected ? ' active' : ''}`); group.setAttribute('tabindex', '0'); group.setAttribute('role', 'button'); group.setAttribute('aria-label', `预览笔记：${node.title}`); group.dataset.level = String(level); group.dataset.noteId = node.id; group.dataset.motion = node.id === root ? 'core' : orbitingIds.has(node.id) ? 'orbit' : 'drift';
+      const degree = adjacency.get(node.id)?.size || 0; const size = 5.5 + Math.min(5, degree * 0.8) + (node.favorite ? 2 : 0); const color = nodeColor(node.id, level); const hit = document.createElementNS(svg.namespaceURI, 'circle'); hit.setAttribute('class', 'notes-graph-node-hit'); const halo = document.createElementNS(svg.namespaceURI, 'circle'); halo.setAttribute('class', 'notes-graph-node-halo'); halo.style.setProperty('fill', color); const circle = document.createElementNS(svg.namespaceURI, 'circle'); circle.setAttribute('r', size); circle.style.setProperty('fill', color); const text = document.createElementNS(svg.namespaceURI, 'text'); text.setAttribute('text-anchor', 'middle'); text.textContent = node.title.slice(0, 14); group.append(hit, halo, circle, text); nodeLayer.appendChild(group); nodeEls.set(node.id, { node, group, hit, halo, circle, text, size, level, phase: (hash(node.id) % 628) / 100 });
     }); svg.appendChild(nodeLayer); stage.appendChild(svg);
-    const hint = mk('div', 'notes-graph-hint', '拖动空白旋转 · 拖动知识点影响相连节点 · 滚轮缩放 · 轻点原位预览'); const hud = mk('div', 'notes-graph-hud'); const pause = mk('button', 'ghost-btn', '暂停公转'); const reset = mk('button', 'ghost-btn', '重置视角'); pause.type = reset.type = 'button'; hud.append(pause, reset); stage.append(hint, hud);
+    const hint = mk('div', 'notes-graph-hint', is2d ? '二维海洋 · 核心居中 · 标签缓慢漂流 · 拖动标签 · 滚轮缩放' : '核心天体弹性拖动 · 相连标签柔性跟随并环绕 · 未连接标签漂浮 · 拖动空白旋转 · 滚轮缩放'); const hud = mk('div', 'notes-graph-hud'); const pause = mk('button', 'ghost-btn', is2d ? '暂停漂流' : '暂停公转'); const reset = mk('button', 'ghost-btn', '重置视角'); pause.type = reset.type = 'button'; hud.append(pause, reset); stage.append(hint, hud);
     const settings = state.graphSettings; const panel = mk('aside', 'notes-graph-controls'); panel.appendChild(mk('h3', '', '图谱参数'));
     const rangeControl = (label, key, min, max, step) => { const row = mk('label', 'notes-graph-control'); const head = mk('span', '', label); const value = mk('output', '', String(settings[key])); const input = mk('input'); input.type = 'range'; input.min = min; input.max = max; input.step = step; input.value = settings[key]; input.addEventListener('input', () => { settings[key] = Number(input.value); value.textContent = input.value; }); head.appendChild(value); row.append(head, input); panel.appendChild(row); };
-    rangeControl('标签圆形大小', 'nodeSize', 0.6, 2, 0.1); rangeControl('连线长度', 'edgeLength', 70, 240, 5); rangeControl('连线粗细', 'edgeWidth', 0.5, 5, 0.1); rangeControl('图谱排斥力', 'repulsion', 1000, 20000, 500); rangeControl('摆动幅度', 'motion', 0, 2, 0.1);
+    rangeControl('连线长度', 'edgeLength', 70, 240, 5); rangeControl('连线粗细', 'edgeWidth', 0.5, 5, 0.1); rangeControl('图谱排斥力', 'repulsion', 1000, 20000, 500); rangeControl(is2d ? '漂流幅度' : '摆动幅度', 'motion', 0, 2, 0.1);
     const selectControl = (label, key, options) => { const row = mk('label', 'notes-graph-control'); row.appendChild(mk('span', '', label)); const input = mk('select'); for (const [value, text] of options) input.appendChild(option(value, text, settings[key] === value)); input.addEventListener('change', () => { settings[key] = input.value; }); row.appendChild(input); panel.appendChild(row); };
     selectControl('连线样式', 'lineStyle', [['solid', '实线'], ['dashed', '虚线'], ['dotted', '点线']]); selectControl('连线颜色', 'edgeColor', [['blue', '蓝色'], ['green', '绿色'], ['purple', '紫色'], ['orange', '橙色'], ['gray', '灰色']]);
-    const legend = mk('div', 'notes-graph-legend'); legend.appendChild(mk('strong', '', '关系层级')); for (let level = 0; level <= maxLevel; level += 1) { const item = mk('span', `notes-graph-level-${Math.min(4, level)}`, `${level === 0 ? '核心' : `${level} 级关系`}`); item.prepend?.(mk('i')); legend.appendChild(item); } panel.appendChild(legend); layout.appendChild(panel);
-    const camera = state.graphCamera; const center = { x: 450, y: 280 }; let autoAngle = 0; let paused = !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches; let sceneDrag = null; let nodeDrag = null; let suppressUntil = 0; let lastTime = null; let preview = null;
+    const legend = mk('div', 'notes-graph-legend'); legend.appendChild(mk('strong', '', '关系层级（同层同色）')); for (const level of graphLevels) { const item = mk('label', 'notes-graph-legend-item'); item.dataset.level = String(level); const dot = mk('i'); const text = mk('span', '', level === 0 ? '核心' : `${level} 级关系`); const color = mk('input', 'notes-graph-level-color'); color.type = 'color'; color.value = state.graphLevelColors.get(level) || defaultGraphLevelColor(level); dot.style.setProperty('background', color.value); color.title = `自定义第 ${level} 层颜色`; color.addEventListener('input', () => setLevelColor(level, color.value)); item.append(dot, text, color); legend.appendChild(item); } panel.appendChild(legend); layout.appendChild(panel);
+    const camera = state.graphCamera; const center = { x: 450, y: 280 }; let autoAngle = 0; let oceanTime = 0; let paused = !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches; let sceneDrag = null; let nodeDrag = null; let suppressUntil = 0; let lastTime = null; let preview = null;
     const clamp = (value, min, max) => Math.max(min, Math.min(max, value)); const rotatePoint = (point, yaw, pitch) => { const cy = Math.cos(yaw); const sy = Math.sin(yaw); const cp = Math.cos(pitch); const sp = Math.sin(pitch); const x = point.x * cy + point.z * sy; const z1 = -point.x * sy + point.z * cy; return { x, y: point.y * cp - z1 * sp, z: point.y * sp + z1 * cp }; };
-    const project = (point, phase = 0, time = 0) => { const sway = Number(settings.motion) * 7; const moving = { x: point.x + Math.sin(time * 0.0007 + phase) * sway, y: point.y + Math.cos(time * 0.00055 + phase * 1.4) * sway * 0.55, z: point.z + Math.sin(time * 0.00045 + phase * 0.8) * sway }; const rotated = rotatePoint(moving, camera.yaw + autoAngle, camera.pitch); const perspective = 680 / Math.max(360, 680 - rotated.z); return { x: center.x + rotated.x * perspective * camera.zoom, y: center.y + rotated.y * perspective * camera.zoom, z: rotated.z, scale: perspective * camera.zoom }; };
+    const project = (point, phase = 0, time = 0, id = '') => {
+      const sway = Number(settings.motion) * (is2d ? 10 : 7); const isRoot = id === root;
+      const oceanX = is2d ? (Math.sin(time * 0.0007 + phase) - Math.sin(phase)) * sway : isRoot ? 0 : Math.sin(time * 0.0007 + phase) * sway;
+      const oceanY = is2d ? (Math.cos(time * 0.00055 + phase * 1.4) - Math.cos(phase * 1.4)) * sway * 0.72 : isRoot ? 0 : Math.cos(time * 0.00055 + phase * 1.4) * sway * 0.55;
+      let moving = { x: point.x + oceanX, y: point.y + oceanY, z: is2d ? 0 : point.z + (isRoot ? 0 : Math.sin(time * 0.00045 + phase * 0.8) * sway) };
+      if (is2d) return { x: center.x + moving.x * camera.zoom, y: center.y + moving.y * camera.zoom, z: 0, scale: camera.zoom };
+      if (!isRoot && orbitingIds.has(id)) { const core = state.graphPositions.get(root) || { x: 0, y: 0, z: 0 }; const relative = { x: moving.x - core.x, y: moving.y - core.y, z: moving.z - core.z }; const orbited = rotatePoint(relative, autoAngle, 0); moving = { x: core.x + orbited.x, y: core.y + orbited.y, z: core.z + orbited.z }; }
+      const rotated = rotatePoint(moving, camera.yaw, camera.pitch); const perspective = 680 / Math.max(360, 680 - rotated.z); return { x: center.x + rotated.x * perspective * camera.zoom, y: center.y + rotated.y * perspective * camera.zoom, z: rotated.z, scale: perspective * camera.zoom };
+    };
     const projected = new Map();
     const simulate = (step) => {
       const entries = [...state.graphPositions.entries()]; for (let i = 0; i < entries.length; i += 1) for (let j = i + 1; j < entries.length; j += 1) { const [aId, a] = entries[i]; const [bId, b] = entries[j]; let dx = a.x - b.x; let dy = a.y - b.y; let dz = a.z - b.z; const dist2 = Math.max(100, dx * dx + dy * dy + dz * dz); const dist = Math.sqrt(dist2); const force = Number(settings.repulsion) / dist2 * 0.055 * step; dx /= dist; dy /= dist; dz /= dist; if (nodeDrag?.id !== aId) { const velocity = velocities.get(aId); velocity.x += dx * force; velocity.y += dy * force; velocity.z += dz * force; } if (nodeDrag?.id !== bId) { const velocity = velocities.get(bId); velocity.x -= dx * force; velocity.y -= dy * force; velocity.z -= dz * force; } }
-      for (const edge of data.edges || []) { const a = state.graphPositions.get(edge.source); const b = state.graphPositions.get(edge.target); if (!a || !b) continue; let dx = b.x - a.x; let dy = b.y - a.y; let dz = b.z - a.z; const dist = Math.max(1, Math.hypot(dx, dy, dz)); const force = (dist - Number(settings.edgeLength)) * 0.0022 * step; dx /= dist; dy /= dist; dz /= dist; if (nodeDrag?.id !== edge.source) { const velocity = velocities.get(edge.source); velocity.x += dx * force; velocity.y += dy * force; velocity.z += dz * force; } if (nodeDrag?.id !== edge.target) { const velocity = velocities.get(edge.target); velocity.x -= dx * force; velocity.y -= dy * force; velocity.z -= dz * force; } }
-      for (const [id, point] of entries) { if (nodeDrag?.id === id) continue; const level = Math.min(4, levels.get(id) || 0); const target = 82 + level * 58; const radius = Math.max(1, Math.hypot(point.x, point.y, point.z)); const radial = (radius - target) * 0.0007 * step; const velocity = velocities.get(id); velocity.x -= point.x / radius * radial; velocity.y -= point.y / radius * radial; velocity.z -= point.z / radius * radial; velocity.x *= 0.9; velocity.y *= 0.9; velocity.z *= 0.9; point.x += velocity.x * step; point.y += velocity.y * step; point.z += velocity.z * step; }
+      for (const edge of data.edges || []) { const a = state.graphPositions.get(edge.source); const b = state.graphPositions.get(edge.target); if (!a || !b) continue; let dx = b.x - a.x; let dy = b.y - a.y; let dz = b.z - a.z; const dist = Math.max(1, Math.hypot(dx, dy, dz)); const elasticBoost = nodeDrag?.id === root && (edge.source === root || edge.target === root) ? 2.2 : 1; const force = (dist - Number(settings.edgeLength)) * 0.0022 * elasticBoost * step; dx /= dist; dy /= dist; dz /= dist; if (nodeDrag?.id !== edge.source) { const velocity = velocities.get(edge.source); velocity.x += dx * force; velocity.y += dy * force; velocity.z += dz * force; } if (nodeDrag?.id !== edge.target) { const velocity = velocities.get(edge.target); velocity.x -= dx * force; velocity.y -= dy * force; velocity.z -= dz * force; } }
+      const core = state.graphPositions.get(root) || { x: 0, y: 0, z: 0 };
+      for (const [id, point] of entries) {
+        if (nodeDrag?.id === id) continue;
+        const velocity = velocities.get(id); const level = levels.get(id) || 0; const linked = orbitingIds.has(id); const relativeCore = !is2d && linked && id !== root;
+        const origin = relativeCore ? core : { x: 0, y: 0, z: 0 }; const dx = point.x - origin.x; const dy = point.y - origin.y; const dz = is2d ? 0 : point.z - origin.z;
+        const radius = Math.max(1, is2d ? Math.hypot(dx, dy) : Math.hypot(dx, dy, dz));
+        const target = id === root ? (is2d ? 0 : Math.min(radius, 135)) : !linked ? 195 : 82 + Math.min(level, 6) * 44;
+        const strength = id === root ? (is2d ? 0.00028 : 0.00016) : 0.0007; const radial = (radius - target) * strength * step;
+        velocity.x -= dx / radius * radial; velocity.y -= dy / radius * radial; if (!is2d) velocity.z -= dz / radius * radial;
+        else { velocity.x += Math.sin(oceanTime * 0.00023 + nodeEls.get(id)?.phase) * 0.003 * settings.motion * step; velocity.y += Math.cos(oceanTime * 0.00019 + nodeEls.get(id)?.phase) * 0.002 * settings.motion * step; velocity.z = 0; }
+        velocity.x *= 0.9; velocity.y *= 0.9; velocity.z *= 0.9; point.x += velocity.x * step; point.y += velocity.y * step; point.z = is2d ? 0 : point.z + velocity.z * step;
+      }
     };
-    const update = (time = Date.now()) => {
-      projected.clear(); for (const [id, point] of state.graphPositions) projected.set(id, project(point, nodeEls.get(id)?.phase || 0, time));
+    const update = (time = is2d ? oceanTime : Date.now()) => {
+      projected.clear(); for (const [id, point] of state.graphPositions) projected.set(id, project(point, nodeEls.get(id)?.phase || 0, time, id));
       const edgeColor = { blue: 'var(--blue)', green: 'var(--green)', purple: 'var(--purple)', orange: 'var(--orange)', gray: 'var(--fg-3)' }[settings.edgeColor] || 'var(--blue)'; const dash = { dashed: '9 7', dotted: '2 7' }[settings.lineStyle] || '';
       for (const { edge, line } of edgeEls) { const from = projected.get(edge.source); const to = projected.get(edge.target); if (!from || !to) continue; line.setAttribute('x1', from.x); line.setAttribute('y1', from.y); line.setAttribute('x2', to.x); line.setAttribute('y2', to.y); line.setAttribute('opacity', clamp(0.15 + (Math.min(from.z, to.z) + 280) / 720, 0.12, 0.7)); line.style.setProperty('stroke', edgeColor); line.style.setProperty('stroke-width', String(settings.edgeWidth)); line.setAttribute('stroke-dasharray', dash); }
-      for (const [id, item] of nodeEls) { const point = projected.get(id); if (!point) continue; const size = item.size * clamp(Number(settings.nodeSize) || 1, 0.6, 2); const depth = clamp((point.z + 300) / 600, 0, 1); item.hit.setAttribute('r', size + 15); item.halo.setAttribute('r', size + 6); item.circle.setAttribute('r', size); item.text.setAttribute('y', size + 14); item.group.setAttribute('transform', `translate(${point.x.toFixed(2)} ${point.y.toFixed(2)}) scale(${clamp(point.scale, 0.5, 1.75).toFixed(3)})`); item.group.setAttribute('opacity', (0.42 + depth * 0.58).toFixed(3)); }
+      for (const [id, item] of nodeEls) { const point = projected.get(id); if (!point) continue; const size = item.size * clamp(Number(state.graphNodeStyles.get(id)?.size) || 1, 0.5, 3); const depth = clamp((point.z + 300) / 600, 0, 1); item.hit.setAttribute('r', size + 15); item.halo.setAttribute('r', size + 6); item.circle.setAttribute('r', size); item.text.setAttribute('y', size + 14); item.group.setAttribute('transform', `translate(${point.x.toFixed(2)} ${point.y.toFixed(2)}) scale(${clamp(point.scale, 0.5, 1.75).toFixed(3)})`); item.group.setAttribute('opacity', (0.42 + depth * 0.58).toFixed(3)); }
       for (const item of starEls) { item.star.setAttribute('cx', item.baseX + Math.sin(time * 0.00032 + item.phase) * 3 * settings.motion); item.star.setAttribute('cy', item.baseY + Math.cos(time * 0.00027 + item.phase) * 2 * settings.motion); }
     };
     const showPreview = async (id, event = {}) => { preview?.remove(); const node = nodeEls.get(id)?.node; if (!node) return; const summary = state.items.find((item) => item.id === id) || { id, title: node.title, tags: [] }; preview = mk('section', 'notes-graph-preview'); const rect = stage.getBoundingClientRect?.() || { left: 0, top: 0, width: 900, height: 560 }; preview.style.left = `${clamp((event.clientX ?? rect.left + rect.width / 2) - rect.left + 12, 12, Math.max(12, (rect.width || 900) - 330))}px`; preview.style.top = `${clamp((event.clientY ?? rect.top + rect.height / 2) - rect.top + 12, 12, Math.max(12, (rect.height || 560) - 250))}px`; const close = mk('button', 'notes-graph-preview-close', '×'); close.type = 'button'; close.addEventListener('click', () => { preview?.remove(); preview = null; }); const head = mk('div', 'notes-graph-preview-head'); head.append(mk('strong', '', node.title), close); const content = mk('div', 'notes-graph-preview-content'); content.appendChild(mk('div', 'loading', '正在读取笔记内容…')); const actions = mk('div', 'notes-graph-preview-actions'); const detail = mk('button', 'ghost-btn', '查看详细笔记'); const edit = mk('button', 'primary-btn', '修改笔记'); detail.type = edit.type = 'button'; detail.addEventListener('click', () => openNoteViewer(summary, detail)); edit.addEventListener('click', () => state.provider.openNote?.(id)); actions.append(detail, edit); preview.append(head, content, actions); stage.appendChild(preview); try { const result = await read(id); content.innerHTML = ''; if (result.format === 'markdown' && window.PCRichText?.render) window.PCRichText.render(content, result.text); else content.textContent = result.text || '（空白笔记）'; } catch (error) { content.innerHTML = ''; content.appendChild(errorBox(`内容读取失败：${error.message}`)); } };
-    const animate = (time) => { if (stage.parentNode && state.mode === 'graph') { const elapsed = lastTime === null ? 1 : Math.min(32, time - lastTime); if (!paused && !sceneDrag && !nodeDrag) autoAngle += elapsed * 0.000055; if (!sceneDrag) simulate(elapsed / 16); lastTime = time; update(time); state.graphFrame = window.requestAnimationFrame(animate); } else state.graphFrame = null; };
-    update(); if (window.requestAnimationFrame) state.graphFrame = window.requestAnimationFrame(animate);
-    pause.textContent = paused ? '继续公转' : '暂停公转'; pause.addEventListener('click', () => { paused = !paused; pause.textContent = paused ? '继续公转' : '暂停公转'; lastTime = null; }); reset.addEventListener('click', () => { camera.yaw = -0.45; camera.pitch = 0.18; camera.zoom = 1; autoAngle = 0; lastTime = null; update(); });
+    const applyNodeColors = () => { for (const [id, item] of nodeEls) { const color = nodeColor(id, item.level); item.circle.style.setProperty('fill', color); item.halo.style.setProperty('fill', color); } };
+    const setNodeStyle = (id, patch) => { const current = state.graphNodeStyles.get(id) || {}; const next = { ...current, ...patch }; if ((!next.color || next.color === '') && (!next.size || Number(next.size) === 1)) state.graphNodeStyles.delete(id); else state.graphNodeStyles.set(id, next); saveGraphStyles(); applyNodeColors(); update(); };
+    const setLevelColor = (level, color = '') => { if (color) state.graphLevelColors.set(level, color); else state.graphLevelColors.delete(level); for (const [id, node] of nodeEls) if (node.level === level) { const style = state.graphNodeStyles.get(id); if (!style?.color) continue; const next = { ...style, color: '' }; if (!next.size || Number(next.size) === 1) state.graphNodeStyles.delete(id); else state.graphNodeStyles.set(id, next); } const resolved = color || defaultGraphLevelColor(level); for (const control of legend.querySelectorAll('.notes-graph-level-color')) if (Number(control.parentNode?.dataset?.level) === level) { control.value = resolved; control.parentNode?.querySelector?.('i')?.style?.setProperty('background', resolved); } saveGraphStyles(); applyNodeColors(); update(); };
+    const openNodeMenu = (event, id) => {
+      event.preventDefault?.(); event.stopPropagation?.(); stage.querySelector('.notes-graph-menu')?.remove(); preview?.remove(); preview = null;
+      const item = nodeEls.get(id); if (!item) return;
+      const menu = mk('div', 'notes-graph-menu'); menu.setAttribute('role', 'menu'); const rect = stage.getBoundingClientRect?.() || { left: 0, top: 0, width: 900, height: 560 };
+      menu.style.left = `${clamp((event.clientX || rect.left) - rect.left + 8, 8, Math.max(8, (rect.width || 900) - 286))}px`; menu.style.top = `${clamp((event.clientY || rect.top) - rect.top + 8, 8, Math.max(8, (rect.height || 560) - 330))}px`;
+      menu.append(mk('strong', 'notes-graph-menu-title', item.node.title), mk('span', 'notes-graph-menu-level', item.level === 0 ? '核心层级' : `第 ${item.level} 层关系`));
+      const currentStyle = state.graphNodeStyles.get(id) || {}; const sizeRow = mk('label', 'notes-graph-menu-field'); const sizeHead = mk('span', '', '标签圆形大小'); const sizeValue = mk('output', '', `${Number(currentStyle.size) || 1}×`); const size = mk('input', 'notes-graph-node-size'); size.type = 'range'; size.min = '0.5'; size.max = '3'; size.step = '0.1'; size.value = String(Number(currentStyle.size) || 1); size.addEventListener('input', () => { sizeValue.textContent = `${size.value}×`; setNodeStyle(id, { size: Number(size.value) }); }); sizeHead.appendChild(sizeValue); sizeRow.append(sizeHead, size); menu.appendChild(sizeRow);
+      const colorRow = mk('label', 'notes-graph-menu-field notes-graph-menu-color-field'); colorRow.appendChild(mk('span', '', '标签颜色')); const color = mk('input', 'notes-graph-node-color'); color.type = 'color'; color.value = nodeColor(id, item.level); color.addEventListener('input', () => setNodeStyle(id, { color: color.value })); colorRow.appendChild(color); menu.appendChild(colorRow);
+      const actions = mk('div', 'notes-graph-menu-actions');
+      const follow = mk('button', '', '跟随本层颜色'); follow.type = 'button'; follow.addEventListener('click', () => { setNodeStyle(id, { color: '' }); color.value = nodeColor(id, item.level); });
+      const applyLevel = mk('button', '', `应用到第 ${item.level} 层全部标签`); applyLevel.type = 'button'; applyLevel.addEventListener('click', () => setLevelColor(item.level, color.value));
+      const resetSize = mk('button', '', '恢复默认大小'); resetSize.type = 'button'; resetSize.addEventListener('click', () => { size.value = '1'; sizeValue.textContent = '1×'; setNodeStyle(id, { size: 1 }); });
+      const resetLevel = mk('button', '', '恢复本层默认颜色'); resetLevel.type = 'button'; resetLevel.addEventListener('click', () => { setLevelColor(item.level); color.value = defaultGraphLevelColor(item.level); });
+      actions.append(follow, applyLevel, resetSize, resetLevel); menu.appendChild(actions);
+      const summary = state.items.find((note) => note.id === id); if (summary) { const properties = mk('button', 'notes-graph-menu-properties', '查看或修改笔记属性'); properties.type = 'button'; properties.addEventListener('click', () => { menu.remove(); openNoteProperties(summary, item.group); }); menu.appendChild(properties); }
+      stage.appendChild(menu); size.focus?.();
+    };
+    const animate = (time) => { if (stage.parentNode && state.mode === 'graph') { const elapsed = lastTime === null ? 1 : Math.min(32, time - lastTime); if (!paused && !sceneDrag && !nodeDrag) { if (is2d) oceanTime += elapsed; else autoAngle += elapsed * 0.000055; } if (!sceneDrag && (!is2d || !paused)) simulate(elapsed / 16); lastTime = time; update(is2d ? oceanTime : time); state.graphFrame = window.requestAnimationFrame(animate); } else state.graphFrame = null; };
+    update(is2d ? oceanTime : Date.now()); if (window.requestAnimationFrame) state.graphFrame = window.requestAnimationFrame(animate);
+    const pauseText = () => paused ? (is2d ? '继续漂流' : '继续公转') : (is2d ? '暂停漂流' : '暂停公转'); pause.textContent = pauseText(); pause.addEventListener('click', () => { paused = !paused; pause.textContent = pauseText(); lastTime = null; }); reset.addEventListener('click', () => { camera.yaw = -0.45; camera.pitch = 0.18; camera.zoom = 1; autoAngle = 0; oceanTime = 0; lastTime = null; update(is2d ? oceanTime : Date.now()); });
     stage.addEventListener('wheel', (event) => { if (event.target?.closest?.('.notes-graph-preview')) return; event.preventDefault?.(); camera.zoom = clamp(camera.zoom * (event.deltaY > 0 ? 0.9 : 1.1), 0.48, 2.4); update(); }, { passive: false });
-    const blocksSceneDrag = (target) => target?.closest?.('.notes-graph-node') || target?.closest?.('.notes-graph-hud') || target?.closest?.('.notes-graph-preview');
+    const blocksSceneDrag = (target) => target?.closest?.('.notes-graph-node') || target?.closest?.('.notes-graph-hud') || target?.closest?.('.notes-graph-preview') || target?.closest?.('.notes-graph-menu');
     stage.addEventListener('dragstart', (event) => event.preventDefault?.()); stage.addEventListener('selectstart', (event) => event.preventDefault?.());
-    stage.addEventListener('pointerdown', (event) => { if (event.button !== undefined && event.button !== 0) return; if (blocksSceneDrag(event.target)) return; event.preventDefault?.(); preview?.remove(); preview = null; sceneDrag = { x: event.clientX, y: event.clientY, yaw: camera.yaw, pitch: camera.pitch, moved: false, pointerId: event.pointerId }; stage.classList.add('is-rotating'); stage.setPointerCapture?.(event.pointerId); });
+    stage.addEventListener('pointerdown', (event) => { const menu = stage.querySelector('.notes-graph-menu'); if (menu && !event.target?.closest?.('.notes-graph-menu')) menu.remove(); if (event.button !== undefined && event.button !== 0) return; if (blocksSceneDrag(event.target) || is2d) return; event.preventDefault?.(); preview?.remove(); preview = null; sceneDrag = { x: event.clientX, y: event.clientY, yaw: camera.yaw, pitch: camera.pitch, moved: false, pointerId: event.pointerId }; stage.classList.add('is-rotating'); stage.setPointerCapture?.(event.pointerId); });
     stage.addEventListener('pointermove', (event) => { if (!sceneDrag || (sceneDrag.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== sceneDrag.pointerId)) return; event.preventDefault?.(); const dx = event.clientX - sceneDrag.x; const dy = event.clientY - sceneDrag.y; if (Math.hypot(dx, dy) > 5) sceneDrag.moved = true; camera.yaw = sceneDrag.yaw + dx * 0.008; camera.pitch = clamp(sceneDrag.pitch - dy * 0.007, -1.25, 1.25); update(); });
     const finishSceneDrag = (event = {}) => { if (!sceneDrag || (sceneDrag.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== sceneDrag.pointerId)) return; if (sceneDrag.moved) suppressUntil = Date.now() + 280; sceneDrag = null; stage.classList.remove('is-rotating'); lastTime = null; }; stage.addEventListener('pointerup', finishSceneDrag); stage.addEventListener('pointercancel', finishSceneDrag); stage.addEventListener('lostpointercapture', finishSceneDrag);
     for (const [id, item] of nodeEls) {
       item.group.addEventListener('keydown', (event) => { if (event.key === 'Enter') showPreview(id); });
-      item.group.addEventListener('pointerdown', (event) => { if (event.button !== undefined && event.button !== 0) return; event.preventDefault?.(); event.stopPropagation?.(); preview?.remove(); preview = null; const original = state.graphPositions.get(id); const rect = svg.getBoundingClientRect?.() || { width: 900, height: 560 }; const viewportScale = Math.max(0.01, Math.min((rect.width || 900) / 900, (rect.height || 560) / 560)); nodeDrag = { id, x: event.clientX, y: event.clientY, original: { ...original }, moved: false, event, pointerId: event.pointerId, yaw: camera.yaw + autoAngle, pitch: camera.pitch, projectedScale: Math.max(0.2, projected.get(id)?.scale || camera.zoom), viewportScale }; item.group.classList.add('is-dragging'); item.group.setPointerCapture?.(event.pointerId); });
-      item.group.addEventListener('pointermove', (event) => { if (!nodeDrag || nodeDrag.id !== id || (nodeDrag.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== nodeDrag.pointerId)) return; event.preventDefault?.(); const screenDx = event.clientX - nodeDrag.x; const screenDy = event.clientY - nodeDrag.y; if (Math.hypot(screenDx, screenDy) <= 3) return; nodeDrag.moved = true; const dx = screenDx / nodeDrag.viewportScale / nodeDrag.projectedScale; const dy = screenDy / nodeDrag.viewportScale / nodeDrag.projectedScale; const cy = Math.cos(nodeDrag.yaw); const sy = Math.sin(nodeDrag.yaw); const cp = Math.cos(nodeDrag.pitch); const sp = Math.sin(nodeDrag.pitch); const worldDx = dx * cy + dy * sp * sy; const worldDy = dy * cp; const worldDz = dx * sy - dy * sp * cy; const next = { x: nodeDrag.original.x + worldDx, y: nodeDrag.original.y + worldDy, z: nodeDrag.original.z + worldDz }; const radius = Math.hypot(next.x, next.y, next.z); if (radius > 330) { next.x *= 330 / radius; next.y *= 330 / radius; next.z *= 330 / radius; } state.graphPositions.set(id, next); update(); });
+      item.group.addEventListener('contextmenu', (event) => openNodeMenu(event, id));
+      item.group.addEventListener('pointerdown', (event) => { if (event.button !== undefined && event.button !== 0) return; event.preventDefault?.(); event.stopPropagation?.(); preview?.remove(); preview = null; const original = state.graphPositions.get(id); const rect = svg.getBoundingClientRect?.() || { width: 900, height: 560 }; const viewportScale = Math.max(0.01, Math.min((rect.width || 900) / 900, (rect.height || 560) / 560)); nodeDrag = { id, x: event.clientX, y: event.clientY, original: { ...original }, moved: false, event, pointerId: event.pointerId, yaw: camera.yaw + (!is2d && id !== root && orbitingIds.has(id) ? autoAngle : 0), pitch: camera.pitch, projectedScale: Math.max(0.2, projected.get(id)?.scale || camera.zoom), viewportScale }; item.group.classList.add('is-dragging'); item.group.setPointerCapture?.(event.pointerId); });
+      item.group.addEventListener('pointermove', (event) => { if (!nodeDrag || nodeDrag.id !== id || (nodeDrag.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== nodeDrag.pointerId)) return; event.preventDefault?.(); const screenDx = event.clientX - nodeDrag.x; const screenDy = event.clientY - nodeDrag.y; if (Math.hypot(screenDx, screenDy) <= 3) return; nodeDrag.moved = true; const dx = screenDx / nodeDrag.viewportScale / nodeDrag.projectedScale; const dy = screenDy / nodeDrag.viewportScale / nodeDrag.projectedScale; let next; if (is2d) next = { x: nodeDrag.original.x + dx, y: nodeDrag.original.y + dy, z: 0 }; else { const cy = Math.cos(nodeDrag.yaw); const sy = Math.sin(nodeDrag.yaw); const cp = Math.cos(nodeDrag.pitch); const sp = Math.sin(nodeDrag.pitch); const worldDx = dx * cy + dy * sp * sy; const worldDy = dy * cp; const worldDz = dx * sy - dy * sp * cy; next = { x: nodeDrag.original.x + worldDx, y: nodeDrag.original.y + worldDy, z: nodeDrag.original.z + worldDz }; } const limit = !is2d && id === root ? 180 : !orbitingIds.has(id) ? 255 : 330; const radius = Math.hypot(next.x, next.y, next.z); if (radius > limit) { next.x *= limit / radius; next.y *= limit / radius; next.z *= limit / radius; } state.graphPositions.set(id, next); update(is2d ? oceanTime : Date.now()); });
       const finishNodeDrag = (event = {}) => { if (!nodeDrag || nodeDrag.id !== id || (nodeDrag.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== nodeDrag.pointerId)) return; const wasMoved = nodeDrag.moved; nodeDrag = null; item.group.classList.remove('is-dragging'); lastTime = null; if (wasMoved) suppressUntil = Date.now() + 280; else if (Date.now() >= suppressUntil) showPreview(id, event); }; item.group.addEventListener('pointerup', finishNodeDrag); item.group.addEventListener('lostpointercapture', (event) => { if (nodeDrag?.id === id) finishNodeDrag(event); }); item.group.addEventListener('pointercancel', (event) => finishNodeDrag(event));
     }
   }

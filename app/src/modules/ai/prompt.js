@@ -15,11 +15,13 @@
 import { WEEKDAY_NAMES, todayKey } from '../../shared/time.js';
 import { WEB_SEARCH_PROMPT } from './web-search.js';
 
-/** 三件事的判定表 + 字段 + 最容易写错的六处（与接口文档 / aiTools 清单保持一致）。 */
+/** 三件事的判定表 + 字段 + 最容易写错的七处（与接口文档 / aiTools 清单保持一致）。 */
 const DOMAIN_RULES = `【三个集合，先选对 —— 选错用户就看不见东西】
 - 待办 Todo：只有截止日 + 完成态。交作业、写报告、复习、"某天之前要打勾的" → target: "todo"
   字段：title（必填）、deadline（YYYY-MM-DD，必填）、estimatedHours（预估**工时**，单位小时、可小数，如 1.5；默认 1）、
-  priority（整数 0=低 / 1=普通 / 2=紧急）、description（备注）、tags。工时要写分钟时用 estimatedMinutes（整数分钟），系统会换算成小时
+  priority（整数 0=低 / 1=普通 / 2=紧急）、description（备注）、tags、
+  category（分类，自由文本 ≤24 字；没有分类就用空字符串 ""）、parentId（父待办的 id，可选，最多 3 层）。
+  工时要写分钟时用 estimatedMinutes（整数分钟），系统会换算成小时
 - 日程 Schedule：必须是时段，startTime 必填，没有完成态。上课、开会、自习、讲座 → target: "schedule"
   字段：title、date（YYYY-MM-DD，必填）、startTime（HH:mm，必填）、endTime（HH:mm）、location、category、description（备注）、priority（整数 0/1/2）
 - 日历事件 Event：日期或日期区间粒度，没有时刻、没有完成态。期中考试、放假、报名截止 → target: "event"
@@ -35,7 +37,7 @@ const DOMAIN_RULES = `【三个集合，先选对 —— 选错用户就看不�
   或让用户把内容口述给你、你整理成待办的 description。用户明确说要记成待办时再出草稿。
 - **不要**输出 target: "note" 的**写入**草稿（create / update / delete）—— 笔记只有只读查询通道，写操作还没有 target，写了系统会报错。
 
-【最容易写错的六处】
+【最容易写错的七处】
 1. 日程必须有 startTime；只有日期没有时刻 → 用 event；只有截止日 → 用 todo。
    日程**没有** allDay、**没有** status，这两个字段传了会被 400 拒绝。
 2. 待办的完成态字段是 completed（布尔），不是 status。
@@ -46,7 +48,11 @@ const DOMAIN_RULES = `【三个集合，先选对 —— 选错用户就看不�
    待办的工时按 estimatedHours（小时，可小数）记；想用分钟就写 estimatedMinutes（整数），系统会换算成小时 ——
    这两个名字以外的一律 400，不会静默丢弃。
 5. 日期一律 YYYY-MM-DD，时刻一律 HH:mm（24 小时制）。相对时间（明天/下周三）自己算成绝对日期。
-6. category 传的是分类 id（不确定就留空或写 "other"），不要传中文分类名；不要自己造 id。`;
+6. 日程的 category 传的是分类 id（不确定就留空或写 "other"），不要传中文分类名；不要自己造 id。
+   **待办的 category 不是分类 id，而是自由文本**（≤24 字，例如 "期末复习"），没有分类就写空字符串 ""。
+7. 待办可以拆父子：parentId 是**父待办的真实 id**（不是标题、序号或 "root"），父 / 子 / 孙最多 3 层。
+   给已有待办加子任务时**先 query 拿到它的 id，再 create 子任务**（新父的 id 由系统生成，你拿不到）；
+   parentId 不能指向自己或自己的子任务（成环会被 400）。这两个字段名写错同样会被 400 拦下。`;
 
 /** 草稿输出协议：回复里额外给 ```command 代码块（写入最多 3 段，一件事一段）。 */
 const DRAFT_PROTOCOL = `【输出格式】

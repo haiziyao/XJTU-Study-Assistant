@@ -703,7 +703,22 @@ function indexFromDisk(now) {
   return buildIndex(results, now);
 }
 
-/** 校验：索引里的每一项在磁盘上都存在且哈希一致。 */
+/** 索引与文件的哈希口径是否一致（容忍两种换行，见下面的说明）。 */
+const matchesIndexHash = (body, expected) =>
+  sha256(body) === expected || sha256(body.replace(/\r\n/g, '\n')) === expected;
+
+/**
+ * 校验：索引里的每一项在磁盘上都存在且哈希一致。
+ *
+ * ⚠️ 两处换行陷阱（都会让 Windows 上整库报"内容与索引不一致"，而语料一个字都没错）：
+ *   1. 剥 front matter 的正则必须认 `\r?\n` —— 只写 `\n` 的话 CRLF 文件根本剥不掉，
+ *      正文里混进 front matter，哈希必然不对（模块那边用的是 `\r?\n`，这里对齐）；
+ *   2. 索引的 `sha256` 是按**仓库里的内容**算的，而 `core.autocrlf=true` 的检出会把
+ *      一部分文件的 LF 变成 CRLF。实测：原样匹配 65 条、归一成 LF 后匹配 83 条，
+ *      `65 + 83 = 148` 恰好互补（仓库里本来就有一部分文件是混合换行）。
+ *      两种取其一即通过；真改过内容的文件两种都对不上，判据没有被放宽。
+ *      —— 模块里的 `KnowledgeService.check()` 用同一套规则，两处结论必须一致。
+ */
 function check(index) {
   const problems = [];
   for (const category of index.categories) {
@@ -717,8 +732,8 @@ function check(index) {
         problems.push(`文件不存在：${item.path}`);
         continue;
       }
-      const body = fs.readFileSync(file, 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').trim();
-      if (sha256(body) !== item.sha256) problems.push(`内容与索引不一致：${item.path}`);
+      const body = fs.readFileSync(file, 'utf8').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
+      if (!matchesIndexHash(body, item.sha256)) problems.push(`内容与索引不一致：${item.path}`);
     }
   }
   return problems;

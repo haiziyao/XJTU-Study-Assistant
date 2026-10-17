@@ -16,35 +16,11 @@
         <a id="back-to-notes" class="note-editor-back" href="../../?view=notes">← 笔记</a>
         <input id="note-title" class="note-editor-title" placeholder="未命名笔记" aria-label="笔记标题" maxlength="200" />
         <span id="save-status" class="note-editor-status" role="status" aria-live="polite">新笔记 · 尚未保存</span>
-        <details id="note-properties" class="note-editor-properties">
-          <summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h4m4 0h8M4 17h10m4 0h2M8 4v6m4-6v6m2 4v6m4-6v6" /></svg>属性</summary>
-          <section class="note-editor-properties-panel" aria-label="笔记属性">
-            <label for="note-tags">标签</label>
-            <input id="note-tags" class="note-editor-tags" placeholder="用逗号分隔，例如：高数，复习" aria-label="笔记标签" />
-            <label for="note-folder">目录</label>
-            <input id="note-folder" placeholder="例如：大二上/高等数学" />
-            <label for="note-aliases">别名</label>
-            <input id="note-aliases" placeholder="用逗号分隔" />
-            <div class="note-editor-property-grid">
-              <label>笔记状态<select id="note-workflow-status"><option value="draft">草稿</option><option value="unorganized">未整理</option><option value="processing">整理中</option><option value="ready">已整理</option><option value="archived">已归档</option></select></label>
-              <label>课程<input id="note-course" placeholder="高等数学" /></label>
-              <label>章节<input id="note-chapter" placeholder="第三章" /></label>
-              <label>类型<select id="note-type"><option value="">普通笔记</option><option>课堂笔记</option><option>错题</option><option>实验报告</option><option>论文阅读</option><option>每日笔记</option></select></label>
-              <label>学习进度<select id="note-study-status"><option value="">未设置</option><option>学习中</option><option>待复习</option><option>已掌握</option></select></label>
-              <label>掌握程度<input id="note-mastery" type="number" min="0" max="5" placeholder="0–5" /></label>
-              <label>复习日期<input id="note-review-date" type="date" /></label>
-            </div>
-            <label class="note-editor-favorite"><input id="note-favorite" type="checkbox" /> 收藏这篇笔记</label>
-            <div id="note-attachments" class="note-editor-attachments" hidden></div>
-            <label for="editor-appearance">外观</label>
-            <select id="editor-appearance" aria-label="颜色模式"><option value="system">跟随系统</option><option value="light">白天模式</option><option value="dark">夜间模式</option></select>
-            <span class="note-editor-property-hint">Markdown 笔记</span>
-          </section>
-        </details>
         <button type="button" id="theme-toggle" class="theme-toggle" data-compact="true" aria-label="切换白天夜间模式">☾</button>
         <button type="button" id="save-note" class="primary-btn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>保存</button>
       </header>
       <div id="editor-error" class="note-editor-error" role="alert" hidden></div>
+      <div id="note-attachments" class="note-editor-attachments note-editor-attachments-bar" hidden></div>
       <div class="note-editor-tools" role="toolbar" aria-label="Markdown 格式工具">
         <div class="note-editor-tool-group">
           <button type="button" id="undo-note" aria-label="撤销" title="撤销（Ctrl / ⌘ + Z）" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5-5 5 5 5M4 10h10a5 5 0 0 1 0 10h-3" /></svg></button>

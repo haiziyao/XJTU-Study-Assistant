@@ -48,11 +48,10 @@ test('笔记 Provider 与新富文本模块结合：摘要关联日程，正文�
 
   assert.match(mount.textContent, /高等数学课堂笔记/);
   assert.match(mount.textContent, /08:00–09:40 高等数学 · A101/);
-  const previewButton = mount.querySelectorAll('button').find((button) => button.textContent === '查看笔记');
-  assert.ok(previewButton, 'Provider 声明能力后应出现查看笔记入口');
-  await previewButton.listeners.click[0]();
+  assert.equal(markdownReads, 0, '正文只能在用户单击笔记后按需读取');
+  mount.querySelector('.notes-card').listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(markdownReads, 1);
-  const preview = app.context.document.body.querySelector('.notes-note-viewer');
+  const preview = mount.querySelector('.notes-detail-preview');
   assert.match(preview.innerHTML, /<strong>洛必达法则<\/strong>/);
   assert.doesNotMatch(JSON.stringify(summary()), /洛必达法则/, '正文不进入 NoteSummary');
 });
@@ -124,9 +123,8 @@ test('上传限制在调用 Provider 前生效，查看纯文本不会注入 HTM
   assert.equal(uploads, 0);
   const result = await notes.read('note-1');
   assert.equal(result.format, 'text'); assert.equal(result.text, '<img src=x onerror=alert(1)>');
-  const viewButton = mount.querySelectorAll('button').find((button) => button.textContent === '查看笔记');
-  await viewButton.listeners.click[0]();
-  const viewer = app.context.document.body.querySelector('.notes-note-viewer');
+  mount.querySelector('.notes-card').listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 5));
+  const viewer = mount.querySelector('.notes-detail-preview');
   assert.equal(viewer.textContent, '<img src=x onerror=alert(1)>');
   assert.equal(viewer.innerHTML, '', '纯文本不得进入 innerHTML');
 });
@@ -177,6 +175,48 @@ test('随手拍挂载点按 ID 幂等更新，并拒绝图片或 OCR 载荷', as
   assert.throws(() => notes.ingestSnapshot({ ...summary(), files: [{ name: 'note.md' }] }), /只接受笔记摘要/);
 });
 
+test('右击笔记卡片可查看并保存属性，正文编辑器不再承担属性管理', async () => {
+  const app = bootRenderer({ api, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
+  const mount = await app.render('notes');
+  const notes = app.PCModules.getService('notes');
+  let patch; let opens = 0;
+  const original = summary({
+    folder: '数学/高数', aliases: ['微积分'], favorite: false,
+    properties: { course: '高等数学', chapter: '第一章', type: '课堂笔记', status: '学习中', custom: '必须保留' },
+  });
+  await notes.connectProvider({
+    capabilities: () => ({ edit: true, manage: true }),
+    listNotes: () => [original],
+    openNote: () => { opens += 1; }, deleteNote: async () => ({}),
+    updateNote: async (id, input) => { patch = input; return { ...original, ...input, updatedAt: '2026-10-14T06:00:00.000Z' }; },
+  });
+
+  const card = mount.querySelector('.notes-card');
+  await card.listeners.dblclick[0](); assert.equal(opens, 1, '双击笔记卡片应直接打开编辑器');
+  let prevented = false;
+  card.listeners.contextmenu[0]({ preventDefault() { prevented = true; }, stopPropagation() {}, clientX: 100, clientY: 100 });
+  assert.equal(prevented, true);
+  const menuText = app.context.document.body.querySelector('.notes-card-menu').textContent;
+  assert.match(menuText, /编辑笔记/); assert.match(menuText, /收藏/); assert.match(menuText, /移至回收站/); assert.match(menuText, /目录/); assert.match(menuText, /创建/);
+  assert.doesNotMatch(menuText, /查看完整笔记/, '右侧已经提供正文预览，右键菜单不应保留重复入口');
+  const propertiesAction = app.context.document.body.querySelectorAll('button').find((button) => button.textContent === '查看或修改属性');
+  assert.ok(propertiesAction, '右键菜单应提供属性入口'); await propertiesAction.listeners.click[0]();
+  assert.match(app.context.document.body.textContent, /笔记属性 · 高等数学课堂笔记/);
+  const folder = app.context.document.body.querySelector('.notes-properties-folder');
+  const aliases = app.context.document.body.querySelector('.notes-properties-aliases');
+  const studyStatus = app.context.document.body.querySelector('.notes-properties-study-status');
+  assert.equal(folder.value, '数学/高数'); assert.equal(aliases.value, '微积分'); assert.match(studyStatus.textContent, /学习中/);
+  folder.value = '数学/期末复习'; aliases.value = '高数，微积分'; studyStatus.value = '待复习';
+  app.context.document.body.querySelector('.notes-properties-favorite').checked = true;
+  await app.context.document.body.querySelector('.notes-properties-save').listeners.click[0]();
+  assert.equal(patch.folder, '数学/期末复习');
+  assert.deepEqual(Array.from(patch.aliases), ['高数', '微积分']);
+  assert.equal(patch.favorite, true); assert.equal(patch.properties.status, '待复习');
+  assert.equal(patch.properties.custom, '必须保留', '界面不认识的自定义属性不能被覆盖掉');
+  assert.equal(patch.expectedUpdatedAt, NOW);
+  assert.match(mount.textContent, /数学\/期末复习/);
+});
+
 test('替换 Provider 会取消旧订阅', async () => {
   const app = bootRenderer({ api, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
   await app.render('notes');
@@ -189,22 +229,32 @@ test('替换 Provider 会取消旧订阅', async () => {
 
 test('三维知识星系支持旋转、缩放、节点拖动与原位预览，并在拖动后防止误开笔记', async () => {
   const app = bootRenderer({ api, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
-  const mount = await app.render('notes'); const notes = app.PCModules.getService('notes'); let opens = 0;
+  const mount = await app.render('notes'); const notes = app.PCModules.getService('notes'); let opens = 0; let graphFilters;
   await notes.connectProvider({
-    capabilities: () => ({}), listNotes: () => [summary(), summary({ id: 'note-2', title: '线性代数' }), summary({ id: 'note-3', title: '概率论' })],
-    graph: async () => ({ nodes: [{ id: 'note-1', title: '高等数学', favorite: true }, { id: 'note-2', title: '线性代数' }, { id: 'note-3', title: '概率论' }], edges: [{ source: 'note-1', target: 'note-2' }, { source: 'note-2', target: 'note-3' }] }),
+    capabilities: () => ({}), listNotes: () => [summary(), summary({ id: 'note-2', title: '线性代数' }), summary({ id: 'note-3', title: '概率论' }), summary({ id: 'note-4', title: '大学物理' }), summary({ id: 'note-5', title: '未连接笔记' })],
+    graph: async (filters) => { graphFilters = filters; return { nodes: [{ id: 'note-1', title: '高等数学', favorite: true }, { id: 'note-2', title: '线性代数' }, { id: 'note-3', title: '概率论' }, { id: 'note-4', title: '大学物理' }, { id: 'note-5', title: '未连接笔记' }], edges: [{ source: 'note-1', target: 'note-2' }, { source: 'note-2', target: 'note-3' }, { source: 'note-1', target: 'note-4' }] }; },
     openNote() { opens += 1; }, createCanvas: async () => ({}),
   });
   const graphTab = mount.querySelectorAll('button').find((button) => button.textContent === '知识图谱'); await graphTab.listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(Object.keys(graphFilters), [], '知识图谱首次打开应默认请求全部笔记，而不是限制为当前笔记两层');
   const stage = mount.querySelector('.notes-graph-stage'); const satellite = mount.querySelector('.notes-graph-node');
   assert.equal(stage.querySelector('.notes-graph-orbits'), null, '背景不得显示虚线同心轨道'); assert.match(stage.textContent, /滚轮缩放/); assert.equal(stage.querySelector('.notes-graph-planet'), null, '中心不得再显示实体星球');
-  assert.match(mount.querySelector('.notes-graph-controls').textContent, /标签圆形大小/); assert.match(mount.querySelector('.notes-graph-controls').textContent, /连线长度/); assert.match(mount.querySelector('.notes-graph-legend').textContent, /关系层级/);
+  const graphNodes = mount.querySelectorAll('.notes-graph-node'); assert.equal(graphNodes.filter((node) => node.dataset.motion === 'core').length, 1); assert.equal(graphNodes.filter((node) => node.dataset.motion === 'orbit').length, 3, '与核心连通的标签应作为卫星环绕'); const driftingNode = graphNodes.find((node) => node.dataset.motion === 'drift'); assert.ok(driftingNode, '与核心不连通的标签应留在星系内漂浮而不参与环绕'); const driftingX = Number(/translate\(([-\d.]+)/.exec(driftingNode.getAttribute('transform'))?.[1]); assert.ok(driftingX > 80 && driftingX < 820, '未连接标签不应被放到整张图边缘');
+  assert.doesNotMatch(mount.querySelector('.notes-graph-controls').textContent, /标签圆形大小/, '全局面板不应再放置节点大小'); assert.match(mount.querySelector('.notes-graph-controls').textContent, /连线长度/); assert.match(mount.querySelector('.notes-graph-legend').textContent, /同层同色/);
+  const levelOneNodes = mount.querySelectorAll('.notes-graph-node').filter((node) => node.dataset.level === '1'); assert.equal(levelOneNodes.length, 2); const levelOneFills = levelOneNodes.map((node) => node.querySelectorAll('circle').find((circle) => circle.className === '').style.getPropertyValue('fill')); assert.equal(levelOneFills[0], levelOneFills[1], '同一关系层级默认必须使用相同颜色');
+  let contextPrevented = false; satellite.listeners.contextmenu[0]({ clientX: 120, clientY: 100, preventDefault() { contextPrevented = true; }, stopPropagation() {} }); assert.equal(contextPrevented, true); const graphMenu = stage.querySelector('.notes-graph-menu'); assert.match(graphMenu.textContent, /标签圆形大小/); assert.match(graphMenu.textContent, /应用到第 0 层全部标签/); assert.match(graphMenu.textContent, /查看或修改笔记属性/);
+  const circle = satellite.querySelectorAll('circle').find((item) => item.className === ''); const initialRadius = Number(circle.getAttribute('r')); const nodeSize = graphMenu.querySelector('.notes-graph-node-size'); nodeSize.value = '1.8'; nodeSize.listeners.input[0](); assert.ok(Number(circle.getAttribute('r')) > initialRadius, '右键菜单应能单独修改节点大小'); const nodeColor = graphMenu.querySelector('.notes-graph-node-color'); nodeColor.value = '#ff3366'; nodeColor.listeners.input[0](); assert.equal(circle.style.getPropertyValue('fill'), '#ff3366', '右键菜单应能单独修改节点颜色');
+  levelOneNodes[0].listeners.contextmenu[0]({ clientX: 180, clientY: 120, preventDefault() {}, stopPropagation() {} }); const levelMenu = stage.querySelector('.notes-graph-menu'); const levelColor = levelMenu.querySelector('.notes-graph-node-color'); levelColor.value = '#12aabb'; levelColor.listeners.input[0](); const applyLevel = levelMenu.querySelectorAll('button').find((button) => /应用到第 1 层/.test(button.textContent)); applyLevel.listeners.click[0](); const updatedLevelFills = levelOneNodes.map((node) => node.querySelectorAll('circle').find((item) => item.className === '').style.getPropertyValue('fill')); assert.deepEqual(updatedLevelFills, ['#12aabb', '#12aabb'], '自定义层级颜色后同层所有标签必须一起更新');
   let nativeDragPrevented = false; stage.listeners.dragstart[0]({ preventDefault() { nativeDragPrevented = true; } }); assert.equal(nativeDragPrevented, true, '应禁止浏览器原生拖拽以避免禁用光标和文字残影');
   const beforeZoom = satellite.getAttribute('transform'); stage.listeners.wheel[0]({ deltaY: -100, preventDefault() {}, target: stage }); assert.notEqual(satellite.getAttribute('transform'), beforeZoom);
-  const beforeRotate = satellite.getAttribute('transform'); stage.listeners.pointerdown[0]({ button: 0, clientX: 10, clientY: 10, pointerId: 1, target: stage, preventDefault() {} }); assert.equal(stage.classList.contains('is-rotating'), true); stage.listeners.pointermove[0]({ clientX: 420, clientY: 35, pointerId: 1, preventDefault() {} }); stage.listeners.pointerup[0]({ pointerId: 1 }); assert.equal(stage.classList.contains('is-rotating'), false); assert.notEqual(satellite.getAttribute('transform'), beforeRotate); assert.equal(opens, 0, '旋转知识星球时不得误开笔记');
-  const translateX = (value) => Number(/translate\(([-\d.]+)/.exec(value)?.[1]); const beforeDrag = satellite.getAttribute('transform'); const beforeDragX = translateX(beforeDrag); satellite.listeners.pointerdown[0]({ button: 0, clientX: 100, clientY: 100, pointerId: 2, preventDefault() {}, stopPropagation() {} }); satellite.listeners.pointermove[0]({ clientX: 135, clientY: 120, pointerId: 2, preventDefault() {} }); satellite.listeners.pointerup[0]({ pointerId: 2 }); const afterDrag = satellite.getAttribute('transform'); assert.notEqual(afterDrag, beforeDrag); assert.ok(translateX(afterDrag) > beforeDragX, '即使图谱已转到背面，鼠标向右拖动时节点在屏幕上也必须向右移动'); assert.equal(opens, 0, '拖动卫星时不得误开笔记');
+  const rotatingNode = graphNodes.find((node) => node.dataset.motion === 'orbit'); const beforeRotate = rotatingNode.getAttribute('transform'); stage.listeners.pointerdown[0]({ button: 0, clientX: 10, clientY: 10, pointerId: 1, target: stage, preventDefault() {} }); assert.equal(stage.classList.contains('is-rotating'), true); stage.listeners.pointermove[0]({ clientX: 420, clientY: 35, pointerId: 1, preventDefault() {} }); stage.listeners.pointerup[0]({ pointerId: 1 }); assert.equal(stage.classList.contains('is-rotating'), false); assert.notEqual(rotatingNode.getAttribute('transform'), beforeRotate); assert.equal(opens, 0, '旋转知识星球时不得误开笔记');
+  const translateX = (value) => Number(/translate\(([-\d.]+)/.exec(value)?.[1]); const beforeDrag = satellite.getAttribute('transform'); const beforeDragX = translateX(beforeDrag); const orbitNode = graphNodes.find((node) => node.dataset.motion === 'orbit'); const orbitBeforeCoreDrag = orbitNode.getAttribute('transform'); satellite.listeners.pointerdown[0]({ button: 0, clientX: 100, clientY: 100, pointerId: 2, preventDefault() {}, stopPropagation() {} }); satellite.listeners.pointermove[0]({ clientX: 135, clientY: 120, pointerId: 2, preventDefault() {} }); const orbitDuringCoreDrag = orbitNode.getAttribute('transform'); satellite.listeners.pointerup[0]({ pointerId: 2 }); const afterDrag = satellite.getAttribute('transform'); assert.notEqual(afterDrag, beforeDrag); assert.ok(translateX(afterDrag) > beforeDragX, '即使图谱已转到背面，鼠标向右拖动时节点在屏幕上也必须向右移动'); assert.ok(Math.abs(translateX(orbitDuringCoreDrag) - translateX(orbitBeforeCoreDrag)) < 1, '拖动核心天体时不得把整个卫星群刚性平移，卫星只允许保留自然漂移并由连线弹性重新排布'); assert.equal(opens, 0, '拖动核心天体时不得误开笔记');
   satellite.listeners.keydown[0]({ key: 'Enter' }); await new Promise((resolve) => setTimeout(resolve, 1)); assert.equal(opens, 0, '轻触只应显示原位预览，不得直接跳转'); assert.ok(stage.querySelector('.notes-graph-preview'));
   const edit = stage.querySelectorAll('button').find((button) => button.textContent === '修改笔记'); await edit.listeners.click[0](); assert.equal(opens, 1, '只有点击修改笔记按钮才进入笔记页面');
+  const dimension = mount.querySelector('.notes-graph-dimension'); assert.match(dimension.textContent, /三维星系/); assert.match(dimension.textContent, /二维海洋/); dimension.value = '2d'; dimension.listeners.change[0](); await new Promise((resolve) => setTimeout(resolve, 5));
+  const ocean = mount.querySelector('.notes-graph-stage'); assert.equal(ocean.classList.contains('is-ocean'), true); assert.doesNotMatch(ocean.textContent, /正在生成知识图谱/, '复用已生成图谱时必须清除加载占位'); assert.match(ocean.textContent, /核心居中/); assert.match(ocean.textContent, /暂停漂流/); const oceanCore = ocean.querySelector('.notes-graph-node'); assert.match(oceanCore.getAttribute('transform'), /translate\(450\.00 280\.00\)/, '二维海洋中连接最核心的标签首次打开应位于中央'); ocean.listeners.pointerdown[0]({ button: 0, clientX: 20, clientY: 20, pointerId: 9, target: ocean, preventDefault() {} }); assert.equal(ocean.classList.contains('is-rotating'), false, '二维模式不得旋转场景');
+  const coreBeforeDrag = translateX(oceanCore.getAttribute('transform')); oceanCore.listeners.pointerdown[0]({ button: 0, clientX: 100, clientY: 100, pointerId: 10, preventDefault() {}, stopPropagation() {} }); oceanCore.listeners.pointermove[0]({ clientX: 128, clientY: 112, pointerId: 10, preventDefault() {} }); oceanCore.listeners.pointerup[0]({ pointerId: 10 }); assert.ok(translateX(oceanCore.getAttribute('transform')) > coreBeforeDrag, '二维海洋的核心标签也必须可以自由拖动');
+  const backToGalaxy = mount.querySelector('.notes-graph-dimension'); backToGalaxy.value = '3d'; backToGalaxy.listeners.change[0](); await new Promise((resolve) => setTimeout(resolve, 5)); assert.doesNotMatch(mount.querySelector('.notes-graph-stage').textContent, /正在生成知识图谱/, '切回三维星系也不得残留加载占位');
 });
 
 test('Canvas 曲线随拖动实时更新，连线与卡片均可右键管理并安全删除', async () => {

@@ -57,11 +57,18 @@ function addYearsKey(key, delta) {
  */
 async function setTodoCompleted(id, completed) {
   try {
-    await PC.api(`/todos/${id}/completed`, { method: 'POST', body: { completed } });
-    PC.toast(completed ? '已完成' : '已恢复待办');
+    const result = await PC.api(`/todos/${id}/completed`, { method: 'POST', body: { completed } });
+    const cascaded = result?.cascaded ?? { completed: [], reverted: [] };
+    // 完成父会连带完成所有后代（服务端级联）：必须把那 N 条说出来，
+    // 否则用户只看到父行打勾，不知道子任务也被一起勾掉了。
+    if (completed && cascaded.completed?.length) PC.toast(`已完成，并连带完成 ${cascaded.completed.length} 个子任务`);
+    else if (!completed && cascaded.reverted?.length) PC.toast(`已恢复待办，并恢复 ${cascaded.reverted.length} 个连带完成的子任务`);
+    else PC.toast(completed ? '已完成' : '已恢复待办');
     PC.refresh();
+    return result;
   } catch (error) {
     PC.toast(error.message);
+    return null;
   }
 }
 
@@ -881,7 +888,13 @@ const todoView = {
 
   render(ctx) {
     ctx.mount.innerHTML = '';
+    todoState();
     ctx.mount.appendChild(todoToolbar());
+    // 分类筛选条在**列表之上**、与状态分段分开：分类是"看哪一类"，
+    // 状态是"看哪种完成度"，两者可以叠加（例如「期末复习」+「未完成」）。
+    const categoryBar = mk('div', 'todo-cat-bar');
+    ctx.mount.appendChild(categoryBar);
+    paintTodoCategoryBar(categoryBar);
     const list = mk('div', 'todo-list');
     ctx.mount.appendChild(list);
     renderTodoList(list);
@@ -934,6 +947,9 @@ function todoToolbar() {
     const body = { title: text, deadline: date.value || PCUtil.todayKey() };
     const parsed = Number(hours.value);
     if (Number.isFinite(parsed) && parsed > 0) body.estimatedHours = parsed;
+    // 正在筛某个分类时，快速添加默认就归到这个分类：否则新加的那条会立刻从列表里"消失"
+    const activeCategory = todoState().category;
+    if (activeCategory !== null) body.category = activeCategory;
     try {
       await PC.api('/todos', { method: 'POST', body });
       title.value = '';
@@ -974,21 +990,92 @@ function todoToolbar() {
 }
 
 /**
- * 待办列表：数据全部来自 `/todos`（待办是独立集合，不再从 schedules 里挑 allDay 行）。
+ * 待办页自己的视图状态（分类筛选 + 折叠的父任务）。
  *
- * 分组：今天 / 本周 / 未完成（更远的）/ 已完成 —— 与参考实现的 TodoPanel 一致。
+ * 为什么在这里补默认值而不是改 shell/app.js：`state.todo` 由外壳创建，本视图是它的
+ * 唯一使用者；外壳不该知道"待办还有分类筛选"这种领域细节（新增功能不回头改外壳）。
+ */
+function todoState() {
+  const state = PC.state.todo;
+  if (state.category === undefined) state.category = null; // null = 全部分类，'' = 未分类
+  if (!state.collapsed || typeof state.collapsed !== 'object') state.collapsed = {}; // 默认全部展开
+  return state;
+}
+
+/**
+ * 分类筛选条：全部 / 未分类 / 各分类（带条数）。
+ *
+ * 计数来自 `GET /todos/categories`（而不是把当前列表自己数一遍）：
+ * 只筛了一个分类时，列表里没有别的分类，自己数就永远只能数出当前这一栏。
+ * 条数用 `total`（该分类共几条）；`open` 放进 title 里，鼠标悬停能看到还剩几条。
+ */
+async function paintTodoCategoryBar(bar) {
+  const state = todoState();
+  let items = [];
+  try {
+    items = (await PC.api('/todos/categories')).items ?? [];
+  } catch {
+    // 分类条拉不到不该把整个待办页拖垮：退化成只有「全部 / 未分类」
+    items = [];
+  }
+
+  const total = items.reduce((sum, item) => sum + (item.total ?? 0), 0);
+  const unknown = items.find((item) => item.name === '') ?? { total: 0, open: 0 };
+
+  const scroll = mk('div', 'tcb-scroll');
+  const chip = (name, label, count, open) => {
+    const active = state.category === name;
+    const button = mk('button', `cat-chip${active ? ' active' : ''}`, `${label} ${count}`);
+    button.type = 'button';
+    button.dataset.category = name ?? '__all__';
+    button.title = `${label}：共 ${count} 条${open === undefined ? '' : ` · 未完成 ${open} 条`}`;
+    button.addEventListener('click', () => {
+      // 再点一次当前分类 = 取消筛选（不用专门做一个"清除"按钮）
+      state.category = state.category === name && name !== null ? null : name;
+      PC.refresh();
+    });
+    scroll.appendChild(button);
+  };
+
+  chip(null, '全部', total);
+  chip('', '未分类', unknown.total ?? 0, unknown.open ?? 0);
+  for (const item of items) if (item.name) chip(item.name, item.name, item.total, item.open);
+
+  bar.replaceChildren(mk('span', 'tcb-label', '分类'), scroll);
+}
+
+/** 父任务是否被收起（默认展开；只有显式点过收起的才在 collapsed 里）。 */
+function todoCollapsed(id) {
+  return Boolean(todoState().collapsed[id]);
+}
+
+/**
+ * 待办列表：数据全部来自 `/todos?tree=1`（待办是独立集合，不再从 schedules 里挑 allDay 行）。
+ *
+ * 分组顺序：**分类 → 顶层待办 → 子待办（缩进，最多 3 层）**。
+ * 以前按截止日分桶；有了父子关系之后再按截止日平铺，子任务会和父任务被拆到不同桶里，
+ * 用户看不出"这几步属于同一件事"。截止日仍显示在每行 meta 里，信息没丢。
  */
 async function renderTodoList(host) {
   const state = PC.state;
+  const todo = todoState();
   const today = PCUtil.todayKey();
   const weekStart = PCUtil.startOfWeek(today);
   const weekEnd = PCUtil.addDays(weekStart, 6);
 
-  let query = '/todos?limit=300';
-  if (state.todo.filter === 'today') query = `/todos?date=${today}`;
-  else if (state.todo.filter === 'week') query = `/todos?from=${weekStart}&to=${weekEnd}`;
-  else if (state.todo.filter === 'overdue') query = '/todos?overdue=1';
-  else if (state.todo.filter === 'done') query = '/todos?completed=true&limit=100';
+  const params = new URLSearchParams({ tree: '1', limit: '300' });
+  if (todo.filter === 'today') params.set('date', today);
+  else if (todo.filter === 'week') {
+    params.set('from', weekStart);
+    params.set('to', weekEnd);
+  } else if (todo.filter === 'overdue') params.set('overdue', '1');
+  else if (todo.filter === 'done') {
+    params.set('completed', 'true');
+    params.set('limit', '100');
+  }
+  // `category=''` 是"未分类"这个具体的桶，必须原样带上（不能被 URLSearchParams 吞掉）
+  if (todo.category !== null && todo.category !== undefined) params.set('category', todo.category);
+  const query = `/todos?${params.toString()}`;
 
   host.innerHTML = '';
   host.appendChild(mk('div', 'loading', '加载中…'));
@@ -1002,41 +1089,56 @@ async function renderTodoList(host) {
     return;
   }
 
-  const items = payload.items ?? [];
+  const roots = payload.items ?? [];
   const stats = payload.stats ?? {};
 
   host.innerHTML = '';
-  if (!items.length) {
+  if (!roots.length) {
     host.appendChild(emptyBox(todoEmptyText(state.todo.filter)));
     renderTodoFooter(host, stats);
     return;
   }
 
-  // 分组顺序：已逾期 -> 今天到期 -> 本周到期 -> 未完成 -> 已完成。
-  // 逾期条目必须单独一组：混在「今天到期」里等于在标题上说假话（截图里就踩到了）。
-  const pending = items.filter((item) => !item.completed);
-  const buckets = [
-    ['overdue', '已逾期', pending.filter((item) => item.isOverdue)],
-    ['today', '今天到期', pending.filter((item) => !item.isOverdue && item.deadline <= today)],
-    ['week', '本周到期', pending.filter((item) => item.deadline > today && item.deadline <= weekEnd)],
-    ['later', '未完成', pending.filter((item) => item.deadline > weekEnd)],
-    ['done', '已完成', items.filter((item) => item.completed)],
-  ];
-  for (const [key, label, list] of buckets) {
-    if (!list.length) continue;
-    const header = mk('div', 'group-head');
-    header.append(mk('span', 'gh-date', label), mk('span', 'gh-count', `${list.length} 条`));
-    host.appendChild(header);
+  // 分类分组：条数多的在前；并列时未分类沉底（与 /todos/categories 的口径一致）
+  const groups = new Map();
+  for (const item of roots) {
+    const name = item.category ?? '';
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(item);
+  }
+  const ordered = [...groups.entries()].sort((a, b) => {
+    if (b[1].length !== a[1].length) return b[1].length - a[1].length;
+    if (a[0] === '') return 1;
+    if (b[0] === '') return -1;
+    return a[0].localeCompare(b[0], 'zh-Hans-CN');
+  });
 
-    const rows = mk('div', 'rows');
-    const sorted = [...list].sort((a, b) =>
-      key === 'done' ? b.deadline.localeCompare(a.deadline) : a.deadline.localeCompare(b.deadline),
+  // 子任务总数要把孙辈也算进去（childCount 只算直接子级）
+  const countDescendants = (item) => (item.children ?? []).reduce((sum, child) => sum + 1 + countDescendants(child), 0);
+  for (const [name, list] of ordered) {
+    const header = mk('div', 'group-head');
+    const childTotal = list.reduce((sum, item) => sum + countDescendants(item), 0);
+    header.append(
+      mk('span', 'gh-date', name || '未分类'),
+      mk('span', 'gh-count', `${list.length} 条${childTotal ? ` · 含 ${childTotal} 个子任务` : ''}`),
     );
-    for (const item of sorted) rows.appendChild(todoRow(item));
+    host.appendChild(header);
+    const rows = mk('div', 'rows');
+    appendTodoTree(rows, list, 1);
     host.appendChild(rows);
   }
 
   renderTodoFooter(host, stats);
+}
+
+/** 递归渲染一棵待办树（最多 3 层：服务端已保证不会更深）。 */
+function appendTodoTree(rows, list, depth) {
+  for (const item of list) {
+    rows.appendChild(todoRow(item, depth));
+    const children = item.children ?? [];
+    if (!children.length || todoCollapsed(item.id)) continue;
+    appendTodoTree(rows, children, depth + 1);
+  }
 }
 
 /** 页脚：完成率与计划工时（口径来自 `/todos` 的 stats）。 */
@@ -1071,12 +1173,22 @@ const COMPLEXITY_COLOR = {
   heavy: 'var(--red)',
 };
 
-function todoRow(item) {
+/**
+ * 一行待办。
+ *
+ * `depth` 是层级（1 = 顶层，2 = 子，3 = 孙）：缩进只由 class 控制，
+ * 不用 inline style（CSP 是 `style-src 'self'`，行内样式会被浏览器拦掉）。
+ * 父行多两样东西：展开/收起箭头、`已完成子任务/子任务总数` 进度（如 2/3）。
+ */
+function todoRow(item, depth = 1) {
   const today = PCUtil.todayKey();
-  const row = mk('div', `todo-row priority-${item.priority ?? 0}`);
+  const row = mk('div', `todo-row priority-${item.priority ?? 0} todo-level-${depth}`);
   if (item.completed) row.classList.add('done');
   if (item.isOverdue) row.classList.add('overdue');
   if (item.isToday) row.classList.add('today');
+  if (item.hasChildren) row.classList.add('has-children');
+  // 被父任务连带完成的子任务：给一个轻标记，让"我没勾它、它怎么完成了"有答案
+  if (item.autoCompletedBy) row.classList.add('auto-done');
 
   const check = mk('button', 'check', item.completed ? '✓' : '');
   check.type = 'button';
@@ -1085,7 +1197,32 @@ function todoRow(item) {
 
   const main = mk('div', 'tr-main');
   const titleLine = mk('div', 'tr-title');
+
+  // 展开 / 收起：默认展开（`collapsed` 里没有它就是展开），只在有子任务时出现
+  if (item.hasChildren) {
+    const collapsed = todoCollapsed(item.id);
+    const toggle = mk('button', 'todo-parent-toggle', collapsed ? '▸' : '▾');
+    toggle.type = 'button';
+    toggle.title = collapsed ? `展开 ${item.childCount} 个子任务` : '收起子任务';
+    toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    toggle.addEventListener('click', () => {
+      const state = todoState();
+      if (collapsed) delete state.collapsed[item.id];
+      else state.collapsed[item.id] = true;
+      PC.refresh();
+    });
+    titleLine.appendChild(toggle);
+  }
+
   titleLine.appendChild(mk('span', null, item.title));
+  if (item.hasChildren) {
+    titleLine.appendChild(mk('span', 'todo-progress', `${item.childDoneCount}/${item.childCount}`));
+  }
+  if (item.autoCompletedBy) {
+    const tag = mk('span', 'tag auto', '连带完成');
+    tag.title = '由父任务完成时连带勾上（取消父的完成会恢复它）';
+    titleLine.appendChild(tag);
+  }
   if (item.priority === 2) titleLine.appendChild(mk('span', 'tag urgent', '紧急'));
   else if (item.isOverdue) titleLine.appendChild(mk('span', 'tag late', '逾期'));
   main.appendChild(titleLine);
@@ -1712,7 +1849,57 @@ function categoryPicker(kind, current) {
 }
 
 /**
- * 待办编辑器：标题 / 截止日 / 优先级 / 预估小时 / 备注 / 标签。
+ * 填「父待办」下拉的候选：顶层 + 第二层的待办（新任务挂上去最多成为第 3 层）。
+ *
+ * 排除自己与自己的后代 —— 服务端也会拦（PARENT_CYCLE），但界面不该先让人选出一个
+ * 注定失败的选项。层级用「·」前缀表达缩进，避免在 select 里堆一长串缩进空格。
+ */
+function loadTodoParentOptions(select, selfId, current) {
+  PC.api('/todos?tree=1&limit=300')
+    .then((payload) => {
+      const blocked = new Set();
+      const markBlocked = (node) => {
+        blocked.add(node.id);
+        for (const child of node.children ?? []) markBlocked(child);
+      };
+      const heightOf = (node) => {
+        const children = node.children ?? [];
+        return children.length ? 1 + Math.max(...children.map(heightOf)) : 1;
+      };
+      let selfHeight = 1;
+      const findSelf = (node) => {
+        if (node.id === selfId) {
+          markBlocked(node);
+          selfHeight = heightOf(node); // 自己下面还有几层，决定"还能往上挂多深"
+        }
+        for (const child of node.children ?? []) findSelf(child);
+      };
+      for (const root of payload.items ?? []) findSelf(root);
+
+      // 新任务（或叶子）能挂到第 2 层，成为第 3 层；本身带子树的只能挂到更浅的位置，
+      // 否则后代会被一起压到第 4 层（服务端也会 400，但界面不该先给一个注定失败的选项）。
+      const maxParentDepth = 3 - selfHeight;
+      const add = (nodes, depth) => {
+        if (depth > maxParentDepth) return;
+        for (const node of nodes) {
+          if (blocked.has(node.id)) continue; // 自己 / 后代：不能当父
+          if (node.id !== current) {
+            const prefix = depth > 1 ? `${'· '.repeat(depth - 1)}` : '';
+            select.appendChild(option(node.id, `${prefix}${node.title}`, false));
+          }
+          add(node.children ?? [], depth + 1);
+        }
+      };
+      add(payload.items ?? [], 1);
+      select.value = current;
+    })
+    .catch(() => {
+      // 拉不到候选时保留「无 / 当前父级」两项：不阻塞编辑其它字段
+    });
+}
+
+/**
+ * 待办编辑器：标题 / 截止日 / 优先级 / 预估小时 / 备注 / 标签 / 分类 / 父待办。
  * 标签用逗号或空格分隔的普通文本框，不引入额外依赖。
  */
 function todoForm(item, defaults) {
@@ -1751,6 +1938,47 @@ function todoForm(item, defaults) {
   const inline2 = mk('div', 'inline-2');
   inline2.append(field('预估工时（小时）', hours), field('标签', tags));
   wrap.appendChild(inline2);
+
+  /**
+   * 分类：自由输入 + 已有分类的 datalist 建议。
+   *
+   * 为什么不是下拉：分类是用户自己的词（"期末复习" / "实验室" / "英语六级"），
+   * 预设枚举会逼他改词；下拉又没法输入新分类。`<input list>` 两者兼得，
+   * 建议列表来自 `GET /todos/categories`，用户照样可以打一个新的。
+   */
+  const category = mk('input', 'f-todo-category');
+  category.type = 'text';
+  category.maxLength = 24;
+  category.value = data.category ?? '';
+  category.placeholder = '例如：期末复习（留空 = 未分类）';
+  category.setAttribute('list', 'todo-category-suggestions');
+  const datalist = mk('datalist');
+  datalist.id = 'todo-category-suggestions';
+  PC.api('/todos/categories')
+    .then((payload) => {
+      for (const row of payload.items ?? []) {
+        if (!row.name) continue; // 未分类不需要建议
+        const suggest = mk('option');
+        suggest.value = row.name;
+        datalist.appendChild(suggest);
+      }
+    })
+    .catch(() => {});
+
+  /**
+   * 父待办：只列**顶层与第二层**（再深就成第 4 层了，服务端会 400），
+   * 并排除自己与自己的后代（否则用户能选出一个环）。
+   * 候选项异步补进 select；编辑时先把"当前父级"放进去，避免加载期间保存把父级清空。
+   */
+  const parent = mk('select', 'f-parent');
+  parent.appendChild(option('', '（无：作为顶层待办）', !data.parentId));
+  if (data.parentId) parent.appendChild(option(data.parentId, '当前父待办', true));
+  loadTodoParentOptions(parent, data.id ?? null, data.parentId ?? '');
+
+  const inline3 = mk('div', 'inline-2');
+  inline3.append(field('分类', category), field('父待办', parent));
+  wrap.appendChild(inline3);
+  wrap.appendChild(datalist);
 
   const description = mk('textarea', 'f-desc');
   description.rows = 2;
@@ -1904,6 +2132,9 @@ function collectTodo(body) {
     deadline: body.querySelector('.f-deadline').value,
     priority: Number(body.querySelector('.f-priority').value),
     estimatedHours: Number.isFinite(hours) && hours > 0 ? hours : 1,
+    // 分类是自由文本（空串 = 未分类）；parentId 为空表示顶层
+    category: body.querySelector('.f-todo-category')?.value.trim() ?? '',
+    parentId: body.querySelector('.f-parent')?.value || null,
     tags: body
       .querySelector('.f-tags')
       .value.split(/[、,，\s]+/)

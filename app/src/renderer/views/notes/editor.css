@@ -13,21 +13,8 @@
 .note-editor-status[data-state='error'] { color: var(--red); }
 .note-editor-header .theme-toggle { width: 32px; height: 32px; padding: 0; border: 0; font-size: 19px; }
 .note-editor-header .primary-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 14px; min-height: 34px; white-space: nowrap; }
-.note-editor-properties { position: relative; flex: none; }
-.note-editor-properties summary { display: flex; align-items: center; gap: 6px; padding: 7px 8px; list-style: none; cursor: pointer; color: var(--fg-2); font-size: 12px; border-radius: 5px; }
-.note-editor-properties summary::-webkit-details-marker { display: none; }
-.note-editor-properties summary:hover, .note-editor-properties[open] summary { background: var(--bg-base); color: var(--fg); }
-.note-editor-properties summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.note-editor-properties-panel { position: absolute; right: 0; top: calc(100% + 10px); width: 290px; display: flex; flex-direction: column; gap: 9px; padding: 20px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg-surface); box-shadow: var(--shadow-2); }
-.note-editor-properties-panel label { color: var(--fg-3); font-size: 12px; }
-.note-editor-properties-panel label:not(:first-child) { margin-top: 8px; }
-.note-editor-tags, .note-editor-properties-panel select, .note-editor-properties-panel input { font-size: 13px; width: 100%; }
-.note-editor-property-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
-.note-editor-property-grid label { display: grid; gap: 5px; margin: 0 !important; }
-.note-editor-favorite { display: flex !important; align-items: center; gap: 7px; }
-.note-editor-favorite input { width: auto; }
+.note-editor-attachments-bar { flex: none; margin: 8px 14px 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-surface); }
 .note-editor-attachments { color: var(--fg-3); font-size: 12px; overflow-wrap: anywhere; }
-.note-editor-property-hint { margin-top: 8px; color: var(--fg-3); font-size: 12px; }
 .note-editor-error { flex: none; padding: 10px 20px; color: var(--red); background: color-mix(in srgb, var(--red) 7%, var(--bg-surface)); border-bottom: 1px solid color-mix(in srgb, var(--red) 30%, var(--line)); }
 .note-editor-tools { display: flex; align-items: center; gap: 8px; flex: none; padding: 5px 20px; border-bottom: 1px solid var(--line); }
 .note-editor-tool-group { display: flex; align-items: center; gap: 2px; border-right: 1px solid var(--line); padding-right: 8px; }
@@ -99,8 +86,6 @@
   .note-editor-header { flex-wrap: wrap; }
   .note-editor-title { flex-basis: calc(100% - 95px); }
   .note-editor-status { margin-right: auto; max-width: none; }
-  .note-editor-properties { position: static; }
-  .note-editor-properties-panel { left: 16px; right: 16px; top: 100%; width: auto; }
   .note-editor-workspace { grid-template-columns: 1fr; overflow: auto; }
   .note-editor-pane { min-height: 40dvh; }
   .note-editor-source { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -111,7 +96,7 @@
   .note-editor-shortcut { display: none; }
 }
 @media (pointer: coarse) {
-  .note-editor-tools button, .note-editor-properties summary, .note-editor-header .theme-toggle, .note-editor-header .primary-btn { min-width: 44px; min-height: 44px; }
+  .note-editor-tools button, .note-editor-header .theme-toggle, .note-editor-header .primary-btn { min-width: 44px; min-height: 44px; }
 }
 @media (forced-colors: active) {
   .note-editor-highlight { display: none; }

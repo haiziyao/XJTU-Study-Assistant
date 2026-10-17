@@ -1331,3 +1331,158 @@
 .day-festival {
   color: var(--blue);
 }
+
+/* ====================================================== 待办：分类筛选条 + 父子分级 */
+/* 2026-10 追加。两条硬约束：
+   ① CSP 是 `style-src 'self'`，缩进/宽度一律用 class，不写行内 style；
+   ② 手机上分类条**横向滚动**，绝不能把页面撑宽（分类名最长 24 字）。 */
+
+.todo-cat-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+  padding: 8px 14px 2px;
+}
+
+.tcb-label {
+  flex: none;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+/* 外面这层负责滚动：`min-width: 0` 是关键，否则 flex 子项会按内容宽度撑开容器 */
+.tcb-scroll {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+
+.cat-chip {
+  flex: 0 0 auto;
+  /* 单个超长分类名最多占屏幕的 60%：不设上限时它会把整个滚动区撑出去，
+     手机上看起来就像"页面横向溢出了" */
+  max-width: min(60vw, 240px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg-surface);
+  color: var(--fg-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  transition: background var(--t), border-color var(--t), color var(--t);
+}
+
+.cat-chip:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.cat-chip.active {
+  background: rgba(108, 140, 255, 0.16);
+  border-color: rgba(108, 140, 255, 0.55);
+  color: var(--blue);
+}
+
+/* --- 父子缩进：最多 3 层（父 / 子 / 孙）。用 margin-left + 内阴影做"连接线"，
+       不动 grid 列宽，也不覆盖优先级/今天那几条左边框。 --- */
+
+.todo-row.todo-level-2 {
+  margin-left: 18px;
+  box-shadow: inset 2px 0 0 rgba(108, 140, 255, 0.28);
+}
+
+.todo-row.todo-level-3 {
+  margin-left: 36px;
+  box-shadow: inset 2px 0 0 rgba(108, 140, 255, 0.18);
+}
+
+/* 子任务行不需要再抢视觉焦点：底色略淡一档（层级一眼能分辨，但不会挤成一坨） */
+.todo-row.todo-level-2,
+.todo-row.todo-level-3 {
+  background: color-mix(in srgb, var(--bg-surface) 78%, var(--bg-base));
+}
+
+/* 展开 / 收起箭头：默认 ▾（展开），收起时 ▸ */
+.todo-parent-toggle {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.todo-parent-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* 父行进度：2/3 = 3 个子任务里完成 2 个 */
+.todo-progress {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(108, 140, 255, 0.35);
+  background: rgba(108, 140, 255, 0.12);
+  color: var(--blue);
+  font-size: 11px;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 被父任务连带完成的子任务：一个安静的小标（长标题先让位给省略号） */
+.tag.auto {
+  color: var(--blue);
+  border-color: rgba(108, 140, 255, 0.4);
+}
+
+/* 窄屏（协作者已把两栏断点改到 900px）：分类条照样横滚，
+   缩进减半 —— 390px 的屏幕上 36px 缩进等于吃掉标题十分之一的宽度。 */
+@media (max-width: 900px) {
+  .todo-cat-bar {
+    padding: 8px 10px 0;
+  }
+
+  .todo-row.todo-level-2 {
+    margin-left: 12px;
+  }
+
+  .todo-row.todo-level-3 {
+    margin-left: 24px;
+  }
+
+  .todo-row {
+    /* 移动端每像素都要留给标题：勾选框列略收窄，操作按钮不换行 */
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+}
+
+@media (max-width: 520px) {
+  .todo-row.todo-level-3 {
+    margin-left: 18px;
+  }
+
+  .todo-row {
+    padding: 7px 8px;
+  }
+}
