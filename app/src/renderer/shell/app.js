@@ -471,13 +471,16 @@
       getMovable: () => [...navLayout.main, ...navLayout.more],
       /** 存一份新布局并立刻重排左栏。 */
       apply: (next) => {
+        // 本地先写一份：下次打开**首帧**就能按用户顺序画，不必等接口回来
         writeStored(SidebarLayout.STORAGE_KEY, SidebarLayout.stringify(next));
         buildNav();
+        void persistSidebarLayout(SidebarLayout.stringify(next));
       },
       /** 清掉偏好，回到默认布局。 */
       reset: () => {
         writeStored(SidebarLayout.STORAGE_KEY, '');
         buildNav();
+        void persistSidebarLayout(null);
       },
       /** 视图的 label/icon：自定义面板要按 id 画出与左栏一致的一行。 */
       describe: (id) => {
@@ -485,6 +488,50 @@
         return view ? { id, label: view.label, icon: view.icon } : null;
       },
     });
+  }
+
+  /**
+   * 把左栏布局同步到**后端**（`PUT /ui/prefs/sidebar`）。
+   *
+   * 为什么不能只靠 `localStorage`：Web UI 的页面由后端在 `http://127.0.0.1:PORT` 提供，
+   * 而 Electron 主进程用 `loadFile()` 加载 —— 来源变成 `file://`，两份存储互不相干，
+   * 换端口也会换一份。结果就是「在浏览器里记得住、桌面端下次打开就没了」。
+   * 后端那份是**唯一真相**，`localStorage` 只当首帧缓存。
+   *
+   * `raw === null` 表示删除（回到默认）。
+   */
+  async function persistSidebarLayout(raw) {
+    let value = null;
+    if (raw !== null) {
+      try {
+        value = JSON.parse(raw);
+      } catch {
+        return;
+      }
+    }
+    try {
+      await api('/ui/prefs/sidebar', { method: 'PUT', body: { value } });
+    } catch (error) {
+      // 存不上不该打断用户改布局：本地那份已经生效，只是跨重启不保证
+      console.warn('[sidebar] 布局没能存到后端：', error?.message ?? error);
+    }
+  }
+
+  /**
+   * 启动时从后端读回左栏布局。
+   *
+   * 后端是唯一真相，读到就覆盖本地缓存并重排；读不到（离线 / 老后端）就沿用本地那份。
+   */
+  async function hydrateSidebarLayout() {
+    try {
+      const data = await api('/ui/prefs/sidebar');
+      const value = data?.value ?? null;
+      if (!value || !Array.isArray(value.main)) return;
+      writeStored(SidebarLayout.STORAGE_KEY, JSON.stringify(value));
+      buildNav();
+    } catch {
+      // 读不到就用本地缓存（首次运行本来也没有）
+    }
   }
 
   /**
@@ -3444,6 +3491,9 @@
     // 见文件末尾的 registerSidebarService()：它在**加载时**就登记，不依赖这里。
 
     buildNav();
+    // 先用 localStorage 那份画首帧（同步、不闪），再去后端核对一遍 ——
+    // 后端是唯一真相（Electron 的 file:// 来源与 Web UI 不共用存储，不能只靠本地）。
+    void hydrateSidebarLayout();
     wireChat();
     // 窄屏布局要在**画面板之前**定好"这一屏给谁"：先挂上 body.mobile-* 类，
     // 后面 selectView() 才知道该走"回聊天"还是"切功能页"（否则会先白画一次没人看得见的面板）。
