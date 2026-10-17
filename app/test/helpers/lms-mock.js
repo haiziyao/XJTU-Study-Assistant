@@ -215,6 +215,8 @@ export async function startMockLms(options = {}) {
     blobFetched: [],
     /** 转发播放时真去取过哪些媒体（验证后端确实补了 Referer）。 */
     mediaFetched: [],
+    /** 转发播放时收到的 Range 头（验证后端真的把分段请求转给了上游）。 */
+    rangeFetched: [],
   };
 
   let origin = '';
@@ -384,7 +386,21 @@ export async function startMockLms(options = {}) {
       // 记录这次取流有没有带 Referer（真实录播站防盗链靠它），不拒绝：下载那条路本来就不带。
       state.mediaFetched.push({ path, referer: req.headers.referer ?? null });
       const payload = Buffer.alloc(Number(options.mediaBytes ?? 64), mediaMatch[1].includes('encoder') ? 0x45 : 0x49);
-      res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': payload.length });
+      // 支持 Range（<video> 拖进度条靠它）：回 206 + Content-Range，并记一笔。
+      const rangeHeader = req.headers.range;
+      if (rangeHeader) {
+        state.rangeFetched.push(rangeHeader);
+        const start = Number((/bytes=(\\d+)-/.exec(rangeHeader) ?? [])[1] ?? 0);
+        const slice = payload.subarray(start);
+        res.writeHead(206, {
+          'Content-Type': 'video/mp4',
+          'Content-Length': String(slice.length),
+          'Content-Range': `bytes -/`,
+          'Accept-Ranges': 'bytes',
+        });
+        return res.end(slice);
+      }
+      res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': payload.length, 'Accept-Ranges': 'bytes' });
       // 慢速模式：先发个头再慢慢发正文字节，用来测"下载中"的进度/取消/去重
       const delay = Number(options.mediaDelayMs ?? 0);
       if (delay > 0) {

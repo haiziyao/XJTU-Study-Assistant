@@ -878,6 +878,9 @@ function lmsOpenCourse(courseId) {
   lmsUi.activityDetail = null;
   lmsUi.replayOpen = null;
   lmsUi.replayError = null;
+  // ★ 换课程必须把播放器关掉：播放器里的视频属于"上一门课的那一条"，
+  //   不清的话新课程页会直接顶着一个旧视频的播放窗口（用户报的第二个 bug）。
+  lmsUi.playing = null;
   lmsUi.sectionToggle = new Map();
   lmsPaint();
 }
@@ -892,6 +895,7 @@ function lmsBackHome() {
   lmsUi.activityDetail = null;
   lmsUi.activityError = null;
   lmsUi.submissions = null;
+  lmsUi.playing = null;
   lmsStopDownloadPolling();
   lmsPaint();
 }
@@ -1308,6 +1312,8 @@ function lmsOpenActivity(activityId) {
   lmsUi.submissionsError = null;
   lmsUi.replayOpen = null;
   lmsUi.replayError = null;
+  // 换一条活动也要关播放器：否则上一条的视频会挂在新详情页的顶上
+  lmsUi.playing = null;
   lmsPaint();
   void lmsLoadActivity();
 }

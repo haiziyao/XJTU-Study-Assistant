@@ -183,23 +183,37 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
    * 实现要点：**直接写 `res`**（`pipeline` 到响应），不缓冲整段视频；
    * 路由层有 `if (res.writableEnded) return;`，所以写完返回即可，不会被再发一次 JSON。
    */
-  router.get(`${P}/replay/stream`, async ({ query, res }) => {
+  router.get(`${P}/replay/stream`, async ({ req, query, res }) => {
     const activityId = query?.activityId;
     if (!activityId) throw HttpError.badRequest('缺少 activityId');
     const source = await lms.replayStreamSource({ activityId, label: query?.label });
-    const upstream = await lms.openReplayStream(source.url);
-    if (upstream.status < 200 || upstream.status >= 300 || !upstream.body) {
+
+    /*
+     * **转发 Range**：`<video>` 拖进度条靠的就是它。
+     *
+     * 浏览器发 `Range: bytes=N-`，上游回 `206 + Content-Range`；这里原样转发请求头、
+     * 也原样把 206 / Content-Range 传回去。之前写死 `Accept-Ranges: none` 又不转 Range，
+     * 等于告诉浏览器"这片不能跳" —— 进度条能拖、画面不动，用户报的就是这个。
+     */
+    const range = req.headers.range;
+    const upstream = await lms.openReplayStream(source.url, { range });
+    const ok = (upstream.status >= 200 && upstream.status < 300) || upstream.status === 206;
+    if (!ok || !upstream.body) {
       throw HttpError.upstream(`录播站返回 HTTP ${upstream.status}，取不到录像流`);
     }
+
+    const pass = (name) => upstream.headers?.get?.(name) ?? null;
     const headers = {
-      'Content-Type': upstream.headers?.get?.('content-type') || 'video/mp4',
+      'Content-Type': pass('content-type') || 'video/mp4',
       'Cache-Control': 'private, max-age=300',
-      // 允许 <video> 同源播放；不写 Accept-Ranges（不做 Range 切片，进度条能拖但会从头缓冲）
-      'Accept-Ranges': 'none',
+      // 上游能分段就如实告诉浏览器；不能就写 none，别骗它说可以跳
+      'Accept-Ranges': pass('accept-ranges') || (upstream.status === 206 ? 'bytes' : 'none'),
     };
-    const length = upstream.headers?.get?.('content-length');
+    const length = pass('content-length');
     if (length) headers['Content-Length'] = length;
-    res.writeHead(200, headers);
+    const contentRange = pass('content-range');
+    if (contentRange) headers['Content-Range'] = contentRange;
+    res.writeHead(upstream.status, headers);
     await pipeline(Readable.fromWeb(upstream.body), res);
     // 故意不返回实体：`res.writableEnded` 已为真，路由会直接结束
   });

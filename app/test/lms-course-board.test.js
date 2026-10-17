@@ -46,6 +46,14 @@ async function startApp() {
     }
     return { status: response.status, body: await response.json(), headers: response.headers, raw: null };
   };
+  /** 带 Range 头发一次请求（模拟 <video> 拖进度条）。 */
+  const callRange = async (method, route, range) => {
+    const response = await fetch(`${info.baseUrl}${route}`, { method, headers: { Range: range } });
+    const type = response.headers.get('content-type') ?? '';
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return { status: response.status, headers: response.headers, raw: buffer, body: type.includes('json') ? JSON.parse(buffer.toString('utf8')) : null };
+  };
+
   const close = async () => {
     await app.close();
     await mock.close();
@@ -54,7 +62,7 @@ async function startApp() {
     const result = await call('POST', '/auth/login', { username: USER, password: PASS, siteId: 'lms' });
     assert.equal(result.body.status, 'ready', `登录应成功：${JSON.stringify(result.body).slice(0, 200)}`);
   };
-  return { app, call, close, login, mock };
+  return { app, call, callRange, close, login, mock };
 }
 
 /* ==================================================== 归一化（纯函数） */
@@ -279,6 +287,25 @@ test('在线播放：活动不存在时给明确错误，而不是空响应', as
     const result = await ctx.call('GET', '/lms/replay/stream?activityId=999999');
     assert.ok(result.status === 404 || result.status === 502, `实际 ${result.status}`);
     assert.ok(result.body?.error?.message, '要带人能看懂的原因');
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('★ 拖进度条：Range 请求被原样转发，206 与 Content-Range 一并回给浏览器', async () => {
+  const ctx = await startApp();
+  try {
+    await ctx.login();
+    await ctx.call('POST', '/lms/courses/refresh');
+    await ctx.call('POST', '/lms/activities/refresh', { courseIds: [1001] });
+
+    // 直接带 Range 头请求转发路由（浏览器拖进度条时发的就是它）
+    const result = await ctx.callRange('GET', '/lms/replay/stream?activityId=5007', 'bytes=10-');
+    assert.equal(result.status, 206, `应当回 206（分段），实际 ${result.status}`);
+    assert.ok(result.headers.get('content-range'), '★ 必须带 Content-Range，否则 <video> 不知道该往哪跳');
+    assert.equal(result.headers.get('accept-ranges'), 'bytes');
+    assert.ok(ctx.mock.state.rangeFetched.length > 0, '★ 后端应当把 Range 转给了上游');
+    assert.equal(ctx.mock.state.rangeFetched.at(-1), 'bytes=10-', '转发的应当是同一个 Range');
   } finally {
     await ctx.close();
   }

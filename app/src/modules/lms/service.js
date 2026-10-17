@@ -511,9 +511,12 @@ export class LmsService {
    *
    * 注意：媒体地址带票据，**不要打日志**。
    */
-  async openReplayStream(url) {
+  async openReplayStream(url, { range } = {}) {
     const rms = this.config.rmsBaseUrl;
-    return this.api.streamMedia(url, { headers: { Referer: `${rms}/`, Origin: rms, Accept: '*/*' } });
+    const headers = { Referer: `${rms}/`, Origin: rms, Accept: '*/*' };
+    // Range 必须原样带给上游：`<video>` 拖进度条靠它，后端不转上游就不会回 206
+    if (range) headers.Range = range;
+    return this.api.streamMedia(url, { headers });
   }
   /**
    * 某次作业的提交记录（个人 / 小组由 `api.submissions()` 自动判别）。
