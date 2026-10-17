@@ -210,6 +210,7 @@
   }
 
   async function api(path, options = {}) {
+
     const response = await fetch(`${state.apiBase}${path}`, {
       headers: { 'Content-Type': 'application/json' },
       ...options,
@@ -3491,9 +3492,10 @@
     // 见文件末尾的 registerSidebarService()：它在**加载时**就登记，不依赖这里。
 
     buildNav();
-    // 先用 localStorage 那份画首帧（同步、不闪），再去后端核对一遍 ——
-    // 后端是唯一真相（Electron 的 file:// 来源与 Web UI 不共用存储，不能只靠本地）。
-    void hydrateSidebarLayout();
+    // ⚠️ 这里**不能**调 hydrateSidebarLayout()：此刻 `state.apiBase` 还是 null
+    //    （要等下面 `resolveInfo()`），`api()` 会拼出 `null/ui/prefs/...` 直接抛错。
+    //    之前就写在这里，错误又被 catch 吞掉 —— 表现为"存了但下次打开不生效"。
+    //    真正的调用点在 `state.apiBase` 赋值之后。
     wireChat();
     // 窄屏布局要在**画面板之前**定好"这一屏给谁"：先挂上 body.mobile-* 类，
     // 后面 selectView() 才知道该走"回聊天"还是"切功能页"（否则会先白画一次没人看得见的面板）。
@@ -3534,9 +3536,13 @@
 
     if (!state.apiBase) {
       setStatus('后端未启动', 'error');
-      systemNote('无法连接后端：请先用 npm run start:server 或 npm run dev:app:macos 启动。', 'fail');
+      systemNote('无法连接后端：请先用 npm run start:server 或 npm run dev:app-macos 启动。', 'fail');
       return;
     }
+
+    // ★ 现在 `state.apiBase` 有了，才能向后端核对左栏布局。
+    //   首帧已经用 localStorage 里那份画好了（不闪），这一步是"以服务端为准"的纠偏。
+    void hydrateSidebarLayout();
 
     // 桌面端自动聚焦输入框（打开就能打字）；手机上**不要**：
     // iOS Safari 的自动聚焦会立刻弹出软键盘，把首屏顶掉一半，用户还没看清页面就先看到键盘。
