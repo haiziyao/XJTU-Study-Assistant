@@ -213,6 +213,8 @@ export async function startMockLms(options = {}) {
     capturesFetched: [],
     /** 附件 blob 被取过哪些 id（验证后端是**代取**而不是把学校地址直接甩给浏览器）。 */
     blobFetched: [],
+    /** 转发播放时真去取过哪些媒体（验证后端确实补了 Referer）。 */
+    mediaFetched: [],
   };
 
   let origin = '';
@@ -379,6 +381,8 @@ export async function startMockLms(options = {}) {
     // 视频本体：真实可下（内容可预测，测试里断言字节）
     const mediaMatch = path.match(/^\/rms\/media\/([\w-]+)\.mp4$/);
     if (mediaMatch) {
+      // 记录这次取流有没有带 Referer（真实录播站防盗链靠它），不拒绝：下载那条路本来就不带。
+      state.mediaFetched.push({ path, referer: req.headers.referer ?? null });
       const payload = Buffer.alloc(Number(options.mediaBytes ?? 64), mediaMatch[1].includes('encoder') ? 0x45 : 0x49);
       res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': payload.length });
       // 慢速模式：先发个头再慢慢发正文字节，用来测"下载中"的进度/取消/去重

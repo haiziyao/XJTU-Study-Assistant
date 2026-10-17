@@ -30,7 +30,7 @@ async function startApp() {
   const app = await createServer({
     dataDir: await mkdtemp(path.join(tmpdir(), 'potato-lms-board-')),
     auth: { casOrigin: mock.origin },
-    lms: { config: { baseUrl: mock.origin, casOrigin: mock.origin } },
+    lms: { config: { baseUrl: mock.origin, casOrigin: mock.origin, rmsBaseUrl: mock.origin + '/rms' } },
   });
   const info = await app.listen({ port: 0 });
   const call = async (method, route, body) => {
@@ -243,6 +243,42 @@ test('不存在的课程给 404 且说明原因', async () => {
     const result = await ctx.call('GET', '/lms/courses/99999');
     assert.equal(result.status, 404);
     assert.ok(result.body.error.message.includes('99999') || result.body.error.message.includes('课程'));
+  } finally {
+    await ctx.close();
+  }
+});
+
+/* ------------------------------------------------ 在线播放：后端转发流 */
+
+test('★ 在线播放走本机转发：后端补上 Referer 才取得到，字节原样转给浏览器', async () => {
+  const ctx = await startApp();
+  try {
+    await ctx.login();
+    await ctx.call('POST', '/lms/courses/refresh');
+    await ctx.call('POST', '/lms/activities/refresh', { courseIds: [1001] });
+
+    const result = await ctx.call('GET', '/lms/replay/stream?activityId=5007&label=%E6%95%99%E5%AE%A4%E5%BD%95%E5%83%8F');
+    assert.equal(result.status, 200, `转发应成功，实际 ${result.status}`);
+    assert.match(result.headers.get('content-type') ?? '', /video\/mp4/, '应按上游的媒体类型回');
+    assert.ok(result.raw.length > 0, '应当有真实字节');
+    assert.equal(result.raw.length, 64, '转发的应当就是上游那个文件（mock 的媒体是 64 字节）');
+
+    // ★ 录播站校验 Referer（防盗链）：后端必须补上才取得到 —— 这正是"直接给 <video> 播不了"的原因
+    assert.ok(ctx.mock.state.mediaFetched.length > 0, '★ 后端应当真的去录播站取过流');
+    const last = ctx.mock.state.mediaFetched.at(-1);
+    assert.ok(last.referer, '★ 取流时必须带上 Referer —— 录播站防盗链靠它，而 <video> 自己发不出来');
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('在线播放：活动不存在时给明确错误，而不是空响应', async () => {
+  const ctx = await startApp();
+  try {
+    await ctx.login();
+    const result = await ctx.call('GET', '/lms/replay/stream?activityId=999999');
+    assert.ok(result.status === 404 || result.status === 502, `实际 ${result.status}`);
+    assert.ok(result.body?.error?.message, '要带人能看懂的原因');
   } finally {
     await ctx.close();
   }
