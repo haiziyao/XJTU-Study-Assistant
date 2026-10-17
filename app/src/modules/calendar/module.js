@@ -21,6 +21,28 @@ import { createCalendarCommands } from './commands.js';
 import { registerCalendarRoutes } from './routes.js';
 import { CALENDAR_TOOL_SPECS } from './tools.js';
 
+/**
+ * 给对话模型的领域说明（由 ai 模块聚合进系统提示词）。
+ *
+ * 为什么这两段必须写：`category` / `parentId` 是 2026-10 新加的字段，提示词里不说，
+ * 模型只会沿用旧清单（title / deadline / …）。用户说"拆成子任务""归到期末复习分类下"时，
+ * 它要么不写、要么自己造一个字段名 —— 而待办对未知字段是**硬 400**
+ * （见 todo-service 的 assertKnownFields），整条草稿都会失败。
+ */
+const AI_PROMPT = `【待办的分类与父子拆解】
+- 分类填在 category（自由文本，≤24 字，例如 "期末复习" / "实验室"）；没有分类就用空字符串 ""，
+  不要编一个不存在的枚举值。用户说"归到 xx 分类下"时写 category: "xx"。
+- 可以把一件事拆成父子（parentId）：父 / 子 / 孙最多 3 层，parentId 必须是**已存在**待办的 id。
+  要给某条现有待办加子任务时，先用 {"action":"query","target":"todo","filters":{"keyword":"<父任务名>"}}
+  查到它的 id，再 {"action":"create","target":"todo","fields":{"title":"…","deadline":"…","parentId":"<那个 id>"}}。
+  **不要**把 parentId 写成标题、序号或 "root"；也不要一轮里先建父再拿"新父的 id"建子（id 由服务端生成，
+  你拿不到）。父已存在就先查后建。
+- 查询可以按分类 / 父子筛：filters 额外支持 category（分类名，"" = 未分类）与 parentId（父 id；"root" = 只看顶层）。
+- 完成父待办会**连带完成所有后代**（响应里的 cascaded.completed 是受影响的 id 列表）；取消完成父只会
+  回滚那些由它连带完成的子任务，用户自己手动勾过的子任务保持完成。回执里带了 cascaded 就如实说明
+  "已连带完成 N 个"。
+`;
+
 export default {
   id: 'calendar',
   title: '日历与待办',
@@ -38,6 +60,32 @@ export default {
 
   /** 聚合进 GET /api/v1/ai/capabilities —— AI 靠这份清单才知道自己能读写待办/日程/事件。 */
   aiTools: CALENDAR_TOOL_SPECS,
+
+  aiPrompt: AI_PROMPT,
+
+  /**
+   * 只读查询结果回灌给模型时保留这些字段（**覆盖** ai 模块内置的 todo 投影表）。
+   *
+   * 投影表是"模型能看到什么"的唯一决定因素，缺一个字段就等于那个信息不存在：
+   * - `category` / `parentId`：缺了模型就没法按分类回答，也拿不到"给现有待办加子任务"
+   *   所需的父 id（parentId 必须是真实 id，它不能靠标题猜）；
+   * - `childCount` / `childDoneCount` / `hasChildren`：缺了它就说不清"这一步拆成几步、做到哪了"。
+   */
+  aiQueryFields: {
+    todo: [
+      'id',
+      'title',
+      'deadline',
+      'completed',
+      'priority',
+      'estimatedHours',
+      'category',
+      'parentId',
+      'childCount',
+      'childDoneCount',
+      'hasChildren',
+    ],
+  },
 
   createServices({ store, broadcast, services }) {
     // 分类注册表要先建：日程/事件服务写库时用它把 category 归一化
@@ -69,6 +117,13 @@ export default {
   async restore({ store, broadcast, own }) {
     // 分类：集合为空时才播种内置的 6+6 个（用户改过就不覆盖）
     await own.categories.ensureDefaults();
+
+    // 父子关系修复：同步按 id 合并、冲突时会给副本换 id，父链可能指向已不存在的记录；
+    // 不修就会留下悬空 parentId（树形视图会静默少掉整棵子树）。修复是幂等的。
+    const hierarchy = await own.todos.repairHierarchy();
+    if (hierarchy.repaired.length) {
+      console.log(`[calendar] 已修复 ${hierarchy.repaired.length} 条待办的父子关系（悬空/成环/超 3 层）`);
+    }
 
     const legacy = store.schedules.all().filter((item) => item.allDay === true && item.source === 'import');
     if (!legacy.length) return;

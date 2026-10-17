@@ -128,8 +128,10 @@ export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1'
 
   // ---------------------------------------------------------------- 待办
   // 待办是独立实体：只有截止日 + 完成态，和日程/事件没有任何共享字段。
+  // 分类与父子分级是待办**自己的**维度（2026-10）：`category` 是自由文本，
+  // `parentId` 指父待办（最多 3 层）。筛选参数见下。
   router.get(`${P}/todos`, ({ query }) => {
-    const items = todos.list({
+    const filters = {
       date: query.date,
       from: query.from,
       to: query.to,
@@ -137,11 +139,32 @@ export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1'
       priority: query.priority,
       overdue: query.overdue,
       keyword: query.keyword,
+      category: query.category,
+      parentId: query.parentId,
       limit: query.limit,
-    });
-    // 统计以「过滤后的集合」为准（不受 limit 截断影响）
-    return { items, stats: todos.stats(items) };
+    };
+    /**
+     * `tree=1`：返回树（顶层数组，每项带 `children`，最多 3 层）。
+     * 口径：`count` 是**顶层条数**，`totalCount` 是含子项的记录总数；
+     * stats 按**返回的全部记录**算（与 totalCount、与界面上能看到的行数一致）。
+     */
+    if (isTruthy(query.tree)) {
+      const result = todos.tree(filters);
+      return {
+        items: result.items,
+        count: result.count,
+        totalCount: result.totalCount,
+        stats: todos.stats(result.flat),
+        tree: true,
+      };
+    }
+    const items = todos.list(filters);
+    // 统计以「过滤后的集合」为准（不受 limit 截断影响）；flat 模式下两个计数一致
+    return { items, count: items.length, totalCount: items.length, stats: todos.stats(items) };
   });
+
+  /** 分类清单：`[{ name, total, open }]`，按 total 降序；未分类的 `name` 是空串。 */
+  router.get(`${P}/todos/categories`, () => ({ items: todos.categories() }));
 
   router.get(`${P}/todos/upcoming`, ({ query }) => ({ items: todos.upcoming({ limit: query.limit }) }));
 
@@ -155,12 +178,21 @@ export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1'
 
   router.get(`${P}/todos/:id`, ({ params }) => ({ item: todos.get(params.id) }));
 
-  router.patch(`${P}/todos/:id`, async ({ params, body }) => ({ item: await todos.update(params.id, body ?? {}) }));
+  /**
+   * 局部更新。响应里的 `cascaded` 是本次操作**连带影响**的待办 id：
+   * `{ completed: [...], reverted: [...] }`（前端据此提示"已连带完成 N 个子任务"）。
+   * 只有显式传了 completed 才可能非空，理由见 todo-service 的 update()。
+   */
+  router.patch(`${P}/todos/:id`, async ({ params, body }) => {
+    const item = await todos.update(params.id, body ?? {});
+    return { item, cascaded: item.cascaded ?? { completed: [], reverted: [] } };
+  });
 
-  /** 勾选 / 取消勾选：「完成」唯一入口。 */
+  /** 勾选 / 取消勾选：「完成」唯一入口（同样会级联，形状与 PATCH 一致）。 */
   router.post(`${P}/todos/:id/completed`, async ({ params, body }) => {
     if (body?.completed === undefined) throw HttpError.badRequest('completed 为必填（true 完成 / false 取消完成）');
-    return { item: await todos.setCompleted(params.id, body.completed) };
+    const item = await todos.setCompleted(params.id, body.completed);
+    return { item, cascaded: item.cascaded ?? { completed: [], reverted: [] } };
   });
 
   router.delete(`${P}/todos/:id`, async ({ params }) => todos.remove(params.id));
@@ -336,8 +368,9 @@ export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1'
     const scheduleMatches = schedules.list({ keyword: body.title }).filter((item) => item.title === body.title);
     const todoMatches = todos.list({ keyword: body.title }).filter((item) => item.title === body.title);
     await services.store.schedules.removeMany(scheduleMatches.map((item) => item.id));
-    await services.store.todos.removeMany(todoMatches.map((item) => item.id));
-    return { deleted: scheduleMatches.length + todoMatches.length };
+    // 待办走服务层批量删除：直接 removeMany 集合会把子任务留成悬空 parentId
+    const todoResult = await todos.removeMany(todoMatches.map((item) => item.id));
+    return { deleted: scheduleMatches.length + todoResult.deleted };
   });
 
   router.patch(`${P}/compat/dschat/events/:id`, async ({ params, body }) => {

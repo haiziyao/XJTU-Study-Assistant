@@ -34,6 +34,9 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
         completed: filters.completed ?? (draft.action === 'complete' ? false : undefined),
         priority: filters.priority,
         keyword: filters.keyword,
+        // 分类与父待办也可以作为定位条件（"完成期末复习下面的第一章"这类说法）
+        category: filters.category,
+        parentId: filters.parentId,
       });
     }
     if (draft.target === 'schedule') {
@@ -103,6 +106,8 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
           priority: filters.priority,
           overdue: filters.overdue,
           keyword: filters.keyword,
+          category: filters.category,
+          parentId: filters.parentId,
         });
         return {
           filters,
@@ -176,8 +181,18 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
         return { dryRun: true, planned: { action: 'delete', target: draft.target, ids: matches.map((item) => item.id) } };
       }
       const ids = matches.map((item) => item.id);
-      if (draft.target === 'todo') await store.todos.removeMany(ids);
-      else if (draft.target === 'schedule') await store.schedules.removeMany(ids);
+      // 待办必须走服务层批量删除：直接删集合会把子任务的 parentId 留成悬空
+      if (draft.target === 'todo') {
+        const result = await todos.removeMany(ids);
+        return {
+          affected: matches.map((item) => ({ id: item.id, title: item.title })),
+          deleted: result.deleted,
+          detachedChildren: result.detachedChildren,
+          ambiguous: matches.length > 1,
+          explain: `已删除 ${result.deleted} 条${labelOf(draft.target)}${result.detachedChildren.length ? `，${result.detachedChildren.length} 个子任务改为独立待办` : ''}`,
+        };
+      }
+      if (draft.target === 'schedule') await store.schedules.removeMany(ids);
       else await store.events.removeMany(ids);
       return {
         affected: matches.map((item) => ({ id: item.id, title: item.title })),
@@ -222,12 +237,21 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
         return { dryRun: true, planned: { action: 'complete', target: 'todo', ids: matches.map((m) => m.id) } };
       }
       const updated = [];
-      for (const match of matches) updated.push(await todos.setCompleted(match.id, true));
+      // 完成父会连带完成所有后代：把影响清单汇总起来回给前端/AI，
+      // 否则模型只会说"完成了"，用户不知道还连带勾掉了 3 个子任务。
+      const cascaded = { completed: [], reverted: [] };
+      for (const match of matches) {
+        const item = await todos.setCompleted(match.id, true);
+        updated.push(item);
+        cascaded.completed.push(...(item.cascaded?.completed ?? []));
+      }
+      const extra = cascaded.completed.length ? `，并连带完成 ${cascaded.completed.length} 个子任务` : '';
       return {
         items: updated,
         affected: updated.map((item) => ({ id: item.id, title: item.title, date: item.deadline })),
+        cascaded,
         ambiguous: matches.length > 1,
-        explain: `已完成 ${updated.length} 条待办`,
+        explain: `已完成 ${updated.length} 条待办${extra}`,
       };
     },
 

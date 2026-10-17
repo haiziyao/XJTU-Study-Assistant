@@ -481,6 +481,54 @@ test('同步：没登录 / 没服务器地址 → 直接如实回报，一个请
   }
 });
 
+/* ================================================================ 6) 待办分类 / 父子 */
+
+test('同步：待办的 category / parentId / autoCompletedBy 原样进 push body（整条记录搬运）', async () => {
+  const fake = await startFakeSyncServer();
+  const client = await startNode('待办设备');
+  try {
+    await connect(client, fake.url);
+    const parent = await client.app.services.todos.create({
+      title: '期末复习',
+      deadline: '2026-12-20',
+      category: '期末复习',
+    });
+    const child = await client.app.services.todos.create({
+      title: '复习第一章',
+      deadline: '2026-12-10',
+      category: '期末复习',
+      parentId: parent.id,
+    });
+    // 完成父 → 子任务被连带完成并写 autoCompletedBy（同步必须把这枚标记也带过去，
+    // 否则另一台设备上"取消完成父"就不知道该回滚谁）
+    await client.app.services.todos.setCompleted(parent.id, true);
+
+    const report = await client.app.services.sync.run({});
+    assert.equal(report.ok, true, JSON.stringify(report.error));
+    assert.equal(fake.pushes().length, 1, '数据量很小，应该只有一批');
+    const raw = fake.pushes()[0].raw;
+    assert.match(raw, /"category"\s*:\s*"期末复习"/, 'category 必须出现在 push body 里');
+    assert.match(raw, new RegExp(`"parentId"\\s*:\\s*"${parent.id}"`), 'parentId 必须出现在 push body 里');
+    assert.match(raw, new RegExp(`"autoCompletedBy"\\s*:\\s*"${parent.id}"`), 'autoCompletedBy 必须出现在 push body 里');
+
+    const pushed = fake.pushes()[0].body.collections.todos;
+    assert.equal(pushed.length, 2);
+    const pushedParent = pushed.find((item) => item.id === parent.id);
+    const pushedChild = pushed.find((item) => item.id === child.id);
+    assert.equal(pushedParent.category, '期末复习');
+    assert.equal(pushedParent.parentId, null);
+    assert.equal(pushedChild.parentId, parent.id);
+    assert.equal(pushedChild.category, '期末复习');
+    assert.equal(pushedChild.autoCompletedBy, parent.id);
+    assert.equal(pushedChild.completed, true);
+    // 传输形状只去掉时间戳，内容字段一个不少（category/parentId 是普通内容字段，天然被带上）
+    assert.ok(!('createdAt' in pushedChild) && !('updatedAt' in pushedChild));
+  } finally {
+    await teardown([client]);
+    await fake.close();
+  }
+});
+
 /* ================================================================ 6) 同步范围 */
 
 test('同步：push body 里只有同步范围内的集合 —— academic-* / lms-* / ai-usage 一个都不出现', async () => {

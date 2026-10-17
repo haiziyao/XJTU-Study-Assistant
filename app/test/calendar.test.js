@@ -339,9 +339,14 @@ test('待办未知字段 400（不再静默丢数据），并给出「你是不�
     const scheduleField = await call('POST', '/todos', { title: '自习', deadline: '2099-06-01', startTime: '09:00' });
     assert.equal(scheduleField.status, 400);
     assert.match(scheduleField.body.error.message, /schedule/);
+    // 分类现在是待办**自己**的字段（自由文本，见 todo-service）：写进去要落库，不再 400。
+    // 日程的其它字段（地点等）仍然必须被这条规则拦下。
     const category = await call('POST', '/todos', { title: '自习', deadline: '2099-06-01', category: 'study' });
-    assert.equal(category.status, 400);
-    assert.deepEqual(category.body.error.details.suggestions[0].suggest, ['tags']);
+    assert.equal(category.status, 201);
+    assert.equal(category.body.item.category, 'study');
+    const location = await call('POST', '/todos', { title: '自习', deadline: '2099-06-02', location: '图书馆' });
+    assert.equal(location.status, 400);
+    assert.match(location.body.error.message, /schedule/);
 
     // ③ 拼错的 deadline / title 也能被认出来
     const dueTypo = await call('POST', '/todos', { title: '交材料', dedline: '2099-06-01' });
