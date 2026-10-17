@@ -188,7 +188,7 @@ test('网关：GET /app?code=<正确码> → 302 + Set-Cookie；带 Cookie 访�
     assert.match(setCookie, new RegExp(`^${GATEWAY_COOKIE}=[0-9a-f]{48}`), 'HttpOnly Cookie 里放 48 位十六进制令牌');
     assert.match(setCookie, /HttpOnly/);
     assert.match(setCookie, /SameSite=Lax/);
-    assert.match(setCookie, /Max-Age=1800/, '有效期与传输 token 一致：30 分钟');
+    assert.match(setCookie, /Max-Age=2592000/, '受信任手机会话默认有效 30 天');
 
     const cookie = cookieOf(entry);
     const health = await device('/api/v1/health', { headers: { Cookie: cookie } });

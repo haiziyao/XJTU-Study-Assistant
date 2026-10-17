@@ -410,6 +410,33 @@
   border-radius: var(--radius-sm);
   background: var(--bg-base);
 }
+
+.tf-qr {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+
+.tf-qr summary {
+  color: var(--blue);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.tf-qr-visual {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding-top: 12px;
+}
+
+.tf-qr-svg {
+  width: min(240px, 80vw);
+  height: auto;
+  border-radius: 10px;
+}
 .tf-lan-url {
   flex: 1;
   min-width: 0;

@@ -12,11 +12,19 @@
       桌面窗口是固定尺寸的 BrowserWindow，这些 meta 对宽屏三栏布局没有任何影响。
     -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#315fda" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="AI 智学" />
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; style-src 'self'; img-src 'self' data: http://127.0.0.1:* http://localhost:*; object-src 'self' data: blob:; frame-src 'self' data: blob:"
     />
     <title>AI 智学 · 测试窗口</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="assets/app-icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="assets/app-icon.svg" />
     <script src="kit/theme.js"></script>
 
     <!-- 样式：外壳 → 各视图自带的样式（新增功能在这里加一行 link） -->
@@ -117,6 +125,25 @@
       </section>
     </div>
 
+    <!-- 手机版底部导航。内容由视图注册表生成，桌面端始终隐藏。 -->
+    <nav class="mobile-tabbar" id="mobile-tabbar" aria-label="手机主导航"></nav>
+    <div class="mobile-more-mask" id="mobile-more-mask" hidden></div>
+    <section class="mobile-more-sheet" id="mobile-more-sheet" aria-label="更多功能" hidden>
+      <div class="mobile-sheet-handle" aria-hidden="true"></div>
+      <header class="mobile-sheet-head">
+        <strong>更多功能</strong>
+        <button type="button" class="icon-btn" id="mobile-more-close" aria-label="关闭更多功能">×</button>
+      </header>
+      <div class="mobile-sheet-grid" id="mobile-more-grid"></div>
+    </section>
+
+    <div class="pwa-status" id="pwa-status" hidden role="status" aria-live="polite"></div>
+    <div class="pwa-update" id="pwa-update" hidden>
+      <span>手机版已有更新</span>
+      <button type="button" id="pwa-update-now">立即更新</button>
+      <button type="button" id="pwa-update-later">稍后</button>
+    </div>
+
     <div id="toast" class="toast"></div>
 
     <!--
@@ -132,6 +159,8 @@
     <script src="kit/dom.js"></script>
     <!-- 富文本：Markdown 子集 + LaTeX 子集 + ```svg 图形（零依赖，见 kit/richtext.js） -->
     <script src="kit/richtext.js"></script>
+    <script src="kit/qrcode.js"></script>
+    <script src="kit/pwa.js"></script>
 
     <script src="shell/planned.js"></script>
 

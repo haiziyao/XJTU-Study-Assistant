@@ -43,7 +43,7 @@
     graphData: null,
     graphFrame: null,
     graphPositions: new Map(),
-    graphCamera: { yaw: -0.45, pitch: 0.18, zoom: 1 },
+    graphCamera: { yaw: -0.45, pitch: 0.18, zoom: 1, panX: 0, panY: 0 },
     graphSettings: { edgeLength: 135, edgeWidth: 1.4, lineStyle: 'solid', repulsion: 8500, edgeColor: 'blue', motion: 1 },
     graphNodeStyles: new Map(),
     graphLevelColors: new Map(),
@@ -73,6 +73,31 @@
   }
 
   const defaultGraphLevelColor = (level) => GRAPH_LEVEL_PALETTE[Math.abs(Number(level) || 0) % GRAPH_LEVEL_PALETTE.length];
+
+  /** 触屏没有右键：静止长按打开同一套菜单，移动超过 10px 就判定为拖拽。 */
+  function wireLongPress(element, handler, delay = 560) {
+    let press = null;
+    const cancel = () => { if (press?.timer) clearTimeout(press.timer); press = null; };
+    element.addEventListener('touchstart', (event) => {
+      if (event.touches?.length !== 1) return cancel();
+      const touch = event.touches[0];
+      const point = { clientX: touch.clientX, clientY: touch.clientY, preventDefault() {}, stopPropagation() {} };
+      press = { x: touch.clientX, y: touch.clientY, identifier: touch.identifier };
+      press.timer = setTimeout(() => {
+        if (!press) return;
+        navigator.vibrate?.(18);
+        handler(point);
+        cancel();
+      }, delay);
+    }, { passive: true });
+    element.addEventListener('touchmove', (event) => {
+      if (!press) return;
+      const touch = [...(event.touches || [])].find((item) => item.identifier === press.identifier);
+      if (!touch || Math.hypot(touch.clientX - press.x, touch.clientY - press.y) > 10) cancel();
+    }, { passive: true });
+    element.addEventListener('touchend', cancel, { passive: true });
+    element.addEventListener('touchcancel', cancel, { passive: true });
+  }
 
   function readFile(file, mode) {
     if (mode === 'text' && typeof file?.text === 'function') return file.text();
@@ -853,6 +878,7 @@
       }
     };
     const update = (time = is2d ? oceanTime : Date.now()) => {
+      center.x = 450 + (Number(camera.panX) || 0); center.y = 280 + (Number(camera.panY) || 0);
       projected.clear(); for (const [id, point] of state.graphPositions) projected.set(id, project(point, nodeEls.get(id)?.phase || 0, time, id));
       const edgeColor = { blue: 'var(--blue)', green: 'var(--green)', purple: 'var(--purple)', orange: 'var(--orange)', gray: 'var(--fg-3)' }[settings.edgeColor] || 'var(--blue)'; const dash = { dashed: '9 7', dotted: '2 7' }[settings.lineStyle] || '';
       for (const { edge, line } of edgeEls) { const from = projected.get(edge.source); const to = projected.get(edge.target); if (!from || !to) continue; line.setAttribute('x1', from.x); line.setAttribute('y1', from.y); line.setAttribute('x2', to.x); line.setAttribute('y2', to.y); line.setAttribute('opacity', clamp(0.15 + (Math.min(from.z, to.z) + 280) / 720, 0.12, 0.7)); line.style.setProperty('stroke', edgeColor); line.style.setProperty('stroke-width', String(settings.edgeWidth)); line.setAttribute('stroke-dasharray', dash); }
@@ -882,16 +908,21 @@
     };
     const animate = (time) => { if (stage.parentNode && state.mode === 'graph') { const elapsed = lastTime === null ? 1 : Math.min(32, time - lastTime); if (!paused && !sceneDrag && !nodeDrag) { if (is2d) oceanTime += elapsed; else autoAngle += elapsed * 0.000055; } if (!sceneDrag && (!is2d || !paused)) simulate(elapsed / 16); lastTime = time; update(is2d ? oceanTime : time); state.graphFrame = window.requestAnimationFrame(animate); } else state.graphFrame = null; };
     update(is2d ? oceanTime : Date.now()); if (window.requestAnimationFrame) state.graphFrame = window.requestAnimationFrame(animate);
-    const pauseText = () => paused ? (is2d ? '继续漂流' : '继续公转') : (is2d ? '暂停漂流' : '暂停公转'); pause.textContent = pauseText(); pause.addEventListener('click', () => { paused = !paused; pause.textContent = pauseText(); lastTime = null; }); reset.addEventListener('click', () => { camera.yaw = -0.45; camera.pitch = 0.18; camera.zoom = 1; autoAngle = 0; oceanTime = 0; lastTime = null; update(is2d ? oceanTime : Date.now()); });
+    const pauseText = () => paused ? (is2d ? '继续漂流' : '继续公转') : (is2d ? '暂停漂流' : '暂停公转'); pause.textContent = pauseText(); pause.addEventListener('click', () => { paused = !paused; pause.textContent = pauseText(); lastTime = null; }); reset.addEventListener('click', () => { camera.yaw = -0.45; camera.pitch = 0.18; camera.zoom = 1; camera.panX = 0; camera.panY = 0; autoAngle = 0; oceanTime = 0; lastTime = null; update(is2d ? oceanTime : Date.now()); });
     stage.addEventListener('wheel', (event) => { if (event.target?.closest?.('.notes-graph-preview')) return; event.preventDefault?.(); camera.zoom = clamp(camera.zoom * (event.deltaY > 0 ? 0.9 : 1.1), 0.48, 2.4); update(); }, { passive: false });
     const blocksSceneDrag = (target) => target?.closest?.('.notes-graph-node') || target?.closest?.('.notes-graph-hud') || target?.closest?.('.notes-graph-preview') || target?.closest?.('.notes-graph-menu');
     stage.addEventListener('dragstart', (event) => event.preventDefault?.()); stage.addEventListener('selectstart', (event) => event.preventDefault?.());
-    stage.addEventListener('pointerdown', (event) => { const menu = stage.querySelector('.notes-graph-menu'); if (menu && !event.target?.closest?.('.notes-graph-menu')) menu.remove(); if (event.button !== undefined && event.button !== 0) return; if (blocksSceneDrag(event.target) || is2d) return; event.preventDefault?.(); preview?.remove(); preview = null; sceneDrag = { x: event.clientX, y: event.clientY, yaw: camera.yaw, pitch: camera.pitch, moved: false, pointerId: event.pointerId }; stage.classList.add('is-rotating'); stage.setPointerCapture?.(event.pointerId); });
-    stage.addEventListener('pointermove', (event) => { if (!sceneDrag || (sceneDrag.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== sceneDrag.pointerId)) return; event.preventDefault?.(); const dx = event.clientX - sceneDrag.x; const dy = event.clientY - sceneDrag.y; if (Math.hypot(dx, dy) > 5) sceneDrag.moved = true; camera.yaw = sceneDrag.yaw + dx * 0.008; camera.pitch = clamp(sceneDrag.pitch - dy * 0.007, -1.25, 1.25); update(); });
-    const finishSceneDrag = (event = {}) => { if (!sceneDrag || (sceneDrag.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== sceneDrag.pointerId)) return; if (sceneDrag.moved) suppressUntil = Date.now() + 280; sceneDrag = null; stage.classList.remove('is-rotating'); lastTime = null; }; stage.addEventListener('pointerup', finishSceneDrag); stage.addEventListener('pointercancel', finishSceneDrag); stage.addEventListener('lostpointercapture', finishSceneDrag);
+    let pinch = null;
+    stage.addEventListener('touchstart', (event) => { if (event.touches?.length !== 2) return; const [a, b] = event.touches; pinch = { distance: Math.max(1, Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)), midX: (a.clientX + b.clientX) / 2, midY: (a.clientY + b.clientY) / 2, zoom: camera.zoom, panX: Number(camera.panX) || 0, panY: Number(camera.panY) || 0 }; sceneDrag = null; stage.classList.remove('is-rotating'); }, { passive: true });
+    stage.addEventListener('touchmove', (event) => { if (!pinch || event.touches?.length !== 2) return; const [a, b] = event.touches; const distance = Math.max(1, Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)); const midX = (a.clientX + b.clientX) / 2; const midY = (a.clientY + b.clientY) / 2; camera.zoom = clamp(pinch.zoom * distance / pinch.distance, 0.48, 2.4); camera.panX = pinch.panX + midX - pinch.midX; camera.panY = pinch.panY + midY - pinch.midY; event.preventDefault?.(); update(); }, { passive: false });
+    const finishTouch = () => { pinch = null; }; stage.addEventListener('touchend', finishTouch, { passive: true }); stage.addEventListener('touchcancel', finishTouch, { passive: true });
+    stage.addEventListener('pointerdown', (event) => { const menu = stage.querySelector('.notes-graph-menu'); if (menu && !event.target?.closest?.('.notes-graph-menu')) menu.remove(); if (event.button !== undefined && event.button !== 0) return; if (blocksSceneDrag(event.target) || pinch) return; event.preventDefault?.(); preview?.remove(); preview = null; sceneDrag = { x: event.clientX, y: event.clientY, yaw: camera.yaw, pitch: camera.pitch, panX: Number(camera.panX) || 0, panY: Number(camera.panY) || 0, moved: false, pointerId: event.pointerId }; stage.classList.add(is2d ? 'is-panning' : 'is-rotating'); stage.setPointerCapture?.(event.pointerId); });
+    stage.addEventListener('pointermove', (event) => { if (!sceneDrag || pinch || (sceneDrag.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== sceneDrag.pointerId)) return; event.preventDefault?.(); const dx = event.clientX - sceneDrag.x; const dy = event.clientY - sceneDrag.y; if (Math.hypot(dx, dy) > 5) sceneDrag.moved = true; if (is2d) { camera.panX = sceneDrag.panX + dx; camera.panY = sceneDrag.panY + dy; } else { camera.yaw = sceneDrag.yaw + dx * 0.008; camera.pitch = clamp(sceneDrag.pitch - dy * 0.007, -1.25, 1.25); } update(); });
+    const finishSceneDrag = (event = {}) => { if (!sceneDrag || (sceneDrag.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== sceneDrag.pointerId)) return; if (sceneDrag.moved) suppressUntil = Date.now() + 280; sceneDrag = null; stage.classList.remove('is-rotating'); stage.classList.remove('is-panning'); lastTime = null; }; stage.addEventListener('pointerup', finishSceneDrag); stage.addEventListener('pointercancel', finishSceneDrag); stage.addEventListener('lostpointercapture', finishSceneDrag);
     for (const [id, item] of nodeEls) {
       item.group.addEventListener('keydown', (event) => { if (event.key === 'Enter') showPreview(id); });
       item.group.addEventListener('contextmenu', (event) => openNodeMenu(event, id));
+      wireLongPress(item.group, (event) => openNodeMenu(event, id));
       item.group.addEventListener('pointerdown', (event) => { if (event.button !== undefined && event.button !== 0) return; event.preventDefault?.(); event.stopPropagation?.(); preview?.remove(); preview = null; const original = state.graphPositions.get(id); const rect = svg.getBoundingClientRect?.() || { width: 900, height: 560 }; const viewportScale = Math.max(0.01, Math.min((rect.width || 900) / 900, (rect.height || 560) / 560)); nodeDrag = { id, x: event.clientX, y: event.clientY, original: { ...original }, moved: false, event, pointerId: event.pointerId, yaw: camera.yaw + (!is2d && id !== root && orbitingIds.has(id) ? autoAngle : 0), pitch: camera.pitch, projectedScale: Math.max(0.2, projected.get(id)?.scale || camera.zoom), viewportScale }; item.group.classList.add('is-dragging'); item.group.setPointerCapture?.(event.pointerId); });
       item.group.addEventListener('pointermove', (event) => { if (!nodeDrag || nodeDrag.id !== id || (nodeDrag.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== nodeDrag.pointerId)) return; event.preventDefault?.(); const screenDx = event.clientX - nodeDrag.x; const screenDy = event.clientY - nodeDrag.y; if (Math.hypot(screenDx, screenDy) <= 3) return; nodeDrag.moved = true; const dx = screenDx / nodeDrag.viewportScale / nodeDrag.projectedScale; const dy = screenDy / nodeDrag.viewportScale / nodeDrag.projectedScale; let next; if (is2d) next = { x: nodeDrag.original.x + dx, y: nodeDrag.original.y + dy, z: 0 }; else { const cy = Math.cos(nodeDrag.yaw); const sy = Math.sin(nodeDrag.yaw); const cp = Math.cos(nodeDrag.pitch); const sp = Math.sin(nodeDrag.pitch); const worldDx = dx * cy + dy * sp * sy; const worldDy = dy * cp; const worldDz = dx * sy - dy * sp * cy; next = { x: nodeDrag.original.x + worldDx, y: nodeDrag.original.y + worldDy, z: nodeDrag.original.z + worldDz }; } const limit = !is2d && id === root ? 180 : !orbitingIds.has(id) ? 255 : 330; const radius = Math.hypot(next.x, next.y, next.z); if (radius > limit) { next.x *= limit / radius; next.y *= limit / radius; next.z *= limit / radius; } state.graphPositions.set(id, next); update(is2d ? oceanTime : Date.now()); });
       const finishNodeDrag = (event = {}) => { if (!nodeDrag || nodeDrag.id !== id || (nodeDrag.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== nodeDrag.pointerId)) return; const wasMoved = nodeDrag.moved; nodeDrag = null; item.group.classList.remove('is-dragging'); lastTime = null; if (wasMoved) suppressUntil = Date.now() + 280; else if (Date.now() >= suppressUntil) showPreview(id, event); }; item.group.addEventListener('pointerup', finishNodeDrag); item.group.addEventListener('lostpointercapture', (event) => { if (nodeDrag?.id === id) finishNodeDrag(event); }); item.group.addEventListener('pointercancel', (event) => finishNodeDrag(event));
@@ -1025,7 +1056,7 @@
       };
       for (const edge of canvas.edges || []) {
         const from = nodesById.get(edge.fromNode); const to = nodesById.get(edge.toNode); if (!from || !to) continue;
-        const halo = document.createElementNS(svg.namespaceURI, 'path'); halo.setAttribute('class', 'notes-canvas-edge-halo'); const path = document.createElementNS(svg.namespaceURI, 'path'); path.setAttribute('class', 'notes-canvas-edge'); const hit = document.createElementNS(svg.namespaceURI, 'path'); hit.setAttribute('class', 'notes-canvas-edge-hit'); hit.addEventListener('contextmenu', (event) => edgeContextMenu(event, canvas, edge)); edgePaths.push({ edge, from, to, halo, path, hit }); svg.append(halo, path, hit);
+        const halo = document.createElementNS(svg.namespaceURI, 'path'); halo.setAttribute('class', 'notes-canvas-edge-halo'); const path = document.createElementNS(svg.namespaceURI, 'path'); path.setAttribute('class', 'notes-canvas-edge'); const hit = document.createElementNS(svg.namespaceURI, 'path'); hit.setAttribute('class', 'notes-canvas-edge-hit'); hit.addEventListener('contextmenu', (event) => edgeContextMenu(event, canvas, edge)); wireLongPress(hit, (event) => edgeContextMenu(event, canvas, edge)); edgePaths.push({ edge, from, to, halo, path, hit }); svg.append(halo, path, hit);
       }
       const updateEdges = () => { for (const entry of edgePaths) { const { edge, path } = entry; const d = edgePath(edge, entry.from, entry.to); const color = { blue: 'var(--blue)', green: 'var(--green)', yellow: 'var(--orange)', red: 'var(--red)', purple: 'var(--purple)', gray: 'var(--fg-3)' }[edge.lineColor] || 'var(--blue)'; const dash = { dashed: '10 7', dotted: '2 7' }[edge.lineStyle] || ''; for (const item of [entry.halo, path, entry.hit]) item.setAttribute('d', d); path.style.setProperty('stroke', color); path.style.setProperty('stroke-width', String([2, 3.5, 5].includes(Number(edge.lineWidth)) ? Number(edge.lineWidth) : 2)); path.setAttribute('stroke-dasharray', dash); path.setAttribute('marker-start', edge.arrow === 'both' ? `url(#${markerId})` : ''); path.setAttribute('marker-end', edge.arrow === 'none' ? '' : `url(#${markerId})`); } };
       updateEdges(); board.appendChild(svg);
@@ -1036,6 +1067,7 @@
         card.appendChild(mk('span', 'notes-canvas-node-content', node.text || (node.type === 'file' ? noteMap.get(node.noteId)?.title || '缺失笔记' : node.type === 'group' ? '分组' : '文本卡片'))); card.tabIndex = 0; card.title = '右击管理卡片';
         if (node.type === 'file') card.addEventListener('dblclick', () => state.provider.openNote(node.noteId));
         card.addEventListener('contextmenu', (event) => contextMenu(event, canvas, node));
+        wireLongPress(card, (event) => contextMenu(event, canvas, node));
         card.addEventListener('click', () => { if (state.canvasSelected.has(node.id)) state.canvasSelected.delete(node.id); else state.canvasSelected.add(node.id); paint(canvas); });
         let drag = null; card.addEventListener('pointerdown', (event) => { if (event.button === 2) return; drag = { x: event.clientX, y: event.clientY, left: node.x || 20, top: node.y || 20 }; card.setPointerCapture?.(event.pointerId); });
         card.addEventListener('pointermove', (event) => { if (!drag) return; node.x = drag.left + event.clientX - drag.x; node.y = drag.top + event.clientY - drag.y; card.style.left = `${node.x}px`; card.style.top = `${node.y}px`; updateEdges(); });

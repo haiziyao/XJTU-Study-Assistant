@@ -1184,6 +1184,22 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
   gap: 4px;
 }
 
+/* 手机版专用组件在桌面端不参与布局。 */
+.mobile-tabbar,
+.mobile-more-sheet,
+.mobile-more-mask,
+.pwa-status,
+.pwa-update {
+  display: none;
+}
+
+.pwa-status[hidden],
+.pwa-update[hidden],
+.mobile-more-sheet[hidden],
+.mobile-more-mask[hidden] {
+  display: none !important;
+}
+
 /* --------------------------------------------------------------- 弹层 */
 
 .modal-mask {
@@ -3105,6 +3121,227 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
     max-width: calc(100vw - 32px);
     font-size: 15px;
   }
+}
+
+/* --------------------------------------------------------------------------
+   手机版 v2：底部导航 + 更多底部弹层。放在旧窄栏规则之后，明确覆盖旧的 60px 左栏。
+   -------------------------------------------------------------------------- */
+@media (max-width: 760px) {
+  :root {
+    --mobile-tab-h: 62px;
+  }
+
+  .app,
+  body.notes-focus .app {
+    grid-template-columns: minmax(0, 1fr);
+    padding-bottom: calc(var(--mobile-tab-h) + env(safe-area-inset-bottom));
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .chat,
+  .panel,
+  body.panel-collapsed .panel {
+    grid-column: 1;
+    min-width: 0;
+  }
+
+  .mobile-panel-back {
+    display: none !important;
+  }
+
+  .mobile-tabbar {
+    position: fixed;
+    z-index: 45;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    min-height: var(--mobile-tab-h);
+    padding: 5px max(6px, env(safe-area-inset-right)) max(5px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    align-items: stretch;
+    gap: 2px;
+    border-top: 1px solid var(--line);
+    background: color-mix(in srgb, var(--bg-surface) 94%, transparent);
+    box-shadow: 0 -8px 24px rgba(18, 35, 72, 0.08);
+    backdrop-filter: blur(18px);
+  }
+
+  .mobile-tab,
+  .mobile-sheet-item {
+    border: 0;
+    color: var(--fg-2);
+    background: transparent;
+  }
+
+  .mobile-tab {
+    min-width: 0;
+    min-height: 48px;
+    padding: 4px 2px;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    touch-action: manipulation;
+  }
+
+  .mobile-tab .nav-icon {
+    width: 22px;
+    height: 22px;
+  }
+
+  .mobile-tab-label {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px !important;
+    line-height: 1.1;
+  }
+
+  .mobile-tab.active {
+    color: var(--blue);
+    background: color-mix(in srgb, var(--blue) 12%, transparent);
+  }
+
+  .mobile-more-mask {
+    position: fixed;
+    z-index: 58;
+    inset: 0;
+    display: block;
+    opacity: 0;
+    background: rgba(8, 12, 24, 0.42);
+    transition: opacity 180ms ease;
+  }
+
+  .mobile-more-sheet {
+    position: fixed;
+    z-index: 59;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    max-height: min(74vh, 640px);
+    padding: 5px 16px calc(18px + env(safe-area-inset-bottom));
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--line);
+    border-bottom: 0;
+    border-radius: 22px 22px 0 0;
+    background: var(--bg-surface);
+    box-shadow: 0 -18px 50px rgba(8, 12, 24, 0.22);
+    transform: translateY(105%);
+    transition: transform 180ms ease;
+  }
+
+  body.mobile-more-open .mobile-more-mask { opacity: 1; }
+  body.mobile-more-open .mobile-more-sheet { transform: translateY(0); }
+
+  .mobile-sheet-handle {
+    width: 42px;
+    height: 5px;
+    margin: 2px auto 8px;
+    border-radius: 999px;
+    background: var(--line-strong, var(--line));
+  }
+
+  .mobile-sheet-head {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .mobile-sheet-head strong { font-size: 18px; }
+
+  .mobile-sheet-grid {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    padding: 8px 0;
+  }
+
+  .mobile-sheet-item {
+    min-height: 86px;
+    padding: 12px 6px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--bg-base);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    touch-action: manipulation;
+  }
+
+  .mobile-sheet-item .nav-icon,
+  .mobile-sheet-item .nav-icon svg { width: 26px; height: 26px; }
+  .mobile-sheet-item .mobile-tab-label { font-size: 14px !important; }
+
+  .modal-mask {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .modal {
+    width: 100%;
+    max-height: min(90dvh, 760px);
+    border-radius: 22px 22px 0 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  :where(button, [role='button'], input, select) {
+    min-height: 44px;
+  }
+
+  .pwa-status {
+    position: fixed;
+    z-index: 44;
+    left: 50%;
+    bottom: calc(var(--mobile-tab-h) + env(safe-area-inset-bottom) + 8px);
+    transform: translateX(-50%);
+    display: block;
+    width: max-content;
+    max-width: calc(100vw - 24px);
+    padding: 7px 12px;
+    border: 1px solid color-mix(in srgb, var(--orange) 55%, var(--line));
+    border-radius: 999px;
+    background: var(--bg-surface);
+    color: var(--fg);
+    box-shadow: var(--shadow-2);
+    font-size: 12px;
+  }
+
+  .pwa-status[data-tone='synced'] { border-color: color-mix(in srgb, var(--green) 55%, var(--line)); }
+
+  .pwa-update {
+    position: fixed;
+    z-index: 61;
+    left: 12px;
+    right: 12px;
+    bottom: calc(var(--mobile-tab-h) + env(safe-area-inset-bottom) + 10px);
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--bg-surface);
+    box-shadow: var(--shadow-2);
+  }
+
+  .pwa-update span { flex: 1; }
+}
+
+@media (max-width: 420px) {
+  .mobile-sheet-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 /* 极窄屏（320px 级的老机型 / 分屏）：只压缩留白，不再改字号 —— 16px 是这条线下面
