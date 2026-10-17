@@ -981,7 +981,11 @@ function lmsTogglePlay(item, video) {
   }
   const playing = lmsUi.playing;
   // 再点一次同一条 = 收起播放器
-  lmsUi.playing = playing && playing.key === key ? null : { key, url, title: item.title ?? '' };
+  // ★ 给 `<video>` 的是**我们自己的转发路由**，不是录播站地址：
+  //   录播站的媒体地址带防盗链（校验 Referer），而 `<video>` 改不了 Referer，
+  //   直接指过去必然加载失败 —— 由后端带上来源头取流再转发。
+  const proxied = `${PC.state.apiBase}/lms/replay/stream?activityId=${encodeURIComponent(item.id)}&label=${encodeURIComponent(video.labelText ?? '')}`;
+  lmsUi.playing = playing && playing.key === key ? null : { key, url: proxied, title: item.title ?? '' };
   lmsPaint();
 }
 

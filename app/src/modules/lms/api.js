@@ -477,6 +477,21 @@ export class LmsApi {
   }
 
   /**
+   * 打开任意媒体地址的**上游字节流**（不读进内存）。
+   *
+   * 回放录像动辄几百 MB，`request()` 会先 `arrayBuffer()` 全读一遍把内存打爆，
+   * 所以走 `http.stream()`，交给路由 `pipeline` 到响应里。
+   *
+   * @returns {Promise<{status:number, headers:Headers, body:ReadableStream|null}>}
+   */
+  async streamMedia(url, { headers = {} } = {}) {
+    const target = String(url ?? '').trim();
+    if (!/^https?:\/\//i.test(target)) {
+      throw new HttpError('播放地址不是 http(s)，无法转发', { status: 400, url: target });
+    }
+    return this.http.stream(target, { headers, follow: true });
+  }
+  /**
    * 取一个附件的原始字节（学校侧 `GET /api/uploads/{id}/blob`）。
    *
    * 为什么必须由后端代取，而不是把学校地址交给浏览器：

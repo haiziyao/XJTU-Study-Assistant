@@ -340,7 +340,8 @@ test('回放的每个视频都给「在线播放」和「下载」两个出口',
     assert.deepEqual(ctx.opened, [], '★ 不能把地址交给浏览器/系统');
     const player = ctx.byClass('lms-player-video');
     assert.equal(player.length, 1, '★ 应当在页面里出现播放器');
-    assert.equal(player[0].src, 'https://rms/play/1', '播放器应指向 playUrl');
+    // ★ 指向的是**我们自己的转发路由**，不是录播站地址：//   媒体地址有防盗链、<video> 改不了 Referer，直接指过去必然加载失败。
+    assert.match(player[0].src, /\/lms\/replay\/stream\?activityId=5007/, '播放器应走本机转发路由');
     const labels = ctx.byClass('ghost-btn').map((node) => ctx.texts(node));
     assert.ok(labels.includes('下载'), '下载按钮应同时存在');
   } finally {

@@ -479,6 +479,43 @@ export class LmsService {
   }
 
   /**
+   * 找出「这条回放的这一路视频」的可取地址，供 `/lms/replay/stream` 转发。
+   *
+   * 为什么必须由后端转发，而不是把录播站地址直接给 `<video>`：
+   * 录播站的媒体地址通常带**防盗链**（校验 Referer、需要票据）。浏览器的 `<video>`
+   * 无法自定义 Referer，直接指向它就会加载失败 —— 用户看到的就是"这个地址播不了"。
+   * 由后端带上正确的来源头去取、再流式转发给浏览器，这两个问题一起解决。
+   *
+   * @param {{activityId: string|number, label?: string}} input `label` 是视频标签（高清 / 教室录像…）
+   */
+  async replayStreamSource({ activityId, label } = {}) {
+    await this.#ensureReady();
+    const record = this.store.lmsActivities.get(activityRecordId(activityId));
+    if (!record) throw HttpError.notFound(`本地没有活动 ${activityId}（先刷新活动）`);
+    const activity = activityView(record);
+    const result = await this.#guard(
+      () => this.api.replayVideos(activity, { lessonId: activity.id }),
+      '取回放地址失败',
+    );
+    const videos = result?.videos ?? [];
+    if (!videos.length) throw HttpError.notFound('这条回放没有可播放的视频');
+    const wanted = String(label ?? '').trim();
+    const picked = (wanted ? videos.find((item) => String(item.labelText ?? '') === wanted) : null) ?? videos[0];
+    const url = picked.playUrl || picked.downloadUrl;
+    if (!url) throw HttpError.notFound('这一路视频没有可用的播放地址');
+    return { url, labelText: picked.labelText ?? '', replayCode: result.replayCode ?? null };
+  }
+
+  /**
+   * 打开回放视频的上游字节流（带上录播站要求的来源头）。
+   *
+   * 注意：媒体地址带票据，**不要打日志**。
+   */
+  async openReplayStream(url) {
+    const rms = this.config.rmsBaseUrl;
+    return this.api.streamMedia(url, { headers: { Referer: `${rms}/`, Origin: rms, Accept: '*/*' } });
+  }
+  /**
    * 某次作业的提交记录（个人 / 小组由 `api.submissions()` 自动判别）。
    *
    * 「我交没交、多少分、老师怎么评的」是作业板块最要紧的三件事 ——

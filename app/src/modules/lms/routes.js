@@ -8,6 +8,9 @@
  * - 未登录时统一返回 401 UNAUTHORIZED，前端据此弹登录框。
  */
 
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+
 import { HttpError } from '../../core/http/router.js';
 import { activityTypesOf } from './config.js';
 
@@ -170,6 +173,36 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
    */
   router.get(`${P}/courses/:id`, ({ params, query }) => lms.coursePage(params.id, { refresh: asBool(query?.refresh) }));
 
+  /**
+   * 回放视频的**字节转发**（`<video>` 直接用这条路由播放）。
+   *
+   * 为什么不把录播站地址直接给 `<video>`：媒体地址通常带防盗链（校验 Referer、要票据），
+   * 而浏览器的 `<video>` 无法自定义 Referer，直接指过去必然加载失败。
+   * 这里由后端带上来源头取流、再流式转发 —— 顺便也绕开了跨域。
+   *
+   * 实现要点：**直接写 `res`**（`pipeline` 到响应），不缓冲整段视频；
+   * 路由层有 `if (res.writableEnded) return;`，所以写完返回即可，不会被再发一次 JSON。
+   */
+  router.get(`${P}/replay/stream`, async ({ query, res }) => {
+    const activityId = query?.activityId;
+    if (!activityId) throw HttpError.badRequest('缺少 activityId');
+    const source = await lms.replayStreamSource({ activityId, label: query?.label });
+    const upstream = await lms.openReplayStream(source.url);
+    if (upstream.status < 200 || upstream.status >= 300 || !upstream.body) {
+      throw HttpError.upstream(`录播站返回 HTTP ${upstream.status}，取不到录像流`);
+    }
+    const headers = {
+      'Content-Type': upstream.headers?.get?.('content-type') || 'video/mp4',
+      'Cache-Control': 'private, max-age=300',
+      // 允许 <video> 同源播放；不写 Accept-Ranges（不做 Range 切片，进度条能拖但会从头缓冲）
+      'Accept-Ranges': 'none',
+    };
+    const length = upstream.headers?.get?.('content-length');
+    if (length) headers['Content-Length'] = length;
+    res.writeHead(200, headers);
+    await pipeline(Readable.fromWeb(upstream.body), res);
+    // 故意不返回实体：`res.writableEnded` 已为真，路由会直接结束
+  });
   /** 某个回放的视频列表（要联网换录播站票据，所以是显式动作）。 */
   router.get(`${P}/activities/:id/replays`, ({ params }) => lms.replayVideos(params.id));
 
