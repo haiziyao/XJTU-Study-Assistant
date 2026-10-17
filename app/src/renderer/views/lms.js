@@ -953,16 +953,18 @@ function lmsReplayRow(item) {
       if (video.isBestAudio) line.appendChild(mk('span', 'tag', '音质更好'));
 
       /*
-       * 「在线播放」：直接开录播站给的播放地址（带签名，浏览器能直接放）。
+       * 「在线播放」：优先用录播站给的播放地址；没有就退回下载直链 ——
+       * 录播站很多路只有 `download_url`（实测如此），而 mp4 直链浏览器本来就能直接播，
+       * 退回去比"什么都不给"有用得多。
        *
        * 为什么是 `target="_blank"` 而不是内嵌 `<video>`：播放地址在录播站那个域上，
-         * 内嵌要处理跨域与票据，而**打开新标签页**是浏览器原生就会做的事，
-         * 不经过我们这一层，也就不会把票据泄漏到页面里。
-       * 没有 `playUrl` 的录像不显示这个按钮（有些只给了下载直链）。
+       * 内嵌要处理跨域与票据；**打开新标签页**是浏览器原生就会做的事，
+       * 不经过我们这一层，票据也就不会落到页面里。
        */
-      if (video.playUrl) {
+      const playHref = video.playUrl || video.downloadUrl;
+      if (playHref) {
         const play = mk('a', 'ghost-btn lms-replay-play', '在线播放');
-        play.href = video.playUrl;
+        play.href = playHref;
         play.target = '_blank';
         play.rel = 'noopener';
         line.appendChild(play);
@@ -1191,6 +1193,9 @@ async function lmsLoadActivity({ refresh = false } = {}) {
         lmsUi.submissionsBusy = false;
       }
     }
+    // 回放详情页**自动取一次视频列表**：用户点进"课程回放"就是想看录像，
+    // 再让他多点一次「取视频」才看到「在线播放/下载」是没有必要的门槛。
+    if (lmsUi.activityDetail?.type === 'lesson') void lmsLoadReplays(lmsUi.activityDetail);
   } catch (error) {
     lmsUi.activityError = error.message ?? String(error);
   } finally {
@@ -1341,18 +1346,38 @@ function lmsHtmlToText(raw) {
 /**
  * 找出这次直播对应的回放活动。
  *
- * 学堂把"直播"和"它的录像"当成两条独立的活动，靠 `lesson_start` 关联
- * （参考项目也是这么做的：`relatedLessonRequested(lesson_start_time)`）。
- * 先按时间戳精确匹配；匹配不到再退回"同一天"，因为两边的秒级写法并不总是完全一致。
+ * 学堂把"直播"和"它的录像"当成两条独立活动。参考项目用 `lesson_start` 关联，
+ * **但实测这个字段在真实数据里恒为 null**（2076 条活动没有一条带它），照抄就永远匹配不到。
+ *
+ * 真正可靠的是 `startTime`：同一次课，直播和回放的时间戳**完全相同**
+ * （直播 `2026-09-15T00:00:00Z` ↔ 回放 `2026-09-15T00:00:00Z`）。
+ * 所以顺序是：`lessonStart` → `startTime` 精确 → `startTime` 同一天。
  */
 function lmsFindRelatedReplay(detail) {
-  const start = detail?.lessonStart;
-  if (!start) return null;
   const replays = lmsUi.coursePage?.groups?.replay ?? [];
-  const exact = replays.find((item) => item.lessonStart && String(item.lessonStart) === String(start));
+  if (!replays.length) return null;
+
+  // 1) 学堂若给了 lesson_start，优先用它（最准）
+  const lessonStart = detail?.lessonStart;
+  if (lessonStart) {
+    const hit = replays.find((item) => item.lessonStart && String(item.lessonStart) === String(lessonStart));
+    if (hit) return hit;
+  }
+
+  // 2) 按开始时间精确配对（真实数据里就靠这个）
+  const start = detail?.startTime;
+  if (!start) {
+    // 连开始时间都没有：只剩 lesson_start 那条线索可用
+    if (!lessonStart) return null;
+    const day = String(lessonStart).slice(0, 10);
+    return replays.find((item) => String(item.startTime ?? '').slice(0, 10) === day) ?? null;
+  }
+  const exact = replays.find((item) => item.startTime && String(item.startTime) === String(start));
   if (exact) return exact;
+
+  // 3) 退回同一天：两边的秒级写法偶尔会有几秒偏差
   const day = String(start).slice(0, 10);
-  return replays.find((item) => item.lessonStart && String(item.lessonStart).slice(0, 10) === day) ?? null;
+  return replays.find((item) => String(item.startTime ?? '').slice(0, 10) === day) ?? null;
 }
 
 /**

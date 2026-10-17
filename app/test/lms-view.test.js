@@ -31,7 +31,7 @@ const PAGE = {
       { id: 5002, type: 'homework', title: '第二次作业：二叉树', userSubmitCount: 1 },
     ],
     material: [{ id: 5005, type: 'material', title: '课件：第 6 章' }],
-    replay: [{ id: 5007, type: 'lesson', title: '第 5 周回放', replayCode: 'rc-5007', lessonStart: '2026-10-13T10:00:00+08:00' }],
+    replay: [{ id: 5007, type: 'lesson', title: '第 5 周回放', replayCode: 'rc-5007', startTime: '2026-10-13T10:00:00+08:00' }],
     live: [{ id: 5004, type: 'lecture_live', title: '第 6 周直播课', startTime: '2026-10-13T10:00:00+08:00' }],
     other: [],
   },
@@ -65,7 +65,7 @@ const DETAIL = {
     },
   },
   5007: { item: { id: 5007, type: 'lesson', title: '第 5 周回放', replayCode: 'rc-5007', uploads: [] } },
-  5004: { item: { id: 5004, type: 'lecture_live', title: '第 6 周直播课', startTime: '2026-10-13T10:00:00+08:00', lessonStart: '2026-10-13T10:00:00+08:00', uploads: [] } },
+  5004: { item: { id: 5004, type: 'lecture_live', title: '第 6 周直播课', startTime: '2026-10-13T10:00:00+08:00', lessonStart: null, uploads: [] } },
 };
 
 const SUBMISSION = {
@@ -365,7 +365,11 @@ test('直播没有对应录像时不给按钮，只说明去处', async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const text = ctx.texts(ctx.mount);
     assert.ok(text.includes('关联回放'));
-    assert.ok(text.includes('去「课程回放」板块找'), '应说明去哪找');
+    // 没有可配对的回放 → 明说"没有关联录像"，别留空也别给一个点了没反应的按钮
+    assert.ok(
+      text.includes('这次直播没有关联的录像') || text.includes('去「课程回放」板块找'),
+      '应说明情况，而不是留空',
+    );
     const jump = ctx.byClass('primary-btn').filter((node) => ctx.texts(node).includes('回放'));
     assert.equal(jump.length, 0, '★ 匹配不到就不该给按钮');
   } finally {
