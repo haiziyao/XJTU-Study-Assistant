@@ -393,8 +393,16 @@ export class LmsApi {
    * **课程回放的视频不在 lms 上**，要跨到录播站（RMS），三步：
    *   1. `GET {lms}/api/lessons/{id}/player-url?from_page=course` → 一个带 `token` 的播放地址；
    *   2. `GET {rms}/api/v1/auth/embed-token?token=…` → 录播站的 Bearer 票据；
-   *   3. `GET {rms}/api/embed/lesson-activities/captures/{replay_code}` → `lesson_videos[]`
-   *      （里面有 `download_url` 直链）。
+   *   3. `GET {rms}/api/embed/lesson-activities/captures/{replay_code}?lesson_activity_id=…`
+   *      → `lesson_videos[]`（里面有 `download_url` 直链）。
+   *
+   * 三处细节是**照着 XJTUToolBox 的 lms.py 逐行对**才发现的，错一个就全盘失败：
+   *   · 第 2 步返回的是 `{ data: "<票据字符串>" }` —— **票据本身就在 `data` 上**，
+   *     不是 `data.token`。按对象去取会永远拿到 undefined，于是每一路回放都报"取不到票据"
+   *     （这就是"全部都获取回放地址失败"的直接原因）。
+   *   · 第 3 步必须带 `lesson_activity_id` 查询参数，否则录播站判为非法请求。
+   *   · `replay_code` 常常只在**活动详情**里（真实数据 850 条回放只有 10 条缓存上带它），
+   *     所以缺了要先去拉详情，再按三级兜底找。
    *
    * 注意：控制台日志里**不要**打这三个地址 —— 它们都带票据，等于把登录态写进日志。
    *
@@ -408,7 +416,18 @@ export class LmsApi {
       throw new HttpError('这个活动没有 id，拿不到回放地址', { field: 'id' });
     }
 
-    // 第一步：lms 给播放地址
+    // 第 0 步：replay_code 常常只在详情里，缓存上没有就去拉一次详情
+    let replayCode = str(activity?.replayCode);
+    if (!replayCode) {
+      try {
+        const detail = normalizeActivityDetail(await this.activityDetail(id));
+        replayCode = str(detail?.replayCode);
+      } catch {
+        // 详情拉不到就继续走 player-url 里那条线索，不在这里就失败
+      }
+    }
+
+    // 第 1 步：lms 给播放地址（参考项目取的是 `url` 字段）
     const player = await this.#apiJson('GET', `/lessons/${encodeURIComponent(id)}/player-url?from_page=course`);
     const body = player?.data && typeof player.data === 'object' ? player.data : player ?? {};
     const playerUrl = str(body.player_url ?? body.playerUrl ?? body.url);
@@ -416,31 +435,42 @@ export class LmsApi {
       throw new HttpError('学堂没有返回播放地址（这门课的回放可能还没生成或未开放）', { lessonId: id });
     }
 
-    // 第二步：拿地址里的 token 去录播站换票据
+    // 第 2 步：拿地址里的 token 去录播站换票据
     const token = queryParam(playerUrl, 'token');
     if (!token) {
       throw new HttpError('播放地址里没有 token，无法换取录播站票据', { lessonId: id });
     }
+    replayCode = replayCode ?? queryParam(playerUrl, 'replay_code') ?? str(body.replay_code ?? body.replayCode);
+
     const rms = this.config.rmsBaseUrl;
     const headers = { Referer: `${rms}/`, Accept: 'application/json, text/plain, */*' };
     const embed = await this.http.json(`${rms}/api/v1/auth/embed-token?token=${encodeURIComponent(token)}`, { headers });
-    const bearer = str(embed?.token ?? embed?.data?.token ?? embed?.embed_token);
+    // ★ 票据就是顶层 `data`（字符串）。同时保留对象形状的兜底，
+    //   是因为录播站不同版本两种形状都出现过 —— 但**字符串那条必须先判**。
+    const bearer =
+      str(embed?.data) ??
+      str(embed?.token) ??
+      str(embed?.data?.token) ??
+      str(embed?.embed_token);
     if (!bearer) {
-      throw new HttpError('录播站没有返回票据（token 可能已过期）', { rms });
+      const code = embed?.error?.code;
+      const message = embed?.error?.message;
+      throw new HttpError(
+        code ? `录播站拒绝换票（code=${code}${message ? `，${message}` : ''}）` : '录播站没有返回票据（token 可能已过期）',
+        { rms },
+      );
     }
 
-    // 第三步：拿 replay_code 要视频列表
-    const replayCode =
-      str(activity?.replayCode) ??
-      queryParam(playerUrl, 'replay_code') ??
-      str(body.replay_code ?? body.replayCode);
+    // 第 3 步：拿 replay_code 要视频列表（必须带 lesson_activity_id）
     if (!replayCode) {
       throw new HttpError('没有 replay_code，拿不到回放视频列表', { lessonId: id });
     }
-    const captures = await this.http.json(
-      `${rms}/api/embed/lesson-activities/captures/${encodeURIComponent(replayCode)}`,
-      { headers: { ...headers, Authorization: `Bearer ${bearer}` } },
-    );
+    const capturesUrl =
+      `${rms}/api/embed/lesson-activities/captures/${encodeURIComponent(replayCode)}` +
+      `?lesson_activity_id=${encodeURIComponent(id)}`;
+    const captures = await this.http.json(capturesUrl, {
+      headers: { ...headers, Authorization: `Bearer ${bearer}` },
+    });
     const raw = captures?.lesson_videos ?? captures?.data?.lesson_videos ?? [];
     const videos = (Array.isArray(raw) ? raw : []).map(normalizeReplayVideo).filter(Boolean);
     return { lessonId: id, replayCode, videos };

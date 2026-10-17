@@ -343,12 +343,20 @@ export async function startMockLms(options = {}) {
       const token = url.searchParams.get('token') ?? '';
       if (!token.startsWith('tk-')) return json(res, 401, { message: 'bad token' });
       state.embedTokenFetched.push(token);
-      return json(res, 200, { token: `bearer-${token}` });
+      // ★ 真实接口返回的是 `{ data: "<票据字符串>" }` —— 票据**就在 data 上**，不是 data.token。
+      //   这里必须照真实形状来：之前 mock 回的是 `{ token }`，于是代码里"取 data.token"
+      //   的错误写法在测试里一直是绿的，真机上却每一路回放都取不到票据。
+      return json(res, 200, { data: `bearer-${token}` });
     }
     const capturesMatch = path.match(/^\/rms\/api\/embed\/lesson-activities\/captures\/([\w-]+)$/);
     if (capturesMatch) {
       if (!String(req.headers.authorization ?? '').startsWith('Bearer bearer-')) {
         return json(res, 401, { message: 'missing bearer' });
+      }
+      // ★ 真实接口要求带 lesson_activity_id；漏了按非法请求处理。
+      //   照真实行为来，漏传才会在这里就暴露，而不是到用户机器上才失败。
+      if (!url.searchParams.get('lesson_activity_id')) {
+        return json(res, 400, { message: 'missing lesson_activity_id' });
       }
       const code = capturesMatch[1];
       state.capturesFetched.push(code);
