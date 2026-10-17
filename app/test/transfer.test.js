@@ -635,7 +635,7 @@ test('传输：本机控制面路由（/api/v1/transfer）能拿到状态、目�
 
     const catalog = await api('/transfer/catalog');
     const names = catalog.body.catalog.map((one) => one.name);
-    for (const expected of ['conversations', 'messages', 'memories', 'notes', 'todos', 'schedules', 'events', 'cards', 'goals', 'grades']) {
+    for (const expected of ['conversations', 'messages', 'memories', 'notes', 'todos', 'schedules', 'events', 'grades']) {
       assert.ok(names.includes(expected), `目录里应有 ${expected}`);
     }
     const grades = catalog.body.catalog.find((one) => one.name === 'grades');
@@ -752,27 +752,16 @@ test('传输：close() 之后立刻删 dataDir 不会撞上"还在写文件"，1
 
 /* ================================================================ 15) 其余可接收集合 */
 
-test('传输：卡片 / 目标 / 日程 / 事件 也能真的收下（逐条走各自模块的服务）', async () => {
+test('传输：日程 / 事件 也能真的收下（逐条走各自模块的服务）', async () => {
   await withPair(async ({ A, B, send }) => {
-    await B.app.services.cards.create({ front: 'TCP 三次握手', back: 'SYN / SYN+ACK / ACK', tags: ['网络'], course: '计算机网络' });
-    await B.app.services.goals.create({ title: '本学期绩点上 3.8', kind: 'goal', targetDate: '2027-01-15', priority: 1 });
     await B.app.services.schedules.create({ title: '数据结构课', date: '2026-10-20', startTime: '08:00', endTime: '09:40', location: '主楼 A203', category: 'class' });
     await B.app.services.events.create({ title: '期中考试周', startDate: '2026-11-02', endDate: '2026-11-06', category: 'exam' });
 
-    const result = await send(['cards', 'goals', 'schedules', 'events']);
+    const result = await send(['schedules', 'events']);
     assert.equal(result.errors, 0, `不该有失败：${JSON.stringify(result.items.filter((one) => one.action === 'failed'))}`);
-    assert.equal(result.sent, 4, '四类各一条都要收下');
+    assert.equal(result.sent, 2, '两类各一条都要收下');
 
     // 用各模块自己的读接口验证（不是看传输结果自说自话）
-    const card = A.app.services.cards.list().items.find((one) => one.front === 'TCP 三次握手');
-    assert.ok(card, '卡片要收下');
-    assert.equal(card.back, 'SYN / SYN+ACK / ACK');
-    assert.equal(card.reps, 0, '复习进度不跟着传，从零开始');
-
-    const goal = A.app.services.goals.list().items.find((one) => one.title === '本学期绩点上 3.8');
-    assert.ok(goal, '目标要收下');
-    assert.equal(goal.targetDate, '2027-01-15');
-
     const schedule = A.app.services.schedules.list({ from: '2026-10-20', to: '2026-10-20' }).find((one) => one.title === '数据结构课');
     assert.ok(schedule, '日程要收下');
     assert.equal(schedule.startTime, '08:00');
@@ -782,10 +771,8 @@ test('传输：卡片 / 目标 / 日程 / 事件 也能真的收下（逐条走�
     assert.ok(event, '事件要收下');
     assert.equal(event.startDate, '2026-11-02');
 
-    // 再传一次：四类都应跳过（幂等对每个集合都成立，不只是笔记）
-    const again = await send(['cards', 'goals', 'schedules', 'events']);
-    assert.equal(again.skipped, 4);
-    assert.equal(A.app.services.cards.list().items.length, 1);
-    assert.equal(A.app.services.goals.list().items.length, 1);
+    // 再传一次：两类都应跳过（幂等对每个集合都成立，不只是笔记）
+    const again = await send(['schedules', 'events']);
+    assert.equal(again.skipped, 2);
   });
 });

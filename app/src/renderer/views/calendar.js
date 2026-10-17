@@ -889,6 +889,15 @@ const todoView = {
   render(ctx) {
     ctx.mount.innerHTML = '';
     todoState();
+    // 「学习周报」是待办页的子功能（不占左栏入口）：打开时**替换**列表那一块内容，
+    // 关掉就回到待办 —— 主列表不会被压扁，也不会让人误以为待办页变成了周报页。
+    const weekly = weeklyPanel();
+    if (weekly?.isOpen?.()) {
+      const host = mk('section', 'todo-weekly-host');
+      ctx.mount.appendChild(host);
+      weekly.mount?.(host);
+      return;
+    }
     ctx.mount.appendChild(todoToolbar());
     // 分类筛选条在**列表之上**、与状态分段分开：分类是"看哪一类"，
     // 状态是"看哪种完成度"，两者可以叠加（例如「期末复习」+「未完成」）。
@@ -900,6 +909,11 @@ const todoView = {
     renderTodoList(list);
   },
 };
+
+/** 学习周报面板：由 `views/weekly-panel.js` 通过 `PCModules.service('weeklyPanel')` 提供。 */
+function weeklyPanel() {
+  return window.PCModules?.getService?.('weeklyPanel') ?? null;
+}
 
 function todoToolbar() {
   const state = PC.state;
@@ -983,8 +997,19 @@ function todoToolbar() {
     }
   });
 
+  // 「学习周报」入口：与筛选 / 快速添加同一条工具条，一眼能找到；点开后替换下面的列表。
+  const weekly = weeklyPanel();
+  const weeklyBtn = mk('button', 'ghost-btn todo-weekly-btn', '学习周报');
+  weeklyBtn.type = 'button';
+  weeklyBtn.title = '打开学习周报（这一周的统计与历史，不占左栏入口）';
+  weeklyBtn.setAttribute('aria-pressed', weekly?.isOpen?.() ? 'true' : 'false');
+  weeklyBtn.addEventListener('click', () => {
+    weeklyPanel()?.toggle?.();
+    PC.refresh();
+  });
+
   const row2 = mk('div', 'toolbar-row');
-  row2.append(quick, create, rollover);
+  row2.append(quick, create, rollover, weeklyBtn);
   bar.append(seg, row2);
   return bar;
 }

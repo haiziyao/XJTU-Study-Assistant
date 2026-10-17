@@ -1,12 +1,14 @@
 # 学习周报（`weekly`）
 
-一周结束时自动汇总：**聊了什么 / 写了哪些笔记 / 复习了多少卡片 / 目标与待办有什么变化**，
+一周结束时汇总：**聊了什么 / 写了哪些笔记 / 待办完成了什么 / 成绩有什么变动**，
 并（可选地）用模型写成一段中文简报。
 
 - 模块：`id: 'weekly'`、`order: 48`、集合 `weeklyReports` → `data/weekly-reports.json`（一周一条）。
 - 依赖：**没有任何必需依赖**。统计只读各模块已落库的集合；`services.ai` 是惰性依赖
   （ai 的 order=90，只能请求时取），拿不到就降级成规则小结。
-- 前端：本模块只有后端（页面在「复习」页里接，见 `docs/AI中枢-实施进度与契约.md`）。
+- 前端：**不占左栏入口**。周报面板挂在「待办」页里（`views/weekly-panel.js`）：
+  待办页顶部有「学习周报」按钮，点开后在同一块内容区显示统计、缺失项、正文与历史；
+  再点一次（或点面板里的「返回待办」）回到待办列表。
 
 ## 1. 接口
 
@@ -59,8 +61,8 @@
 
 ## 3. `stats` 每个字段的数据来源（一个字段一个出处）
 
-`stats` 恒有 `{ from, to, week, days, partial, missing, conversations, notes, cards, goals, schedule, grades }`。
-**时间一律用记录里的 ISO 时间戳与本地日界闭区间 `[from 00:00:00.000, to 23:59:59.999]` 比较。**
+`stats` 恒有 `{ from, to, week, days, partial, missing, conversations, notes, schedule, grades }`，
+**只有四个来源**。**时间一律用记录里的 ISO 时间戳与本地日界闭区间 `[from 00:00:00.000, to 23:59:59.999]` 比较。**
 
 | stats 字段 | 集合 | 字段 |
 | --- | --- | --- |
@@ -72,37 +74,28 @@
 | `notes.updated` / `updatedOnly` | `notes` | `updatedAt` ∈ 区间（`updatedOnly` 再排除区间内新建的） |
 | `notes.deleted` | `notes` | `deletedAt` ∈ 区间 |
 | `notes.titles` | `notes` | 上述笔记按 `updatedAt` 倒序的 `title`（最多 5 条） |
-| `cards.due`（当前到期） | `services.cards.stats()` → `dueNow` | 语义由 cards 模块定义（未暂停且 `due <= now`）；服务不在时才读 `cards` 集合按 `due` 时间戳现算 |
-| `cards.total` | 同上 → `total` | 卡片总数 |
-| `cards.reviewedCards`（本周复习过的卡片数） | `cards` | `lastReviewedAt` ∈ 区间。**精确**口径，但它是"卡片数"不是"次数" |
-| `cards.reviews`（区间复习次数） | `cardReviews`/`reviewLogs`… | 复习流水时间 ∈ 区间。**cards 现在没有流水** → `null` + `partial` |
-| `cards.learned`（这周新学会） | 同上 | 每张卡**最早**一条流水落在区间内（= reps 从 0 变正）；没有流水 → `null` + `partial` |
-| `goals.updated` | `goals` | `updatedAt` ∈ 区间（"本周有改动"，不等于进度前进） |
-| `goals.progressChanges` | `goals` | `progressLog`/`history`/`updates` 条目时间 ∈ 区间；**goals 现在没有流水** → `null` + `partial` |
-| `goals.completed` | `goals` | `completedAt`/`finishedAt`/`doneAt` ∈ 区间；goals 没有完成时间字段，回落"`status === 'done'` 且 `updatedAt` ∈ 区间"（近似，已记 `partial`） |
-| `goals.overdue` / `dueSoon` | `goals` | `status === 'active'` 且 `targetDate` < 今天 / ∈ [今天, 今天+7]（与 `decorate().overdue`、`remindDays` 同口径） |
-| `goals.active` / `total` | `goals` | `status === 'active'` / 全部（`status` ∈ active/done/archived） |
 | `schedule.todosCreated` | `todos` | `createdAt` ∈ 区间 |
 | `schedule.todosCompleted` | `todos` | `completed === true` 且 `completedAt` ∈ 区间 |
+| `schedule.todosOpen` | `todos` | `completed !== true` |
 | `schedule.todosOverdue` / `todosDueSoon` | `todos` | 未完成且 `deadline` < 今天 / ∈ [今天, 今天+7] |
 | `schedule.attention` | `todos` | 上述条目的 `title` + `deadline`（最多 3 条，逾期优先） |
 | `grades.changed` / `updated` / `synced` | `academicGrades` | `updatedAt` / `syncedAt` ∈ 区间 |
 | `grades.gpa` / `includedCount` | `services.academic.stats()` | 现算学分绩（`gpa: null` = 没有可计算的成绩，**不是 0**） |
 
-> 卡片与目标的**当前状态**字段（`due`/`total`/`status`/`targetDate`）都按各自模块的定义读，
-> 不自己发明第二套口径 —— 否则周报上的"到期 8 张"会和复习页上的数字对不上。
-
 **"逾期 / 临近"按统计时刻的今天判断**，不是区间末尾：周报的用途是提醒"下一步做什么"，
 一周结束时生成两者恰好重合，回看历史周时"现在仍逾期"才是需要行动的信息。
+
+> 本次改版删除了间隔重复卡片与学习目标两个功能，它们的数据集合与统计项一并移除。
+> `stats` 里不再有这两项，`missing` 里也不会再出现它们 —— 不是"取不到"，是系统不再统计。
 
 ### `missing`：取不到就说取不到
 
 ```jsonc
-"missing": [{ "source": "cards", "reason": "unavailable", "detail": "cards 模块未装配（…）" }]
+"missing": [{ "source": "conversations", "reason": "unavailable", "detail": "ai 模块未装配（…）" }]
 ```
 
-- `unavailable`：这个来源整个不存在（模块没装配 / 没有对应集合 / 对方服务没有口径方法）→ 该来源为 `null`；
-- `partial`：来源在，但只有一部分字段能算（如没有复习流水 → `reviews`/`learned` 为 `null`，`due` 照给）；
+- `unavailable`：这个来源整个不存在（模块没装配 / 没有对应集合）→ 该来源为 `null`；
+- `partial`：来源在，但只有一部分字段能算（如 academic 服务不在 → 学分绩为 `null`，成绩记录数照给）；
 - `read_failed`：集合存在但读失败（文件损坏等）→ 该来源为 `null`，错误原话进 `detail`。
 
 **绝不把"没数据"写成 0**：0 与缺失对用户的含义完全不同。单个来源读失败不会让接口 500。
@@ -112,7 +105,7 @@
 1. `POST /weekly/report/generate` → 现算 `stats` → 同一周已有记录且 `force` 不为真 → **返回缓存**（结束，不花 token）。
 2. 否则把 `stats` 压成中文键摘要（`buildDigest`）交给 `services.ai.complete({ system, user, temperature, thinking })`。
    提示词三条硬规则：**只依据给定数字**、**明说没有"学习时长"数据源**、**`null` 是"没有数据"不是 0**。
-   输出格式：一句话总结 + `学习投入 / 复习与笔记 / 需要注意的事` 三小节，≤400 字。
+   输出格式：一句话总结 + `学习投入 / 笔记与成绩 / 需要注意的事` 三小节，≤400 字。
 3. `services.ai` 拿不到、未配置密钥（501）、上游失败（502）、返回空内容 → **降级**：
    `report` = `fallbackReport(stats)`（纯规则、逐句对应一个字段，缺的小节写"暂无数据"），
    `fallback: true`、`reason` 记原话、`model: null`、**`ok` 仍是 `true`**。
@@ -121,28 +114,14 @@
 
 > 降级结果也进缓存：否则每次打开都会重试模型、白烧 token。要重写就带 `force: true`。
 
-## 5. 与 cards / goals 的对接状态（父智能体需要知道的两点）
+## 5. 界面：待办页里的子功能
 
-`cards`（order 46，集合 `cards`）与 `goals`（order 47，集合 `goals`）已经装配，
-本模块 `order = 48` 排在它们之后，**没有改动它们的任何文件**，按下面的顺序自适应：
-
-1. **服务口径优先**：`services.cards.stats()`（`dueNow` / `total`）与
-   `services.goals.weeklyStats({from,to})` / `stats({from,to})`（若将来提供）。
-   缺哪个字段就 `null` + `missing.partial`，不会拿 0 顶上。
-2. **集合兜底**：直接读 `store.cards` / `store.goals` 现算。集合名候选表在 `sources.js` 顶部
-   （`CARD_COLLECTIONS` / `REVIEW_COLLECTIONS` / `GOAL_COLLECTIONS`）；命名若变，**只改那三张表**。
-
-**还差一块（需要 cards 侧决定，不是本模块能补的）**：`cards` 目前只保存每张卡的最后复习时间
-（`lastReviewedAt`）与累计 `reps`，**没有复习流水**，因此"区间复习次数"和"这周新学会"无法还原
-（一张卡这周复习了 3 次也只留下最后那一次）。本模块现在的处理是：
-
-- 如实给 `reviews: null` / `learned: null` + `missing[].reason = 'partial'`（**不拿 0 或"卡片数"冒充**）；
-- 同时给出可精确计算的 `reviewedCards`（`lastReviewedAt` 落在区间内的卡片数），
-  报告与降级小结里写作「复习过 N 张卡片」，与"复习次数"分开表述。
-
-只要 cards 之后落了复习流水（例如追加 `{ cardId, reviewedAt, reps, grade }` 的
-`cardReviews` 集合），或提供 `services.cards.weeklyStats({from,to})`，
-**本模块不改一行代码**就会用上更精确的口径。
+- 待办页工具栏第二行有「**学习周报**」按钮；按钮带 `aria-pressed`，面板打开时按钮为选中态。
+- 面板打开后**替换**待办列表那一块内容（不叠在列表上、也不把列表挤扁），顶部有「← 返回待办」。
+- 面板里依次是：本周区间 +「生成本周周报 / 刷新」、客观统计表、`missing` 说明、正文（含降级标记）、历史周报；
+  点历史条目会读取并展示那一周的现算统计与正文，可「重新生成（force）」或删除。
+- 手机（≤900px）：统计行改为上下两行、按钮换行、正文与历史条目 `overflow-wrap: anywhere`，
+  面板自身不产生横向滚动（`views/weekly.css`）。
 
 ## 6. 已知边界
 
@@ -150,3 +129,5 @@
 - 一周一条：`from` 是键（`to` 一起比对，避免自定义区间与自然周互相顶掉）；`force` 重写不新增记录。
 - 只统计"今天"之前的数据也会算进去（区间是闭区间，未来的数据落在区间内同样计入 —— 例如
   提前写好的日程待办）；本模块不判断"是否已发生"。
+- 统计不覆盖日程（`schedules`）与日历事件（`events`）：它们没有"完成"语义，硬算成"学习投入"
+  会造出用户没做过的数字。待办已经能回答"这周做完了什么"。

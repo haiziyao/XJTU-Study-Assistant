@@ -4,7 +4,8 @@
  * 依赖与顺序
  * ----------
  * - `order = 48`：排在 notes(40) / memory(45) 之后，`ai`(90) 之前 —— 与 `memory` 同一段位。
- * - **不依赖任何模块的服务**：统计数据全部来自各模块**已落库的集合**（只读，契约允许）。
+ * - **不依赖任何模块的服务**：统计数据全部来自各模块**已落库的集合**（只读，契约允许）；
+  只有学分绩会问一下 `services.academic.stats()`，取不到就给 null + `missing`。
  * - `ai` 是**惰性依赖**：`createServices` 拿到的 `services` 是**共享注册表**，后装配的模块
  *   （ai 的 order=90）会把服务合并进同一个对象，所以 `this.services.ai` 在**请求时**读得到，
  *   而在 `createServices` 里立刻取只会拿到 undefined。这正是"不把自己排在 ai 后面"的原因：
@@ -13,6 +14,7 @@
  * 两条路径的边界（这是本模块的核心设计）
  * ------------------------------------
  *   1. `stats({ from, to })` —— **纯统计**，永远可用、永远不花钱：只读集合，不调模型、不写库。
+ *      来源固定为 AI 对话 / 笔记 / 待办 / 成绩四项（见 sources.js）。
  *      读不到的来源给 null + `missing`（见 sources.js），接口不因此失败。
  *   2. `generate({ from, to, force })` —— 生成简报：把 stats 交给模型写一段中文简报。
  *      模型不可用/调用失败 → **降级**成规则小结，`ok` 仍是 true、`fallback: true` 并带 `reason`。
@@ -134,8 +136,6 @@ export class WeeklyService {
       week: isoWeekLabel(from),
       /** 逾期/临近的基准日：按"统计时刻的今天"，而不是区间末尾（见 sources.js 的说明）。 */
       today: todayKey(now),
-      /** 同一时刻的毫秒值：卡片的"现在到期"要按时间点比（`due <= now`），不能按天比。 */
-      nowMs: now.getTime(),
     };
   }
 
@@ -145,7 +145,7 @@ export class WeeklyService {
    * 区间统计（**不依赖模型，必须永远可用**）。
    *
    * @param {{ from?: string, to?: string }} [input]
-   * @returns {{ from, to, week, days, partial, missing, conversations, notes, cards, goals, schedule, grades }}
+   * @returns {{ from, to, week, days, partial, missing, conversations, notes, schedule, grades }}
    */
   stats(input = {}) {
     return this.#collect(this.resolveRange(input));

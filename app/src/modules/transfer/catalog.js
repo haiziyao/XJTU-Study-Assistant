@@ -30,8 +30,6 @@ export const COLLECTION_ORDER = [
   'todos',
   'schedules',
   'events',
-  'cards',
-  'goals',
 ];
 
 /** 空字符串/空白统一成「没有名字」，避免同名判定被空格骗过去。 */
@@ -255,61 +253,6 @@ export const COLLECTIONS = {
     },
     remove({ services }, id) {
       return services.events.remove(id);
-    },
-  },
-
-  cards: {
-    collection: 'cards',
-    label: '卡片',
-    importable: true,
-    title: (item) => item.front,
-    duplicateKey: (item) => nameOf(item.front),
-    project(item) {
-      return {
-        front: item.front,
-        back: item.back,
-        tags: item.tags,
-        course: item.course,
-        // 复习进度（due / ease / reps…）**不跟着传**：它是"我复习到哪了"，
-        // 跟着数据走会让另一台机器的复习计划被悄悄改掉；调度从零开始，由模块自己定。
-        // source 只能是 note / manual / ai，所以这里固定 manual。
-        source: 'manual',
-      };
-    },
-    create({ services }, fields) {
-      return services.cards.create(fields).then((record) => ({ record }));
-    },
-    remove({ services }, id) {
-      return services.cards.remove(id);
-    },
-  },
-
-  goals: {
-    collection: 'goals',
-    label: '目标',
-    importable: true,
-    title: (item) => item.title,
-    duplicateKey: (item) => nameOf(item.title),
-    project(item) {
-      return {
-        title: item.title,
-        kind: item.kind,
-        course: item.course,
-        targetDate: item.targetDate,
-        status: item.status,
-        progress: item.progress,
-        milestones: item.milestones,
-        priority: item.priority,
-        note: item.note,
-        remindDays: item.remindDays,
-        source: 'import',
-      };
-    },
-    create({ services }, fields) {
-      return services.goals.create(fields).then((record) => ({ record }));
-    },
-    remove({ services }, id) {
-      return services.goals.remove(id);
     },
   },
 };

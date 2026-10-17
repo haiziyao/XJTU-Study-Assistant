@@ -21,11 +21,11 @@ export const WEEKLY_TOOLS = [
   {
     name: 'weekly_report_get',
     description:
-      '读某一周的学习周报（聊了什么/写了哪些笔记/复习了多少卡片/目标与待办有什么变化）。只读，不写数据、不调用模型。' +
+      '读某一周的学习周报（聊了什么/写了哪些笔记/待办完成了什么/成绩有什么变动）。只读，不写数据、不调用模型。' +
       '有已生成的报告就返回正文；没有则返回 `report: null` + `hint`，同时**照常给出这一周的现算统计**（stats）——' +
       '要生成报告必须用 weekly_report_generate。' +
       'from/to 都是 YYYY-MM-DD（本地日期）；都不传 = 本周（周一起算），只传一个 = 那一天所在的自然周；' +
-      'stats 里为 null 的来源表示**没有数据**（如复习卡片/学习目标模块未装配），不是 0，也不要猜。',
+      'stats 里为 null 的来源表示**没有数据**（如 AI 对话/成绩模块未装配），不是 0，也不要猜。',
     method: 'GET',
     path: '/weekly/report',
     requiresAuth: false,

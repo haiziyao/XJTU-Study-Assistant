@@ -21,6 +21,8 @@ import { bootRenderer } from './helpers/renderer-dom.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CALENDAR_CSS = path.join(HERE, '../src/renderer/views/calendar.css');
+const WEEKLY_CSS = path.join(HERE, '../src/renderer/views/weekly.css');
+const WEEKLY_JS = path.join(HERE, '../src/renderer/views/weekly-panel.js');
 
 /** 一条待办的公共形状（与真实 /todos 响应对齐，派生字段一个不少）。 */
 function todo(overrides) {
@@ -81,8 +83,38 @@ function makeApi() {
     todo({ id: 'p2', title: '交实验报告', category: '', children: [] }),
   ];
 
+  /** 周报面板的伪后端：一个"本周还没有正文"的统计快照（字段与 GET /weekly/report 一致）。 */
+  const weeklyStats = {
+    from: '2099-12-01',
+    to: '2099-12-07',
+    week: '2099-W49',
+    days: 7,
+    conversations: { newConversations: 1, messages: 3, userMessages: 2, assistantMessages: 1, activeConversations: 1, titles: [] },
+    notes: { created: 2, updated: 3, updatedOnly: 1, deleted: 0, titles: [] },
+    schedule: { todosCreated: 1, todosCompleted: 1, todosOpen: 2, todosOverdue: 0, todosDueSoon: 1, attention: [] },
+    grades: { gpa: 3.42, includedCount: 10, total: 10, updated: 0, synced: 0, changed: false },
+    partial: false,
+    missing: [],
+  };
+
   const api = async (url) => {
     calls.push(url);
+    if (url.startsWith('/weekly/report?')) {
+      return {
+        ok: true,
+        ...weeklyStats,
+        stats: weeklyStats,
+        cached: false,
+        report: null,
+        generatedAt: null,
+        model: null,
+        fallback: null,
+        reason: null,
+        statsChangedSinceReport: null,
+        hint: '这一周还没有生成周报',
+      };
+    }
+    if (url.startsWith('/weekly/reports')) return { items: [], count: 0, total: 0 };
     if (url.startsWith('/todos/categories')) {
       return { items: [{ name: '期末复习', total: 3, open: 2 }, { name: '', total: 1, open: 1 }] };
     }
@@ -270,4 +302,52 @@ test('分类条与缩进的样式：横向滚动、窄屏缩进收紧、不用�
   assert.match(css, /@media \(max-width: 900px\)[\s\S]*\.todo-row\.todo-level-3/s, '窄屏要收紧三级缩进');
   assert.match(css, /\.todo-row\.todo-level-2\s*\{[^}]*margin-left/s, '二级缩进由 class 控制');
   assert.match(css, /\.todo-row\.todo-level-3\s*\{[^}]*margin-left/s, '三级缩进由 class 控制');
+});
+
+
+test('周报面板样式：自建滚动容器、900px 断点、不写行内 style', () => {
+  const css = readFileSync(WEEKLY_CSS, 'utf8');
+  assert.match(css, /\.todo-weekly-host\s*\{[^}]*overflow:\s*auto/s, '周报容器要自己滚（与 .todo-list 同一份滚动契约）');
+  assert.match(css, /\.todo-weekly-host\s*\{[^}]*min-height:\s*0/s, 'min-height:0 才能在 flex 里拿到确定高度');
+  assert.match(css, /\.todo-weekly-host\s*\{[^}]*min-width:\s*0/s, 'min-width:0 防止长统计行撑破外壳');
+  assert.match(css, /@media \(max-width: 900px\)[\s\S]*\.wk-table-row\s*\{[^}]*flex-direction:\s*column/s, '手机上统计行改上下排');
+  assert.match(css, /\.wk-report\s*\{[^}]*overflow-wrap:\s*anywhere/s, '长正文必须能断行，不能把页面撑宽');
+  const js = readFileSync(WEEKLY_JS, 'utf8');
+  assert.equal(/\.style\./.test(js), false, 'CSP 的 style-src self 会拦行内 style');
+});
+
+test('周报：待办页顶部有入口，点开显示统计与缺失项，返回后回到待办列表', async () => {
+  const ctx = boot();
+  const first = await ctx.render('todo', { wait: 30 });
+
+  const entry = first.querySelector('.todo-weekly-btn');
+  assert.ok(entry, '待办页工具栏里要有「学习周报」入口（这是唯一的界面入口）');
+  assert.equal(entry.textContent, '学习周报');
+  assert.equal(entry.getAttribute('aria-pressed'), 'false');
+
+  // 点入口 → 服务打开面板；外壳的 PC.refresh 在测试桩里是 no-op，手动重画一次
+  entry.listeners.click[0]();
+  assert.equal(ctx.window.PCModules.getService('weeklyPanel').isOpen(), true, '点一下要真的打开周报');
+
+  const panel = await ctx.render('todo', { wait: 30 });
+  assert.ok(panel.querySelector('.wk-panel'), '打开后要有周报面板');
+  assert.equal(panel.querySelector('.wk-title').textContent, '学习周报', '面板标题要一眼看出这是周报');
+  assert.ok(panel.querySelector('.todo-list') === null, '面板打开时替换待办列表，不挤占主列表');
+  assert.match(panel.querySelector('.wk-range').textContent, /2099-W49/, '面板要显示周区间');
+
+  // 四个来源的统计行（卡片 / 目标已随功能移除，不该再出现）
+  const keys = panel.querySelectorAll('.wk-table-key').map((node) => node.textContent);
+  assert.deepEqual(keys, ['AI 对话', '笔记', '待办', '成绩']);
+  const scheduleLine = panel.querySelectorAll('.wk-table-row').find((row) => row.querySelector('.wk-table-key').textContent === '待办');
+  assert.match(scheduleLine.querySelector('.wk-table-value').textContent, /完成 1/);
+
+  // 没有缺失项时给"都读到了"，不是空白
+  assert.match(panel.querySelector('.wk-note').textContent, /生成会真的调用一次模型/);
+
+  // 面板里的「← 返回待办」关掉面板，待办列表回来
+  panel.querySelector('.wk-back').listeners.click[0]();
+  assert.equal(ctx.window.PCModules.getService('weeklyPanel').isOpen(), false);
+  const back = await ctx.render('todo', { wait: 30 });
+  assert.ok(back.querySelector('.todo-list'), '关掉周报后待办列表要回来');
+  assert.equal(back.querySelector('.wk-panel'), null, '关掉后不该残留面板节点');
 });
