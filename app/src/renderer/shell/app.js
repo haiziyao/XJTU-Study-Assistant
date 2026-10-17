@@ -177,6 +177,7 @@
    * 由 `buildNav()` 从「存下来的偏好」+「注册表」合并出来；「更多」弹层与高亮都读它。
    */
   let navLayout = { main: [], more: [], bottom: [] };
+  const MOBILE_PRIMARY = ['chat', 'calendar', 'todo', 'notes'];
 
   /**
    * 窄屏断点，与 `shell.css` 里 `@media (max-width: 760px)` **必须一致**。
@@ -285,7 +286,71 @@
       }
     }
     if (navLayout.more.length === 0) closeMorePop();
+    buildMobileNav();
     syncNavActive();
+  }
+
+  /** 手机底栏固定四个高频入口，其余注册视图自动进入「更多」。 */
+  function buildMobileNav() {
+    if (!dom.mobileTabbar || !dom.mobileMoreGrid) return;
+    dom.mobileTabbar.replaceChildren();
+    dom.mobileMoreGrid.replaceChildren();
+    const views = Modules.list();
+    const byId = new Map(views.map((view) => [view.id, view]));
+    const append = (parent, item, className = 'mobile-tab') => {
+      const button = mk('button', className);
+      button.type = 'button';
+      button.dataset.mobileView = item.id;
+      button.append(navIcon(item.icon), mk('span', 'mobile-tab-label', item.label));
+      button.addEventListener('click', () => {
+        closeMobileMore();
+        selectView(item.id);
+      });
+      parent.appendChild(button);
+    };
+    for (const id of MOBILE_PRIMARY) {
+      const item = byId.get(id);
+      if (item) append(dom.mobileTabbar, item);
+    }
+    const more = mk('button', 'mobile-tab mobile-tab-more');
+    more.type = 'button';
+    more.dataset.mobileMore = '1';
+    more.append(navIcon('⋯'), mk('span', 'mobile-tab-label', '更多'));
+    more.addEventListener('click', openMobileMore);
+    dom.mobileTabbar.appendChild(more);
+
+    for (const item of views.filter((view) => !MOBILE_PRIMARY.includes(view.id))) {
+      append(dom.mobileMoreGrid, item, 'mobile-sheet-item');
+    }
+    syncMobileNavActive();
+  }
+
+  function openMobileMore() {
+    if (!isMobile() || !dom.mobileMoreSheet) return;
+    dom.mobileMoreSheet.hidden = false;
+    dom.mobileMoreMask.hidden = false;
+    requestAnimationFrame(() => document.body.classList.add('mobile-more-open'));
+  }
+
+  function closeMobileMore() {
+    document.body.classList.remove('mobile-more-open');
+    if (!dom.mobileMoreSheet) return;
+    const finish = () => {
+      if (document.body.classList.contains('mobile-more-open')) return;
+      dom.mobileMoreSheet.hidden = true;
+      dom.mobileMoreMask.hidden = true;
+    };
+    setTimeout(finish, 180);
+  }
+
+  function syncMobileNavActive() {
+    if (!dom.mobileTabbar) return;
+    const visible = state.mobileScreen === SCREEN_CHAT ? CHAT_VIEW : state.view;
+    for (const button of dom.mobileTabbar.querySelectorAll('[data-mobile-view]')) {
+      button.classList.toggle('active', button.dataset.mobileView === visible);
+    }
+    const moreActive = isMobile() && state.mobileScreen === SCREEN_PANEL && !MOBILE_PRIMARY.includes(state.view);
+    dom.mobileTabbar.querySelector('[data-mobile-more]')?.classList.toggle('active', moreActive);
   }
 
   /** 读存下来的布局（坏数据/读不到都返回 null，`resolve()` 会退回默认）。 */
@@ -321,6 +386,7 @@
       const active = !isMobile() && !state.panelCollapsed && navLayout.more.includes(state.view);
       dom.navMore.classList.toggle('active', active);
     }
+    syncMobileNavActive();
   }
 
   /**
@@ -672,6 +738,7 @@
    * 高亮不在这里自己算，统一交给 `syncNavActive()`。
    */
   function selectView(view) {
+    closeMobileMore();
     state.view = view;
     if (view !== 'notes') document.body.classList.remove('notes-focus');
     // 主动切视图 = 一定展开面板（收起态下点「学业」里的跳转按钮，不该跳进一个看不见的面板）
@@ -3406,6 +3473,11 @@
       chatControls: document.getElementById('chat-controls'),
       dot: document.getElementById('dot'),
       toast: document.getElementById('toast'),
+      mobileTabbar: document.getElementById('mobile-tabbar'),
+      mobileMoreMask: document.getElementById('mobile-more-mask'),
+      mobileMoreSheet: document.getElementById('mobile-more-sheet'),
+      mobileMoreGrid: document.getElementById('mobile-more-grid'),
+      mobileMoreClose: document.getElementById('mobile-more-close'),
     };
 
     // openEditor 由日历模块通过 PCModules.service('editor', ...) 提供；其它视图经 PC.openEditor 复用，
@@ -3444,6 +3516,8 @@
     // 见文件末尾的 registerSidebarService()：它在**加载时**就登记，不依赖这里。
 
     buildNav();
+    dom.mobileMoreMask?.addEventListener('click', closeMobileMore);
+    dom.mobileMoreClose?.addEventListener('click', closeMobileMore);
     wireChat();
     // 窄屏布局要在**画面板之前**定好"这一屏给谁"：先挂上 body.mobile-* 类，
     // 后面 selectView() 才知道该走"回聊天"还是"切功能页"（否则会先白画一次没人看得见的面板）。
@@ -3481,6 +3555,7 @@
     state.apiBase = info.baseUrl;
     state.wsUrl = info.wsUrl;
     applyTheme(info.theme);
+    window.PCPWA?.init?.({ apiBase: state.apiBase });
 
     if (!state.apiBase) {
       setStatus('后端未启动', 'error');

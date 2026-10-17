@@ -64,6 +64,8 @@ export const GATEWAY_COOKIE = 'potato_lan';
 export const GATEWAY_TOKEN_HEADER = 'x-potato-lan-token';
 /** WebSocket 升级专用的查询参数（浏览器无法给 WebSocket 设请求头，见 `#authenticate`）。 */
 const GATEWAY_QUERY_TOKEN = 'lan_token';
+export const GATEWAY_CA_PATH = '/mobile-ca.cer';
+export const LAN_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** 代理超时上限（见文件头"超时的取舍"）。 */
 export const UPSTREAM_TIMEOUT_MS = 30 * 1000;
@@ -169,7 +171,7 @@ function deviceLabelOf(req) {
  * 会让用户以为程序坏了，而不是"我少输了一个码"。所以这一页**完全由网关内联生成**：
  * 无脚本、无外部资源、只带 6 行内联样式，且不发 CSP 之外的任何东西。
  */
-function gatePageHtml({ message = null, tone = 'warn' } = {}) {
+function gatePageHtml({ message = null, tone = 'warn', tokenTtlMs = LAN_SESSION_TTL_MS, secure = null } = {}) {
   return `<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -203,7 +205,8 @@ function gatePageHtml({ message = null, tone = 'warn' } = {}) {
         <button type="submit">进入</button>
       </form>
       ${message ? `<p class="${tone === 'fail' ? 'fail' : 'warn'}">${escapeHtml(message)}</p>` : ''}
-      <p class="note">配对码 10 分钟有效、错 5 次锁 60 秒。进入后这台设备可以打开本程序（令牌 30 分钟有效，过期重新输码即可）。</p>
+      ${secure?.caUrl ? `<p><a style="color:#8fb1ff" href="${escapeHtml(secure.caUrl)}">① 下载本机安全证书</a></p><p><a style="color:#8fb1ff" href="${escapeHtml(secure.url)}">② 安装并信任证书后，打开安全版</a></p>` : ''}
+      <p class="note">配对码 10 分钟有效、错 5 次锁 60 秒。授权成功后这台设备可连续使用 ${Math.max(1, Math.round(tokenTtlMs / 86400000))} 天，也可随时在电脑端撤销。</p>
       <p class="note">能看到这一页说明网关已经打开；如果电脑上关掉了「允许手机/平板在局域网内打开本程序」，这个地址会立刻失效。</p>
     </main>
   </body>
@@ -212,9 +215,9 @@ function gatePageHtml({ message = null, tone = 'warn' } = {}) {
 }
 
 /** 回说明页（纯 HTML，状态码如实反映"没通过鉴权"）。 */
-function sendGatePage(res, { status = 401, message = null, tone = 'warn' } = {}) {
+function sendGatePage(res, { status = 401, message = null, tone = 'warn', tokenTtlMs, secure } = {}) {
   if (res.writableEnded) return;
-  const body = gatePageHtml({ message, tone });
+  const body = gatePageHtml({ message, tone, tokenTtlMs, secure });
   res.writeHead(status, {
     'Content-Type': 'text/html; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
@@ -245,7 +248,8 @@ export class LanGateway {
     this.enabled = this.config.enabled === true;
     this.timeoutMs = Number(this.config.timeoutMs) > 0 ? Number(this.config.timeoutMs) : UPSTREAM_TIMEOUT_MS;
     // 令牌有效期与传输 token 一致（同一个数字只有一个出处：protocol.js 的 TOKEN_TTL_MS）
-    this.tokenTtlMs = Number(this.config.tokenTtlMs) > 0 ? Number(this.config.tokenTtlMs) : (Number(transfer?.tokenTtlMs) > 0 ? Number(transfer.tokenTtlMs) : TOKEN_TTL_MS);
+    this.tokenTtlMs = Number(this.config.tokenTtlMs) > 0 ? Number(this.config.tokenTtlMs) : LAN_SESSION_TTL_MS;
+    this.secure = { available: false, ready: false, port: Number(this.config.httpsPort) > 0 ? Number(this.config.httpsPort) : 8887, error: null };
 
     /** 显式指定的上游（测试与排查用）；没给就自己认（见 `#resolveUpstream`）。 */
     this.explicitUpstream = this.#parseUpstream(this.config);
@@ -287,9 +291,30 @@ export class LanGateway {
     return count;
   }
 
+  revoke(id) {
+    const prefix = String(id ?? '').trim();
+    for (const token of this.tokens.keys()) {
+      if (token.startsWith(prefix)) {
+        this.tokens.delete(token);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  setSecureInfo(info = {}) {
+    this.secure = { ...this.secure, ...info };
+    return this.secure;
+  }
+
   /** 局域网地址列表（非回环 IPv4）：给「传输」页直接显示/复制。 */
   urls() {
     return lanAddresses().map((address) => `http://${address}:${this.port()}${GATEWAY_PREFIX}`);
+  }
+
+  secureUrls() {
+    if (!this.secure?.ready) return [];
+    return lanAddresses().map((address) => `https://${address}:${this.secure.port}${GATEWAY_PREFIX}`);
   }
 
   port() {
@@ -305,6 +330,16 @@ export class LanGateway {
       port,
       // 地址列表照给（页面上只在开关打开时才显示）：用户"先看地址再决定开不开"是正常顺序
       urls: this.urls(),
+      httpsUrls: this.secureUrls(),
+      certificate: {
+        available: Boolean(this.secure?.available),
+        ready: Boolean(this.secure?.ready),
+        port: this.secure?.port ?? null,
+        error: this.secure?.error ?? null,
+        generatedAt: this.secure?.generatedAt ?? null,
+        expiresAt: this.secure?.expiresAt ?? null,
+        caUrls: this.secure?.available ? lanAddresses().map((address) => `http://${address}:${port}${GATEWAY_CA_PATH}`) : [],
+      },
       tokenCount: this.tokens.size,
       // 只给"能认人"的部分：完整令牌绝不出现在接口响应里（它等价于门票）
       tokens: [...this.tokens.values()].map((session) => ({
@@ -326,6 +361,7 @@ export class LanGateway {
   /** 这个（未解码的）路径是不是网关的地盘。关着的时候一律不是 —— 于是 8886 上只剩协议 4 条路由。 */
   owns(pathname) {
     if (!this.enabled) return false;
+    if (pathname === GATEWAY_CA_PATH) return true;
     if (pathname === GATEWAY_PREFIX || pathname.startsWith(`${GATEWAY_PREFIX}/`)) return true;
     if (pathname === API_ROOT || pathname.startsWith(`${API_ROOT}/`)) return true;
     return pathname === WS_PATH;
@@ -350,6 +386,20 @@ export class LanGateway {
   async handle(req, res, url) {
     const pathname = url.pathname;
 
+    if (pathname === GATEWAY_CA_PATH) {
+      if (!this.secure?.caPath) throw HttpError.notFound('本机安全证书尚未生成');
+      const body = await fs.readFile(this.secure.caPath);
+      res.writeHead(200, {
+        'Content-Type': 'application/x-x509-ca-cert',
+        'Content-Disposition': 'attachment; filename="ai-study-local-ca.cer"',
+        'Content-Length': body.length,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      res.end(body);
+      return;
+    }
+
     if (pathname === WS_PATH) {
       // 普通 HTTP 打到 /ws：与主服务口径一致（426），别让人以为"网关把请求吞了"
       sendJson(res, 426, { ok: false, error: { code: 'UPGRADE_REQUIRED', message: '该路径需要 WebSocket 升级' } });
@@ -357,6 +407,25 @@ export class LanGateway {
     }
 
     const isApp = pathname === GATEWAY_PREFIX || pathname.startsWith(`${GATEWAY_PREFIX}/`);
+    if (isApp && this.secure?.ready && !req.socket?.encrypted) {
+      const host = String(req.headers?.host ?? '').split(':')[0];
+      if (url.searchParams.has('code')) {
+        res.writeHead(302, {
+          Location: `https://${host}:${this.secure.port}${url.pathname}${url.search}`,
+          'Content-Length': 0,
+          'Cache-Control': 'no-store',
+        });
+        res.end();
+        return;
+      }
+      sendGatePage(res, {
+        status: 200,
+        tokenTtlMs: this.tokenTtlMs,
+        secure: { caUrl: GATEWAY_CA_PATH, url: `https://${host}:${this.secure.port}${GATEWAY_PREFIX}` },
+        message: '首次使用请先安装并信任本机安全证书，再打开安全版。',
+      });
+      return;
+    }
     const auth = this.#authenticate(req, url, { allowQueryToken: false });
 
     if (isApp) {
@@ -366,9 +435,12 @@ export class LanGateway {
         return;
       }
       if (!auth.session) {
+        const host = String(req.headers?.host ?? '').split(':')[0];
         sendGatePage(res, {
           status: 401,
           message: auth.reason === 'invalid' ? `上次的令牌已失效（${Math.round(this.tokenTtlMs / 60000)} 分钟有效），请重新输入配对码。` : null,
+          tokenTtlMs: this.tokenTtlMs,
+          secure: this.secure?.ready && !req.socket?.encrypted ? { caUrl: GATEWAY_CA_PATH, url: `https://${host}:${this.secure.port}${GATEWAY_PREFIX}` } : null,
         });
         return;
       }
@@ -386,6 +458,9 @@ export class LanGateway {
           : this.#authHint(),
         { hint: this.#authHint() },
       );
+    }
+    if (pathname.startsWith(`${API_PREFIX}/transfer/gateway`) && req.method !== 'GET') {
+      throw new HttpError(403, 'LOCAL_ONLY', '设备授权只能在电脑端管理');
     }
     await this.#proxy(req, res);
   }
@@ -446,10 +521,10 @@ export class LanGateway {
     return session;
   }
 
-  #cookieHeader(token) {
+  #cookieHeader(token, secure = false) {
     // HttpOnly：脚本拿不到（XSS 也偷不走）；SameSite=Lax：够用且不会被 Safari 拒绝；
     // 不加 Secure —— 这是 http://<内网IP>，加了 Secure 浏览器会直接丢掉这个 Cookie。
-    return `${GATEWAY_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(this.tokenTtlMs / 1000)}`;
+    return `${GATEWAY_COOKIE}=${token}; Path=/; HttpOnly; SameSite=${secure ? 'Strict' : 'Lax'}; Max-Age=${Math.floor(this.tokenTtlMs / 1000)}${secure ? '; Secure' : ''}`;
   }
 
   #sweep() {
@@ -489,7 +564,7 @@ export class LanGateway {
 
     res.writeHead(302, {
       Location: location,
-      'Set-Cookie': this.#cookieHeader(session.token),
+      'Set-Cookie': this.#cookieHeader(session.token, Boolean(req.socket?.encrypted)),
       'Content-Type': 'text/plain; charset=utf-8',
       'Content-Length': 0,
       'Cache-Control': 'no-store',
@@ -577,6 +652,7 @@ export class LanGateway {
       // 前端更新立刻生效（桌面端走 core/http/static.js 也是 no-store）
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
+      ...(path.basename(target) === 'sw.js' ? { 'Service-Worker-Allowed': '/app/' } : {}),
     });
     res.end(body);
   }

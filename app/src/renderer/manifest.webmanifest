@@ -1,0 +1,27 @@
+{
+  "id": "/app/",
+  "name": "AI 智学",
+  "short_name": "智学",
+  "description": "西安交通大学 AI 学习助手",
+  "lang": "zh-CN",
+  "start_url": "/app/#chat",
+  "scope": "/app/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "background_color": "#f4f7fd",
+  "theme_color": "#315fda",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "assets/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    { "name": "对话", "url": "/app/#chat" },
+    { "name": "笔记", "url": "/app/#notes" },
+    { "name": "日历", "url": "/app/#calendar" }
+  ]
+}
