@@ -1467,6 +1467,28 @@ function lmsPaintInner() {
 
 /* ------------------------------------------------------------------ 登记到外壳 */
 
+/**
+ * 渲染层测试用的**测试缝**（与 `shell/app.js` 的 `__PC_CHAT_TEST__` / `__PC_NAV_TEST__` 同一口径：
+ * 只暴露已经存在的函数与状态本身，不为测试另写一套逻辑）。
+ *
+ * 为什么需要它：这门课的三级导航（课程 → 板块 → 详情）与"切页签不联网""返回回到原板块"
+ * 这几条不变式全在视图内部，不挖缝就只能靠肉眼点浏览器，回归时第一个坏掉的就是它们。
+ */
+window.__PC_LMS_TEST__ = {
+  ui: lmsUi,
+  paint: lmsPaint,
+  openCourse: lmsOpenCourse,
+  openActivity: lmsOpenActivity,
+  backToCourse: lmsBackToCourse,
+  selectTab: lmsSelectTab,
+  loadCoursePage: lmsLoadCoursePage,
+  /** 直接塞一份课程页数据（省掉一次网络往返）。 */
+  setCoursePage: (page) => {
+    lmsUi.coursePage = page;
+    lmsPaint();
+  },
+};
+
 window.PCModules.register({
   id: 'lms',
   label: '思源学堂',
