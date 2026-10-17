@@ -1006,14 +1006,24 @@ function lmsPlayerBlock() {
   video.autoplay = true;
   video.setAttribute('controls', 'controls');
   video.src = playing.url;
-  // 播不了要说清原因，而不是留一块黑屏
+
+  /*
+   * 播放失败时**只改这一个节点的文字，绝不调 lmsPaint()**。
+   *
+   * 这条是血泪：`lmsPaint()` 会 `mount.innerHTML = ''` 重建整棵树，
+   * 于是又造出一个指向同一个坏地址的 `<video>`，它再失败再触发 error → 再重画……
+   * 无限重画把主线程占死，表现就是**整个右侧面板卡住、点什么都没反应**
+   * （连切左侧导航都刷不动，因为重画在不停发生）。
+   */
+  const errorNode = mk('div', 'lms-error');
+  errorNode.hidden = true;
   video.addEventListener('error', () => {
-    lmsUi.playingError = '这个地址播不了（可能是签名过期，或它不是可直接播放的视频流）';
-    lmsPaint();
+    errorNode.textContent =
+      '这个地址播不了（录播站可能要求带上来源信息或签名已过期）。可以点「下载」把文件存下来再看。';
+    errorNode.hidden = false;
   });
 
-  box.append(head, video);
-  if (lmsUi.playingError) box.appendChild(mk('div', 'lms-error', lmsUi.playingError));
+  box.append(head, video, errorNode);
   return box;
 }
 
