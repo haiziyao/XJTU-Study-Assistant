@@ -28,11 +28,28 @@ const ACTIVITY_TTL_MS = 10 * 60 * 1000;
 const USER_RETRY_MS = 60 * 1000;
 /** 单次预览最多补拉多少条作业详情（详情接口一个活动一次请求）。 */
 const MAX_DETAIL_FETCH = 40;
+/**
+ * 单次附件转发的字节上限。
+ *
+ * 附件走 `request()` 会整份读进内存（回放视频另走流式下载），所以必须有个上限：
+ * 没有它，一个几百 MB 的课件就能把进程内存打爆。超过就明确报错让用户去学堂下，
+ * 而不是悄悄占满内存再被系统杀掉。
+ */
+const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
 
 const courseRecordId = (courseId) => `lms:course:${courseId}`;
 const activityRecordId = (activityId) => `lms:activity:${activityId}`;
 
 export class LmsService {
+  /**
+   * 每门课最近一次自动拉活动的时间：`courseId → 毫秒时间戳`。只活在内存里。
+   *
+   * 为什么不能用全局的 `state.lastActivitiesAt` 做节流：那个是"任何一门课刷新过"
+   * 就会更新，于是刷完 A 再点 B 会被判成"新鲜"，B 的四个板块一直是空的。
+   * 这个 Map 让"每门课最多每 10 分钟自动拉一次"：既不会空着，也不会来回点就狂打学校接口。
+   */
+  #courseFetchedAt;
+
   /**
    * @param {object} options
    * @param {object} options.auth **共享的全局认证服务**（`services.auth`，order=5）。
@@ -87,6 +104,7 @@ export class LmsService {
       lastAutoSyncAt: null,
     };
     this.autoSyncTimer = undefined;
+    this.#courseFetchedAt = new Map();
   }
 
   // ---------------------------------------------------------------- 对外状态
@@ -340,12 +358,38 @@ export class LmsService {
   /**
    * 课程页数据：课程信息 + 这门课的活动按类型分组。
    *
-   * 全部来自本地缓存（`POST /lms/activities/refresh` 负责刷新），
-   * 打开课程页不该再打一次学校接口 —— 那会让"点一下课程"变成几秒白屏。
+   * **为什么要自动拉一次**：以前这里只读本地缓存，而"打开课程"不会触发任何刷新 ——
+   * 用户点进一门课，四个板块全空，必须自己去点「刷新本课活动」才看得到东西。
+   * 现在按 `ACTIVITY_TTL_MS` 节流地自动补：缓存新鲜就直接用，过期或这门课一条都没有才打学校接口。
+   *
+   * 自动刷新失败**不抛错**：已经有缓存就照常显示，把错误放进 `refreshError` 让页面提示一句。
+   * 一门课的活动拉取失败不该让整页打不开。
+   *
+   * @param {string|number} courseId
+   * @param {{refresh?: boolean}} [options] `refresh: true` 强制拉取（用户点了刷新按钮）
    */
-  coursePage(courseId) {
+  async coursePage(courseId, { refresh = false } = {}) {
     const record = this.store.lmsCourses.all().find((item) => Number(item.courseId) === Number(courseId));
     if (!record) throw HttpError.notFound(`本地没有课程 ${courseId}（先刷新课程）`);
+
+    const cached = this.listActivities({ courseIds: [courseId] }).items;
+    let refreshError = null;
+    // ★ 节流要**按课程**算，不能用全局的 `lastActivitiesAt`：
+    //   那个时间戳是"任何一门课刷新过"就会更新，于是刷完 A 再点 B 会被判成"新鲜"，
+    //   B 的四个板块就一直是空的 —— 而这正是这次要修的症状之一。
+    const key = String(courseId);
+    const fetchedAt = this.#courseFetchedAt.get(key) ?? 0;
+    const fresh = Date.now() - fetchedAt < ACTIVITY_TTL_MS;
+    if (refresh || !fresh) {
+      try {
+        await this.refreshActivities({ courseIds: [Number(courseId)] });
+        this.#courseFetchedAt.set(key, Date.now());
+      } catch (error) {
+        // 自动刷新失败不抛：已有缓存就照常显示，把错误放进 refreshError 让页面说一句
+        refreshError = error?.message ?? String(error);
+      }
+    }
+
     const course = courseView(record);
     const items = this.listActivities({ courseIds: [courseId] }).items;
     const groups = { replay: [], homework: [], material: [], live: [], other: [] };
@@ -367,7 +411,83 @@ export class LmsService {
       groups,
       counts: Object.fromEntries(Object.entries(groups).map(([key, list]) => [key, list.length])),
       fetchedAt: this.state.lastActivitiesAt,
+      refreshError,
       loggedIn: this.state.status === 'ready',
+    };
+  }
+
+  /**
+   * 某门课的「资料」清单。
+   *
+   * 学堂没有独立的资料接口 —— 资料就是一种课程活动（`type: 'material'`），
+   * 附件挂在它的详情里。所以这里返回的是"这门课的资料类活动"，
+   * `withDetail: true` 时才顺带把每条的附件补上（会多打 N 次详情接口，默认不做）。
+   */
+  async materials(courseId, { withDetail = false } = {}) {
+    const record = this.store.lmsCourses.all().find((item) => Number(item.courseId) === Number(courseId));
+    if (!record) throw HttpError.notFound(`本地没有课程 ${courseId}（先刷新课程）`);
+    const items = this.listActivities({ courseIds: [courseId], type: 'material' }).items;
+    const list = items.map((item) => ({ ...item, uploads: [] }));
+    if (withDetail) {
+      // 串行补详情：资料通常十几条，并发打学校接口更容易触发限流
+      for (const item of list) {
+        try {
+          const detail = await this.activityDetail(item.id);
+          item.uploads = detail.item?.uploads ?? [];
+          item.description = detail.item?.description ?? '';
+        } catch {
+          // 单条详情拿不到就留空，不影响其它资料
+        }
+      }
+    }
+    return { items: list, count: list.length, courseName: record.name ?? null };
+  }
+
+  /**
+   * 某个附件/提交文件的原始字节。
+   *
+   * 前端拿到的是 `/lms/attachments/:id` 这样的**本机地址**：
+   * 学校那个 blob 地址要 CAS cookie，浏览器直连必 401，所以字节只能由后端代取再转发。
+   * `filename` 只用于拼 `Content-Disposition`，**绝不参与任何路径拼接**。
+   */
+  async attachment(uploadId) {
+    // ★ 参数非法要**在调上游之前**就挡掉：`#guard` 会把任何异常翻译成 502 "取附件失败"，
+    //   于是一个明显的 400（id 写错了）会被伪装成学校那边出错，排查时非常误导。
+    const id = Number(uploadId);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw HttpError.badRequest(`附件 id 非法：${uploadId}`, { field: 'id' });
+    }
+    await this.#ensureReady();
+    const blob = await this.#guard(() => this.api.attachmentBlob(id), '取附件失败');
+    const bytes = blob?.bytes ?? new Uint8Array(0);
+    if (!bytes.length) throw HttpError.notFound(`附件 ${uploadId} 是空的（或没有下载权限）`);
+    // 防御：附件本应是课件/文档。真有超大文件时宁可明确报错，也不要把它整份读进内存。
+    if (bytes.length > MAX_ATTACHMENT_BYTES) {
+      throw HttpError.badRequest(
+        `附件太大（${humanSize(bytes.length)}），超过单次转发上限 ${humanSize(MAX_ATTACHMENT_BYTES)}，请在学堂里下载`,
+      );
+    }
+    return { bytes, contentType: blob?.contentType ?? '' };
+  }
+
+  /**
+   * 某次作业的提交记录（个人 / 小组由 `api.submissions()` 自动判别）。
+   *
+   * 「我交没交、多少分、老师怎么评的」是作业板块最要紧的三件事 ——
+   * 以前这条路由是 501，详情页只能说"不知道"。
+   */
+  async submission(activityId) {
+    await this.#ensureReady();
+    const submissions = await this.#guard(
+      () => this.api.submissions(activityId),
+      '拉取作业提交记录失败',
+    );
+    const list = Array.isArray(submissions) ? submissions : [];
+    return {
+      activityId: String(activityId),
+      submitted: list.length > 0,
+      count: list.length,
+      submissions: list,
     };
   }
 

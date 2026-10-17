@@ -153,10 +153,26 @@ export function defaultDataset() {
       1002: [{ id: 5006, course_id: 1002, type: 'homework', title: 'Unit 3 作文', start_time: activityIso(live, '08:00:00'), end_time: activityIso(live + 3, '22:00:00'), published: true, submit_by_group: false }],
     },
     details: {
-      5001: { description: '<p>实现单链表并提交源码</p>', user_submit_count: 0, highest_score: 100, lowest_score: 60, average_score: 82 },
+      5001: {
+        description: '<p>实现单链表并提交源码</p>',
+        user_submit_count: 0,
+        highest_score: 100,
+        lowest_score: 60,
+        average_score: 82,
+        // 附件挂在详情里（学堂就是这么分的）：一个是可下载的 PDF，一个老师关掉了下载
+        uploads: [
+          { id: 9001, name: '作业要求.pdf', size: 2048, type: 'application/pdf', allow_download: true, reference_id: 71 },
+          { id: 9002, name: '评分细则.docx', size: 4096, type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', allow_download: false },
+        ],
+      },
       5002: { description: '<p>实现二叉树遍历</p>', user_submit_count: 1, highest_score: 100 },
       5003: { description: '<p>摸底</p>', user_submit_count: 1 },
       5006: { description: '<p>Write a letter</p>', user_submit_count: 0 },
+      // 资料类活动：详情里带附件，资料板块就靠这个
+      5005: {
+        description: '<p>第 6 章课件</p>',
+        uploads: [{ id: 9003, name: '第6章-树与二叉树.pptx', size: 8192, type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', allow_download: true }],
+      },
     },
   };
 }
@@ -195,6 +211,8 @@ export async function startMockLms(options = {}) {
     playerUrlFetched: [],
     embedTokenFetched: [],
     capturesFetched: [],
+    /** 附件 blob 被取过哪些 id（验证后端是**代取**而不是把学校地址直接甩给浏览器）。 */
+    blobFetched: [],
   };
 
   let origin = '';
@@ -384,6 +402,23 @@ export async function startMockLms(options = {}) {
       }
       const submissionsMatch = path.match(/^\/api\/activities\/(\d+)\/(students|groups)\/(\d+)\/submission_list$/);
       if (submissionsMatch) return json(res, 200, { submissions: [{ id: 1, score: 95, status: 'marked', submitted_at: '2026-10-06T20:00:00+08:00' }] });
+
+      /**
+       * 附件字节（`GET /api/uploads/{id}/blob`）。
+       *
+       * 真实站点上这条要 CAS cookie，所以我们的后端**代取**再转发 ——
+       * mock 这里回一段可识别的字节，测试就能验证"转发的确实是这个文件"。
+       * 9009 故意做成"不存在"，用来测 404 分支。
+       */
+      const blobMatch = path.match(/^\/api\/uploads\/(\d+)\/blob$/);
+      if (blobMatch) {
+        const uploadId = Number(blobMatch[1]);
+        if (uploadId === 9009) return json(res, 404, { message: 'upload not found' });
+        state.blobFetched.push(uploadId);
+        const payload = Buffer.from(`blob-of-${uploadId}`, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': String(payload.length) });
+        return res.end(payload);
+      }
 
       // 回放第一步：lms 给一个带 token 的播放地址（回放的视频不在 lms 上）
       const playerMatch = path.match(/^\/api\/lessons\/(\d+)\/player-url$/);

@@ -162,24 +162,102 @@ export function normalizeActivity(raw) {
   };
 }
 
+/**
+ * 附件类型 → 前端选图标用的粗分类。
+ *
+ * 学堂的 `uploads[].type` 是一串 MIME 化的字符串（`application/pdf`、
+ * `video/mp4`、`application/vnd.openxmlformats-…` …），直接拿去判断分支既脆又难读。
+ * 这里映射成四档；认不出的一律 `file`（**不能**当成"没有附件"丢掉）。
+ */
+export function uploadKind(type, name = '') {
+  const text = String(type ?? '').toLowerCase();
+  const ext = String(name ?? '').toLowerCase().split('.').pop() ?? '';
+  if (text.startsWith('video/') || ['mp4', 'mkv', 'flv', 'mov', 'avi', 'm3u8'].includes(ext)) return 'video';
+  if (text.startsWith('audio/') || ['mp3', 'm4a', 'wav', 'aac'].includes(ext)) return 'audio';
+  if (text.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(ext)) return 'image';
+  if (
+    text.includes('pdf') ||
+    text.includes('word') ||
+    text.includes('document') ||
+    text.includes('presentation') ||
+    text.includes('sheet') ||
+    text.includes('officedocument') ||
+    ['doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'txt', 'md', 'zip', 'rar', '7z'].includes(ext)
+  ) {
+    return 'document';
+  }
+  return 'file';
+}
+
+/**
+ * 一个附件上传（`uploads[]` 的一项）。
+ *
+ * **下载地址给的是我们自己的代理，不是学校地址** —— 学校那个 `/api/uploads/{id}/blob`
+ * 必须带 CAS 会话 cookie，浏览器直连会 401；文件也跨域拿不到。
+ * 所以这里只给出"点一下该请求哪条后端路由"，真正取字节由 `GET /lms/attachments/:id` 做。
+ *
+ * `allow_download === false` 的附件**不给下载入口**，只给预览 —— 那是老师的显式设置，
+ * 我们不能凭空给个按钮然后让用户点出 403。
+ */
+export function normalizeUpload(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = toIntOrNull(raw.id);
+  const name = str(raw.name) ?? (id === null ? null : `附件 ${id}`);
+  if (!name) return null;
+  const size = toIntOrNull(raw.size);
+  const allowDownload = raw.allow_download === undefined ? true : bool(raw.allow_download);
+  const referenceId = toIntOrNull(raw.reference_id ?? raw.referenceId);
+  const type = str(raw.type) ?? '';
+  return {
+    id,
+    name,
+    type,
+    kind: uploadKind(type, name),
+    size,
+    allowDownload,
+    referenceId,
+    // 下载与预览都指向本机代理；没有 id 就没法代理，两个都不给
+    downloadUrl: id !== null && allowDownload ? `/lms/attachments/${id}` : null,
+    previewUrl: id !== null ? `/lms/attachments/${id}?inline=1` : null,
+  };
+}
+
+/** 从活动详情里抠 `replay_code`：参考实现的三级兜底，缺了就拿不到回放视频。 */
+function pickReplayCode(raw, data) {
+  const direct = str(raw.replay_code ?? raw.replayCode);
+  if (direct) return direct;
+  // 2) 挂在 lesson_resource.properties 上
+  const properties = raw.lesson_resource?.properties ?? raw.lessonResource?.properties;
+  const nested = str(properties?.replay_code ?? properties?.replayCode);
+  if (nested) return nested;
+  // 3) 直播详情里的 replay_id
+  const external = data?.external_live_detail ?? data?.externalLiveDetail;
+  return str(external?.replay_id ?? external?.replayId);
+}
+
 export function normalizeActivityDetail(raw) {
   const brief = normalizeActivity(raw);
   if (!brief) return null;
+  // 学堂把很多字段塞在 `data` 里（描述、直播详情），顶层是拿不到的 ——
+  // 只读顶层会让"描述"永远是空字符串，板块看起来像没有内容。
+  const data = raw.data && typeof raw.data === 'object' ? raw.data : {};
+  const uploads = Array.isArray(raw.uploads) ? raw.uploads.map(normalizeUpload).filter(Boolean) : [];
   return {
     ...brief,
-    description: str(raw.description) ?? '',
+    description: str(data.description ?? raw.description) ?? '',
     groupId: toIntOrNull(raw.group_id ?? raw.groupId),
+    groupSetId: toIntOrNull(raw.group_set_id ?? raw.groupSetId),
+    groupSetName: str(raw.group_set_name ?? raw.groupSetName),
     userSubmitCount: toIntOrNull(raw.user_submit_count ?? raw.userSubmitCount),
     averageScore: raw.average_score ?? raw.averageScore ?? null,
     highestScore: raw.highest_score ?? raw.highestScore ?? null,
     lowestScore: raw.lowest_score ?? raw.lowestScore ?? null,
+    hasScoreCount: toIntOrNull(raw.has_score_count ?? raw.hasScoreCount),
     lessonStart: str(raw.lesson_start ?? raw.lessonStart),
     lessonEnd: str(raw.lesson_end ?? raw.lessonEnd),
-    replayCode: str(raw.replay_code ?? raw.replayCode),
+    replayCode: pickReplayCode(raw, data),
     replayVideoCount: toIntOrNull(raw.replay_video_count ?? raw.replayVideoCount),
-    uploads: Array.isArray(raw.uploads)
-      ? raw.uploads.map((item) => ({ id: toIntOrNull(item?.id), name: str(item?.name), size: toIntOrNull(item?.size) }))
-      : [],
+    uploads,
   };
 }
 
@@ -192,9 +270,7 @@ export function normalizeSubmission(raw) {
     submittedAt: str(raw.submitted_at ?? raw.submittedAt),
     comment: str(raw.comment) ?? '',
     instructorComment: str(raw.instructor_comment ?? raw.instructorComment) ?? '',
-    uploads: Array.isArray(raw.uploads)
-      ? raw.uploads.map((item) => ({ id: toIntOrNull(item?.id), name: str(item?.name), size: toIntOrNull(item?.size) }))
-      : [],
+    uploads: Array.isArray(raw.uploads) ? raw.uploads.map(normalizeUpload).filter(Boolean) : [],
   };
 }
 
@@ -368,6 +444,42 @@ export class LmsApi {
     const raw = captures?.lesson_videos ?? captures?.data?.lesson_videos ?? [];
     const videos = (Array.isArray(raw) ? raw : []).map(normalizeReplayVideo).filter(Boolean);
     return { lessonId: id, replayCode, videos };
+  }
+
+  /**
+   * 取一个附件的原始字节（学校侧 `GET /api/uploads/{id}/blob`）。
+   *
+   * 为什么必须由后端代取，而不是把学校地址交给浏览器：
+   *   1. 那个地址要 CAS 会话 cookie，浏览器直连必然 401；
+   *   2. 即使带上 cookie，跨域也读不到响应体。
+   * 所以前端只认我们自己的 `GET /lms/attachments/:id`，字节由这里取、由路由转发。
+   *
+   * 说明：这里走 `request()`（正文读进内存）。附件是课件/文档，几 MB 量级；
+   * 回放视频那种几百 MB 的走 `replay-download.js` 的流式下载，不经过这里。
+   * 路由层仍会挡一个上限，避免有人拿超大文件把内存打爆。
+   */
+  async attachmentBlob(uploadId) {
+    const id = Number(uploadId);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new HttpError('附件 id 非法', { status: 400, field: 'id' });
+    }
+    // ⚠️ `apiBase` 本身已经以 `/api` 结尾（见构造函数），这里**不能再写一遍**
+    // ——写成 `${apiBase}/api/uploads/…` 会变成 `/api/api/…`，学校直接 404。
+    const url = `${this.apiBase}/uploads/${id}/blob`;
+    const response = await this.http.request(url, {
+      headers: { Referer: `${this.config.baseUrl}/user/index` },
+      follow: true,
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw new HttpError('登录态已失效，请重新登录思源学堂', { status: response.status, url });
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new HttpError(`取附件失败：HTTP ${response.status}`, { status: response.status, url });
+    }
+    return {
+      bytes: response.bytes ?? new Uint8Array(0),
+      contentType: response.headers?.get?.('content-type') ?? '',
+    };
   }
 
   /**

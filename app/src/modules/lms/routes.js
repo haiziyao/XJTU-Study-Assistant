@@ -24,6 +24,40 @@ function asBool(value) {
   return value === true || value === 'true' || value === '1' || value === 1;
 }
 
+/**
+ * 按扩展名猜 `Content-Type`。
+ *
+ * 什么时候需要它：学校返回的 blob 响应不一定带 `Content-Type`，而浏览器
+ * 拿到 `application/octet-stream` 的 PDF 会直接下载而不是预览 —— 点「预览」却弹下载框，
+ * 用户会以为按钮坏了。猜不出来才退回 octet-stream。
+ */
+function guessContentType(filename) {
+  const ext = String(filename ?? '').toLowerCase().split('.').pop() ?? '';
+  const table = {
+    pdf: 'application/pdf',
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    svg: 'image/svg+xml',
+    txt: 'text/plain; charset=utf-8',
+    md: 'text/markdown; charset=utf-8',
+    csv: 'text/csv; charset=utf-8',
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+    mp3: 'audio/mpeg',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    zip: 'application/zip',
+  };
+  return table[ext] ?? '';
+}
+
 function normalizeKeys(value) {
   if (value === undefined || value === null) return null;
   if (!Array.isArray(value)) throw HttpError.badRequest('字段 keys 必须是数组');
@@ -130,9 +164,11 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
 
   /**
    * 课程页：课程信息 + 这门课的活动（按 回放/作业/资料/直播 分组）。
-   * 全部走本地缓存，点开课程页不会再打一次学校接口。
+   *
+   * `?refresh=1` 强制重拉这门课的活动（用户点了刷新按钮）；不传时服务层按
+   * `ACTIVITY_TTL_MS` 节流地自动补齐 —— 缓存新鲜就直接读本地，不再打学校接口。
    */
-  router.get(`${P}/courses/:id`, ({ params }) => lms.coursePage(params.id));
+  router.get(`${P}/courses/:id`, ({ params, query }) => lms.coursePage(params.id, { refresh: asBool(query?.refresh) }));
 
   /** 某个回放的视频列表（要联网换录播站票据，所以是显式动作）。 */
   router.get(`${P}/activities/:id/replays`, ({ params }) => lms.replayVideos(params.id));
@@ -150,10 +186,14 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
   /** 清掉已结束的任务记录（不删文件）。 */
   router.post(`${P}/downloads/clear`, () => lms.clearDownloads());
 
-  /** 某门课的课件/资料清单。 */
-  router.get(
-    `${P}/courses/:id/materials`,
-    planned('课程资料清单', { params: { id: 'string' }, returns: { items: '[{ id, title, kind, bytes, uploadedAt, downloadable }]' } }),
+  /**
+   * 某门课的课件/资料清单。
+   *
+   * 学堂没有独立的资料接口 —— 资料就是一种课程活动（`type: 'material'`），
+   * 附件挂在它的详情里。`?detail=1` 时顺带把每条资料的附件补上（会多打 N 次详情接口）。
+   */
+  router.get(`${P}/courses/:id/materials`, ({ params, query }) =>
+    lms.materials(params.id, { withDetail: asBool(query?.detail) }),
   );
 
   /** 某门课的讨论区主题。 */
@@ -163,9 +203,41 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
   );
 
   /** 某次作业的提交情况（是否提交、时间、得分、评语、附件）。 */
+  router.get(`${P}/activities/:id/submission`, ({ params }) => lms.submission(params.id));
+
+  /**
+   * 附件/提交文件的字节转发。
+   *
+   * 学校那个 `blob` 地址要 CAS cookie，浏览器直连必 401 —— 所以字节由后端代取再转发。
+   * `inline=1` 时让浏览器直接预览（PDF/图片），否则按下载处理。
+   * `name` 只用于拼 `Content-Disposition`，**绝不参与路径拼接**。
+   */
+  router.get(`${P}/attachments/:id`, async ({ params, query }) => {
+    const result = await lms.attachment(params.id);
+    const inline = asBool(query?.inline);
+    const filename = typeof query?.name === 'string' ? query.name : '';
+    const contentType = result.contentType || guessContentType(filename) || 'application/octet-stream';
+    // 文件名里的非 ASCII（中文课件名很常见）必须走 RFC 5987 的 filename*，
+    // 直接塞进 filename= 会被某些浏览器丢成乱码或截断。
+    const disposition = inline ? 'inline' : 'attachment';
+    const headers = {
+      'Content-Type': contentType,
+      'Content-Length': String(result.bytes.length),
+      'Cache-Control': 'private, max-age=300',
+    };
+    if (filename) {
+      const ascii = filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+      headers['Content-Disposition'] = `${disposition}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+    } else {
+      headers['Content-Disposition'] = disposition;
+    }
+    return { __raw: { status: 200, body: Buffer.from(result.bytes), headers } };
+  });
+
+  /** 课程通知/公告（可按课程过滤）。 */
   router.get(
-    `${P}/activities/:id/submission`,
-    planned('作业提交情况', { params: { id: 'string' }, returns: { submitted: 'boolean', submittedAt: 'string?', score: 'number?', comment: 'string?', files: 'array' } }),
+    `${P}/notices`,
+    planned('课程通知与公告', { params: { courseId: 'string?' }, returns: { items: '[{ id, courseId, courseName, title, publishedAt, body }]' } }),
   );
 
   /** 课程通知/公告（可按课程过滤）。 */
