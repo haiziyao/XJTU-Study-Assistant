@@ -3615,6 +3615,24 @@
       return;
     }
 
+    // 本机没存过权限时，用后端默认档位（feat/ai-settings 会把 AI 改的 permission 落到
+    // uiprefs，并由 GET /ai/config 一并回显）。本地已经选过就绝不覆盖 —— 用户的显式选择优先。
+    if (!PERMISSION_OPTIONS.some((item) => item.value === storedPermission)) {
+      try {
+        const [pref, cfg] = await Promise.all([
+          api('/ui/prefs/permission').catch(() => null),
+          api('/ai/config').catch(() => null),
+        ]);
+        const backendPermission = pref?.value ?? cfg?.config?.permission;
+        if (PERMISSION_OPTIONS.some((item) => item.value === backendPermission)) {
+          state.permission = backendPermission;
+          renderControls();
+        }
+      } catch {
+        /* 后端偏好不可用：保持本地默认 manual，不影响启动 */
+      }
+    }
+
     // ★ 现在 `state.apiBase` 有了，才能向后端核对左栏布局。
     //   首帧已经用 localStorage 里那份画好了（不闪），这一步是"以服务端为准"的纠偏。
     void hydrateSidebarLayout();
