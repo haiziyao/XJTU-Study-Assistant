@@ -377,6 +377,21 @@ node scripts/lms-probe.js
   外壳 `{code:"0",datas}` —— **`code` 是字符串**，用 `=== 0` 判断会全部失败。
 - **未登录不会被当成"没有课"**：wdkb 未登录会 302 到 CAS，接口返回 **401 `NOT_LOGGED_IN`**；
   上游异常（500 / 非 JSON / `code!=="0"`）返回 **502 `EHALL_ERROR`** 并带原始路径，不回传上游 HTML。
+- **为什么课表要额外握手**：jwapp 的每个应用（成绩 `cjcx`、课表 `wdkb`…）都要求先做一次
+  **应用授权握手**：`GET /jwapp/sys/wdkb/*default/index.do`（应用页，从 `_JW_INIT_CONFIG`
+  取 appId）→ `GET /jwapp/sys/funauthapp/api/getAppConfig/wdkb-<appId>.do` →
+  `POST /jwapp/sys/jwpubapp/modules/bb/cxjwggbbdqx.do {SFQY:1, APP:<appId>}`，之后业务接口
+  才返回 JSON。只带 CAS 票据直接 POST 会稳定 **403 HTML**（2026-10 真机实测）；
+  成绩模块的授权**不能**给课表用，所以两边各握一次。握手结果按会话缓存，
+  业务 403 时用**全新握手重试一次**；失败返回 **502 `EHALL_HANDSHAKE_FAILED`**（带卡住的步骤），
+  与 401 未登录严格分开 —— 登录有效时绝不会再引导用户去重新登录。
+- **登录判定入口必须是 HTML 应用页**：`CasAuth.begin()` 只看"有没有 `execution` / 是否在
+  `/cas/login`"。旧实现把 `loginUrl` 指向 POST-only 的 `xskcb.do`，GET 它得到 403 HTML，
+  于是被误判成"已登录"（`lastOkAt` 有值但业务全 403）—— 这正是「课表登录态已失效」的根因。
+  换成应用页后：未登录 302 → CAS 登录表单，已登录 200 HTML。
+- **可诊断**：`GET /timetable/status?probe=1` 多返回
+  `diagnose:{site:{ready,reason,lastOkAt}, handshake:{ok,appId,steps:[{step,status,error}]}, lastError}`，
+  只读、**不含 cookie / 票据**，能一眼看出卡在 `appPage` / `getAppConfig` / `appInit` 哪一步。
 - **合并**：同一天、同课程名、节次连续、周次相同 → 合并成一条（1-2 + 3-4 → 1-4）；
   教师 / 教室不同仍合并并「 / 」并列；不连续（1-2 与 5-6）保持两条。
 - **周次跨段拆多条**：`repeat.until` 只能表达连续区间，所以 `1-8 与 10-16` 写成两条日程。

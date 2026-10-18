@@ -4,24 +4,43 @@
  * 它刻意复刻真机上会踩的几件事：
  * 1. **未登录时 jwapp 接口 302 到 `/cas/login?service=…`**（不是 401）——
  *    所以「未登录被误判成没有课」这条缺陷会在测试里被强制执行；
- * 2. 登录页带 `execution` 与 `mfaEnabled`，密码必须用 `/cas/jwt/publicKey` 的公钥加密
+ * 2. **jwapp 应用授权握手是强制的**（与真机一致）：登录了但没做
+ *    `应用页 → getAppConfig → appInit` 时，三个业务接口一律 **403 HTML**；
+ *    未做 appInit 就调 appInit 也会被拒 —— 这样「握手顺序」一旦被删就会立刻红；
+ * 3. **课表 JSON 接口用 GET 打会 403 HTML**（真机行为）—— 旧实现把 `loginUrl`
+ *    指向它，`CasAuth.begin()` 会误判成"已登录"；mock 复刻这一点，防止回归；
+ * 4. 登录页带 `execution` 与 `mfaEnabled`，密码必须用 `/cas/jwt/publicKey` 的公钥加密
  *    并带 `__RSA__` 前缀（与 ehall-mock 同一套 CAS 行为）；
- * 3. 三个业务接口都是 `POST` + `x-www-form-urlencoded`，响应外壳 `{code:"0",datas}`，
+ * 5. 三个业务接口都是 `POST` + `x-www-form-urlencoded`，响应外壳 `{code:"0",datas}`，
  *    **`code` 是字符串**；
- * 4. 课表行字段名严格使用真实拼音缩写（`KCM` / `SKJS` / `JASMC` / `SKXQ` / `KSJC` /
+ * 6. 课表行字段名严格使用真实拼音缩写（`KCM` / `SKJS` / `JASMC` / `SKXQ` / `KSJC` /
  *    `JSJC` / `SKZC` / `XNXQDM`），大小写敏感。
  *
  * 另外提供几个测试开关：
  * - `state.failNextTimetableWith = 500`（下一次课表请求返回 HTTP 500）；
  * - `state.timetableOverride = '<html>…'`（用任意响应替换课表响应，测非 JSON）；
  * - `state.timetableCode = '1'` + `state.timetableMessage`（测业务错误码）；
- * - `state.termStart = null`（模拟历史学期取不到起始日 → 上层走本地推断）。
+ * - `state.termStart = null`（模拟历史学期取不到起始日 → 上层走本地推断）；
+ * - `startMockTimetable({ appId: null })`（应用页里没有 appId → 握手必须报
+ *   `EHALL_HANDSHAKE_FAILED` 且 steps 可读）；
+ * - `state.failNextAppInitWith = 500` / `state.forbidAllBusiness = true`（握手失败路径）；
+ * - `state.forbidNextBusiness = 1`（业务接口下一次 403 → 测"全新握手重试一次"）。
  */
 
 import { constants as cryptoConstants, generateKeyPairSync, privateDecrypt } from 'node:crypto';
 import http from 'node:http';
 
 const SERVICE_SESSION = 'EHALL_SESSION=ok';
+
+/** 握手与业务路径（与 src/modules/timetable/config.js 的默认值一致）。 */
+const APP_PAGE_PATH = '/jwapp/sys/wdkb/*default/index.do';
+const APP_CONFIG_PREFIX = '/jwapp/sys/funauthapp/api/getAppConfig/';
+const APP_INIT_PATH = '/jwapp/sys/jwpubapp/modules/bb/cxjwggbbdqx.do';
+const BUSINESS_PATHS = Object.freeze({
+  currentTerm: '/jwapp/sys/wdkb/modules/jshkcb/dqxnxq.do',
+  termStart: '/jwapp/sys/wdkb/modules/jshkcb/cxjcs.do',
+  timetable: '/jwapp/sys/wdkb/modules/xskcb/xskcb.do',
+});
 
 const LOGIN_HTML = `<!doctype html><html><head><title>登录 - 西安交通大学统一身份认证网关</title>
 <script>var globalConfig = {"mfaEnabled": true, "locale": "zh"};</script></head>
@@ -37,6 +56,18 @@ const ALERT_HTML = (title) => `<!doctype html><html><head><title>统一身份认
 /** 已登录时业务地址返回的普通业务页（无 execution → CAS 状态机判定 READY）。 */
 const BUSINESS_HTML = `<!doctype html><html><head><title>我的课表</title></head>
 <body><div id="wdkb-app">课表</div></body></html>`;
+
+/** 真机上课表应用的真实 appId（应用页 `_JW_INIT_CONFIG` 里的值）。 */
+export const MOCK_APP_ID = '4770397878132218';
+
+/** 课表应用页：HTML + `_JW_INIT_CONFIG`（appId 的唯一权威来源，与真机同形）。 */
+const appPageHtml = (appId) => `<!doctype html><html><head><title>我的课表</title>
+<script>window._JW_INIT_CONFIG = {"appId":"${appId}","name":"wdkb"};</script></head>
+<body><div id="wdkb-app">课表</div></body></html>`;
+
+/** 真机未握手时业务接口返回的 403 页：**不是登录页**（没有 execution / CAS 地址）。 */
+const FORBIDDEN_HTML = `<!doctype html><html><head><title>403</title></head>
+<body><h1>403</h1><p>没有访问该应用的授权</p></body></html>`;
 
 /**
  * 默认课表行：**真实数据形状**（全大写拼音字段名），覆盖
@@ -166,10 +197,29 @@ export async function startMockTimetable(options = {}) {
 
   const state = {
     requests: [],
+    /** 结构化请求日志：`{method,path,referer,xRequestedWith,contentType,body}`，用于断言握手序列。 */
+    calls: [],
     /** 三个接口的调用计数（断言「预览 + 导入只拉一次」等）。 */
     timetableCalls: 0,
     currentTermCalls: 0,
     termStartCalls: 0,
+    /** 握手三步各自的调用计数（断言"只握一次" / "403 后重新握手"）。 */
+    appPageCalls: 0,
+    appConfigCalls: 0,
+    appInitCalls: 0,
+    /** 应用页里的 appId；null = 应用页里没有（测"取不到 appId"）。 */
+    appId: options.appId === undefined ? MOCK_APP_ID : options.appId,
+    /** 业务接口是否强制要求先握手（默认 true；设 false 可测旧行为）。 */
+    requireHandshake: options.requireHandshake !== false,
+    /** 握手会话状态：getAppConfig 已登记 / appInit 已完成。 */
+    appConfigured: false,
+    appAuthorized: false,
+    /** 下一次 appInit 返回这个 HTTP 状态（测握手失败）。 */
+    failNextAppInitWith: null,
+    /** 接下来 N 次业务请求强制 403（测"全新握手重试一次"）。 */
+    forbidNextBusiness: 0,
+    /** 所有业务请求强制 403（测"重试后仍 403 → 502 而不是 401"）。 */
+    forbidAllBusiness: false,
     /** 最近一次 cxjcs 收到的 XN / XQ。 */
     lastTermStartQuery: null,
     /** 下一次课表请求直接返回这个 HTTP 状态。 */
@@ -203,6 +253,14 @@ export async function startMockTimetable(options = {}) {
       const body = Object.fromEntries(form.entries());
       const cookies = parseCookies(req.headers.cookie);
       const loggedIn = cookies.EHALL_SESSION === 'ok';
+      state.calls.push({
+        method: req.method,
+        path,
+        referer: req.headers.referer ?? null,
+        xRequestedWith: req.headers['x-requested-with'] ?? null,
+        contentType: req.headers['content-type'] ?? null,
+        body,
+      });
 
       const json = (code, payload) => {
         res.writeHead(code, { 'Content-Type': 'application/json;charset=UTF-8' });
@@ -239,6 +297,9 @@ export async function startMockTimetable(options = {}) {
         }
         if (password !== state.password) return html(200, ALERT_HTML('用户名或密码错误'));
         const service = url.searchParams.get('service') ?? `${origin.value}/`;
+        // 新会话 → 旧的 jwapp 应用授权作废（与真机一致：授权挂在会话里）
+        state.appConfigured = false;
+        state.appAuthorized = false;
         res.writeHead(302, {
           Location: service,
           'Set-Cookie': `${SERVICE_SESSION}; Path=/; HttpOnly`,
@@ -254,26 +315,81 @@ export async function startMockTimetable(options = {}) {
         return res.end();
       }
 
+      // ------------------------------------------------ 握手第 1 步：应用页（HTML）
+      // 登录后打开应用页：200 HTML，`_JW_INIT_CONFIG` 里带 appId（与真机同形）。
+      if (path === APP_PAGE_PATH && req.method === 'GET') {
+        state.appPageCalls += 1;
+        return html(200, appPageHtml(state.appId ?? ''));
+      }
+
+      // ------------------------------------------------ 握手第 2 步：getAppConfig
+      if (path.startsWith(APP_CONFIG_PREFIX) && req.method === 'GET') {
+        state.appConfigCalls += 1;
+        if (path !== `${APP_CONFIG_PREFIX}wdkb-${state.appId}.do`) {
+          return json(403, { code: '403', msg: '应用 ID 不匹配' });
+        }
+        state.appConfigured = true;
+        return json(200, {
+          APP_ID: state.appId,
+          MODULES: [{ route: 'xskcb', title: '学生课程表' }],
+          HEADER: { userInfo: { name: state.username } },
+        });
+      }
+
+      // ------------------------------------------------ 握手第 3 步：appInit
+      if (path === APP_INIT_PATH && req.method === 'POST') {
+        state.appInitCalls += 1;
+        if (state.failNextAppInitWith) {
+          const status = state.failNextAppInitWith;
+          state.failNextAppInitWith = null;
+          res.writeHead(status, { 'Content-Type': 'text/html;charset=UTF-8' });
+          return res.end(`<html><head><title>${status}</title></head><body>${status}</body></html>`);
+        }
+        if (body.SFQY !== '1' || body.APP !== state.appId) {
+          return json(400, { code: '400', msg: 'APP / SFQY 不正确' });
+        }
+        // 顺序是强制的：没登记授权就 appInit → 403（照真机）
+        if (!state.appConfigured) return json(403, { code: '403', msg: '缺少 getAppConfig' });
+        state.appAuthorized = true;
+        return json(200, { code: '0', datas: { cxjwggbbdqx: { totalSize: 0, pageSize: 999, rows: [] } } });
+      }
+
       // ------------------------------------------------ 课表应用（wdkb，三个接口）
       const isWdkb = path.startsWith('/jwapp/sys/wdkb/');
 
-      // 登录后 GET 业务地址：CAS 状态机靠「不是登录页」判定 READY。
-      if (isWdkb && req.method === 'GET') return html(200, BUSINESS_HTML);
+      // 真机行为：这三个是 POST-only 的 JSON 接口，用 GET 打会得到 403 HTML
+      //（没有 execution、URL 也不是 CAS）。旧实现把 loginUrl 指到这里，
+      // CasAuth.begin() 就会误判成"已登录" —— mock 复刻它，防止回归。
+      if (isWdkb && req.method === 'GET') {
+        if (path === APP_PAGE_PATH) return html(200, BUSINESS_HTML);
+        return html(403, FORBIDDEN_HTML);
+      }
 
-      if (path === '/jwapp/sys/wdkb/modules/jshkcb/dqxnxq.do' && req.method === 'POST') {
+      // 业务接口前必须先完成 jwapp 应用授权握手（真机没授权就是 403）：
+      // 这是本次修复的核心行为，删掉握手测试会立刻红。
+      if (isWdkb && req.method === 'POST') {
+        if (state.forbidAllBusiness) return html(403, FORBIDDEN_HTML);
+        if (state.forbidNextBusiness > 0) {
+          state.forbidNextBusiness -= 1;
+          return html(403, FORBIDDEN_HTML);
+        }
+        if (state.requireHandshake && !state.appAuthorized) return html(403, FORBIDDEN_HTML);
+      }
+
+      if (path === BUSINESS_PATHS.currentTerm && req.method === 'POST') {
         state.currentTermCalls += 1;
         const rows = state.currentTerm ? [{ DM: state.currentTerm }] : [];
         return json(200, { code: '0', datas: { dqxnxq: { rows } } });
       }
 
-      if (path === '/jwapp/sys/wdkb/modules/jshkcb/cxjcs.do' && req.method === 'POST') {
+      if (path === BUSINESS_PATHS.termStart && req.method === 'POST') {
         state.termStartCalls += 1;
         state.lastTermStartQuery = { XN: body.XN ?? null, XQ: body.XQ ?? null };
         const rows = state.termStart ? [{ XQKSRQ: `${state.termStart} 00:00:00` }] : [];
         return json(200, { code: '0', datas: { cxjcs: { rows } } });
       }
 
-      if (path === '/jwapp/sys/wdkb/modules/xskcb/xskcb.do' && req.method === 'POST') {
+      if (path === BUSINESS_PATHS.timetable && req.method === 'POST') {
         state.timetableCalls += 1;
         if (state.failNextTimetableWith) {
           const status = state.failNextTimetableWith;
@@ -306,7 +422,8 @@ export async function startMockTimetable(options = {}) {
     config() {
       return {
         baseUrl: origin.value,
-        loginUrl: `${origin.value}/jwapp/sys/wdkb/modules/xskcb/xskcb.do`,
+        // 登录判定入口必须是 HTML 应用页（不是 POST-only 的 JSON 接口）
+        loginUrl: `${origin.value}${APP_PAGE_PATH}`,
         casOrigin: origin.value,
         timeoutMs: 5000,
         totalWeeks: 18,

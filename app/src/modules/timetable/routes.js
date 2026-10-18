@@ -11,6 +11,9 @@
  *
  * 错误语义（前端据此决定「去登录」还是「报上游故障」）：
  * - 未登录 / 票据失效 → **401 `NOT_LOGGED_IN`**；
+ * - jwapp 应用授权握手失败（登录本身可能有效）→ **502 `EHALL_HANDSHAKE_FAILED`**，
+ *   响应里带 `error.details.handshake.steps`（卡在哪一步）；这条必须和 401 分开，否则用户会被
+ *   反复引导去重新登录，而问题其实在应用授权；
  * - 上游 302/500 / 非 JSON / `code!=="0"` → **502 `EHALL_ERROR`**，消息里带原始接口路径；
  * - 入参错误 → 400。
  *
@@ -70,6 +73,12 @@ export function translateTimetableError(error) {
       return new HttpError(400, ERROR_CODES.BAD_REQUEST, error.message, {
         code: TIMETABLE_ERROR.BAD_REQUEST,
         ...details,
+      });
+    case TIMETABLE_ERROR.EHALL_HANDSHAKE_FAILED:
+      return new HttpError(502, TIMETABLE_ERROR.EHALL_HANDSHAKE_FAILED, error.message, {
+        hint: '课表接口需要先完成 jwapp 应用授权握手（应用页 → getAppConfig → appInit）才会返回数据；这不是登录过期。',
+        step: details.step ?? null,
+        handshake: details.handshake ?? null,
       });
     case TIMETABLE_ERROR.EHALL_ERROR:
     default:
