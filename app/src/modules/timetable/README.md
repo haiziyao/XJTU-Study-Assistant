@@ -20,11 +20,34 @@
 登录不在本模块实现：`auth` 模块（order=5）负责 CAS / MFA；本模块只
 `auth.registerSite({id:'timetable', …})` 并在业务请求前 `auth.ensure('timetable')`。
 
+### ★ 为什么课表还要额外的 jwapp 授权握手
+
+**登录有效 ≠ 课表接口可用。** 只带 CAS 票据直接 POST `xskcb.do` 会稳定返回 **403 HTML**
+（2026-10 真机实测：`GET/POST xskcb.do` 都是 403，会话本身完全有效）。jwapp 的每个应用
+（成绩 `cjcx`、课表 `wdkb`…）都要先做一次**应用授权握手**，授权按应用登记，
+所以学业模块握过的成绩应用授权**不能**给课表用：
+
+```
+GET  /jwapp/sys/wdkb/*default/index.do                       → 200 HTML，取 _JW_INIT_CONFIG.appId
+GET  /jwapp/sys/funauthapp/api/getAppConfig/wdkb-<appId>.do  → 登记本账号对该应用的授权
+POST /jwapp/sys/jwpubapp/modules/bb/cxjwggbbdqx.do           → {SFQY:'1', APP:<appId>}，刷新 _WEU
+POST /jwapp/sys/wdkb/modules/xskcb/xskcb.do                  → 这才返回 {code:"0",datas}
+```
+
+握手结果按会话缓存；业务接口 403 时用**全新握手重试一次**，仍 403 就是
+**502 `EHALL_HANDSHAKE_FAILED`（带 steps）**，绝不冒充 401 未登录。
+
+同理，**站点的 `loginUrl` 必须指向 HTML 应用页**，不能指向 `xskcb.do` 这种 POST-only 的
+JSON 接口：`CasAuth.begin()` 只看"有没有 `execution` 令牌 / 是否在 `/cas/login`"，
+GET 一个 403 HTML 错误页会被它误判成"业务页 → 已登录"，于是 `lastOkAt` 有值、
+站点 ready，但真正业务请求一打就 403 —— 用户看到的就是「课表登录态已失效」。
+
 ## HTTP 接口
 
 | 方法 | 路径                    | 说明 |
 | ---- | ----------------------- | ---- |
-| GET  | `/timetable/status`     | `{loggedIn, reason?, currentTerm, terms:[{value,label,current}], imported:{count,courses}}`，只读本地 + 必要时拉一次当前学期 |
+| GET  | `/timetable/status`     | `{loggedIn, reason?, error?, currentTerm, terms:[{value,label,current}], imported:{count,courses}, diagnose}`，只读本地 + 必要时拉一次当前学期 |
+| GET  | `/timetable/status?probe=1` | 额外主动重验站点 + 跑一次授权握手，返回 `diagnose:{site:{ready,reason,lastOkAt}, handshake:{ok,appId,steps:[{step,status,error}]}, lastError}`（只读、不含 cookie / 票据） |
 | GET  | `/timetable/preview?term=` | `{term, termLabel, termStart, startSource, totalWeeks, maxWeek, courses, skipped}`，只读；`&refresh=1` 绕过课表短缓存 |
 | POST | `/timetable/import`     | body `{term, courseIds, untilWeek?}` → `{created, updated, skipped, skippedCount, events, removed}` |
 | POST | `/timetable/remove`     | body `{term?, courseIds?, all?}` → `{removed}` |
@@ -33,8 +56,9 @@
 `preview.courses[]`：`{id, name, teacher, location, weekDays, periodRange, weeks:{list,runs,min,max},
 slots, eventCount, schedulePreviews:[{weekDay,startTime,endTime,weeks:{start,end},date,season}]}`。
 
-错误语义：未登录 `401 NOT_LOGGED_IN`；上游异常 `502 EHALL_ERROR`（消息带原始路径，
-**不回传上游 HTML**）；入参错误 400。
+错误语义：未登录 `401 NOT_LOGGED_IN`；jwapp 应用授权握手失败 `502 EHALL_HANDSHAKE_FAILED`
+（响应里 `details.handshake.steps` 指出卡在哪一步，**不引导重新登录**）；上游异常
+`502 EHALL_ERROR`（消息带原始路径，**不回传上游 HTML**）；入参错误 400。
 
 ## 合并规则（merge.js）
 

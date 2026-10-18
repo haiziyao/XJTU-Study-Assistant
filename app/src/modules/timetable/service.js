@@ -58,6 +58,8 @@ export class TimetableService {
     this.state = {
       /** 最近一次成功拿到的当前学期（避免 status 每次都打学校服务器）。 */
       currentTerm: null,
+      /** 最近一次失败（只读诊断用）：`{code, message, at}`，绝不含 cookie / 票据。 */
+      lastError: null,
     };
     /** 学期起始日缓存：`term -> {startDate, source, fetchedAt}`。 */
     this.termStarts = new Map();
@@ -66,15 +68,21 @@ export class TimetableService {
     this.restored = false;
 
     /**
-     * 订阅全局认证：登出 / 本站点掉线时清掉学期与课表缓存。
+     * 订阅全局认证：登出 / 换账号 / 本站点掉线时清掉学期、课表与**握手**缓存。
      *
-     * 为什么要清：换了账号还拿着上一个账号的学期号去请求，轻则多一次无效往返，
-     * 重则把「当前学期」显示成别人的。票据本身归 auth 管，这里只清自己的派生缓存。
+     * 为什么要清握手：jwapp 的应用授权是**按账号**登记在会话里的 ——
+     * 换了账号还沿用上一次的 `authorized=true`，第一次业务请求就会 403。
+     * 票据本身归 auth 管，这里只清自己的派生缓存。
      */
     this.auth.onChange?.((event) => {
-      if (event.type === 'logout' || (event.type === 'site-lost' && event.siteId === 'timetable')) {
+      if (
+        event.type === 'logout' ||
+        event.type === 'login' ||
+        (event.type === 'site-lost' && event.siteId === 'timetable')
+      ) {
         this.api.reset();
         this.state.currentTerm = null;
+        this.state.lastError = null;
         this.rowsCache.clear();
       }
     });
@@ -93,30 +101,55 @@ export class TimetableService {
    *
    * 已登录时顺手拿一次当前学期（`dqxnxq.do`）—— 学期下拉就是以它为中心前后各 3 个。
    * 拿不到（上游抽风）时如实返回 `error`，但不把「已登录」说成「未登录」。
+   *
+   * `?probe=1`（页面上的「刷新状态」）会多做两件事，都是**只读**的：
+   * 1. 主动重验一次站点认证（`auth.ensure`，共享罐里还有票据就能静默救回）；
+   * 2. 主动跑一次 jwapp 授权握手，把握手结果放进 `diagnose.handshake`
+   *    —— 下次再遇到"登录明明有效但课表用不了"，一眼就能看到卡在哪一步。
    */
   async status({ probe = false } = {}) {
-    let site = this.auth.siteStatus('timetable');
+    const site = this.auth.siteStatus('timetable');
     let reason = site.reason ?? null;
-    // `probe`：页面上的「刷新状态」会带它来。此时**主动重试一次站点认证** ——
-    // 共享罐里可能还有 CAS 票据，`ensure()` 能静默把站点救回来；
-    // 默认（首页加载）不这么做，否则未登录用户每打开一次页面都要白等一次登录页跳转。
-    if (!site.ready && probe) {
-      const outcome = await this.auth.ensure('timetable');
-      site = this.auth.siteStatus('timetable');
-      if (!outcome.ok) reason = outcome.reason ?? reason;
-    }
     let loggedIn = Boolean(site.ready);
     let currentTerm = this.state.currentTerm;
     let error = null;
 
-    if (loggedIn && !currentTerm) {
+    // `probe`：页面上的「刷新状态」会带它来。此时**主动重试一次站点认证** ——
+    // 共享罐里可能还有 CAS 票据，`ensure()` 能静默把站点救回来；
+    // 默认（首页加载）不这么做，否则未登录用户每打开一次页面都要白等一次登录页跳转。
+    if (probe) {
+      if (!loggedIn) {
+        const outcome = await this.auth.ensure('timetable');
+        loggedIn = Boolean(this.auth.siteStatus('timetable').ready);
+        if (!outcome.ok) reason = outcome.reason ?? reason;
+      }
+      // 站点就绪还不够：wdkb 需要自己的 jwapp 握手（成绩应用的授权对它无效）。
+      // 握手成功会被缓存，接下来的 currentTerm 请求直接复用。
+      if (loggedIn) {
+        try {
+          await this.api.ensureHandshake();
+        } catch (failure) {
+          const translated = this.#record(failure);
+          if (translated.code === TIMETABLE_ERROR.NOT_LOGGED_IN) {
+            this.#onAuthFailure(translated.message);
+            loggedIn = false;
+            reason = translated.message;
+          } else {
+            // 握手失败 ≠ 未登录：登录还是好的，只是应用授权没过（502 语义）。
+            error = translated.message;
+          }
+        }
+      }
+    }
+
+    if (loggedIn && !currentTerm && !error) {
       try {
         await this.#ensureReady();
         currentTerm = await this.#guard(() => this.api.currentTerm());
         parseTerm(currentTerm);
         this.state.currentTerm = currentTerm;
       } catch (failure) {
-        const translated = this.#translate(failure);
+        const translated = failure instanceof TimetableError ? failure : this.#translate(failure);
         if (translated.code === TIMETABLE_ERROR.NOT_LOGGED_IN) {
           this.#onAuthFailure(translated.message);
           loggedIn = false;
@@ -151,6 +184,22 @@ export class TimetableService {
           count: course.count,
         })),
       },
+      /** 只读诊断：站点认证 / jwapp 握手 / 最近一次失败，**不含任何 cookie 或票据**。 */
+      diagnose: this.#diagnose(),
+    };
+  }
+
+  /** `/status` 的 `diagnose` 字段：站点三要素 + 握手步骤 + 最近一次失败。 */
+  #diagnose() {
+    const site = this.auth.siteStatus('timetable');
+    return {
+      site: {
+        ready: Boolean(site.ready),
+        reason: site.reason ?? null,
+        lastOkAt: site.lastOkAt ?? null,
+      },
+      handshake: this.api.diagnose().handshake,
+      lastError: this.state.lastError,
     };
   }
 
@@ -466,11 +515,31 @@ export class TimetableService {
     return new TimetableError(`${message}`, { code: TIMETABLE_ERROR.EHALL_ERROR, details: { cause: error?.name ?? 'Error' } });
   }
 
+  /**
+   * 记录一次失败（`state.lastError` 是 `/status` 的 `diagnose.lastError` 来源），
+   * 并翻译成本模块的结构化错误。
+   *
+   * 注意：只有 `NOT_LOGGED_IN` 才会把站点打回待验证；
+   * `EHALL_HANDSHAKE_FAILED` **不动登录态** —— 登录是好的，问题在应用授权。
+   */
+  #record(error) {
+    const translated = this.#translate(error);
+    this.state.lastError = {
+      code: translated.code ?? 'UNKNOWN',
+      message: translated.message,
+      at: new Date().toISOString(),
+    };
+    return translated;
+  }
+
   async #guard(factory) {
     try {
-      return await factory();
+      const result = await factory();
+      // 最近一次业务成功 → 旧错误不再代表现状（与 academic 的 lastError 语义一致）
+      this.state.lastError = null;
+      return result;
     } catch (error) {
-      const translated = this.#translate(error);
+      const translated = this.#record(error);
       // 票据在 auth 眼里还是「就绪」、但上游已经 302 回登录页：这里顺手把它打回待验证，
       // 否则之后每次业务请求都要先失败一次（status 也会一直显示"已登录"）。
       if (translated.code === TIMETABLE_ERROR.NOT_LOGGED_IN) this.#onAuthFailure(translated.message);

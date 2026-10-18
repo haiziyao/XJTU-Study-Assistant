@@ -56,10 +56,34 @@ function row(overrides = {}) {
   };
 }
 
-/** 用假的 http 客户端构造 EhallApi（不需要起服务器）。 */
-function apiReturning(text, { status = 200, url = 'https://ehall.xjtu.edu.cn/jwapp/sys/wdkb/modules/xskcb/xskcb.do' } = {}) {
+/**
+ * 用假的 http 客户端构造 EhallApi（不需要起服务器）。
+ *
+ * 现在业务请求前要先过 jwapp 授权握手，所以假客户端必须同时支持：
+ * - `get(应用页)` → 带 `_JW_INIT_CONFIG` 的 HTML（可取到 appId）；
+ * - `get(getAppConfig)` → JSON；
+ * - `postForm(appInit)` → `{code:"0"}`；
+ * - 其余 `postForm` → 测试指定的业务响应。
+ */
+function apiReturning(
+  text,
+  { status = 200, url = 'https://ehall.xjtu.edu.cn/jwapp/sys/wdkb/modules/xskcb/xskcb.do', appId = '4770397878132218' } = {},
+) {
   const config = resolveTimetableConfig({ baseUrl: 'https://ehall.xjtu.edu.cn' });
-  return new EhallApi({ http: { postForm: async () => ({ status, url, text }) }, config });
+  const http = {
+    async get(target) {
+      if (String(target).includes('/jwapp/sys/funauthapp/api/getAppConfig/')) {
+        return { status: 200, url: target, text: '{"APP_ID":"4770397878132218","MODULES":[]}' };
+      }
+      const appPage = `<html><script>window._JW_INIT_CONFIG = {"appId":"${appId}"};</script></html>`;
+      return { status: 200, url: target, text: appPage };
+    },
+    async postForm(target) {
+      if (String(target).includes('/jwpubapp/')) return { status: 200, url: target, text: '{"code":"0","datas":{}}' };
+      return { status, url, text };
+    },
+  };
+  return new EhallApi({ http, config });
 }
 
 async function startApp(mock) {

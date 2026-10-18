@@ -8,7 +8,9 @@
  *   排在 `academic`(30) / `lms`(20) 之间不会互相影响，只是给左栏留出「课表导入」的位置。
  *   （`pomodoro` 预留 21、`lms` 20、`academic` 30。）
  * - **不自己实现登录**：账号密码、CAS、MFA 全在 `auth` 模块；这里只登记一个站点 `timetable`。
- *   登录 URL 直接用课表业务地址，让 CAS 状态机自己跟 302（未登录时它会一路跳到登录页）。
+ *   登录 URL 用 wdkb 的 **HTML 应用页**（不是课表 JSON 接口）：未登录时它会 302 到 CAS，
+ *   已登录时是 200 HTML。JSON 接口用 GET 打会返回 403 HTML，会被认证状态机误判成"已登录"
+ *   （详见 config.js 的 LOGIN_URL 与 api.js 的握手说明）。
  * - **不声明 collection**：课表本身不落库（每次预览按需拉取，短缓存），
  *   写出去的是 calendar 模块的 `schedules`。
  */
@@ -34,6 +36,9 @@ const AI_PROMPT = `【课表导入（教务 wdkb）】
 - 删除：POST /timetable/remove {term, courseIds} 或 {all:true} —— 只删本模块导入的日程
   （externalId 以 timetable: 开头），用户手建的日程不会被删。
 - 如果返回 401 NOT_LOGGED_IN：不要向用户索要密码，告诉对方「请到设置 → 统一身份认证登录」。
+- 如果返回 502 EHALL_HANDSHAKE_FAILED：**这不是登录过期**，是 jwapp 应用授权握手失败；
+  把 error.details.handshake.steps 里失败的那一步（appPage / getAppConfig / appInit）如实告诉用户，
+  不要让对方反复重新登录。
 - 如果返回 502 EHALL_ERROR：说明学校接口异常或已改版，把返回里的 path 原样告诉用户即可，
   不要编造课表内容。`;
 
