@@ -179,7 +179,14 @@ export class CategoryService {
     return this.view(found.kind, found.item);
   }
 
-  async create(input = {}) {
+  /**
+   * 校验并归一「新建分类」的输入，但**不写库**。
+   *
+   * 为什么单独拆出来：AI 草稿的 dryRun 预览必须跑与真写**完全同一套**校验，
+   * 否则确认卡上看着没问题、用户点确认才 400。复制一份 label/color/order 规则
+   * 迟早会漂移，所以 create() 也复用本方法。REST 路由的行为不受影响。
+   */
+  prepareCreate(input = {}) {
     const kind = requireKind(input.kind);
     const label = requireLabel(input.label);
     const color = normalizeColor(input.color, 'color');
@@ -192,18 +199,24 @@ export class CategoryService {
         ? Number(input.order)
         : Math.max(0, ...sameKind.filter((item) => !item.locked).map((item) => item.order ?? 0)) + ORDER_STEP;
 
-    const created = await collection.insert({
-      label,
-      color,
-      order: Number.isFinite(order) ? order : 100,
-      builtin: false,
-      locked: false,
-    });
+    return {
+      kind,
+      data: { label, color, order: Number.isFinite(order) ? order : 100, builtin: false, locked: false },
+    };
+  }
+
+  async create(input = {}) {
+    const { kind, data } = this.prepareCreate(input);
+    const created = await this.collectionOf(kind).insert(data);
     this.broadcast({ type: 'data_changed', payload: { target: 'category', action: 'create', kind, id: created.id } });
     return this.view(kind, created);
   }
 
-  async update(id, patch = {}, { kind } = {}) {
+  /**
+   * 校验并归一「修改分类」的 patch，但**不写库**（同样给 AI 的 dryRun 预览用）。
+   * 返回 `kind` 与归一后的 `data`；`update()` 复用同一份判断。
+   */
+  prepareUpdate(id, patch = {}, { kind } = {}) {
     const found = this.locate(id, kind);
     const data = {};
     if (patch.kind !== undefined && patch.kind !== found.kind) {
@@ -220,9 +233,14 @@ export class CategoryService {
       if (!Number.isFinite(order)) throw HttpError.badRequest('字段 order 必须是数字', { field: 'order' });
       data.order = order;
     }
-    const updated = await this.collectionOf(found.kind).update(id, data);
-    this.broadcast({ type: 'data_changed', payload: { target: 'category', action: 'update', kind: found.kind, id } });
-    return this.view(found.kind, updated);
+    return { kind: found.kind, item: found.item, data };
+  }
+
+  async update(id, patch = {}, { kind } = {}) {
+    const prepared = this.prepareUpdate(id, patch, { kind });
+    const updated = await this.collectionOf(prepared.kind).update(id, prepared.data);
+    this.broadcast({ type: 'data_changed', payload: { target: 'category', action: 'update', kind: prepared.kind, id } });
+    return this.view(prepared.kind, updated);
   }
 
   /**

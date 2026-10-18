@@ -766,6 +766,17 @@ test('设置页：「一次提问最多检索几次」是 1–6 的数字框，�
     assert.match(mount.textContent, /一次提问最多检索几次/);
     assert.match(mount.textContent, /用完就不再发起新检索，模型会按已有结果收尾/, '文案要说清预算用完会怎样');
 
+    // 「一轮最多执行几个操作」：数字框默认 3（服务端没给就用默认值），另有「不限制（0）」复选框
+    const maxActions = mount.querySelector('.cs-max-actions');
+    assert.ok(maxActions, '要有 .cs-max-actions 输入框');
+    assert.equal(maxActions.type, 'number');
+    assert.equal(maxActions.min, '1', '有限档下限 1');
+    assert.equal(maxActions.max, '50', '有限档上限 50');
+    assert.equal(maxActions.value, '3', '默认 3（沿用旧版提示词里的数）');
+    assert.match(mount.textContent, /一轮最多执行几个操作/);
+    assert.match(mount.textContent, /实际还受多轮上限/, '文案要说清还有别的约束');
+    assert.ok(mount.querySelector('#cs-max-actions-unlimited'), '要有「不限制（0）」复选框');
+
     // 越界要当场拦住（不发请求）
     // 注意：失败一次会触发 paint()，整个区块被重画 —— 之后必须**重新取**输入框和按钮，
     // 拿旧节点赋值等于给一个已经不在页面上的元素填数字（这里第一次写就踩过）
@@ -785,6 +796,16 @@ test('设置页：「一次提问最多检索几次」是 1–6 的数字框，�
     assert.ok(post, '保存要打 /ai/config');
     assert.equal(post.body.searchRetryMax, 5, '新字段跟着一起写');
     assert.equal(post.body.searchMaxPages, 8, '原有字段照常一起提交');
+    assert.equal(post.body.maxActionsPerTurn, 3, '「一轮最多执行几个操作」默认 3 一起提交');
+
+    // 勾上「不限制」：保存的是 0（服务端语义：0 = 不限制，而不是"一条都不执行"）
+    mount.querySelector('#cs-max-actions-unlimited').checked = true;
+    mount.querySelector('#cs-max-actions-unlimited').dispatch('change');
+    assert.equal(mount.querySelector('.cs-max-actions').disabled, true, '勾选后数字框禁用');
+    mount.querySelectorAll('button').find((node) => node.textContent === '保存').dispatch('click');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const unlimitedPost = sent.filter((item) => item.url === '/ai/config' && item.body).pop();
+    assert.equal(unlimitedPost.body.maxActionsPerTurn, 0, '「不限制」提交 0');
   } finally {
     await app.close();
   }

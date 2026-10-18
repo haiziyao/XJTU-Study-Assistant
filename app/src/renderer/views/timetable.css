@@ -1,0 +1,161 @@
+/* 课表导入视图样式。全部类名以 `tt-` 为前缀，与其它模块互不影响。
+   布局约定与 academic / lms 一致：内容放进 `.view-content`（它提供内边距与滚动），
+   按钮用外壳既有的 `.primary-btn / .ghost-btn / .danger-btn`。
+   ⚠️ 页面 CSP 是 `style-src 'self'`：这里不能出现 inline style，JS 里也不写 style 属性。 */
+
+.tt-page {
+  /* 手机上长课程名 / 长教师名不能把页面撑出横向滚动条 */
+  overflow-x: hidden;
+}
+
+.tt-head { margin-bottom: 2px; }
+.tt-title { margin: 0 0 4px; font-size: 18px; }
+.tt-sub { margin: 0; color: var(--fg-3); font-size: 13px; line-height: 1.6; }
+.tt-muted { color: var(--fg-3); font-size: 13px; margin: 0; }
+
+.tt-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  min-width: 0;
+}
+.tt-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.tt-card-title { margin: 0; font-size: 15px; }
+.tt-card-head .tt-muted { margin-left: auto; }
+
+.tt-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--line);
+}
+.tt-badge-ok { border-color: var(--green, #5cdb8b); color: var(--green, #5cdb8b); }
+
+/* ---------------------------------------------------------------- 登录与学期 */
+
+.tt-term-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.tt-label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--fg-2); }
+.tt-term-select,
+.tt-week-input {
+  background: var(--control-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: inherit;
+  padding: 6px 10px;
+  font-size: 13px;
+  max-width: 100%;
+}
+.tt-term-select { min-width: 0; flex: 1 1 220px; }
+.tt-week-input { width: 88px; }
+.tt-term-row .primary-btn { flex: 0 0 auto; }
+
+.tt-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
+/* ---------------------------------------------------------------- 预览与选择 */
+
+.tt-import-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  margin-bottom: 10px;
+}
+.tt-hint { font-size: 12px; color: var(--fg-3); }
+
+.tt-courses { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; }
+
+.tt-course {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg-surface);
+  cursor: pointer;
+  min-width: 0;
+}
+.tt-course:hover { border-color: var(--blue); }
+.tt-course-off { opacity: 0.5; }
+.tt-course-check {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+.tt-course-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.tt-course-name {
+  font-size: 14px;
+  font-weight: 600;
+  /* 超长课程名换行而不是撑破卡片 */
+  overflow-wrap: anywhere;
+}
+.tt-course-meta { font-size: 12px; color: var(--fg-3); line-height: 1.55; overflow-wrap: anywhere; }
+
+.tt-import-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.tt-count { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tt-import-footer .primary-btn { margin-left: auto; }
+
+/* ---------------------------------------------------------------- 已导入 */
+
+.tt-imported-list { display: flex; flex-direction: column; gap: 6px; }
+.tt-imported-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-width: 0;
+}
+.tt-imported-main { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; flex: 1 1 auto; }
+.tt-imported-name { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.tt-imported-row .danger-btn { flex: 0 0 auto; }
+.tt-page .danger-btn.small { padding: 4px 10px; font-size: 12px; }
+
+/* ---------------------------------------------------------------- 手机端（≤900px）
+
+   要求：单列、按钮 ≥44px、不横向溢出。
+   外壳在更窄的断点里也有按钮 44px 的规则，但本页的断点是 900px，
+   平板竖屏 / 分屏窗口同样要能用，所以在这里显式再写一遍。 */
+
+@media (max-width: 900px) {
+  .tt-page { padding-left: 10px; padding-right: 10px; }
+  .tt-courses { grid-template-columns: 1fr; }
+  .tt-import-bar { align-items: stretch; }
+  .tt-term-row { align-items: stretch; }
+  .tt-term-select { flex-basis: 100%; }
+  .tt-week-input { width: 100%; max-width: 140px; }
+  .tt-card { padding: 12px; }
+  .tt-page .primary-btn,
+  .tt-page .ghost-btn,
+  .tt-page .danger-btn {
+    min-height: 44px;
+    min-width: 44px;
+    font-size: 15px;
+  }
+  .tt-import-footer .primary-btn { margin-left: 0; width: 100%; }
+  .tt-import-footer { align-items: stretch; }
+  .tt-imported-row { align-items: stretch; }
+  .tt-imported-row .danger-btn { min-width: 72px; }
+  .tt-actions { align-items: stretch; }
+  .tt-actions .primary-btn,
+  .tt-actions .ghost-btn,
+  .tt-actions .danger-btn { flex: 1 1 auto; }
+}

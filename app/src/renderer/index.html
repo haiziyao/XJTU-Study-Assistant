@@ -12,6 +12,11 @@
       桌面窗口是固定尺寸的 BrowserWindow，这些 meta 对宽屏三栏布局没有任何影响。
     -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#315fda" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="AI 智学" />
     <!--
       CSP 要点（改之前先读完这条注释）：
 
@@ -30,6 +35,9 @@
       content="default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; style-src 'self'; img-src 'self' data: http://127.0.0.1:* http://localhost:*; media-src 'self' http://127.0.0.1:* http://localhost:*; object-src 'self' data: blob:; frame-src 'self' data: blob:"
     />
     <title>AI 智学 · 测试窗口</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="assets/app-icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="assets/app-icon.svg" />
     <script src="kit/theme.js"></script>
 
     <!-- 样式：外壳 → 各视图自带的样式（新增功能在这里加一行 link） -->
@@ -38,6 +46,8 @@
     <link rel="stylesheet" href="views/lms.css" />
     <link rel="stylesheet" href="views/notifications.css" />
     <link rel="stylesheet" href="views/academic.css" />
+    <!-- 「课表导入」：选课 / 导入到第几周 / 删除课程三件事都在这一页（见 views/timetable.js） -->
+    <link rel="stylesheet" href="views/timetable.css" />
     <link rel="stylesheet" href="views/notes/notes.css" />
     <link rel="stylesheet" href="views/auth.css" />
     <link rel="stylesheet" href="shell/theme.css" />
@@ -46,6 +56,8 @@
     <link rel="stylesheet" href="views/chat-settings.css" />
     <!-- 学习周报面板：挂在「待办」页里，样式类名统一 wk- 前缀 -->
     <link rel="stylesheet" href="views/weekly.css" />
+    <!-- 番茄钟：独立左栏入口（order 21，紧挨待办之后） -->
+    <link rel="stylesheet" href="views/pomodoro.css" />
     <link rel="stylesheet" href="views/transfer.css" />
     <link rel="stylesheet" href="views/account.css" />
     <!-- 「设置 → 多端同步」：账号数据在桌面/服务器/手机之间双向同步（见 views/sync.js） -->
@@ -132,6 +144,25 @@
       </section>
     </div>
 
+    <!-- 手机版底部导航。内容由视图注册表生成，桌面端始终隐藏。 -->
+    <nav class="mobile-tabbar" id="mobile-tabbar" aria-label="手机主导航"></nav>
+    <div class="mobile-more-mask" id="mobile-more-mask" hidden></div>
+    <section class="mobile-more-sheet" id="mobile-more-sheet" aria-label="更多功能" hidden>
+      <div class="mobile-sheet-handle" aria-hidden="true"></div>
+      <header class="mobile-sheet-head">
+        <strong>更多功能</strong>
+        <button type="button" class="icon-btn" id="mobile-more-close" aria-label="关闭更多功能">×</button>
+      </header>
+      <div class="mobile-sheet-grid" id="mobile-more-grid"></div>
+    </section>
+
+    <div class="pwa-status" id="pwa-status" hidden role="status" aria-live="polite"></div>
+    <div class="pwa-update" id="pwa-update" hidden>
+      <span>手机版已有更新</span>
+      <button type="button" id="pwa-update-now">立即更新</button>
+      <button type="button" id="pwa-update-later">稍后</button>
+    </div>
+
     <div id="toast" class="toast"></div>
 
     <!--
@@ -147,13 +178,19 @@
     <script src="kit/dom.js"></script>
     <!-- 富文本：Markdown 子集 + LaTeX 子集 + ```svg 图形（零依赖，见 kit/richtext.js） -->
     <script src="kit/richtext.js"></script>
+    <script src="kit/qrcode.js"></script>
+    <script src="kit/pwa.js"></script>
 
     <script src="shell/planned.js"></script>
 
     <script src="views/calendar.js"></script>
+    <!-- 番茄钟：左栏入口 order 21，紧挨「日历 / 待办」之后（见 views/pomodoro.js） -->
+    <script src="views/pomodoro.js"></script>
     <script src="views/lms.js"></script>
     <script src="views/notifications.js"></script>
     <script src="views/academic.js"></script>
+    <!-- 「课表导入」独立页面：三段式（登录与学期 / 预览与选择 / 已导入） -->
+    <script src="views/timetable.js"></script>
     <script src="views/notes/notes.js"></script>
     <!-- 全局登录只往「设置」里加一块卡片，不占左栏入口（见 views/auth-settings.js） -->
     <script src="views/auth-settings.js"></script>

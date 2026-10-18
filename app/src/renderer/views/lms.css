@@ -248,6 +248,17 @@
   cursor: not-allowed;
 }
 
+/* 「作业自动变成待办」开关：与自动同步同一张卡，单独一行、留一点间距 */
+.lms-todos-row {
+  margin-top: 8px;
+}
+
+/* 二级开关「只同步本学期作业」：缩进一点，视觉上从属于上面那个父开关 */
+.lms-todos-term {
+  margin-top: 4px;
+  padding-left: 22px;
+}
+
 /* 首页顶部状态提示：只在「还没读到登录态」或「读取失败」时出现 */
 .lms-status-notice {
   display: flex;

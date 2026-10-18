@@ -155,9 +155,94 @@ textarea:disabled {
 /* ------------------------------------------------------------------ 骨架 */
 
 .app {
+  /* 分界线是绝对定位的覆盖层（见下方 .col-splitter），需要这里当定位上下文。
+     它**不占网格列**，所以 1500px 宽下的默认 128 / 592 / 780 一点没变。 */
+  position: relative;
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(300px, 1fr) var(--panel-w);
   height: 100vh;
+}
+
+/* ------------------------------------------------------- 中/右栏分界线（可拖动） */
+
+/*
+ * 为什么是绝对定位的覆盖层，而不是第 4 个网格子项：
+ *   把 6px 的线塞进 grid，就会从三栏的总宽里硬切走 6px —— 1500px 下默认的
+ *   `128 / 592 / 780` 立刻变成 `128 / 589 / 777`（要求首次运行逐像素不变）。
+ *   定位到 `right: var(--panel-w)` 则只覆盖边界，不参与布局；拖动时改 `--panel-w`，
+ *   轨道和线一起动，视觉上就是那条线在推着两栏走。
+ *
+ * 命中区 6px、细线 1px：
+ *   线本身要"极细"才不抢内容，但 1px 的拖拽目标太难点中。所以元素实体 6px
+ *   （跨在边界两侧各 3px），中间用 ::before 画 1px 的线。
+ */
+.col-splitter {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: calc(var(--panel-w) - 3px);
+  width: 6px;
+  z-index: 30;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  /* 触屏/触控板拖动时不要触发页面滚动或文本选择 */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.col-splitter::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* 6px 元素的右边缘在边界 +3px；right:3px 让 1px 线正好压在中栏既有的
+     border-right 上（不是旁边再加一条），静止时因此**不改变任何像素**。 */
+  right: 3px;
+  width: 1px;
+  /* 静止时透明：中栏 `.chat` 本来就有一条 1px 的 border-right，这条细线就是分界线；
+     再叠一层 8% 白会让默认外观变亮。只有在 hover / 聚焦 / 拖动时才染成蓝色。 */
+  background: transparent;
+  transition: background var(--t), box-shadow var(--t);
+}
+
+/* hover / 键盘聚焦 / 正在拖动：三种时候都高亮，告诉用户"这条线是能动的" */
+.col-splitter:hover::before,
+.col-splitter:focus-visible::before,
+body.resizing .col-splitter::before {
+  background: var(--blue);
+  box-shadow: 0 0 0 1px rgba(108, 140, 255, 0.35), 0 0 8px rgba(108, 140, 255, 0.45);
+}
+
+/* 焦点已经由上面那条变蓝的线表达；再套一层全局 2px outline 会变成两条竖线 */
+.col-splitter:focus-visible {
+  outline: none;
+}
+
+/* 拖动期间统一光标并禁止选中文字：否则指针滑过中栏时会把聊天记录刷成蓝色 */
+body.resizing,
+body.resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+/* 收起右栏 / 笔记专注模式：第三栏不存在，分界线也必须跟着消失。
+   展开后 `--panel-w`（若用户拖过）仍留在 .app 上，所以自然回到上次的宽度。 */
+body.panel-collapsed .col-splitter,
+body.notes-focus .col-splitter {
+  display: none;
+}
+
+/* ≤900px：三栏放不下「中栏 360 + 右栏 380」这两条下限，分界线没有可用区间；
+   手机布局本身在 760px 以下切换成两栏。这里隐藏而不是留一条拖不动的线，
+   同时让 tab 键不会聚焦到一个不可见的分隔条上。 */
+@media (max-width: 900px) {
+  .col-splitter {
+    display: none;
+  }
 }
 
 body.panel-collapsed .app {
@@ -1182,6 +1267,22 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
   font-size: 12px;
   display: grid;
   gap: 4px;
+}
+
+/* 手机版专用组件在桌面端不参与布局。 */
+.mobile-tabbar,
+.mobile-more-sheet,
+.mobile-more-mask,
+.pwa-status,
+.pwa-update {
+  display: none;
+}
+
+.pwa-status[hidden],
+.pwa-update[hidden],
+.mobile-more-sheet[hidden],
+.mobile-more-mask[hidden] {
+  display: none !important;
 }
 
 /* --------------------------------------------------------------- 弹层 */
@@ -3105,6 +3206,227 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
     max-width: calc(100vw - 32px);
     font-size: 15px;
   }
+}
+
+/* --------------------------------------------------------------------------
+   手机版 v2：底部导航 + 更多底部弹层。放在旧窄栏规则之后，明确覆盖旧的 60px 左栏。
+   -------------------------------------------------------------------------- */
+@media (max-width: 760px) {
+  :root {
+    --mobile-tab-h: 62px;
+  }
+
+  .app,
+  body.notes-focus .app {
+    grid-template-columns: minmax(0, 1fr);
+    padding-bottom: calc(var(--mobile-tab-h) + env(safe-area-inset-bottom));
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .chat,
+  .panel,
+  body.panel-collapsed .panel {
+    grid-column: 1;
+    min-width: 0;
+  }
+
+  .mobile-panel-back {
+    display: none !important;
+  }
+
+  .mobile-tabbar {
+    position: fixed;
+    z-index: 45;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    min-height: var(--mobile-tab-h);
+    padding: 5px max(6px, env(safe-area-inset-right)) max(5px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    align-items: stretch;
+    gap: 2px;
+    border-top: 1px solid var(--line);
+    background: color-mix(in srgb, var(--bg-surface) 94%, transparent);
+    box-shadow: 0 -8px 24px rgba(18, 35, 72, 0.08);
+    backdrop-filter: blur(18px);
+  }
+
+  .mobile-tab,
+  .mobile-sheet-item {
+    border: 0;
+    color: var(--fg-2);
+    background: transparent;
+  }
+
+  .mobile-tab {
+    min-width: 0;
+    min-height: 48px;
+    padding: 4px 2px;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    touch-action: manipulation;
+  }
+
+  .mobile-tab .nav-icon {
+    width: 22px;
+    height: 22px;
+  }
+
+  .mobile-tab-label {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px !important;
+    line-height: 1.1;
+  }
+
+  .mobile-tab.active {
+    color: var(--blue);
+    background: color-mix(in srgb, var(--blue) 12%, transparent);
+  }
+
+  .mobile-more-mask {
+    position: fixed;
+    z-index: 58;
+    inset: 0;
+    display: block;
+    opacity: 0;
+    background: rgba(8, 12, 24, 0.42);
+    transition: opacity 180ms ease;
+  }
+
+  .mobile-more-sheet {
+    position: fixed;
+    z-index: 59;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    max-height: min(74vh, 640px);
+    padding: 5px 16px calc(18px + env(safe-area-inset-bottom));
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--line);
+    border-bottom: 0;
+    border-radius: 22px 22px 0 0;
+    background: var(--bg-surface);
+    box-shadow: 0 -18px 50px rgba(8, 12, 24, 0.22);
+    transform: translateY(105%);
+    transition: transform 180ms ease;
+  }
+
+  body.mobile-more-open .mobile-more-mask { opacity: 1; }
+  body.mobile-more-open .mobile-more-sheet { transform: translateY(0); }
+
+  .mobile-sheet-handle {
+    width: 42px;
+    height: 5px;
+    margin: 2px auto 8px;
+    border-radius: 999px;
+    background: var(--line-strong, var(--line));
+  }
+
+  .mobile-sheet-head {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .mobile-sheet-head strong { font-size: 18px; }
+
+  .mobile-sheet-grid {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    padding: 8px 0;
+  }
+
+  .mobile-sheet-item {
+    min-height: 86px;
+    padding: 12px 6px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--bg-base);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    touch-action: manipulation;
+  }
+
+  .mobile-sheet-item .nav-icon,
+  .mobile-sheet-item .nav-icon svg { width: 26px; height: 26px; }
+  .mobile-sheet-item .mobile-tab-label { font-size: 14px !important; }
+
+  .modal-mask {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .modal {
+    width: 100%;
+    max-height: min(90dvh, 760px);
+    border-radius: 22px 22px 0 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  :where(button, [role='button'], input, select) {
+    min-height: 44px;
+  }
+
+  .pwa-status {
+    position: fixed;
+    z-index: 44;
+    left: 50%;
+    bottom: calc(var(--mobile-tab-h) + env(safe-area-inset-bottom) + 8px);
+    transform: translateX(-50%);
+    display: block;
+    width: max-content;
+    max-width: calc(100vw - 24px);
+    padding: 7px 12px;
+    border: 1px solid color-mix(in srgb, var(--orange) 55%, var(--line));
+    border-radius: 999px;
+    background: var(--bg-surface);
+    color: var(--fg);
+    box-shadow: var(--shadow-2);
+    font-size: 12px;
+  }
+
+  .pwa-status[data-tone='synced'] { border-color: color-mix(in srgb, var(--green) 55%, var(--line)); }
+
+  .pwa-update {
+    position: fixed;
+    z-index: 61;
+    left: 12px;
+    right: 12px;
+    bottom: calc(var(--mobile-tab-h) + env(safe-area-inset-bottom) + 10px);
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--bg-surface);
+    box-shadow: var(--shadow-2);
+  }
+
+  .pwa-update span { flex: 1; }
+}
+
+@media (max-width: 420px) {
+  .mobile-sheet-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 /* 极窄屏（320px 级的老机型 / 分屏）：只压缩留白，不再改字号 —— 16px 是这条线下面

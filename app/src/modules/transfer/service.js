@@ -23,6 +23,7 @@
  */
 
 import http from 'node:http';
+import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
@@ -31,7 +32,8 @@ import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { HttpError } from '../../core/http/router.js';
 import { COLLECTIONS, COLLECTION_NAMES, catalog, entryOf } from './catalog.js';
 import { createDiscovery } from './discovery.js';
-import { LanGateway } from './gateway.js';
+import { LanGateway, lanAddresses } from './gateway.js';
+import { ensureWindowsLanCertificate } from './certificate.js';
 import {
   BROADCAST_INTERVAL_MS,
   CHUNK_BYTES,
@@ -130,6 +132,7 @@ export class TransferService {
     this.logger = logger;
     this.now = now;
     this.options = options ?? {};
+    this.dataDir = dataDir;
 
     this.port = Number(this.options.port) > 0 ? Number(this.options.port) : DEFAULT_PORT;
     /** 只监听局域网可达的地址：主服务是 127.0.0.1，这里必须是 0.0.0.0，否则对面连不上。 */
@@ -181,6 +184,8 @@ export class TransferService {
      */
     this.dirty = false;
     this.server = null;
+    this.httpsServer = null;
+    this.httpsReadyPromise = null;
     this.serverError = null;
     this.listening = false;
     this.actualPort = null;
@@ -256,6 +261,7 @@ export class TransferService {
     this.discovery?.start();
     this.discovery?.setEnabled(this.discoverable);
     this.#startDeviceServer();
+    if (this.gateway.enabled) this.#startHttpsGateway();
     return this;
   }
 
@@ -290,7 +296,9 @@ export class TransferService {
 
       // ③ 设备服务器：先断连接（在飞请求就此中止，不干等），再 close
       const server = this.server;
+      const httpsServer = this.httpsServer;
       this.server = null;
+      this.httpsServer = null;
       this.listening = false;
       this.actualPort = null;
       // 网关：注销局域网令牌、掐断在飞的 WebSocket 上游连接（留着它们测试进程退不出去）
@@ -309,6 +317,17 @@ export class TransferService {
         } else {
           // 端口没绑上（EADDRINUSE 等）：close 只是为了释放对象，回调里的错误可以忽略
           server.close(() => {});
+        }
+      }
+      if (httpsServer) {
+        httpsServer.closeAllConnections?.();
+        if (httpsServer.listening) {
+          await Promise.race([
+            new Promise((resolve) => httpsServer.close(() => resolve())),
+            new Promise((resolve) => { const timer = setTimeout(resolve, 2000); timer.unref?.(); }),
+          ]);
+        } else {
+          httpsServer.close(() => {});
         }
       }
       return this;
@@ -368,6 +387,64 @@ export class TransferService {
       });
       server.once('error', () => resolve(null));
     });
+  }
+
+  /** 正式手机版入口：8887 HTTPS。随机端口测试默认不启动，避免测试机写系统证书。 */
+  #startHttpsGateway() {
+    const config = this.options.gateway ?? {};
+    const wanted = config.https === true || (config.https !== false && this.port === DEFAULT_PORT);
+    if (!wanted || this.stopping) return Promise.resolve(null);
+    if (this.httpsReadyPromise) return this.httpsReadyPromise;
+    const securePort = Number(config.httpsPort) > 0 ? Number(config.httpsPort) : 8887;
+    this.gateway.setSecureInfo({ available: process.platform === 'win32', ready: false, port: securePort, error: null });
+    this.httpsReadyPromise = (async () => {
+      try {
+        const certificate = await ensureWindowsLanCertificate({ dataDir: this.dataDir, addresses: lanAddresses(), logger: this.logger });
+        if (!certificate.available || this.stopping) {
+          this.gateway.setSecureInfo({ available: false, ready: false, error: certificate.reason ?? 'HTTPS 不可用' });
+          return null;
+        }
+        const server = https.createServer({ pfx: certificate.pfx, passphrase: certificate.passphrase }, (req, res) => {
+          const url = new URL(req.url ?? '/', `https://${req.headers.host ?? '0.0.0.0'}`);
+          if (!this.gateway?.owns(url.pathname)) {
+            sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND', message: '路径不存在' } });
+            return;
+          }
+          this.gateway.handle(req, res, url).catch((error) => sendError(res, error));
+        });
+        server.on('upgrade', (req, socket, head) => {
+          if (this.gateway?.ownsUpgrade(req)) this.gateway.handleUpgrade(req, socket, head);
+          else socket.destroy();
+        });
+        server.on('error', (error) => {
+          const message = error?.code === 'EADDRINUSE' ? `HTTPS 端口 ${securePort} 已被占用` : error?.message ?? String(error);
+          this.gateway.setSecureInfo({ ready: false, error: message });
+          this.logger?.warn?.(`[transfer] 手机版 HTTPS 未启动：${message}`);
+        });
+        this.httpsServer = server;
+        await new Promise((resolve) => {
+          server.listen(securePort, this.host, () => resolve(true));
+          server.once('error', () => resolve(false));
+        });
+        if (!server.listening) return null;
+        this.gateway.setSecureInfo({
+          available: true,
+          ready: true,
+          port: securePort,
+          caPath: certificate.caPath,
+          generatedAt: certificate.generatedAt,
+          expiresAt: certificate.expiresAt,
+          error: null,
+        });
+        this.logger?.log?.(`[transfer] 手机版 HTTPS 已启动：${this.host}:${securePort}`);
+        return { port: securePort };
+      } catch (error) {
+        this.gateway.setSecureInfo({ available: false, ready: false, error: error?.message ?? String(error) });
+        this.logger?.warn?.(`[transfer] 无法准备手机版 HTTPS：${error?.message ?? error}`);
+        return null;
+      }
+    })();
+    return this.httpsReadyPromise;
   }
 
   async #handleRequest(req, res) {
@@ -1188,14 +1265,20 @@ export class TransferService {
    * 这里管的是"手机/平板能不能用浏览器打开本程序"。混在一个接口里，前端一个滑块错了会让另一个跟着变。
    * 开关**不落盘**（理由见构造函数里 gateway 那段注释）：默认永远是关。
    */
-  updateGateway({ enabled } = {}) {
+  async updateGateway({ enabled } = {}) {
     if (enabled !== undefined) this.gateway.setEnabled(Boolean(enabled));
+    if (this.gateway.enabled) await this.#startHttpsGateway();
     return this.status();
   }
 
   /** 注销所有局域网令牌（「全部注销」：一次性踢掉所有手机）。 */
   revokeLanTokens() {
     const revoked = this.gateway.revokeAll();
+    return { revoked, gateway: this.gateway.status() };
+  }
+
+  revokeLanToken(id) {
+    const revoked = this.gateway.revoke(id) ? 1 : 0;
     return { revoked, gateway: this.gateway.status() };
   }
 

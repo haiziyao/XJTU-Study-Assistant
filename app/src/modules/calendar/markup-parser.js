@@ -152,11 +152,12 @@ function todoDraft(raw, action, parts) {
   const date = normalizeLooseDate(pick(parts, 2));
   const subject = pick(parts, 3);
   if (!title) warnings.push('标记行缺少待办标题');
-  if (!date) warnings.push('标记行缺少截止日期，默认今天');
+  // 待办的截止日是可选的：标记行没写日期就不设，不要编一个今天（会污染逾期提醒）。
+  if (!date) warnings.push('标记行缺少截止日期，不设截止日');
 
   const fields = {
     title: title ?? '未命名待办',
-    deadline: date ?? new Date().toISOString().slice(0, 10),
+    deadline: date ?? null,
     priority,
     source: 'command',
   };
@@ -171,7 +172,9 @@ function todoDraft(raw, action, parts) {
     fields,
     confidence: warnings.length ? 0.6 : 0.88,
     warnings,
-    explain: `添加待办「${fields.title}」（截止 ${fields.deadline}，优先级 ${priority}）`,
+    explain: date
+      ? `添加待办「${fields.title}」（截止 ${date}，优先级 ${priority}）`
+      : `添加待办「${fields.title}」（不设截止日，优先级 ${priority}）`,
     markup: { type: 'todo' },
   };
 }

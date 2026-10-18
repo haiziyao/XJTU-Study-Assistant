@@ -122,6 +122,32 @@ test('顺延指令解析为 rollover/todo', () => {
   assert.equal(draft.filters.weekStart, '2025-10-13');
 });
 
+test('待办没识别到日期时不默认今天：解析 / 落库的 deadline 都是 null', async () => {
+  // 解析层：没有日期的待办草稿必须是"不设截止日"，不能再填 todayKey()
+  const draft = parser.parse('记一下交实验报告');
+  assert.equal(draft.target, 'todo');
+  assert.equal(draft.fields.deadline, null, '没识别到日期时不要编一个今天');
+  assert.equal(draft.warnings.some((text) => text.includes('默认今天')), false);
+
+  const { app, call } = await startApp();
+  try {
+    // 接口层：POST /commands/parse 返回的草稿同样没有截止日
+    const parsed = await call('POST', '/commands/parse', { text: '记一下交实验报告' });
+    assert.equal(parsed.status, 200);
+    assert.equal(parsed.body.draft.target, 'todo');
+    assert.equal(parsed.body.draft.fields.deadline, null);
+
+    // 真落库后也是 null，并且能按「没有截止日」查出来
+    const created = await call('POST', '/commands/run', { text: '记一下交实验报告' });
+    assert.equal(created.status, 200);
+    assert.equal(created.body.item.deadline, null);
+    const listed = await call('GET', '/todos?noDeadline=1');
+    assert.equal(listed.body.items.some((item) => item.id === created.body.item.id), true);
+  } finally {
+    await app.close();
+  }
+});
+
 // ---------------------------------------------------------------- 端到端
 
 test('一句话加待办：落进 todos，待办视图的查询能查到', async () => {
@@ -691,3 +717,222 @@ function addDays(key, n) {
   const date = new Date(y, m - 1, d + n);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
+
+
+// ---------------------------------------------------------------------------
+// 重复日程的查询要展开（真机 bug：课表导入后 AI 说"你没有日程"）
+// ---------------------------------------------------------------------------
+
+/**
+ * 真机事故：课表导入的 24 条日程 `date` 都是**首次发生日**（2026-09-14 起每周重复），
+ * 而 AI 的 schedule 查询走的是 `list({from,to})` —— 只按 `date` 过滤，不展开 repeat。
+ * 于是问"这周有什么课"时一条都命中不了，AI 只能回答"你没有日程"，用户界面上却看得到。
+ * 这条用例锁住：区间查询必须走 `range()`，返回"每一次发生"并带 occurrenceDate。
+ */
+test('日程查询：按区间查重复日程会展开成每一次发生（带 occurrenceDate 与原日程 id）', async () => {
+  const { app, call } = await startApp();
+  try {
+    const created = await call('POST', '/schedules', {
+      title: '材料力学',
+      date: '2026-09-14',
+      startTime: '08:00',
+      endTime: '09:40',
+      repeat: { type: 'weekly', interval: 1, weekdays: [1], until: { mode: 'date', date: '2027-01-11' } },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body)?.slice(0, 200));
+    const scheduleId = created.body.item.id;
+
+    // 9 月 14 日是周一，10 月 19 日也是周一 → 区间查询应命中这一次
+    const queried = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { from: '2026-10-19', to: '2026-10-25' } },
+      dryRun: true,
+    });
+    assert.equal(queried.status, 200, JSON.stringify(queried.body)?.slice(0, 240));
+    assert.equal(queried.body.count, 1, `一条每周重复的日程在单周区间内应只展开出一次，实际 count=${queried.body.count}`);
+    const hit = queried.body.items.find((item) => item.title === '材料力学');
+    assert.ok(hit, '应当命中材料力学这一次');
+    assert.equal(hit.occurrenceDate, '2026-10-19', '展开出的日期应是这一次发生的日期');
+    assert.equal(hit.id, scheduleId, 'id 仍是原日程 id，方便模型后续改/删');
+    assert.equal(hit.isRepeatInstance, true);
+
+    // 单日查询同样要展开
+    const oneDay = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { date: '2026-10-19' } },
+      dryRun: true,
+    });
+    assert.ok((oneDay.body.items ?? []).some((item) => item.title === '材料力学' && item.occurrenceDate === '2026-10-19'));
+
+    // 按原日程 id 定位单条仍然可用（filters.id 分支不经过展开，不能受合成 id 影响）
+    const byId = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'update', target: 'schedule', filters: { id: scheduleId }, fields: { location: '主楼 A101' } },
+      dryRun: true,
+    });
+    assert.deepEqual(byId.body.planned?.ids, [scheduleId], 'filters.id 必须直接定位到原日程');
+
+    // 区间查询会展开出 5 次（10/19、10/26、11/2、11/9、11/16），但写操作只能定位到 1 条原日程
+    const rangeUpdate = await call('POST', '/commands/execute', {
+      draft: {
+        ok: true,
+        action: 'update',
+        target: 'schedule',
+        filters: { from: '2026-10-19', to: '2026-11-22' },
+        fields: { location: '主楼 A101' },
+      },
+      dryRun: true,
+    });
+    assert.deepEqual(rangeUpdate.body.planned?.ids, [scheduleId], '展开出的同一条日程在写操作里必须按原日程去重');
+
+    // 不重复的日程在区间内照旧能查到
+    await call('POST', '/schedules', { title: '一次性会议', date: '2026-10-20', startTime: '15:00', endTime: '16:00' });
+    const mixed = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { from: '2026-10-19', to: '2026-10-25' } },
+      dryRun: true,
+    });
+    assert.ok((mixed.body.items ?? []).some((item) => item.title === '一次性会议'));
+  } finally {
+    await app.close();
+  }
+});
+
+/**
+ * 展开器不能只认「每周」：`interval:2`（隔周）与 `until: date`（提前结课）都是真实课表
+ * 会出现的形状。查询若把它们当成"每周无限重复"，AI 就会在没课的那周报出一节课，
+ * 或者在课程已经结束后还继续排课 —— 和"查不到课"一样是在骗用户。
+ */
+test('日程查询：隔周重复与 until 截止的日程只展开命中的那几次', async () => {
+  const { app, call } = await startApp();
+  try {
+    // 每两周的周一：9/14 起 → 命中 9/14、9/28、10/12、10/26 …，10/19 那周没有课
+    await call('POST', '/schedules', {
+      title: '大学物理',
+      date: '2026-09-14',
+      startTime: '10:00',
+      endTime: '11:40',
+      repeat: { type: 'weekly', interval: 2, weekdays: [1], until: { mode: 'date', date: '2026-12-31' } },
+    });
+    // 每周三，但 10/7 之后结课：10/19 那周不应该再出现
+    await call('POST', '/schedules', {
+      title: '已经结课的英语',
+      date: '2026-09-16',
+      startTime: '08:00',
+      endTime: '09:40',
+      repeat: { type: 'weekly', interval: 1, weekdays: [3], until: { mode: 'date', date: '2026-10-07' } },
+    });
+
+    const offWeek = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { from: '2026-10-19', to: '2026-10-25' } },
+      dryRun: true,
+    });
+    assert.equal(offWeek.status, 200);
+    assert.equal(offWeek.body.items.some((item) => item.title === '大学物理'), false, '隔周课程不应在间隔周出现');
+    assert.equal(offWeek.body.items.some((item) => item.title === '已经结课的英语'), false, 'until 之后不应再展开');
+
+    const onWeek = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { from: '2026-10-26', to: '2026-11-01' } },
+      dryRun: true,
+    });
+    const physics = (onWeek.body.items ?? []).find((item) => item.title === '大学物理');
+    assert.ok(physics, '到上课周必须能查到');
+    assert.equal(physics.occurrenceDate, '2026-10-26', '隔周课程应落在 10/26');
+    assert.equal(physics.isRepeatInstance, true);
+    assert.equal(onWeek.body.items.some((item) => item.title === '已经结课的英语'), false, '截止后任何一周都不应再展开');
+  } finally {
+    await app.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 待办可以没有截止日期（用户要求）
+// ---------------------------------------------------------------------------
+
+/**
+ * 生活里大量待办本来就"想做，但不赶时间"。以前截止日必填，只能逼用户随便挑一天 ——
+ * 假期限会把逾期统计污染成噪音。这组用例锁住"可选"的完整语义：
+ * 创建/清空/派生字段/过滤/排序/日历聚合都不能因为 null 出错。
+ */
+test('待办：不传 deadline 也能创建，派生字段是"不逾期/不是今天/没有剩余天数"', async () => {
+  const ctx = await startApp();
+  try {
+    const created = await ctx.call('POST', '/todos', { title: '没有截止日的事' });
+    assert.equal(created.status, 201, JSON.stringify(created.body)?.slice(0, 200));
+    const item = created.body.item;
+    assert.equal(item.deadline, null, '不传 deadline 就该存 null，而不是替用户填今天');
+    assert.equal(item.isOverdue, false, '没有截止日不可能逾期');
+    assert.equal(item.isToday, false);
+    assert.equal(item.daysRemaining, null, 'null 而不是 0：0 会被读成"今天到期"');
+
+    // 显式传 null 等价于"不设"
+    const explicit = await ctx.call('POST', '/todos', { title: '显式 null', deadline: null });
+    assert.equal(explicit.status, 201);
+    assert.equal(explicit.body.item.deadline, null);
+
+    // 空串与 null 等价：表单留空提交时就是 ''
+    const blank = await ctx.call('POST', '/todos', { title: '空串', deadline: '' });
+    assert.equal(blank.status, 201, JSON.stringify(blank.body)?.slice(0, 200));
+    assert.equal(blank.body.item.deadline, null);
+  } finally {
+    await ctx.app.close();
+  }
+});
+
+test('待办：PATCH 传 deadline:null/空串能把已有截止日清掉；不传则不动', async () => {
+  const ctx = await startApp();
+  try {
+    const created = await ctx.call('POST', '/todos', { title: '先有日期', deadline: '2026-11-01' });
+    const id = created.body.item.id;
+    assert.equal(created.body.item.deadline, '2026-11-01');
+
+    // 不传 deadline → 保持原值
+    const touched = await ctx.call('PATCH', `/todos/${id}`, { title: '先有日期（改名）' });
+    assert.equal(touched.body.item.deadline, '2026-11-01', '没传 deadline 不许把日期清掉');
+
+    // 传 null → 清空
+    const cleared = await ctx.call('PATCH', `/todos/${id}`, { deadline: null });
+    assert.equal(cleared.status, 200, JSON.stringify(cleared.body)?.slice(0, 200));
+    assert.equal(cleared.body.item.deadline, null);
+    assert.equal(cleared.body.item.isOverdue, false);
+
+    // 再填回去，然后用空串清空：表单把日期输入框清掉时发的是 ''
+    const refilled = await ctx.call('PATCH', `/todos/${id}`, { deadline: '2026-12-01' });
+    assert.equal(refilled.body.item.deadline, '2026-12-01');
+    const blanked = await ctx.call('PATCH', `/todos/${id}`, { deadline: '' });
+    assert.equal(blanked.status, 200, JSON.stringify(blanked.body)?.slice(0, 200));
+    assert.equal(blanked.body.item.deadline, null);
+  } finally {
+    await ctx.app.close();
+  }
+});
+
+test('待办：无截止日的不算逾期、能单独筛出、排序排在有日期的后面', async () => {
+  const ctx = await startApp();
+  try {
+    await ctx.call('POST', '/todos', { title: 'A 无期限' });
+    await ctx.call('POST', '/todos', { title: 'B 逾期', deadline: '2020-01-01' });
+    await ctx.call('POST', '/todos', { title: 'C 未来', deadline: '2099-12-31' });
+
+    const overdue = await ctx.call('GET', '/todos?overdue=1');
+    assert.deepEqual(overdue.body.items.map((item) => item.title), ['B 逾期'], '只有真有日期的才会逾期');
+
+    const noDeadline = await ctx.call('GET', '/todos?noDeadline=1');
+    assert.deepEqual(noDeadline.body.items.map((item) => item.title), ['A 无期限']);
+
+    const all = await ctx.call('GET', '/todos');
+    const titles = all.body.items.map((item) => item.title);
+    assert.equal(titles[titles.length - 1], 'A 无期限', `无截止日应排最后：${titles.join(' | ')}`);
+  } finally {
+    await ctx.app.close();
+  }
+});
+
+test('待办：日历聚合跳过无截止日的待办（不会塞进 key 为 null 的桶）', async () => {
+  const ctx = await startApp();
+  try {
+    await ctx.call('POST', '/todos', { title: '无期限', deadline: null });
+    await ctx.call('POST', '/todos', { title: '有期限', deadline: '2026-11-02' });
+    const grouped = ctx.app.services.todos.groupByDeadline({});
+    assert.equal(grouped.has(null), false, '不该出现 null 这个桶');
+    assert.equal(grouped.get('2026-11-02')?.length, 1);
+  } finally {
+    await ctx.app.close();
+  }
+});

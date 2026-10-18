@@ -324,9 +324,13 @@ export function firstSentence(text) {
  * 构造收 `{ store, broadcast, now }`：`now` 可注入（测试复核/衰减时不必改系统时钟）。
  */
 export class MemoryService {
-  constructor({ store, broadcast, now } = {}) {
+  constructor({ store, broadcast, now, services = null, audit = null } = {}) {
     this.store = store;
     this.broadcast = broadcast;
+    // 用户经界面/HTTP 写记忆时记一条 actor:'user'；AI 执行草稿期间（services.__actor === 'ai'）
+    // 跳过，由 chat-service 记 actor:'ai'（一次改动一条日志，避免重复）。
+    this.services = services;
+    this.audit = audit;
     this.now = typeof now === 'function' ? now : () => new Date();
     /** inject() 的后台命中回报：测试与关闭前可以 await flush() 等它们落盘。 */
     this.pending = new Set();
@@ -599,6 +603,8 @@ export class MemoryService {
       await this.collection.update(existing.id, { status: 'superseded', supersededBy: created.id });
     }
     this.#changed('create', created.id, existing ? { superseded: existing.id } : {});
+    // 用户路径（create / 用户确认草稿）记一条；AI 执行草稿期间由 chat-service 统一记，服务端跳过。
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'memory', action: 'create', targetId: created.id, title: created.text, after: created, summary: existing ? `取代了「${existing.text}」` : undefined });
     return existing
       ? { item: created, replaced: { id: existing.id, text: existing.text }, ...adjusted }
       : { item: created, ...adjusted };
@@ -780,6 +786,7 @@ export class MemoryService {
 
     const updated = await this.collection.update(current.id, next);
     this.#changed('update', current.id);
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'memory', action: 'update', targetId: current.id, title: updated.text, before: current, after: updated });
     return updated;
   }
 
@@ -789,6 +796,7 @@ export class MemoryService {
       const current = this.get(id);
       await this.collection.remove(current.id);
       this.#changed('delete', current.id);
+      if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'memory', action: 'delete', targetId: current.id, title: current.text, before: current });
       return { id: current.id, deleted: true };
     });
   }
@@ -804,6 +812,7 @@ export class MemoryService {
       const backup = await this.#backup();
       await this.collection.removeMany(items.map((item) => item.id));
       this.#changed('clear', null, { count: items.length });
+      if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'memory', action: 'bulk', summary: `清空 ${items.length} 条记忆`, before: { count: items.length } });
       return { deleted: items.length, backup };
     });
   }

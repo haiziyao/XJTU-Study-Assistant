@@ -29,6 +29,19 @@
  *   - 默认 1_000_000（1M），合法区间 8000–2_000_000，越界同 `searchMaxPages` 的两段式处理；
  *   - 分母由用户填是因为不同模型/端点的窗口差别很大（128K / 1M / 自建代理），
  *     写死一个数只会让百分比长期对不上；`GET /ai/status` 会把它带出去，前端据此算百分比。
+ *
+ * 一轮最多执行几个操作（`maxActionsPerTurn`）：
+ *   - **默认 3**，合法取值是 **1–50** 的整数，另有 **0 = 不限制**；
+ *   - 为什么默认 3：这就是本项设置出现之前提示词里写死的那个数 —— 用户没动过设置时，
+ *     行为必须与旧版完全一致；3 也确实是"一句话三件事"的常见规模，再多就该分两轮说。
+ *   - 为什么 0 表示不限制、而不是 1：1 是一个**真实可选的严格档**（一轮只自动办一件事），
+ *     若拿 1 当"不限制"，用户把它从 3 调到 1 时限制会**静默消失**，正好调反；
+ *     0 则是"没有上限"的天然哨兵，与 `historyTurns: 0`（不带历史）的口径一致。
+ *   - 它只管 **auto（自动审批）档**真正执行的写操作条数：超出的草稿留在 `drafts` 里走
+ *     人工确认卡（manual 语义）。manual / strict 档本来就一条都不自动执行，因此不受它约束 ——
+ *     草稿列表也不截断，用户自己决定点哪几张。
+ *   - 提示词里那一句也由它生成（见 prompt.js），所以"提示"与"真正执行"是同一个数，
+ *     不会出现"提示词说最多 3 条，服务端却执行了 5 条"的割裂。
  */
 
 import path from 'node:path';
@@ -36,7 +49,7 @@ import path from 'node:path';
 import { HttpError } from '../../core/http/router.js';
 
 import { JsonFile } from './secret-store.js';
-import { SEARCH_PROVIDERS, normalizeSearchKeys, resolveSearchBackend } from './web-search.js';
+import { SEARCH_PROVIDERS, normalizeSearchKeys, resolveDeepSeekKey, resolveSearchBackend } from './web-search.js';
 
 /** 默认指向 DeepSeek 的 OpenAI 兼容端点；换任何同协议的服务只需改 baseUrl + model。 */
 export const AI_DEFAULTS = Object.freeze({
@@ -75,14 +88,38 @@ export const AI_DEFAULTS = Object.freeze({
    */
   searchRetryMax: 3,
   /**
-   * 搜索服务：`auto`（默认，有 key 就用 API）/ `tavily` / `brave` / `serper` / `bing` /
-   * `scrape`（强制解析结果页，哪怕配了 key）。
+   * 搜索服务：`auto`（默认，有 key 就用官方接口）/ `deepseek`（DeepSeek 官方 Search API）/
+   * `tavily` / `brave` / `serper` / `bing` / `scrape`（强制解析结果页，哪怕配了 key）。
+   *
+   * `deepseek` 与 `auto` 用的是**「AI 接入」里的 `apiKey`**（同一个 DeepSeek 账号、同一份账单）；
+   * 只有显式选了 `deepseek` 时才允许用 `searchApiKey` 覆盖它（自建代理常见这种需求）。
    */
   searchProvider: 'auto',
   /** 单个搜索密钥：配合 `searchProvider` 用；`''` 表示清空。 */
   searchApiKey: '',
   /** 每个服务各自的密钥（优先于 `searchApiKey`）：`{ tavily, brave, serper, bing }`。 */
   searchApiKeys: Object.freeze({}),
+  /**
+   * DeepSeek 官方 Search / Fetch 的 API 根地址（可指向自建代理）。
+   * 实际端点是 `${searchApiBase}/v1/tools/search` 与 `${searchApiBase}/v1/tools/fetch`。
+   */
+  searchApiBase: 'https://api.deepseek.com',
+  /**
+   * 检索时是否让官方接口直接带回全文（请求体 `need_content`，默认 true）。
+   *
+   * 为什么默认开：官方按**成功请求次数**计费（Search 5 元/1000 次、Fetch 同价），
+   * 一次 `search + need_content:true` 拿到 N 条正文，比"search 一次 + 逐页 Fetch N 次"
+   * 便宜 N 倍；关掉只在"只要链接和摘要、不想要正文"时才有意义。
+   */
+  searchNeedContent: true,
+
+  // ---------------------------------------------------------------- 写入执行
+  /**
+   * 「一轮最多执行几个操作」（auto 档真正落库的写操作条数）。
+   * **默认 3 / 合法 1–50 / 0 = 不限制**；超出的草稿留成待确认卡，不静默丢弃。
+   * 提示词里那句"一轮最多给 N 条写入草稿"与这里**同源**（见 prompt.js）。
+   */
+  maxActionsPerTurn: 3,
 });
 
 /** 允许被持久化的字段白名单：接口不能往里塞任意键。 */
@@ -102,6 +139,9 @@ export const AI_CONFIG_FIELDS = Object.freeze([
   'searchProvider',
   'searchApiKey',
   'searchApiKeys',
+  'searchApiBase',
+  'searchNeedContent',
+  'maxActionsPerTurn',
 ]);
 
 /** 「网络搜索最大条数」的合法区间（与 web-search.js 的 SEARCH_LIMIT_MIN/MAX 一致）。 */
@@ -124,8 +164,19 @@ export const SEARCH_RETRY_MAX = 6;
 export const CONTEXT_WINDOW_MIN = 8_000;
 export const CONTEXT_WINDOW_MAX = 2_000_000;
 
-/** `searchProvider` 的合法取值：auto + 四家 API + 强制只解析结果页。 */
-export const SEARCH_PROVIDER_VALUES = Object.freeze(['auto', 'scrape', ...SEARCH_PROVIDERS]);
+/**
+ * 「一轮最多执行几个操作」的合法取值。
+ *
+ * `0` 单独表示**不限制**（不是"一次也不执行"）：见文件头对"为什么不是用 1 表示不限制"的说明。
+ * 上限 50：再往上用户已经分不清一轮里到底写了什么，确认卡也会刷屏；
+ * 它挡的是"手滑多敲一个 0"，而不是限制正常使用（默认才 3）。
+ */
+export const MAX_ACTIONS_UNLIMITED = 0;
+export const MAX_ACTIONS_MIN = 1;
+export const MAX_ACTIONS_MAX = 50;
+
+/** `searchProvider` 的合法取值：auto + DeepSeek 官方 + 四家 API + 强制只解析结果页。 */
+export const SEARCH_PROVIDER_VALUES = Object.freeze(['auto', 'scrape', 'deepseek', ...SEARCH_PROVIDERS]);
 
 const str = (value) => (value === undefined || value === null ? undefined : String(value).trim());
 
@@ -188,6 +239,23 @@ function normSearchRetryMax(value, fallback = AI_DEFAULTS.searchRetryMax) {
 }
 
 /**
+ * `searchApiBase` 的宽松归一化：不是合法的 http(s) 根地址就回落默认。
+ * **不在末尾保留斜杠**：拼接 `/v1/tools/search` 时不能出现 `//v1`。
+ */
+function normSearchApiBase(value, fallback = AI_DEFAULTS.searchApiBase) {
+  const base = String(fallback ?? AI_DEFAULTS.searchApiBase).trim().replace(/\/+$/, '') || AI_DEFAULTS.searchApiBase;
+  const text = str(value);
+  if (!text) return base;
+  try {
+    const url = new URL(text);
+    if (!/^https?:$/.test(url.protocol) || !url.hostname) return base;
+    return text.replace(/\/+$/, '');
+  } catch {
+    return base;
+  }
+}
+
+/**
  * 「上下文窗口上限」的宽松归一化：取整 + 收敛到 8000–2_000_000。
  * 与 `normSearchMaxPages` 同款：磁盘/环境变量里的脏值静默回落，服务照常起来。
  */
@@ -195,6 +263,25 @@ function normContextWindow(value, fallback = AI_DEFAULTS.contextWindow) {
   const base = num(fallback, { fallback: AI_DEFAULTS.contextWindow, min: CONTEXT_WINDOW_MIN, max: CONTEXT_WINDOW_MAX });
   const parsed = num(value, { fallback: base, min: CONTEXT_WINDOW_MIN, max: CONTEXT_WINDOW_MAX });
   return Math.min(CONTEXT_WINDOW_MAX, Math.max(CONTEXT_WINDOW_MIN, Math.trunc(parsed)));
+}
+
+/**
+ * 「一轮最多执行几个操作」的宽松归一化：取整，只接受 **0 或 1–50**。
+ *
+ * 0 是合法值（不限制），不能像 `normSearchRetryMax` 那样把下界写成 1 —— 那会把
+ * "用户明确关掉了限制"悄悄变成"一轮只办一件"，正好是相反的意思。
+ * 磁盘/环境变量里的脏值（负数、51、非数字）静默回落默认 3，服务照常起来；
+ * 用户在设置页填的越界值则由 `assertAiConfigInput` 抛 400。
+ *
+ * 导出给 prompt.js 用：提示词必须和真正执行用同一个数，不能让"默认值"有两份。
+ */
+export function normalizeMaxActionsPerTurn(value, fallback = AI_DEFAULTS.maxActionsPerTurn) {
+  const parse = (input) => {
+    // min 用 0 同时接住 0 与 1–50；小数先通过区间判断，再统一取整
+    const parsed = num(input, { fallback: null, min: MAX_ACTIONS_UNLIMITED, max: MAX_ACTIONS_MAX });
+    return parsed === null ? null : Math.trunc(parsed);
+  };
+  return parse(value) ?? parse(fallback) ?? AI_DEFAULTS.maxActionsPerTurn;
 }
 
 /**
@@ -294,6 +381,29 @@ export function assertAiConfigInput(input = {}) {
     }
   }
 
+  // 「一轮最多执行几个操作」：0 合法（不限制），1–50 合法；负数 / 51 / 小数 / 非数字一律 400。
+  // 它是 auto 档真正落库的条数上限，填错会让"以为只办 3 件、结果办了 30 件"，所以必须当场拦住。
+  const actions = input.maxActionsPerTurn;
+  if (actions !== undefined && actions !== null && actions !== '') {
+    // 布尔值不能当数字收：`Number(false) === 0` 会把它悄悄解释成"不限制"，
+    // 而 `pickAiConfig` 存的是 "false"（归一化时又回落 3）—— 两边不一致必须当场拦住。
+    const value = typeof actions === 'boolean' ? Number.NaN : Number(actions);
+    if (!Number.isFinite(value)) {
+      throw HttpError.badRequest(`一轮最多执行几个操作必须是数字，收到 ${JSON.stringify(actions)}`, {
+        field: 'maxActionsPerTurn',
+      });
+    }
+    if (!Number.isInteger(value)) {
+      throw HttpError.badRequest(`一轮最多执行几个操作必须是整数，收到 ${value}`, { field: 'maxActionsPerTurn' });
+    }
+    if (value !== MAX_ACTIONS_UNLIMITED && (value < MAX_ACTIONS_MIN || value > MAX_ACTIONS_MAX)) {
+      throw HttpError.badRequest(
+        `一轮最多执行几个操作只能是 0（不限制）或 ${MAX_ACTIONS_MIN}–${MAX_ACTIONS_MAX} 之间的整数，收到 ${value}`,
+        { field: 'maxActionsPerTurn' },
+      );
+    }
+  }
+
   const provider = input.searchProvider;
   if (provider !== undefined && provider !== null && provider !== '') {
     const value = String(provider).trim().toLowerCase();
@@ -311,6 +421,36 @@ export function assertAiConfigInput(input = {}) {
     const legal = typeof enabled === 'boolean' || ['1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'].includes(text);
     if (!legal) {
       throw HttpError.badRequest(`联网检索开关只能是 true / false，收到 ${JSON.stringify(enabled)}`, { field: 'searchEnabled' });
+    }
+  }
+
+  // DeepSeek 官方搜索的根地址：必须是 http(s) 且带 host（拼接时会直接接 `/v1/tools/...`）
+  const apiBase = input.searchApiBase;
+  if (apiBase !== undefined && apiBase !== null && apiBase !== '') {
+    if (typeof apiBase !== 'string') {
+      throw HttpError.badRequest('搜索 API 地址必须是字符串', { field: 'searchApiBase' });
+    }
+    let parsed;
+    try {
+      parsed = new URL(apiBase.trim());
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || !/^https?:$/.test(parsed.protocol) || !parsed.hostname) {
+      throw HttpError.badRequest(
+        `搜索 API 地址必须是带主机名的 http(s) 地址，收到 ${JSON.stringify(apiBase)}`,
+        { field: 'searchApiBase' },
+      );
+    }
+  }
+
+  // need_content 是布尔开关：只接受 0/1 与 true/false 这几种写法
+  const needContent = input.searchNeedContent;
+  if (needContent !== undefined && needContent !== null && needContent !== '') {
+    const text = String(needContent).trim().toLowerCase();
+    const legal = typeof needContent === 'boolean' || ['1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'].includes(text);
+    if (!legal) {
+      throw HttpError.badRequest(`need_content 开关只能是 true / false，收到 ${JSON.stringify(needContent)}`, { field: 'searchNeedContent' });
     }
   }
 
@@ -348,6 +488,9 @@ export function normalizeAiConfig(input = {}, base = AI_DEFAULTS) {
   out.historyTurns = num(raw.historyTurns, { fallback: base.historyTurns, min: 0, max: 100 });
   // 上下文上限只影响「用量指示」的分母，不影响任何截断行为（截断仍看 historyTurns + 摘要）
   out.contextWindow = normContextWindow(raw.contextWindow, base.contextWindow);
+  // 一轮最多执行几个操作：宽松归一（0 = 不限制；磁盘/环境变量脏值静默回落默认 3）。
+  // 真正用它的是 chat-service 的 auto 档执行循环，提示词里那句也由同一个值生成。
+  out.maxActionsPerTurn = normalizeMaxActionsPerTurn(raw.maxActionsPerTurn, base.maxActionsPerTurn);
   // 布尔字段：pickAiConfig 已把它转成字符串，这里再解释一次
   out.drawMode = bool(raw.drawMode === undefined ? base.drawMode : raw.drawMode, base.drawMode);
 
@@ -364,6 +507,12 @@ export function normalizeAiConfig(input = {}, base = AI_DEFAULTS) {
   const wantedProvider = String(raw.searchProvider ?? base.searchProvider ?? 'auto').trim().toLowerCase();
   out.searchProvider = SEARCH_PROVIDER_VALUES.includes(wantedProvider) ? wantedProvider : 'auto';
   if (raw.searchApiKey !== undefined) out.searchApiKey = raw.searchApiKey;
+  // DeepSeek 官方接口地址：脏值/非 http(s) 静默回落默认，保证拼接出来的端点一定可用
+  out.searchApiBase = normSearchApiBase(raw.searchApiBase, base.searchApiBase);
+  out.searchNeedContent = bool(
+    raw.searchNeedContent === undefined ? base.searchNeedContent : raw.searchNeedContent,
+    base.searchNeedContent !== false,
+  );
   // 每家的密钥按"服务名"**合并**（旧值保留、新值覆盖），这样只改一家的 key 不会把别家清掉；
   // 想清掉某一家就显式传空串（合并后统一把空值剔除）。
   const mergedKeys = { ...(base.searchApiKeys ?? {}), ...(raw.searchApiKeys ?? {}) };
@@ -388,7 +537,10 @@ export function maskAiConfig(config = {}) {
   const key = config.apiKey ?? '';
   const searchKeys = normalizeSearchKeys(config);
   const backend = resolveSearchBackend(config);
-  const effectiveSearchKey = searchKeys[backend.id] ?? '';
+  // DeepSeek 官方通道复用 AI 接入的 apiKey：末四位提示也取它，否则界面上会显示"配了 key 但没有提示"。
+  // 显式 provider=deepseek 时 searchApiKey 可以覆盖它（见 resolveDeepSeekKey），提示也跟着走。
+  const deepseekKey = resolveDeepSeekKey(config);
+  const effectiveSearchKey = backend.id === 'deepseek' ? deepseekKey : (searchKeys[backend.id] ?? '');
   return {
     provider: config.provider,
     baseUrl: config.baseUrl,
@@ -398,6 +550,11 @@ export function maskAiConfig(config = {}) {
     historyTurns: config.historyTurns,
     /** 上下文窗口上限：前端拿它当「已用 / 上限」的分母（见 shell/app.js 的圆环）。 */
     contextWindow: config.contextWindow,
+    /**
+     * 一轮最多执行几个操作：0 = 不限制，1–50 = 上限（默认 3）。
+     * 设置页据此回显，前端不必自己猜默认值。
+     */
+    maxActionsPerTurn: normalizeMaxActionsPerTurn(config.maxActionsPerTurn),
     drawMode: config.drawMode !== false,
     configured: Boolean(key),
     hasKey: Boolean(key),
@@ -409,10 +566,16 @@ export function maskAiConfig(config = {}) {
     /** 一个回合内最多联网检索几次（界面上的「检索重试上限」）。 */
     searchRetryMax: config.searchRetryMax,
     searchProvider: config.searchProvider,
-    /** 这一轮**实际**会用的通道：tavily / brave / serper / bing，或 scrape（免密钥解析结果页）。 */
+    /** DeepSeek 官方 Search / Fetch 的根地址（自建代理时与官方不同）。 */
+    searchApiBase: config.searchApiBase,
+    /** 检索时是否让官方接口直接带回全文（need_content）。 */
+    searchNeedContent: config.searchNeedContent !== false,
+    /** 这一轮**实际**会用的通道：deepseek / tavily / brave / serper / bing，或 scrape（免密钥解析结果页）。 */
     searchBackend: backend.id,
     searchBackendReason: backend.reason,
     hasSearchKey: Object.keys(searchKeys).length > 0,
+    /** DeepSeek 官方搜索复用 AI 接入的 apiKey，所以有没有它要单独说明。 */
+    hasDeepSeekKey: Boolean(resolveDeepSeekKey(config)),
     searchKeyHint: effectiveSearchKey ? `…${effectiveSearchKey.slice(-4)}` : null,
     searchKeys: Object.fromEntries(
       SEARCH_PROVIDERS.map((provider) => [
@@ -435,7 +598,7 @@ export function redactSecret(text, secret) {
 
 /**
  * 从环境变量取配置
- * （`PC_AI_API_KEY` / `PC_AI_BASE_URL` / `PC_AI_MODEL` / … / `PC_AI_SEARCH_*`）。
+ * （`PC_AI_API_KEY` / `PC_AI_BASE_URL` / `PC_AI_MODEL` / … / `PC_AI_MAX_ACTIONS_PER_TURN` / `PC_AI_SEARCH_*`）。
  * 搜索密钥可以按服务给：`PC_AI_TAVILY_API_KEY` / `PC_AI_BRAVE_API_KEY` /
  * `PC_AI_SERPER_API_KEY` / `PC_AI_BING_API_KEY`，或用一个通用的 `PC_AI_SEARCH_API_KEY`。
  */
@@ -449,12 +612,15 @@ export function aiConfigFromEnv(env = process.env) {
     temperature: env.PC_AI_TEMPERATURE,
     historyTurns: env.PC_AI_HISTORY_TURNS,
     contextWindow: env.PC_AI_CONTEXT_WINDOW,
+    maxActionsPerTurn: env.PC_AI_MAX_ACTIONS_PER_TURN,
     drawMode: env.PC_AI_DRAW_MODE,
     searchEnabled: env.PC_AI_SEARCH_ENABLED,
     searchMaxPages: env.PC_AI_SEARCH_MAX_PAGES,
     searchRetryMax: env.PC_AI_SEARCH_RETRY_MAX,
     searchProvider: env.PC_AI_SEARCH_PROVIDER,
     searchApiKey: env.PC_AI_SEARCH_API_KEY,
+    searchApiBase: env.PC_AI_SEARCH_API_BASE,
+    searchNeedContent: env.PC_AI_SEARCH_NEED_CONTENT,
     searchApiKeys: {
       tavily: env.PC_AI_TAVILY_API_KEY,
       brave: env.PC_AI_BRAVE_API_KEY,

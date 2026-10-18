@@ -22,6 +22,7 @@ import { JsonFile } from './secret-store.js';
 import { LmsApi } from './api.js';
 import { ReplayDownloader, humanSize } from './replay-download.js';
 import { applySyncPlan, buildSyncPlan } from './sync.js';
+import { applyHomeworkTodoPlan, planHomeworkTodos, resolveCurrentTerm } from './todos-bridge.js';
 import { parseLmsDate } from './time.js';
 
 /** 活动缓存的新鲜度：预览时若超过这个时间就顺手刷新一次。 */
@@ -103,6 +104,24 @@ export class LmsService {
       lastSyncAt: null,
       autoSync: false,
       autoSyncIntervalHours: 6,
+      /**
+       * 「作业自动变成待办」开关，默认**开启**。
+       *
+       * 为什么默认开：待办页的用途就是"哪天要交什么"，而作业截止日是这个问题的最大来源；
+       * 让用户先手动点一次同步才看得到，等于把自动化藏起来。关掉之后只停止新建/更新，
+       * **已有待办一律保留**（删数据是用户自己的事，见 todos-bridge.js 文件头）。
+       */
+      todosEnabled: true,
+      /**
+       * 「只同步本学期作业」，默认**开启**。
+       *
+       * 为什么默认开：学堂会返回全部历史学期的课程/作业，全量同步会把往年作业一股脑塞进
+       * 待办页，真正要交的本学期作业反而被淹没（详见 todos-bridge.js 文件头第 6~8 条）。
+       * 关掉恢复旧的全量行为；**已有待办不会因为打开过滤而消失**。
+       */
+      currentTermOnly: true,
+      lastTodosSyncAt: null,
+      lastTodosResult: null,
       /** 回放下载目录（null = 用 dataDir/downloads）。改它要同步给下载器。 */
       downloadDir: null,
       lastAutoSyncAt: null,
@@ -181,6 +200,16 @@ export class LmsService {
       },
       synced: { schedules: schedules.length, events: events.length, todos: todos.length },
       lastSyncAt: this.state.lastSyncAt,
+      /**
+       * 作业待办桥接的状态与开关（设置页那个开关读它）。
+       * `lastResult` 只在内存里保留最近一次，用来让界面/排查知道"上一次到底建了几条"。
+       */
+      todos: {
+        enabled: this.state.todosEnabled,
+        currentTermOnly: this.state.currentTermOnly,
+        lastSyncAt: this.state.lastTodosSyncAt,
+        lastResult: this.state.lastTodosResult,
+      },
       autoSync: {
         enabled: this.state.autoSync,
         intervalHours: this.state.autoSyncIntervalHours,
@@ -207,6 +236,13 @@ export class LmsService {
     this.state.autoSync = Boolean(meta.autoSync);
     this.state.autoSyncIntervalHours = Number(meta.autoSyncIntervalHours) > 0 ? Number(meta.autoSyncIntervalHours) : 6;
     this.state.lastAutoSyncAt = meta.lastAutoSyncAt ?? null;
+    // 默认开启：只有明确存过 false 才关。老配置里没有这个键 —— 那是"功能上线前就没关过"，
+    // 按新功能的默认值（开）处理，不能让升级后的用户看不到作业待办。
+    this.state.todosEnabled = meta.todosEnabled !== false;
+    // 同样是"只有明确存过 false 才关"：老配置没有这个键，升级后应按新功能的默认值（只同步本学期）处理
+    this.state.currentTermOnly = meta.currentTermOnly !== false;
+    this.state.lastTodosSyncAt = meta.lastTodosSyncAt ?? null;
+    this.state.lastTodosResult = meta.lastTodosResult ?? null;
     // 下载目录是用户设置过的，重启后要接着用（下载器持有自己那份路径，一并同步）
     this.state.downloadDir = typeof meta.downloadDir === 'string' && meta.downloadDir ? meta.downloadDir : null;
     if (this.state.downloadDir) this.downloads.downloadDir = this.state.downloadDir;
@@ -339,15 +375,24 @@ export class LmsService {
     return { items, count: items.length, fetchedAt: this.state.lastActivitiesAt, loggedIn: this.state.status === 'ready' };
   }
 
-  /** 拉取指定课程（默认全部）的活动列表并落缓存。 */
-  async refreshActivities({ courseIds, force = false } = {}) {
+  /**
+   * 拉取指定课程（默认全部）的活动列表并落缓存。
+   *
+   * 成功落库后默认顺手跑一次「作业 → 待办」桥接（见 `syncTodos`）：用户点一次"刷新活动"，
+   * 作业就自动出现在待办里，不需要再手动点第二次同步。
+   * `todoSync: false` 只给日历同步内部用 —— 那条路径要在应用完同步计划之后再跑桥接，
+   * 否则桥接会先建出待办，把同步计划里的"新建"变成"更新"，让用户在预览里看到的名目对不上。
+   */
+  async refreshActivities({ courseIds, force = false, todoSync = true } = {}) {
     await this.#ensureReady();
     const all = this.store.lmsCourses.all();
     if (!all.length) await this.refreshCourses();
     const courses = this.store.lmsCourses
       .all()
       .filter((course) => (courseIds?.length ? courseIds.map(Number).includes(Number(course.courseId)) : true));
-    if (!courses.length) return { items: [], count: 0, fetchedAt: this.state.lastActivitiesAt, errors: [] };
+    if (!courses.length) {
+      return { items: [], count: 0, fetchedAt: this.state.lastActivitiesAt, errors: [], ...(todoSync ? { todos: await this.#runTodoBridge() } : {}) };
+    }
 
     const { activities, errors } = await this.#guard(
       () => this.api.activitiesForCourses(courses.map((course) => course.courseId)),
@@ -360,7 +405,10 @@ export class LmsService {
     }
     this.state.lastActivitiesAt = now;
     await this.#persistMeta();
-    return { ...this.listActivities({ courseIds }), errors };
+    // 桥接失败**不能**让活动刷新失败：活动缓存已经写好了，页面照样能看；
+    // 桥接自己会把失败原因（未登录 / 上游异常）放在返回值的 reason 里。
+    const todos = todoSync ? await this.#runTodoBridge() : null;
+    return { ...this.listActivities({ courseIds }), errors, ...(todos ? { todos } : {}) };
   }
 
   /**
@@ -650,8 +698,163 @@ export class LmsService {
     });
     this.state.lastSyncAt = new Date().toISOString();
     await this.#persistMeta();
+    /*
+     * 应用完同步计划后**再**跑一次作业待办桥接（拿到补拉过的提交状态）。
+     *
+     * 为什么放在这里而不是计划之前：桥接若先建出待办，计划里那两条作业就会从"新建"变成
+     * "更新"，用户在预览清单里勾的"新建 2 条"落库后对不上，是很容易让人不信任同步的一类差异。
+     * 放在这里也保证「自动同步（runAutoSyncOnce）」同样会把作业补进待办 —— 用户从不打开
+     * 学堂页也能在待办页看到截止日。
+     */
+    const todos = await this.#runTodoBridge();
     this.broadcast({ type: 'data_changed', payload: { target: 'lms', action: 'sync', ...result, lastSyncAt: this.state.lastSyncAt } });
-    return { ...result, summary: plan.summary, lastSyncAt: this.state.lastSyncAt };
+    return { ...result, summary: plan.summary, lastSyncAt: this.state.lastSyncAt, todos };
+  }
+
+  // ---------------------------------------------------------------- 作业 → 待办
+
+  /** 作业待办开关与最近一次同步结果（设置页那两个开关读它）。 */
+  todosConfig() {
+    return {
+      enabled: this.state.todosEnabled,
+      currentTermOnly: this.state.currentTermOnly,
+      lastSyncAt: this.state.lastTodosSyncAt,
+      lastResult: this.state.lastTodosResult,
+    };
+  }
+
+  /**
+   * 修改「作业自动变成待办」与「只同步本学期作业」。
+   *
+   * 两个字段都可以单独改（设置页两个开关各管各的），至少给一个；给了就必须是布尔值。
+   * 关闭任何一项都**只停止后续的自动建/更新**，已经建出来的待办一条都不删：
+   * 它们可能已经被用户改过、勾过、加上自己的备注；"关掉开关"不等于"替我清空数据"
+   * （理由同 todos-bridge.js 文件头第 2、7 条）。
+   */
+  async updateTodoSettings({ enabled, currentTermOnly } = {}) {
+    if (enabled === undefined && currentTermOnly === undefined) {
+      throw HttpError.badRequest('字段 enabled / currentTermOnly 至少提供一个布尔值');
+    }
+    if (enabled !== undefined && typeof enabled !== 'boolean') {
+      throw HttpError.badRequest('字段 enabled 必须是布尔值（true / false）', { field: 'enabled' });
+    }
+    if (currentTermOnly !== undefined && typeof currentTermOnly !== 'boolean') {
+      throw HttpError.badRequest('字段 currentTermOnly 必须是布尔值（true / false）', { field: 'currentTermOnly' });
+    }
+    if (enabled !== undefined) this.state.todosEnabled = enabled;
+    if (currentTermOnly !== undefined) this.state.currentTermOnly = currentTermOnly;
+    await this.#persistMeta();
+    return this.todosConfig();
+  }
+
+  /**
+   * 把缓存里的**作业** upsert 成待办（手动触发 / 活动同步后自动跑）。
+   *
+   * 口径：
+   * - 只处理 `type === 'homework'`；直播 / 回放 / 资料一律不进待办；
+   * - 默认只处理**本学期**（`currentTermOnly`）：历史学期跳过并在 `skippedReasons`
+   *   里给出 `term_mismatch` / `deadline_outside_term` / `term_unknown`；关掉开关即全量；
+   * - 没有截止日 → 计入 `skipped`，不建（不编日期）；
+   * - 同 `externalId` 已存在 → 更新（绝不新建第二条，也绝不重置 `completed`）；
+   * - 学堂已提交 → 把待办标完成，但不删除（用户可能还要看要求/分数）；
+   * - 学堂那边查不到的活动 / 这次被学期过滤掉的活动**都不删除**本地待办；
+   * - 未登录 / 上游失败 → 返回零计数 + 明确 `reason`，**一条都不写**，也不假装"没有作业"。
+   *
+   * 已提交状态只在活动详情里（列表接口不返回），所以这里先补详情：
+   * 手动触发时 `refreshDetails` 会重拉（用户主动点，值得为准确买单）；
+   * 自动路径复用已有详情，避免每次刷新都打 N 次详情接口。
+   *
+   * @param {{refresh?: boolean, refreshDetails?: boolean}} [options]
+   * @returns {Promise<{created:number, updated:number, completed:number, skipped:number, enabled:boolean, currentTermOnly:boolean, skippedReasons?:object, reason?:string, lastSyncAt?:string}>}
+   */
+  async syncTodos({ refresh = false, refreshDetails = false } = {}) {
+    const empty = { created: 0, updated: 0, completed: 0, skipped: 0 };
+    if (!this.state.todosEnabled) {
+      return {
+        ...empty,
+        enabled: false,
+        currentTermOnly: this.state.currentTermOnly,
+        reason: '「作业自动变成待办」已关闭',
+      };
+    }
+    if (!this.services.todos) {
+      // 只装配 lms 没装配 calendar 的场景（onlyModules）：不能静默当成功。
+      return { ...empty, enabled: true, currentTermOnly: this.state.currentTermOnly, reason: '日历模块未加载，待办不可用' };
+    }
+    try {
+      // 缓存为空时即使没传 refresh 也先拉一次：否则手动同步会永远返回 0，
+      // 用户会以为"学堂没有作业"，其实只是还没拉过活动。
+      if (refresh || !this.store.lmsActivities.all().length) await this.refreshActivities({ todoSync: false });
+      else await this.#ensureReady();
+
+      // 先补作业详情：没有它，`userSubmitCount` 就无从判断，"已提交"的作业永远标不成完成。
+      // 自动路径（活动刷新后）用已有详情；手动路径重拉，保证点到按钮时看到的是学校的最新状态。
+      await this.#enrichHomeworkDetails(this.store.lmsActivities.all().map(activityView), {
+        today: todayKey(),
+        includePast: true,
+        refreshDetails: Boolean(refreshDetails),
+      });
+
+      const activities = this.store.lmsActivities.all().map(activityView);
+      const courses = this.store.lmsCourses.all().map(courseView);
+      // 当前学期从 LMS 自己的课程缓存取（哪门课今天正在上，就按它挂的学期），
+      // 取不到再退回系统学年/学期推算；两边都按北京时间算，见 todos-bridge.js。
+      const currentTerm = resolveCurrentTerm({ courses });
+      const plan = planHomeworkTodos({
+        activities,
+        courses,
+        existingTodos: this.store.todos.all(),
+        currentTermOnly: this.state.currentTermOnly,
+        currentTerm,
+      });
+      const result = await applyHomeworkTodoPlan({ todos: this.services.todos, plan });
+      const summary = {
+        created: result.created,
+        updated: result.updated,
+        completed: result.completed,
+        skipped: result.skipped,
+        enabled: true,
+        currentTermOnly: this.state.currentTermOnly,
+        // 为什么少了几条：term_mismatch / deadline_outside_term / term_unknown / no_deadline
+        skippedReasons: result.skippedReasons,
+        ...(result.errors.length ? { errors: result.errors } : {}),
+      };
+      this.state.lastTodosSyncAt = new Date().toISOString();
+      this.state.lastTodosResult = summary;
+      await this.#persistMeta();
+      return { ...summary, lastSyncAt: this.state.lastTodosSyncAt };
+    } catch (error) {
+      // 未登录（#ensureReady 抛 401）或上游失败：**一条都不写**，把原因如实带回去。
+      // 这里刻意不 throw：调用方（设置页/自动同步/AI）需要区分"没作业"和"没登录/没同步成功"，
+      // 而不是收到一个 401 后自己猜。HTTP 端点因此对未登录也返回 200 + reason。
+      const reason = error?.message ?? String(error);
+      const currentTermOnly = this.state.currentTermOnly;
+      this.state.lastTodosResult = { ...empty, currentTermOnly, reason };
+      return { ...empty, enabled: true, currentTermOnly, reason };
+    }
+  }
+
+  /**
+   * 跑一次作业待办桥接，**保证不向外抛**。
+   *
+   * 为什么还要包一层：`syncTodos` 内部已经兜住了未登录与上游失败，但活动刷新 / 日历同步
+   * 是它的调用方，待办桥接再出任何意外（例如磁盘写 `lms-meta.json` 失败）都不该让
+   * "活动已经拉下来了"这件事看起来失败。失败原因落在 reason 里，界面/接口照常能说清。
+   */
+  async #runTodoBridge() {
+    try {
+      return await this.syncTodos();
+    } catch (error) {
+      return {
+        created: 0,
+        updated: 0,
+        completed: 0,
+        skipped: 0,
+        enabled: this.state.todosEnabled,
+        currentTermOnly: this.state.currentTermOnly,
+        reason: `作业待办同步失败：${error?.message ?? String(error)}`,
+      };
+    }
   }
 
   // ---------------------------------------------------------------- 设置 / 自动同步
@@ -760,7 +963,9 @@ export class LmsService {
 
     const age = this.state.lastActivitiesAt ? Date.now() - Date.parse(this.state.lastActivitiesAt) : Infinity;
     if (!this.store.lmsActivities.all().length || options.refresh || age > options.maxAgeMs) {
-      await this.refreshActivities({ courseIds: options.courseIds ?? undefined });
+      // `todoSync: false`：这条路径（预览/应用同步）自己会在应用完计划后统一跑桥接，
+      // 见 syncTodos 的注释 —— 提前建待办会把预览里的"新建"变成"更新"。
+      await this.refreshActivities({ courseIds: options.courseIds ?? undefined, todoSync: false });
     }
 
     const activities = this.store.lmsActivities.all().map(activityView);
@@ -775,10 +980,16 @@ export class LmsService {
     return { courses: courseList, activities: refreshed, countByCourse };
   }
 
-  /** 作业是否已提交，只有详情接口才知道；按需补拉并写回缓存。 */
+  /**
+   * 作业是否已提交，只有详情接口才知道；按需补拉并写回缓存。
+   *
+   * `options.refreshDetails` 为真时**连已有详情也重拉**：用户手动点「同步作业待办」时，
+   * 上一次拉详情之后他可能刚交了作业，不重拉就永远标不成完成。自动路径不重拉：
+   * 每次活动刷新都打 N 次详情接口对学校服务器和本机都不友好。
+   */
   async #enrichHomeworkDetails(activities, options) {
     const targets = activities
-      .filter((item) => item.type === 'homework' && !item.detailFetchedAt)
+      .filter((item) => item.type === 'homework' && (options.refreshDetails || !item.detailFetchedAt))
       .filter((item) => {
         if (options.includePast) return true;
         const end = parseLmsDate(item.endTime) ?? parseLmsDate(item.startTime);
@@ -815,8 +1026,14 @@ export class LmsService {
       keep.add(activity.id);
       const previous = existingById.get(activity.id);
       await this.store.lmsActivities.insert({
-        // 详情字段（description / userSubmitCount）在列表接口里没有，合并时不能丢
-        ...(force ? {} : (previous ?? {})),
+        /*
+         * `force`（用户点"刷新"）只表示"列表字段以这次返回为准"，**不能**把详情字段也清掉：
+         * 列表接口本来就不返回 `userSubmitCount` / `description` / `replayCode`，而
+         * `detailFetchedAt` 又被保留 —— 一旦详情字段被清空，这条活动就会永远显示成"未提交"
+         * （且因为 detailFetchedAt 还在，下次也不会自动补拉）。作业待办正是靠这个字段判断
+         * "已提交 → 标完成"，丢了它，用户交完作业再刷新，待办也永远不会被标完成。
+         */
+        ...(force ? detailFieldsOf(previous) : (previous ?? {})),
         ...activity,
         id,
         activityId: activity.id,
@@ -894,6 +1111,12 @@ export class LmsService {
       autoSync: this.state.autoSync,
       autoSyncIntervalHours: this.state.autoSyncIntervalHours,
       lastAutoSyncAt: this.state.lastAutoSyncAt,
+      /** 「作业自动变成待办」：默认开，只有明确关过才存 false（见 restore）。 */
+      todosEnabled: this.state.todosEnabled,
+      /** 「只同步本学期作业」：默认开，同样只有明确关过才存 false。 */
+      currentTermOnly: this.state.currentTermOnly,
+      lastTodosSyncAt: this.state.lastTodosSyncAt,
+      lastTodosResult: this.state.lastTodosResult,
       /** 展示用的账号信息 —— 不是凭据，凭据在 auth-session.json（0600）。 */
       user: this.state.user,
         downloadDir: this.state.downloadDir ?? null,
@@ -995,6 +1218,38 @@ export class LmsService {
   }
 }
 
+/**
+ * 活动**详情**才有的字段（对齐 api.js 的 `normalizeActivityDetail`）。
+ *
+ * 列表接口不返回它们；`#saveActivities` 在 `force` 刷新时只以列表为准，这组字段必须从旧记录
+ * 原样带过来，否则"提交状态 / 回放 code / 附件"会被一次普通刷新抹掉。
+ */
+const DETAIL_FIELDS = [
+  'description',
+  'groupId',
+  'groupSetId',
+  'groupSetName',
+  'userSubmitCount',
+  'averageScore',
+  'highestScore',
+  'lowestScore',
+  'hasScoreCount',
+  'lessonStart',
+  'lessonEnd',
+  'replayCode',
+  'replayVideoCount',
+  'uploads',
+];
+
+/** 从旧记录里挑出详情字段（没有的键不补，避免把 undefined 写进库）。 */
+function detailFieldsOf(previous) {
+  const out = {};
+  for (const field of DETAIL_FIELDS) {
+    if (previous?.[field] !== undefined) out[field] = previous[field];
+  }
+  return out;
+}
+
 /** 去掉存储层附加的字段，只把业务字段交给前端/同步逻辑。 */
 function stripRecordMeta(record) {
   const { createdAt, updatedAt, ...rest } = record ?? {};
@@ -1015,5 +1270,15 @@ function courseView(record) {
 
 function activityView(record) {
   const rest = stripRecordMeta(record);
-  return { ...rest, recordId: rest.id, id: rest.activityId ?? rest.id };
+  const activity = { ...rest, recordId: rest.id, id: rest.activityId ?? rest.id };
+  /*
+   * 给前端 / AI / 待办桥接补两个**派生**字段（不落库）：
+   * - `deadline`：`YYYY-MM-DD`（优先 endTime，其次 startTime，北京时间）。学堂只给时刻串，
+   *   而"哪天要交"只关心日期；`/lms/activities` 的 AI 契约里写了它，就必须真的给。
+   * - `submitted`：是否已提交（详情里的 `user_submit_count`）。列表接口不返回它，
+   *   没补过详情时一律 false —— 和 `userSubmitCount` 的口径保持一致，不猜。
+   */
+  activity.deadline = parseLmsDate(activity.endTime) ?? parseLmsDate(activity.startTime);
+  activity.submitted = Number(activity.userSubmitCount ?? 0) > 0;
+  return activity;
 }

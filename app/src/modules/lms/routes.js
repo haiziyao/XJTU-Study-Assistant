@@ -1,11 +1,13 @@
 /**
  * 思源学堂（LMS）路由。
  *
- * 全部挂在 `/api/v1/lms` 下，只有「登录 / 验证码 / 同步」三类动作。
+ * 全部挂在 `/api/v1/lms` 下，只有「登录 / 验证码 / 同步 / 作业待办」几类动作。
  * 约定：
- * - 所有写操作都必须先通过 `/lms/sync/preview` 预览，再带 keys 调 `/lms/sync/apply`；
+ * - 日历同步必须先通过 `/lms/sync/preview` 预览，再带 keys 调 `/lms/sync/apply`；
+ * - 作业待办（`/lms/todos/*`）是独立能力：活动同步成功后自动跑，也可手动触发；
  * - `/lms/captcha` 直接回二进制图片，方便 `<img src>` 直接用；
- * - 未登录时统一返回 401 UNAUTHORIZED，前端据此弹登录框。
+ * - 未登录时业务接口统一返回 401；**唯一例外是 `/lms/todos/sync`**：它回 200 + 零计数 + reason，
+ *   让调用方能区分"没有作业"和"没登录所以没同步"（见下方路由处的注释）。
  */
 
 import { Readable } from 'node:stream';
@@ -122,6 +124,23 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
   router.post(`${P}/logout`, () => lms.logout());
 
   router.post(`${P}/settings`, ({ body }) => lms.updateSettings({ autoSync: body?.autoSync, autoSyncIntervalHours: body?.autoSyncIntervalHours }));
+
+  /* ------------------------------------------------------------ 作业 → 待办
+   *
+   * 设计要点：**未登录也返回 200**，但计数全是 0 且带 `reason`。
+   *
+   * 为什么不回 401：调用方（待办页自动刷新、AI、设置页）需要区分「今天没有作业」与
+   * 「登录态失效了，所以这次什么都没同步」。401 会让人以为"作业没有"，而 200 + reason
+   * 才能让界面说清原因。写操作依旧受保护：未登录时服务层一条都不写。
+   */
+  router.get(`${P}/todos/config`, () => lms.todosConfig());
+
+  // 两个开关可以单独改：只传 enabled 时 currentTermOnly 保持原值（反之亦然）
+  router.post(`${P}/todos/config`, ({ body }) =>
+    lms.updateTodoSettings({ enabled: body?.enabled, currentTermOnly: body?.currentTermOnly }),
+  );
+
+  router.post(`${P}/todos/sync`, ({ body }) => lms.syncTodos({ refresh: asBool(body?.refresh), refreshDetails: true }));
 
   router.get(`${P}/courses`, async ({ query }) => {
     if (asBool(query.refresh)) return lms.refreshCourses();

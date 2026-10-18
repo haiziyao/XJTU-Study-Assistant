@@ -17,7 +17,7 @@ import { ScheduleService } from './schedule-service.js';
 import { TodoService } from './todo-service.js';
 import { ReminderService } from './reminder-service.js';
 import { CommandParser } from './parser.js';
-import { createCalendarCommands } from './commands.js';
+import { createCalendarCommands, createCategoryCommands } from './commands.js';
 import { registerCalendarRoutes } from './routes.js';
 import { CALENDAR_TOOL_SPECS } from './tools.js';
 
@@ -72,6 +72,27 @@ export default {
    * - `childCount` / `childDoneCount` / `hasChildren`：缺了它就说不清"这一步拆成几步、做到哪了"。
    */
   aiQueryFields: {
+    /**
+     * 日程查询走 `range()` 展开重复后，每条是「某一天的那一次」：
+     * `occurrenceDate` 是这次发生的日期，`id` / `scheduleId` 是**原日程 id**
+     * （改/删要用它 —— `range()` 内部的 `${id}:${date}` 是合成 id，集合里没有这条记录）。
+     * 展开结果里没有 `date`（那是 `list()` 路径上的首次发生日）；只给 `date` 不给
+     * `occurrenceDate`，模型会把「每周重复的课」当成只在 9 月 14 日上一次。
+     */
+    schedule: [
+      'id',
+      'scheduleId',
+      'occurrenceDate',
+      'date',
+      'title',
+      'category',
+      'priority',
+      'startTime',
+      'endTime',
+      'location',
+      'estimatedMinutes',
+      'isRepeatInstance',
+    ],
     todo: [
       'id',
       'title',
@@ -85,14 +106,22 @@ export default {
       'childDoneCount',
       'hasChildren',
     ],
+    /**
+     * 分类的 AI 投影。字段名与 `category` 草稿的 fields 保持一致（name/color/sort），
+     * `usage` 是“有多少条记录在用”（删除前的关键判断），`kind` 区分日程分类与事件分类。
+     */
+    category: ['id', 'name', 'kind', 'color', 'sort', 'usage', 'locked', 'builtin'],
   },
 
   createServices({ store, broadcast, services }) {
     // 分类注册表要先建：日程/事件服务写库时用它把 category 归一化
     const categories = new CategoryService({ store, broadcast });
-    const events = new EventService({ store, broadcast, categories });
-    const schedules = new ScheduleService({ store, broadcast, categories });
-    const todos = new TodoService({ store, broadcast });
+    // audit 是 order 6 的全局服务：注入给三个写服务后，用户经界面/HTTP 的写操作才会被记录
+    // （AI 写由 chat-service 统一记 actor:'ai'，服务端在 __actor 标记期间跳过，避免重复）。
+    const audit = services.audit;
+    const events = new EventService({ store, broadcast, categories, services, audit });
+    const schedules = new ScheduleService({ store, broadcast, categories, services, audit });
+    const todos = new TodoService({ store, broadcast, services, audit });
     const reminders = new ReminderService({ store, scheduleService: schedules, broadcast });
 
     // 向框架的指令系统登记本模块的能力：
@@ -103,6 +132,9 @@ export default {
     services.commands.registerHandler('event', calendarCommands);
     services.commands.registerHandler('schedule', calendarCommands);
     services.commands.registerHandler('todo', calendarCommands);
+    // 分类是独立 target：它是“配置数据”，不是日程本身；走同一个 CategoryService，
+    // 所以颜色/锁定/在用数等校验与 REST 路由完全一致（AI 层只额外加“重名/在用不可删”两道护栏）。
+    services.commands.registerHandler('category', createCategoryCommands({ categories }));
 
     return { events, schedules, todos, categories, reminders };
   },

@@ -34,6 +34,7 @@ export function registerTransferRoutes(router, { own, apiPrefix }) {
 
   /** 注销所有局域网令牌：一键把已经连上的手机（全部）踢掉，它们下次要重新输配对码。 */
   router.post(`${P}/gateway/revoke`, () => transfer.revokeLanTokens());
+  router.post(`${P}/gateway/revoke/:id`, ({ params }) => transfer.revokeLanToken(params.id));
 
   /** 集合清单：哪些能传、哪些接收侧写不进来（界面直接照着显示原因）。 */
   router.get(`${P}/catalog`, () => ({ catalog: catalog() }));
