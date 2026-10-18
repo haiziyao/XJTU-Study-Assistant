@@ -222,7 +222,8 @@ test('服务端版：思源学堂（LMS）明确禁用 —— 403 + 原因，且
     assert.equal(ids.includes('lms'), false, `服务端版不该加载 lms，实际模块：${ids.join('、')}`);
     assert.equal(ids.includes('transfer'), false, `服务端版不该加载 transfer，实际模块：${ids.join('、')}`);
     // 其它模块照常可用（证明只砍了这两块，没有把服务端版砍成空壳）
-    for (const id of ['calendar', 'notes', 'cards', 'goals', 'ai']) {
+    // cards / goals / 复习页已由 main 的「拆除复习系统」移除，这里改断言 main 现有的模块。
+    for (const id of ['calendar', 'notes', 'ai', 'pomodoro', 'timetable', 'audit']) {
       assert.ok(ids.includes(id), `模块 ${id} 应当仍然可用`);
     }
   } finally {
