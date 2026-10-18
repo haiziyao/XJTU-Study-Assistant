@@ -408,7 +408,7 @@ function renderMonth(host, anchor) {
         const dots = mk('div', 'cell-dots');
         for (const todo of dayTodos.slice(0, 3)) {
           const dot = mk('span', `cell-dot${todo.isToday ? ' today' : ''}${todo.completed ? ' done' : ''}`);
-          dot.title = `${todo.title}（截止 ${todo.deadline}）`;
+          dot.title = todo.deadline ? `${todo.title}（截止 ${todo.deadline}）` : todo.title;
           dots.appendChild(dot);
         }
         if (dayTodos.length > 3) dots.appendChild(mk('span', 'cell-dot-more', `+${dayTodos.length - 3}`));
@@ -958,7 +958,8 @@ function todoToolbar() {
       title.focus();
       return;
     }
-    const body = { title: text, deadline: date.value || PCUtil.todayKey() };
+    // 日期留空就是"没有截止日"：以前这里偷偷填了今天，等于替用户编了个假期限
+    const body = { title: text, deadline: date.value || null };
     const parsed = Number(hours.value);
     if (Number.isFinite(parsed) && parsed > 0) body.estimatedHours = parsed;
     // 正在筛某个分类时，快速添加默认就归到这个分类：否则新加的那条会立刻从列表里"消失"
@@ -983,7 +984,7 @@ function todoToolbar() {
   // 「+ 添加」打开完整编辑器（优先级 / 标签 / 备注）
   const create = mk('button', 'primary-btn', '+ 新建待办');
   create.type = 'button';
-  create.addEventListener('click', () => openEditor({ target: 'todo', defaults: { deadline: PCUtil.todayKey() } }));
+  create.addEventListener('click', () => openEditor({ target: 'todo', defaults: {} }));
 
   const rollover = mk('button', 'ghost-btn', '顺延未完成到本周');
   rollover.type = 'button';
@@ -1256,8 +1257,10 @@ function todoRow(item, depth = 1) {
   const dot = mk('span', 'complexity-dot');
   dot.style.background = COMPLEXITY_COLOR[item.complexity] ?? 'var(--fg-3)';
   meta.append(
-    mk('span', null, `截止 ${PCUtil.fmtCN(item.deadline)}`),
-    mk('span', null, ` · ${PCUtil.relativeDay(item.deadline, today)}`),
+    item.deadline
+      ? mk('span', null, `截止 ${PCUtil.fmtCN(item.deadline)}`)
+      : mk('span', 'todo-no-deadline', '无截止时间'),
+    mk('span', null, item.deadline ? ` · ${PCUtil.relativeDay(item.deadline, today)}` : ''),
     mk('span', null, ` · ${item.completed ? '已完成' : '优先级'} `),
     mk('span', 'todo-priority', '★'.repeat(Math.max(1, (item.priority ?? 0) + 1))),
     mk('span', null, ' · '),
@@ -1929,7 +1932,8 @@ function loadTodoParentOptions(select, selfId, current) {
  */
 function todoForm(item, defaults) {
   const data = item ?? {
-    deadline: defaults.deadline ?? PCUtil.todayKey(),
+    // 新建时不预填日期：留空就是"没有截止日"（用户明确要求待办可以不设截止日期）
+    deadline: defaults.deadline ?? '',
     priority: 0,
     estimatedHours: 1,
     tags: [],
@@ -1944,11 +1948,11 @@ function todoForm(item, defaults) {
 
   const deadline = mk('input', 'f-deadline');
   deadline.type = 'date';
-  deadline.value = data.deadline ?? PCUtil.todayKey();
+  deadline.value = data.deadline ?? '';
   const priority = mk('select', 'f-priority');
   for (const key of [0, 1, 2]) priority.appendChild(option(key, PRIORITY_LABEL[key], Number(data.priority ?? 0) === key));
   const inline1 = mk('div', 'inline-2');
-  inline1.append(field('截止日', deadline), field('优先级', priority));
+  inline1.append(field('截止日（可不填）', deadline), field('优先级', priority));
   wrap.appendChild(inline1);
 
   const hours = mk('input', 'f-hours');

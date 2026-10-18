@@ -691,3 +691,88 @@ function addDays(key, n) {
   const date = new Date(y, m - 1, d + n);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
+
+
+// ---------------------------------------------------------------------------
+// 待办可以没有截止日期（用户要求）
+// ---------------------------------------------------------------------------
+
+/**
+ * 生活里大量待办本来就"想做，但不赶时间"。以前截止日必填，只能逼用户随便挑一天 ——
+ * 假期限会把逾期统计污染成噪音。这组用例锁住"可选"的完整语义：
+ * 创建/清空/派生字段/过滤/排序/日历聚合都不能因为 null 出错。
+ */
+test('待办：不传 deadline 也能创建，派生字段是"不逾期/不是今天/没有剩余天数"', async () => {
+  const ctx = await startApp();
+  try {
+    const created = await ctx.call('POST', '/todos', { title: '没有截止日的事' });
+    assert.equal(created.status, 201, JSON.stringify(created.body)?.slice(0, 200));
+    const item = created.body.item;
+    assert.equal(item.deadline, null, '不传 deadline 就该存 null，而不是替用户填今天');
+    assert.equal(item.isOverdue, false, '没有截止日不可能逾期');
+    assert.equal(item.isToday, false);
+    assert.equal(item.daysRemaining, null, 'null 而不是 0：0 会被读成"今天到期"');
+
+    // 显式传 null 等价于"不设"
+    const explicit = await ctx.call('POST', '/todos', { title: '显式 null', deadline: null });
+    assert.equal(explicit.status, 201);
+    assert.equal(explicit.body.item.deadline, null);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('待办：PATCH 传 deadline:null/空串能把已有截止日清掉；不传则不动', async () => {
+  const ctx = await startApp();
+  try {
+    const created = await ctx.call('POST', '/todos', { title: '先有日期', deadline: '2026-11-01' });
+    const id = created.body.item.id;
+    assert.equal(created.body.item.deadline, '2026-11-01');
+
+    // 不传 deadline → 保持原值
+    const touched = await ctx.call('PATCH', `/todos/${id}`, { title: '先有日期（改名）' });
+    assert.equal(touched.body.item.deadline, '2026-11-01', '没传 deadline 不许把日期清掉');
+
+    // 传 null → 清空
+    const cleared = await ctx.call('PATCH', `/todos/${id}`, { deadline: null });
+    assert.equal(cleared.status, 200, JSON.stringify(cleared.body)?.slice(0, 200));
+    assert.equal(cleared.body.item.deadline, null);
+    assert.equal(cleared.body.item.isOverdue, false);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('待办：无截止日的不算逾期、能单独筛出、排序排在有日期的后面', async () => {
+  const ctx = await startApp();
+  try {
+    await ctx.call('POST', '/todos', { title: 'A 无期限' });
+    await ctx.call('POST', '/todos', { title: 'B 逾期', deadline: '2020-01-01' });
+    await ctx.call('POST', '/todos', { title: 'C 未来', deadline: '2099-12-31' });
+
+    const overdue = await ctx.call('GET', '/todos?overdue=1');
+    assert.deepEqual(overdue.body.items.map((item) => item.title), ['B 逾期'], '只有真有日期的才会逾期');
+
+    const noDeadline = await ctx.call('GET', '/todos?noDeadline=1');
+    assert.deepEqual(noDeadline.body.items.map((item) => item.title), ['A 无期限']);
+
+    const all = await ctx.call('GET', '/todos');
+    const titles = all.body.items.map((item) => item.title);
+    assert.equal(titles[titles.length - 1], 'A 无期限', `无截止日应排最后：${titles.join(' | ')}`);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('待办：日历聚合跳过无截止日的待办（不会塞进 key 为 null 的桶）', async () => {
+  const ctx = await startApp();
+  try {
+    await ctx.call('POST', '/todos', { title: '无期限', deadline: null });
+    await ctx.call('POST', '/todos', { title: '有期限', deadline: '2026-11-02' });
+    const grouped = ctx.services.todos.groupByDeadline({});
+    assert.equal(grouped.has(null), false, '不该出现 null 这个桶');
+    assert.equal(grouped.get('2026-11-02')?.length, 1);
+  } finally {
+    await ctx.close();
+  }
+});

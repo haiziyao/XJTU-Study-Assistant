@@ -2,7 +2,7 @@
  * 待办服务（Todo）。
  *
  * 领域模型（对齐 PotatoCalendar 的 `TodoItem`）：
- * - **待办是独立实体**：`deadline`（截止日）+ 预估工时 + 优先级 + 完成态；
+ * - **待办是独立实体**：`deadline`（截止日，**可选**）+ 预估工时 + 优先级 + 完成态；
  * - **日程是时段**：有起止时刻，没有完成态；
  * - **日历事件是日期/区间粒度**：假期、考试周、纪念日，也没有完成态。
  *
@@ -96,7 +96,7 @@ const KNOWN_FIELDS = new Set([...EDITABLE, ...READONLY_FIELDS, 'estimatedMinutes
 
 /** 报错时摆在最前面的字段清单（人/模型照着改一次就能对）。 */
 const KNOWN_FIELD_LIST =
-  'title / deadline / estimatedHours（小时，可小数；也收 estimatedMinutes，整数分钟） / priority / completed / description / tags / category / parentId（spentSelfSec 只读，由番茄钟维护）';
+  'title / deadline（可选，不填就是“没有截止日”） / estimatedHours（小时，可小数；也收 estimatedMinutes，整数分钟） / priority / completed / description / tags / category / parentId（spentSelfSec 只读，由番茄钟维护）';
 
 /**
  * 单个别名的归一化（不认识的键原样返回）。
@@ -304,8 +304,17 @@ function normalize(rawInput, { partial = false } = {}) {
   if (input.title !== undefined) data.title = requireTitle(input.title);
   else if (!partial) data.title = requireTitle(undefined);
 
-  if (input.deadline !== undefined) data.deadline = requireDate(input.deadline, 'deadline');
-  else if (!partial) data.deadline = requireDate(undefined, 'deadline');
+  /**
+   * `deadline` 是**可选**的：`null` / `''` / 不传都表示“没有截止日”。
+   *
+   * 为什么放开：生活里大量待办本来就"想做，但不赶时间"（买牙膏、看完某本书）。
+   * 以前必填只能逼用户随便挑一天，于是逾期统计被垃圾日期污染 —— 那比没有截止日更糟。
+   * 显式传 `null` / `''` 在 PATCH 里是**清空**（不是"不改"）：两者语义必须能区分，
+   * 否则用户没法把已经填过的日期去掉。
+   */
+  if (input.deadline === null || input.deadline === '') data.deadline = null;
+  else if (input.deadline !== undefined) data.deadline = requireDate(input.deadline, 'deadline');
+  else if (!partial) data.deadline = null;
 
   /**
    * 预估工时：待办的领域字段是 `estimatedHours`（小时，可小数），但 `estimatedMinutes`
@@ -490,9 +499,10 @@ function decorate(item, today, children = NO_CHILDREN, spentSec = 0) {
     childCount: children.count,
     childDoneCount: children.done,
     hasChildren: children.count > 0,
-    isOverdue: !item.completed && item.deadline < today,
-    isToday: item.deadline === today,
-    daysRemaining: Math.round((new Date(item.deadline) - new Date(today)) / 86400000),
+    // 没有截止日 = 不逾期、不是今天、没有剩余天数（`null` 而不是 0：0 天会被读成"今天到期"）
+    isOverdue: Boolean(item.deadline) && !item.completed && item.deadline < today,
+    isToday: Boolean(item.deadline) && item.deadline === today,
+    daysRemaining: item.deadline ? Math.round((new Date(item.deadline) - new Date(today)) / 86400000) : null,
     complexity,
     complexityLabel: COMPLEXITY_LABEL[complexity] ?? '',
   };
@@ -619,13 +629,14 @@ export class TodoService {
    * @param {string} [filters.to]         截止日 <= to
    * @param {boolean|string} [filters.completed] 完成态精确过滤
    * @param {number|string} [filters.priority]   优先级精确过滤
-   * @param {boolean|string} [filters.overdue]   true = 未完成且 deadline < 今天
+   * @param {boolean|string} [filters.overdue]   true = 未完成且 deadline < 今天（无截止日的不算逾期）
+   * @param {boolean|string} [filters.noDeadline] true = 只看没有截止日的待办
    * @param {string} [filters.keyword]    标题 / 备注 / 标签模糊匹配
    * @param {string} [filters.category]   分类精确过滤（空串 = 只看未分类）
    * @param {string} [filters.parentId]   父待办 id；`root` = 只看顶层
    * @param {number|string} [filters.limit]
    */
-  list({ date, from, to, completed, priority, overdue, keyword, category, parentId, limit } = {}) {
+  list({ date, from, to, completed, priority, overdue, noDeadline, keyword, category, parentId, limit } = {}) {
     const today = todayKey();
     let items = this.#alive();
 
@@ -640,7 +651,12 @@ export class TodoService {
       items = items.filter((item) => item.priority === Number(priority));
     }
     if (booleanValue(overdue, 'overdue', { optional: true, fallback: false })) {
-      items = items.filter((item) => !item.completed && item.deadline < today);
+      // 空截止日绝不能算逾期：`null < '2026-10-18'` 在 JS 里是 true，漏了这个判断
+      // 会让所有"不赶时间"的待办永远挂在逾期列表里。
+      items = items.filter((item) => Boolean(item.deadline) && !item.completed && item.deadline < today);
+    }
+    if (booleanValue(noDeadline, 'noDeadline', { optional: true, fallback: false })) {
+      items = items.filter((item) => !item.deadline);
     }
     if (keyword) {
       const kw = String(keyword).toLowerCase();
@@ -665,7 +681,9 @@ export class TodoService {
     }
 
     items.sort((a, b) => {
-      if (a.deadline !== b.deadline) return a.deadline.localeCompare(b.deadline);
+      // 无截止日的排最后：它们"不赶时间"，不该挤在今天/逾期的事情前面
+      if (!a.deadline !== !b.deadline) return a.deadline ? -1 : 1;
+      if (a.deadline !== b.deadline) return (a.deadline ?? '').localeCompare(b.deadline ?? '');
       if (Boolean(a.completed) !== Boolean(b.completed)) return a.completed ? 1 : -1;
       if (a.priority !== b.priority) return b.priority - a.priority;
       return a.title.localeCompare(b.title);
@@ -840,6 +858,8 @@ export class TodoService {
   groupByDeadline({ from, to } = {}) {
     const buckets = new Map();
     for (const item of this.list({ from, to })) {
+      // 没有截止日的待办不属于任何一天：日历聚合必须跳过，否则会被塞进一个 key 为 null 的桶
+      if (!item.deadline) continue;
       if (!buckets.has(item.deadline)) buckets.set(item.deadline, []);
       buckets.get(item.deadline).push(item);
     }
@@ -1078,7 +1098,7 @@ export class TodoService {
 
     const candidates = this.collection
       .all()
-      .filter((item) => !item.completed && item.deadline < anchor)
+      .filter((item) => Boolean(item.deadline) && !item.completed && item.deadline < anchor)
       .sort((a, b) => a.deadline.localeCompare(b.deadline));
     if (!candidates.length) return { weekStart: anchor, moved: 0, items: [] };
 

@@ -18,7 +18,7 @@ import { WEB_SEARCH_PROMPT } from './web-search.js';
 /** 三件事的判定表 + 字段 + 最容易写错的七处（与接口文档 / aiTools 清单保持一致）。 */
 const DOMAIN_RULES = `【三个集合，先选对 —— 选错用户就看不见东西】
 - 待办 Todo：只有截止日 + 完成态。交作业、写报告、复习、"某天之前要打勾的" → target: "todo"
-  字段：title（必填）、deadline（YYYY-MM-DD，必填）、estimatedHours（预估**工时**，单位小时、可小数，如 1.5；默认 1）、
+  字段：title（必填）、deadline（YYYY-MM-DD，**可选**：用户没说期限就别填，绝不替他编一个今天）、estimatedHours（预估**工时**，单位小时、可小数，如 1.5；默认 1）、
   priority（整数 0=低 / 1=普通 / 2=紧急）、description（备注）、tags、
   category（分类，自由文本 ≤24 字；没有分类就用空字符串 ""）、parentId（父待办的 id，可选，最多 3 层）。
   工时要写分钟时用 estimatedMinutes（整数分钟），系统会换算成小时
@@ -65,6 +65,8 @@ const DRAFT_PROTOCOL = `【输出格式】
 
 规则：
 - action 取 create / query / update / delete / complete / include / exclude（include / exclude 由对应模块声明）。
+- **待办的 deadline 是可选的**：用户没说期限（"记一下交实验报告"）就**不要**填 deadline ——
+  编一个今天会变成假期限、污染逾期提醒。上面示例里带日期，是因为用户说了"明天"。
 - target **只能取下面「领域说明」里真的出现过的那些**，一个都不许自创。当前已声明的有：
   - 写入类：\`todo\` / \`schedule\` / \`event\`（日历三件套）、\`memory\`（只能提议，等用户确认）；
   - 只读查询类：\`note\`（笔记）、\`grade\`（成绩）、\`knowledge\`（教务处政策语料）、\`search\`（**三源统一检索**：
