@@ -1455,11 +1455,158 @@
   border-color: rgba(108, 140, 255, 0.4);
 }
 
+/* ====================================================== 待办：多选 + 批量操作 */
+/* 与分类条同一节的约束：CSP 禁行内 style（尺寸/颜色全用 class）；
+   手机上批量条**换行**而不是横向滚动 —— 删除是不可逆操作，按钮被滚出屏幕外比占两行更糟。 */
+
+/* 没进多选模式时批量条是空容器：:empty 不占高度，不把列表往下推 */
+.todo-batch-host:empty {
+  display: none;
+}
+
+.todo-batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 6px 14px 2px;
+  padding: 8px 10px;
+  min-width: 0;
+  border: 1px solid rgba(108, 140, 255, 0.35);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+}
+
+.todo-batch-count {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--blue);
+  font-variant-numeric: tabular-nums;
+}
+
+.todo-batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.todo-batch-btn {
+  min-height: 30px;
+  padding: 4px 10px;
+}
+
+.todo-select-btn.active {
+  border-color: rgba(108, 140, 255, 0.55);
+  background: rgba(108, 140, 255, 0.16);
+  color: var(--blue);
+}
+
+/* 行首选择框：与完成勾选框同尺寸，但用蓝色描边区分"选择"与"完成" */
+.todo-select-check {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid rgba(108, 140, 255, 0.5);
+  background: var(--bg-base);
+  color: var(--blue);
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--t), border-color var(--t), color var(--t);
+}
+
+.todo-select-check:hover {
+  border-color: var(--blue);
+}
+
+.todo-select-check.checked {
+  background: rgba(108, 140, 255, 0.9);
+  border-color: var(--blue);
+  color: #fff;
+  font-weight: 700;
+}
+
+/* 多选模式下逐条编辑/删除让位：这一轮的入口是顶部批量条，行内再放图标只会挤标题 */
+.todo-list.selecting .ri-actions {
+  display: none;
+}
+
+.todo-row.selectable {
+  cursor: pointer;
+}
+
+.todo-row.selectable:hover {
+  border-color: rgba(108, 140, 255, 0.4);
+}
+
+/* 「含子项」：父行上的显式子树选择开关（默认勾父不勾子，见 toggleTodoSubtree 注释） */
+.todo-pick-sub {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px dashed rgba(108, 140, 255, 0.45);
+  background: transparent;
+  color: var(--blue);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.todo-pick-sub:hover {
+  background: rgba(108, 140, 255, 0.14);
+}
+
+/* 批量改分类：行内展开的输入条（不用 prompt：Electron 渲染进程不支持 prompt()） */
+.todo-batch-category {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.todo-batch-cat-input {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
 /* 窄屏（协作者已把两栏断点改到 900px）：分类条照样横滚，
    缩进减半 —— 390px 的屏幕上 36px 缩进等于吃掉标题十分之一的宽度。 */
 @media (max-width: 900px) {
   .todo-cat-bar {
     padding: 8px 10px 0;
+  }
+
+  /* 批量条换行 + 44px 可点高度（手指目标），绝不横向溢出：
+     flex-wrap 让按钮换到下一行；按钮不设固定宽度，长文案不会被裁 */
+  .todo-batch {
+    margin: 6px 10px 2px;
+    padding: 8px;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .todo-batch-actions {
+    width: 100%;
+  }
+
+  .todo-batch-btn,
+  .todo-pick-sub {
+    min-height: 44px;
+    padding: 0 12px;
+    font-size: 14px;
+    white-space: normal;
+  }
+
+  .todo-batch-cat-input {
+    flex: 1 1 100%;
+    min-height: 44px;
   }
 
   .todo-row.todo-level-2 {
@@ -1485,4 +1632,224 @@
   .todo-row {
     padding: 7px 8px;
   }
+}
+
+/* ------------------------------------------------- 批量删除 / 回收站 */
+
+/*
+  弹层样式只写类名（CSP 是 style-src 'self'，内联 style 会被拦）。
+  红按钮沿用 .danger-btn；这里只补"范围卡片 / 预览块"两类新结构。
+*/
+
+.bulk-modal {
+  width: min(520px, 100%);
+}
+
+.bulk-note {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg-3);
+  margin-bottom: 10px;
+}
+
+.bulk-scopes {
+  display: grid;
+  gap: 6px;
+}
+
+.bulk-scope {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-base);
+  cursor: pointer;
+  transition: background var(--t), border-color var(--t);
+}
+
+.bulk-scope:hover {
+  background: var(--bg-hover);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.bulk-radio {
+  margin: 2px 0 0;
+  flex: none;
+}
+
+.bulk-scope-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.bulk-scope-label {
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.bulk-scope-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-3);
+}
+
+.bulk-range {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+/* 全部范围：红色边框 + 必须勾选，和"普通范围"在视觉上就不一样 */
+.bulk-all-warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255, 107, 122, 0.45);
+  background: rgba(255, 107, 122, 0.1);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.bulk-all-check {
+  margin: 0;
+  flex: none;
+}
+
+.bulk-preview {
+  margin-top: 12px;
+  padding: 10px;
+  min-height: 44px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--bg-base);
+}
+
+.bulk-preview-empty {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg-3);
+}
+
+.bulk-count {
+  font-size: 13px;
+  color: var(--fg);
+  margin-bottom: 6px;
+}
+
+.bulk-count strong {
+  color: var(--red);
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bulk-samples {
+  display: grid;
+  gap: 4px;
+}
+
+.bulk-sample {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+
+.bulk-sample-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulk-sample-date {
+  flex: none;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.bulk-more,
+.bulk-mix {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.bulk-warning {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--red);
+}
+
+.bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+/* 窄屏：单列、按钮 44px 起（手指点得中），左右不溢出 */
+@media (max-width: 900px) {
+  .bulk-range {
+    grid-template-columns: 1fr;
+  }
+
+  .bulk-scope,
+  .bulk-all-warn {
+    padding: 10px;
+  }
+
+  .bulk-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .bulk-actions button {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .bulk-modal .modal-foot {
+    flex-wrap: wrap;
+  }
+
+  .bulk-modal .modal-foot .spacer {
+    display: none;
+  }
+
+  .bulk-modal .modal-foot button {
+    flex: 1 1 100%;
+    min-height: 44px;
+  }
+
+  .toolbar .calendar-bulk-btn {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 520px) {
+  .bulk-scope-hint {
+    font-size: 10px;
+  }
+}
+
+/* .danger-btn 原先没有 disabled 态：不给样式的话，看起来还能点，用户会一直戳 */
+.bulk-confirm:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: transparent;
 }

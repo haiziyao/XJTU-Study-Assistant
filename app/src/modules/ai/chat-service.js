@@ -11,9 +11,11 @@
  *   3. **先插一条 assistant 占位消息**（`status: "streaming"`）拿到稳定的 messageId，
  *      流式的 delta 才能带着它广播出去；
  *   4. **循环**调上游（最多 `MAX_ROUNDS` 轮，一轮 = 一次 `provider.chat`，**每轮都流式**）：
- *      抽草稿（一轮可含多条写入草稿）→ dryRun 预校验 → 只读查询自动执行（`auto` 档连写操作一起执行）→
+ *      抽草稿（一轮可含多条写入草稿）→ dryRun 预校验 → 只读查询自动执行（`auto` 档连写操作一起执行，
+ *      但受设置项 `maxActionsPerTurn` 约束：只执行前 N 条，0 = 不限制）→
  *      把这一轮的结果（查询结果 **和** 已自动执行的写操作结果）回灌进上下文再进下一轮；
- *      某一轮既没有**新**查询、也没有真执行写操作，就说明它在作答，循环结束；
+ *      某一轮既没有**新**查询、也没有真执行写操作、也没有"因上限被截下来待确认"的草稿，
+ *      就说明它在作答，循环结束；
  *   5. 用**最后一轮**的正文把占位消息更新成 `done`（`rounds` / `roundLimit` / `usageRounds` 一起记下）；
  *   6. 失败：第一轮就失败 → 整条标 `failed` 并带上错误（不删，用户能看到"刚才那次没成"）；
  *      第二轮及以后的"总结失败" → 只记 `PARTIAL`，已经查到的数据照常返回。
@@ -26,12 +28,20 @@ import { ERROR_CODES } from '../../shared/constants.js';
 import { HttpError } from '../../core/http/router.js';
 import { todayKey } from '../../shared/time.js';
 
-import { maskAiConfig, AI_DEFAULTS, SEARCH_RETRY_MIN, SEARCH_RETRY_MAX } from './config.js';
+import {
+  AI_DEFAULTS,
+  MAX_ACTIONS_UNLIMITED,
+  SEARCH_RETRY_MIN,
+  SEARCH_RETRY_MAX,
+  assertAiConfigInput,
+  maskAiConfig,
+  normalizeMaxActionsPerTurn,
+} from './config.js';
 import { extractDrafts, previewDrafts } from './drafts.js';
 import { buildChatSystemPrompt, buildCommandSystemPrompt, describeChatPrompt, estimateTokens } from './prompt.js';
 import {
+  pageFromSearchContent,
   readPages,
-  searchWeb,
   searchWebDetailed,
   SEARCH_LIMIT_DEFAULT,
   normalizeSearchLimit,
@@ -215,6 +225,52 @@ const IMAGE_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image
 const PERMISSIONS = Object.freeze(['auto', 'manual', 'strict']);
 
 /**
+ * AI 可写的设置白名单（target: `settings`）。
+ *
+ * 为什么必须是**白名单**而不是黑名单：这段输入来自模型生成的草稿，用户只说了一句
+ * “把搜索服务换成 brave”，模型完全可能顺手带上 `apiKey`、`account`、`token` 之类的字段。
+ * 凭据类字段一旦可写，等于把密钥交给一段不可审计的生成文本；而黑名单只能挡住想得到的名字
+ * （`searchApiKeys`、`password`、`session`…），挡不住下一个新字段。这里只列“改了之后
+ * 用户能在设置页看见、且与身份/凭据无关”的键，其余一律 400，绝不静默忽略。
+ *
+ * 每项声明它落到哪条既有写入路径：
+ *   - `aiConfig` → `AiChatService.updateConfig()`（→ AiConfigStore.save，复用其区间/枚举校验）；
+ *   - `pref`     → `services.prefs.set()`（→ uiprefs 集合，复用其键名/大小校验与广播）。
+ *
+ * 故意**不开放**的键（README 有完整说明）：
+ *   - `apiKey` / `searchApiKey` / `searchApiKeys` / `account` / 任何令牌：凭据永远不交给 AI；
+ *   - `provider` / `baseUrl` / `model`：改错会让整个 AI 通道失联，属于“去设置页手动改”的事；
+ *   - `searchEnabled` / `drawMode`：本次任务未列入白名单，保持最小暴露面；
+ *   - `maxActionsPerTurn`：代码里并不存在这个设置（“一轮最多 3 条写入”是提示词常量），
+ *     不为了对上一个不存在的键而虚构一个设置。
+ */
+const AI_SETTING_KEYS = Object.freeze(['searchProvider', 'searchMaxPages', 'searchRetryMax', 'contextWindow']);
+const PREF_SETTING_VALUES = Object.freeze({
+  permission: PERMISSIONS,
+  theme: ['system', 'light', 'dark'],
+});
+
+const SETTING_LABELS = Object.freeze({
+  permission: '默认写入权限',
+  theme: '颜色模式',
+  searchProvider: '搜索服务',
+  searchMaxPages: '网络搜索最大条数',
+  searchRetryMax: '检索重试上限',
+  contextWindow: '上下文上限',
+});
+
+const PERMISSION_LABELS = Object.freeze({
+  auto: '完全权限（auto，自动执行）',
+  manual: '手动审批（manual，逐条确认）',
+  strict: '全部确认（strict）',
+});
+
+const THEME_LABELS = Object.freeze({ system: '跟随系统', light: '白天模式', dark: '夜间模式' });
+
+/** 设置项不可写时统一的错误码（测试与上游 Agent 都靠它区分“字段不认识”和普通 400）。 */
+const SETTING_NOT_WRITABLE = 'SETTING_NOT_WRITABLE';
+
+/**
  * 联网检索档位（UI 上的「关闭 / 校外网 / 校内网」）。
  *
  * 目前**还没有真正的检索实现**：这个值只是原样交给提示词（`context.search`），
@@ -271,6 +327,80 @@ function draftFingerprint(entry) {
     fields: draft.fields ?? null,
     id: draft.id ?? null,
   });
+}
+
+/**
+ * 把 `settings` 草稿的 fields 拆成「AI 配置补丁」与「界面偏好补丁」，并做白名单校验。
+ *
+ * 任何不在白名单里的键都抛 `SETTING_NOT_WRITABLE`（400）——**不做部分写入**：
+ * 如果 `{searchProvider:"brave", apiKey:"sk-…"}` 只写前一半、悄悄丢掉后一半，
+ * 用户会以为密钥也被改了；而如果静默丢掉的是拼错的键名，用户会以为设置生效了。
+ * 宁可整条失败并明确说“这些键不能由 AI 改”。
+ */
+function splitSettingsFields(fields) {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    throw HttpError.badRequest('settings 的 fields 必须是对象');
+  }
+  const keys = Object.keys(fields);
+  if (!keys.length) throw HttpError.badRequest('settings 更新至少要提供一个设置项');
+
+  const writablePrefs = Object.keys(PREF_SETTING_VALUES);
+  const unknown = keys.filter((key) => !AI_SETTING_KEYS.includes(key) && !writablePrefs.includes(key));
+  if (unknown.length) {
+    throw new HttpError(
+      400,
+      SETTING_NOT_WRITABLE,
+      `这些设置项不能由 AI 修改：${unknown.join('、')}（可改：${[...AI_SETTING_KEYS, ...writablePrefs].join(' / ')}）；` +
+        'API Key、搜索密钥、账号、令牌等凭据永远不在可写范围内，请用户自己在设置页填写',
+      { fields: unknown, writable: [...AI_SETTING_KEYS, ...writablePrefs] },
+    );
+  }
+
+  const aiPatch = {};
+  const prefPatch = {};
+  for (const key of keys) {
+    const value = fields[key];
+    if (value === undefined || value === null || value === '') {
+      throw HttpError.badRequest(`${SETTING_LABELS[key]}的值不能为空`, { field: key });
+    }
+    if (AI_SETTING_KEYS.includes(key)) {
+      aiPatch[key] = value;
+      continue;
+    }
+    const allowed = PREF_SETTING_VALUES[key];
+    const text = typeof value === 'string' ? value.trim().toLowerCase() : value;
+    if (!allowed.includes(text)) {
+      throw HttpError.badRequest(
+        `${SETTING_LABELS[key]}只能是 ${allowed.join(' / ')}，收到 ${JSON.stringify(value)}`,
+        { field: key, allowed: [...allowed] },
+      );
+    }
+    prefPatch[key] = text;
+  }
+
+  // AI 配置走它自己的严格校验：越界/枚举错误在这里就 400，与设置页提交 POST /ai/config 同口径。
+  if (Object.keys(aiPatch).length) assertAiConfigInput(aiPatch);
+  return { aiPatch, prefPatch };
+}
+
+/** 请求值归一成“生效后的值”，用于预览时判断 changed / ignored。 */
+function projectedSettingValue(key, value) {
+  if (key === 'searchProvider') return String(value).trim().toLowerCase();
+  if (['searchMaxPages', 'searchRetryMax', 'contextWindow'].includes(key)) return Number(value);
+  return String(value).trim().toLowerCase();
+}
+
+/** 设置值的人话展示（写进 explain，用户不必反查枚举）。 */
+function settingDisplayValue(key, value) {
+  if (key === 'permission') return PERMISSION_LABELS[value] ?? value;
+  if (key === 'theme') return THEME_LABELS[value] ?? value;
+  return String(value);
+}
+
+/** AI 配置里给前端/上游看的“当前值”；权限来自界面偏好（AI 配置本身没有这一项）。 */
+function settingCurrentValue(key, source) {
+  if (key === 'permission' || key === 'theme') return source.prefs[key] ?? null;
+  return source.ai[key];
 }
 
 /** 从草稿里挑一个"人话名字"：标题优先，其次检索词 / 关键词 / id。 */
@@ -534,6 +664,18 @@ export class AiChatService {
      * 没声明的 target 仍用 MAX_QUERY_ITEMS。
      */
     this.queryLimits = queryLimits;
+
+    /**
+     * target `settings` 的处理器注册在 AI 模块自己这里（而不是新建一个 ai/commands.js）：
+     * 它要调用 `this.updateConfig()` 与 `services.prefs.set()` 这两条**模块自己的写入路径**，
+     * 只有服务实例同时握着两者。注册放在构造期、执行时再取 `this.services.prefs`，
+     * 因为 uiprefs 模块（order 95）在 AI（order 90）之后装配，构造时它还不在 services 上。
+     */
+    if (this.commands && typeof this.commands.registerHandler === 'function' && !this.commands.handlers?.has?.('settings')) {
+      this.commands.registerHandler('settings', {
+        update: (draft, options) => this.#updateSettings(draft, options),
+      });
+    }
   }
 
   // ---------------------------------------------------------------- 状态 / 配置
@@ -544,7 +686,7 @@ export class AiChatService {
     return {
       configured: this.provider.configured(),
       provider: this.provider.configured() ? this.provider.name : null,
-      config: maskAiConfig(this.config.get()),
+      config: this.maskConfig(),
       /** 老配置里的旧模型名被自动换掉时，这里给出原名字（界面据此提示一次） */
       modelMigratedFrom: this.config.migratedFrom ?? null,
       conversations: conversations.length,
@@ -555,7 +697,31 @@ export class AiChatService {
   }
 
   maskConfig() {
-    return maskAiConfig(this.config.get());
+    /**
+     * 对外配置多带一个 `permission`（默认写入权限）。
+     *
+     * 为什么它不在 ai-config.json 里：权限档位一直是**每一轮请求**的参数
+     * （`POST /ai/chat {permission}`），渲染层存在自己的 localStorage（`potato.permission`）。
+     * AI 改“默认权限”时，把它落到 uiprefs（后端偏好表），再在这里合并进配置响应 ——
+     * 这样 `GET /ai/config` 能回显、设置页/渲染层可以读它作为下一轮的默认值。
+     * 不把它塞进 AiConfigStore：那个白名单（AI_CONFIG_FIELDS）是账号/端点/密钥的存储契约，
+     * 权限不是 AI 接入配置，混进去会让“配置 = 凭据”的边界变模糊。
+     *
+     * 渲染层目前仍优先读自己的 localStorage；后端这个值要等渲染层接入后才自动生效 ——
+     * 这是本次改动的已知边界，README 的“风险与边界”里写明了。
+     */
+    return { ...maskAiConfig(this.config.get()), permission: this.#prefValue('permission', 'manual', PERMISSIONS) };
+  }
+
+  /** 读一个界面偏好；没有/服务未装配/值不合法时回落到 fallback（绝不因偏好读失败而让配置接口 500）。 */
+  #prefValue(key, fallback, allowed = null) {
+    try {
+      const value = this.services?.prefs?.get?.(key)?.value;
+      if (value === undefined || value === null) return fallback;
+      return !allowed || allowed.includes(value) ? value : fallback;
+    } catch {
+      return fallback;
+    }
   }
 
   /**
@@ -788,6 +954,151 @@ export class AiChatService {
     // 与保存配置对称：清空也要广播，否则设置页与顶部徽标会停在旧状态
     this.broadcast?.({ type: 'data_changed', module: 'ai', payload: { target: 'ai_config' } });
     return maskAiConfig(next);
+  }
+
+  /* -------------------------------------------------------------- settings target */
+
+  /** 当前设置快照：AI 配置 + 两项界面偏好（权限/主题）。 */
+  #settingsSnapshot() {
+    return {
+      ai: this.maskConfig(),
+      prefs: {
+        permission: this.#prefValue('permission', 'manual', PERMISSIONS),
+        theme: this.#prefValue('theme', 'system', PREF_SETTING_VALUES.theme),
+      },
+    };
+  }
+
+  /**
+   * 写界面偏好（permission / theme）。
+   *
+   * 走 uiprefs 自己的 `set()`，因此复用它的键名校验、16KB 上限与 `data_changed` 广播；
+   * 不直接操作 `store.uiPrefs` —— 那样会绕过校验，也不会通知前端刷新。
+   */
+  async #setPref(key, value) {
+    const prefs = this.services?.prefs;
+    if (!prefs?.set) {
+      throw new HttpError(501, ERROR_CODES.NOT_IMPLEMENTED, '界面偏好服务未装配，无法写入权限/主题设置');
+    }
+    return prefs.set(key, value);
+  }
+
+  /** 危险项警告：permission=auto 必须让用户在确认卡和执行回执里都看见。 */
+  #settingsWarnings(requested) {
+    const warnings = [];
+    if (requested.permission === 'auto') {
+      warnings.push(
+        '把默认写入权限改成「完全权限（auto）」后，AI 之后的新增 / 修改 / 删除会直接执行，不再逐条确认；' +
+          '如果你不想要这个行为，请把 permission 改回 manual。',
+      );
+    }
+    return warnings;
+  }
+
+  /** 设置改动的人话说明：只报**实际生效**的键，不用模型的措辞。 */
+  #settingsExplain(changed, ignored, values) {
+    if (!changed.length) {
+      const already = ignored.length ? `（${ignored.map((key) => SETTING_LABELS[key] ?? key).join('、')}已经是这个值）` : '';
+      const stillAuto = values.permission === 'auto' ? ' 当前默认写入权限仍是完全权限（auto），AI 会直接执行写操作，不再逐条确认。' : '';
+      return `设置没有变化${already}。${stillAuto}`.trim();
+    }
+    const parts = changed.map((key) => `${SETTING_LABELS[key] ?? key} → ${settingDisplayValue(key, values[key])}`);
+    const reminders = [];
+    if (changed.includes('permission')) {
+      reminders.push(
+        values.permission === 'auto'
+          ? '注意：之后 AI 会直接执行写操作，不再逐条确认。'
+          : '写操作会重新逐条确认后才执行。',
+      );
+    }
+    if (ignored.length) {
+      reminders.push(`未变化的项：${ignored.map((key) => SETTING_LABELS[key] ?? key).join('、')}（已经是这个值）。`);
+    }
+    return `已修改设置：${parts.join('；')}。${reminders.join(' ')}`.trim();
+  }
+
+  /**
+   * 把实际改动写回草稿的 explain / warnings。
+   *
+   * 为什么必须改草稿：确认卡与消息记录读的是 `draft.explain` / `draft.warnings`
+   * （渲染层只画这两个字段），而命令返回的 explain 只在**已经执行**的回执里被使用。
+   * 不改的话，manual 档的用户在点确认前看不到“改成 auto 会不再逐条确认”这句警告。
+   */
+  #annotateSettingsDraft(draft, explain, warnings) {
+    draft.explain = explain;
+    const existing = Array.isArray(draft.warnings) ? draft.warnings.filter((text) => !warnings.includes(text)) : [];
+    draft.warnings = [...existing, ...warnings];
+  }
+
+  /**
+   * target `settings` 的 update 处理器。
+   *
+   * 权限闸不在这里：`manual` / `strict` 档只做 dryRun，草稿由既有机制渲染成确认卡；
+   * `auto` 档由 `#autoExecuteWrites` 再调一次（不带 dryRun）才真正落库。
+   */
+  async #updateSettings(draft, options = {}) {
+    const { aiPatch, prefPatch } = splitSettingsFields(draft.fields);
+    const requested = { ...aiPatch, ...prefPatch };
+    const before = this.#settingsSnapshot();
+
+    // 预览值：AI 配置在写入时会被归一化（数字转 number、provider 转小写），
+    // 这里先按同一口径归一，才能在确认卡上准确判断“哪些会变、哪些已经是这个值”。
+    const projected = Object.fromEntries(
+      Object.entries(requested).map(([key, value]) => [key, projectedSettingValue(key, value)]),
+    );
+    const changed = Object.keys(requested).filter((key) => settingCurrentValue(key, before) !== projected[key]);
+    const ignored = Object.keys(requested).filter((key) => !changed.includes(key));
+    const warnings = this.#settingsWarnings(requested);
+
+    if (options.dryRun) {
+      const explain = this.#settingsExplain(changed, ignored, projected);
+      this.#annotateSettingsDraft(draft, explain, warnings);
+      return {
+        dryRun: true,
+        planned: { action: 'update', target: 'settings', fields: { ...requested } },
+        changed,
+        ignored,
+        explain,
+        warnings,
+      };
+    }
+
+    // 先写 AI 配置，再写界面偏好：AI 配置的校验最严格（越界/枚举），
+    // 让它先失败就不会出现“权限已经改了、搜索配置却没写进去”的半截状态。
+    if (Object.keys(aiPatch).length) await this.updateConfig(aiPatch);
+    for (const [key, value] of Object.entries(prefPatch)) await this.#setPref(key, value);
+
+    // 写完统一广播一次：permission/theme 落在 uiprefs，而 updateConfig 的广播只覆盖 AI 配置；
+    // 放在全部写入之后发，前端重读 /ai/config 才能一次拿到完整结果。
+    this.broadcast?.({
+      type: 'data_changed',
+      module: 'ai',
+      payload: { target: 'ai_config', settings: Object.keys(requested) },
+    });
+
+    const after = this.#settingsSnapshot();
+    const actual = Object.fromEntries(
+      Object.keys(requested).map((key) => [key, settingCurrentValue(key, after)]),
+    );
+    const actualChanged = Object.keys(requested).filter(
+      (key) => settingCurrentValue(key, before) !== settingCurrentValue(key, after),
+    );
+    const actualIgnored = Object.keys(requested).filter((key) => !actualChanged.includes(key));
+    const actualWarnings = this.#settingsWarnings(requested);
+    const explain = this.#settingsExplain(actualChanged, actualIgnored, actual);
+    this.#annotateSettingsDraft(draft, explain, actualWarnings);
+
+    return {
+      affected: actualChanged.map((key) => ({
+        id: key,
+        title: SETTING_LABELS[key] ?? key,
+        value: settingDisplayValue(key, actual[key]),
+      })),
+      changed: actualChanged,
+      ignored: actualIgnored,
+      warnings: actualWarnings,
+      explain,
+    };
   }
 
   // ---------------------------------------------------------------- 会话
@@ -1191,6 +1502,12 @@ export class AiChatService {
     const summary = await this.#ensureSummary(conversation, signal);
     // 作图：设置里开着就给（默认开），关着但用户用了「画…」这类指令词也临时给
     const draw = this.config.get().drawMode !== false || DRAW_KEYWORDS.test(trimmed);
+    /**
+     * 本轮最多自动执行几个写操作（设置项 `maxActionsPerTurn`，0 = 不限制）。
+     * 每回合只读一次：一次提问过程中用户改设置是极端情况，中途换数只会让"前面已执行几条"
+     * 的账算不清；这里取的是回合开始时的值，并在下面作为**整个回合**的累计预算使用。
+     */
+    const maxActions = normalizeMaxActionsPerTurn(this.config.get().maxActionsPerTurn);
     const history = this.#history(conversation.id);
     // #history 里最后一条就是刚存的用户正文，这里换成"正文 + 附件"的多模态版本
     const messages = [
@@ -1206,6 +1523,9 @@ export class AiChatService {
           // 放在展开之后，免得请求体里的 context 把这轮的选择覆盖掉。
           permission: mode,
           search: searchMode,
+          // 提示词里"一轮最多 N 条写入草稿"的 N 与下面真正执行用的是**同一个配置值**
+          // （0 = 不限制），不做任何字符串替换 —— prompt.js 是纯函数拼装。
+          maxActionsPerTurn: maxActions,
           // 摘要由上面 #ensureSummary 产出/复用；没有就是空串，提示词里不会多一段
           summary,
         }),
@@ -1246,6 +1566,12 @@ export class AiChatService {
     const queried = [];          // 只读查询结果：跨轮累积
     const executed = [];         // 自动执行的写操作：跨轮累积
     let drafts = [];             // 留给用户确认的草稿（没执行的，含校验不过的）
+    /**
+     * 因**超出本轮执行上限**而没有自动执行的写草稿：跨轮累积。
+     * 它们同时已经进了 `drafts`（走人工确认卡），这里单独留一份是为了给模型/调用方
+     * 说清"还有几条没执行" —— 只靠 drafts 区分不出"校验不过"与"上限截断"。
+     */
+    const deferredByLimit = [];
     let content = '';            // 被采纳的那一轮正文（每轮都会被下一轮覆盖）
     /**
      * 「停止时该落的正文」= 用户此刻在屏幕上看到的那一份。
@@ -1441,7 +1767,16 @@ export class AiChatService {
         // 被抽掉了），只看到"我准备加一条待办"的正文，所以它在后面某一轮把同一件事再说一遍很常见。
         // 注意：写结果现在会**回灌**（见下面的 #withExecutionResults），模型更容易"把刚做完的事
         // 再说一遍"（它想确认），所以这道指纹去重是必需的，不是可选的优化。
-        const doneKeys = new Set(executed.map((item) => this.#draftKey(item.entry)));
+        /**
+         * 已经处理过的写入 = 执行过的 + **因上限留成确认卡**的。
+         *
+         * 后者也要算进来：模型下一轮很可能把刚被截断的那几条再说一遍（它只看到自己说过
+         * "我加上这几条"，不知道哪几条没执行）。若不算，它们会被当成新草稿再次进入执行队列，
+         * 既可能重复出卡，也会让"回灌 → 再答"多绕好几轮。同一件事只处理一次。
+         */
+        const doneKeys = new Set(
+          [...executed, ...deferredByLimit].map((item) => this.#draftKey(item.entry ?? item)),
+        );
         /**
          * 真正要执行的写草稿 = 跨轮去重（`doneKeys`）+ **轮内去重**。
          *
@@ -1458,7 +1793,46 @@ export class AiChatService {
           freshKeys.add(key);
           freshWrites.push(entry);
         }
-        const executedNow = mode === 'auto' ? await this.#autoExecuteWrites(freshWrites, { signal, plan }) : [];
+        /**
+         * 「一轮最多执行几个操作」：**服务端真正执行限制**，不能只靠提示词。
+         *
+         * 提示词已经把 N 告诉模型了，但模型完全可能一口气给 5 条 —— 提示词是"请求"，这里才是"事实"。
+         * 只把前 N 条交给 `#autoExecuteWrites`，其余**不丢**：留在 `drafts` 里走人工确认卡
+         * （manual 语义，用户自己决定点不点）。这条"不静默丢弃"是硬要求：用户看到的应该是
+         * "办了 3 件、还有 2 件等你确认"，而不是"说了 5 件只办了 3 件、另外 2 件凭空消失"。
+         *
+         * 口径：
+         *   - 预算按**整个回合**累计（`executed` 跨轮），不是每轮各给 N 条 —— 用户设"一轮最多 3 个操作"，
+         *     期望的是"这次提问最多自动改 3 处"，而不是"模型每多说一轮就再多改 3 处"；
+         *   - 只统计**可执行**的写草稿：校验不过的本来就不会执行，不该白占名额；
+         *   - `0` = 不限制：全部交给执行器（仍受 `MAX_ROUNDS` 与去重约束）；
+         *   - manual / strict 档一条都不走这里，因此**不受这个上限影响**：确认卡列表不截断。
+         */
+        const writableWrites = freshWrites.filter(
+          (entry) => !entry.error && entry.draft?.action !== 'query' && entry.draft?.ok !== false,
+        );
+        const remainingSlots = maxActions === MAX_ACTIONS_UNLIMITED
+          ? writableWrites.length
+          : Math.max(maxActions - executed.length, 0);
+        const allowedWrites = writableWrites.slice(0, remainingSlots);
+        const deferredWrites = mode === 'auto' ? writableWrites.slice(remainingSlots) : [];
+        const executedNow = mode === 'auto' ? await this.#autoExecuteWrites(allowedWrites, { signal, plan }) : [];
+        if (deferredWrites.length) {
+          /**
+           * 给每张被截断的确认卡补一句"为什么没自动执行"。
+           *
+           * 写进 `draft.warnings` 而不是另造字段：确认卡本来就会渲染 warnings（见 shell 的 draftCard），
+           * 不需要改渲染层；用户点开卡片就能看到"超出上限、需要确认"，而不是以为自己点错了什么。
+           */
+          const notice = maxActions === MAX_ACTIONS_UNLIMITED
+            ? '本轮没有执行条数限制，这条没有自动执行（原因见回灌说明）。'
+            : `本轮最多自动执行 ${maxActions} 个操作（设置项「一轮最多执行几个操作」），这条超出了上限，`
+              + '**没有自动执行**：点「确认执行」后才会落库。';
+          for (const entry of deferredWrites) {
+            entry.draft = { ...entry.draft, warnings: [...(entry.draft?.warnings ?? []), notice] };
+          }
+          deferredByLimit.push(...deferredWrites);
+        }
         if (executedNow.length) {
           roundDrafts = freshWrites.filter((entry) => !executedNow.some((item) => item.entry === entry));
           executed.push(...executedNow);
@@ -1489,6 +1863,8 @@ export class AiChatService {
               signal,
               plan,
               searchBudget,
+              // 用户原话透传给 DeepSeek 官方 Search 的 ori_question（帮助理解检索意图）
+              oriQuestion: trimmed,
             })
           : [];
         queried.push(...fresh);
@@ -1542,15 +1918,29 @@ export class AiChatService {
           ];
           continue;
         }
-        if (!fresh.length && !executedNow.length) break;
-        // 还有新查询（或刚写完还没回灌）、但轮数已经用光：记下来，调用方据此知道
+        /**
+         * 终止条件加了一项 `deferredWrites.length`：**被上限截断的这一轮也要回灌**。
+         *
+         * 不这么做的话，auto 档第二轮才冒出来的写草稿被截断时，循环直接收尾，模型永远不知道
+         * 它们没执行 —— 它下一句很可能照旧说"都加好了"，而用户看到的却是几张待确认卡。
+         * 回灌一轮让它知道"还有 M 条没执行"，它才有机会改口（也算"超出上限要说明"的兜底）。
+         * 不会因此死循环：被截断的草稿指纹已经进了 `doneKeys`，模型原样重发时不会再次触发。
+         */
+        if (!fresh.length && !executedNow.length && !deferredWrites.length) break;
+        // 还有新查询（或刚写完 / 刚被截断还没回灌）、但轮数已经用光：记下来，调用方据此知道
         // "答案是被上限截断的"，而不是以为模型就答了这么点。
         if (round >= MAX_ROUNDS) {
           hitRoundLimit = true;
           break;
         }
         // 把这一轮的结果回灌进上下文，进入下一轮 —— 这才是真正的工具循环
-        turnMessages = this.#withExecutionResults(turnMessages, extracted.text, { queried: fresh, executed: executedNow });
+        turnMessages = this.#withExecutionResults(turnMessages, extracted.text, {
+          queried: fresh,
+          executed: executedNow,
+          // 因上限没执行的也要说：模型据此改口，不谎报"都办好了"
+          deferred: deferredWrites,
+          maxActions,
+        });
       }
 
       // 循环因停止而跳出：按"已停止"收尾（正文保留停止前的内容），绝不落成 done
@@ -1565,10 +1955,29 @@ export class AiChatService {
       const saved = await this.store.aiMessages.update(assistant.id, {
         // 正文 = **最后一轮**抽掉草稿后的话；它为空时按"这一刻的事实"兜底：
         // 查过数据就说查到了、自动执行过写操作就说处理好了（细节另有数据卡片/回执卡）。
-        content: content || (queried.length ? '已经查到数据。' : executed.length ? '已经照你说的处理好了。' : ''),
+        // 有草稿被上限截断时优先说这一句：只报"处理好了"会让用户以为全部办完了。
+        content: content || (
+          deferredByLimit.length
+            ? executed.length
+              ? `已经自动执行 ${executed.length} 个操作，另有 ${deferredByLimit.length} 条超出本轮上限、等你确认。`
+              : `另有 ${deferredByLimit.length} 条写入草稿超出本轮上限、等你确认。`
+            : queried.length
+              ? '已经查到数据。'
+              : executed.length
+                ? '已经照你说的处理好了。'
+                : ''
+        ),
         // 草稿 / 已执行 / 查询都是**跨轮累积**：用户看到的应该是整次交互的全貌
         drafts,
         executed,
+        // 执行上限的**机读回执**：前端/排查都能看出"这一轮设了 3、执行了 3、截下 2 条"。
+        // 人话提示同时在 drafts[].draft.warnings 里（确认卡上可见）。
+        actionLimit: {
+          max: maxActions,
+          unlimited: maxActions === MAX_ACTIONS_UNLIMITED,
+          executed: executed.length,
+          deferred: deferredByLimit.length,
+        },
         thinking,
         permission: mode,
         search: searchMode,
@@ -1614,6 +2023,8 @@ export class AiChatService {
         drafts,
         queried,
         executed,
+        /** 执行上限回执：`{ max, unlimited, executed, deferred }`（0 = 不限制）。 */
+        actionLimit: saved.actionLimit,
         // 把这一轮的选择回显给调用方：前端据此在气泡上标注"自动执行/思考强度/联网"
         thinking,
         permission: mode,
@@ -1897,6 +2308,8 @@ export class AiChatService {
       draw: config.drawMode !== false,
       permission: 'manual',
       search: 'off',
+      // 提示词里的"N 条写入草稿"随配置变，估 token 时也要用同一个 N（差几个字符，但口径要一致）
+      maxActionsPerTurn: config.maxActionsPerTurn,
       domainBlocks: this.domainBlocks,
       summary,
       recent: this.#recentSummary(todayKey()),
@@ -2116,7 +2529,7 @@ export class AiChatService {
    * 为什么必须自动执行：模型看不见数据，就会一直说"我拿不到/需要你确认"，
    * 而用户问的是"我明天有什么日程"——这种问题应该直接给答案。
    */
-  async #runReadOnlyQueries(previewed, { searchMode = 'off', signal = null, plan = null, searchBudget = null } = {}) {
+  async #runReadOnlyQueries(previewed, { searchMode = 'off', signal = null, plan = null, searchBudget = null, oriQuestion = '' } = {}) {
     const out = [];
     for (const entry of previewed) {
       if (entry.draft?.action !== 'query') continue;
@@ -2126,7 +2539,7 @@ export class AiChatService {
       // 联网检索走自己的执行器：它要读**用户在界面上选的通道**（校外/校内/关），
       // 而那个信息只存在于这一次请求里，命令服务那边看不到（理由见 #runWebQuery）。
       if (entry.draft.target === WEB_TARGET) {
-        out.push(await this.#runWebQuery(entry, { searchMode, signal, plan, searchBudget }));
+        out.push(await this.#runWebQuery(entry, { searchMode, signal, plan, searchBudget, oriQuestion }));
         continue;
       }
       /**
@@ -2170,15 +2583,35 @@ export class AiChatService {
    *
    * 不写库、不进对话，纯只读的一次尝试。
    */
-  async searchPreview({ query, mode = 'web', limit } = {}) {
+  async searchPreview({ query, mode = 'web', limit, oriQuestion } = {}) {
     const config = this.config.get() ?? {};
     const scope = WEB_SEARCH_MODES.includes(mode) ? mode : 'web';
     const configured = normalizeSearchLimit(config.searchMaxPages, { fallback: SEARCH_LIMIT_DEFAULT });
     const max = normalizeSearchLimit(limit, { fallback: configured });
     const log = (level, message) => this.#log(level, message);
-    const detailed = await searchWebDetailed({ query, mode: scope, limit: max, config, log, fetchImpl: this.searchFetch ?? undefined });
-    const pages = await readPages(detailed.results, { limit: max, log, fetchImpl: this.searchFetch ?? undefined });
-    const byUrl = new Map(pages.map((page) => [page.url, page]));
+    const detailed = await searchWebDetailed({
+      query,
+      mode: scope,
+      limit: max,
+      config,
+      log,
+      fetchImpl: this.searchFetch ?? undefined,
+      // 试搜没有"对话原话"可用，就把检索词本身当 ori_question 传过去
+      oriQuestion: oriQuestion ?? query,
+    });
+    /**
+     * **一次搜索拿全**：官方 `need_content:true` 已经把正文带回来了，
+     * 这些条目不要再走 `readPages`（那会多花 N 次 Fetch 计费）；只有 content 为空的才回退抓取。
+     */
+    const inlinePages = detailed.results
+      .map((item) => pageFromSearchContent(item))
+      .filter(Boolean);
+    const inlineByUrl = new Map(inlinePages.map((page) => [page.url, page]));
+    const needsRead = detailed.results.filter((item) => !inlineByUrl.has(item.url));
+    const fetchedPages = needsRead.length
+      ? await readPages(needsRead, { limit: max, log, fetchImpl: this.searchFetch ?? undefined, config })
+      : [];
+    const byUrl = new Map([...inlinePages, ...fetchedPages].map((page) => [page.url, page]));
     const items = detailed.results.map((item) => {
       const page = byUrl.get(item.url) ?? {};
       return {
@@ -2189,6 +2622,13 @@ export class AiChatService {
         scope: item.scope,
         matchedBy: item.matchedBy ?? null,
         site: item.site ?? null,
+        // 官方结果的新字段：设置页的"试一下"要能显示 rerank_score / authority / date / 来源
+        summary: item.summary ?? null,
+        date: item.date ?? null,
+        publishedAt: item.publishedAt ?? null,
+        authority: Number.isFinite(item.authority) ? item.authority : null,
+        rerankScore: Number.isFinite(item.rerankScore) ? item.rerankScore : null,
+        siteName: item.siteName ?? null,
         ok: page.ok !== false,
         error: page.error ?? null,
         chars: String(page.text ?? '').length,
@@ -2204,6 +2644,7 @@ export class AiChatService {
       limit: detailed.limit,
       backend: detailed.backend,
       campus: detailed.campus,
+      deepseek: detailed.deepseek,
       notes: detailed.notes,
       count: items.length,
       read: items.filter((item) => item.chars > 0).length,
@@ -2232,7 +2673,7 @@ export class AiChatService {
     try {
       const pages = await readPages(
         urls.map((url) => ({ title: url, url })),
-        { limit, log, fetchImpl: this.searchFetch ?? undefined },
+        { limit, log, fetchImpl: this.searchFetch ?? undefined, config },
       );
       const items = pages.map((page) => ({
         title: page.title && page.title !== page.url ? page.title : page.url,
@@ -2272,7 +2713,7 @@ export class AiChatService {
    * 「联网关掉了」的口径：不搜，并且**明确告诉模型原因**（它会照实转告用户），
    * 而不是返回空结果让它以为"网上没有"。
    */
-  async #runWebQuery(entry, { searchMode = 'off', signal = null, plan = null, searchBudget = null } = {}) {
+  async #runWebQuery(entry, { searchMode = 'off', signal = null, plan = null, searchBudget = null, oriQuestion = '' } = {}) {
     const draft = entry.draft;
     /**
      * 记一步"没做成"。
@@ -2349,29 +2790,68 @@ export class AiChatService {
     const log = (level, message) => this.#log(level, message);
     plan?.start(entry);
     try {
-      const results = await this.#abortable(
-        searchWeb({ query, mode, limit: count, config, log, fetchImpl: this.searchFetch ?? undefined }),
+      /**
+       * 用 `searchWebDetailed` 而不是 `searchWeb`：要拿 `deepseek` 诊断（欠费/限流/key 无效）
+       * 与 `backend`，才能在 explain 里如实说明"官方挂了、已降级"，而不是笼统说"没搜到"。
+       */
+      const detailed = await this.#abortable(
+        searchWebDetailed({
+          query,
+          mode,
+          limit: count,
+          config,
+          log,
+          fetchImpl: this.searchFetch ?? undefined,
+          // 用户原话透传给官方 Search 的 ori_question（帮助理解检索意图）
+          oriQuestion,
+          signal,
+        }),
         signal,
       );
       // 停止信号到了：这次检索不再等结果（底层请求自己在后台结束，结果丢弃）
-      if (!results) return fail({ code: STOPPED_CODE, message: '这一轮已被用户停止，检索结果不再等待' }, { attempt, remaining });
+      if (!detailed) return fail({ code: STOPPED_CODE, message: '这一轮已被用户停止，检索结果不再等待' }, { attempt, remaining });
+      const results = detailed.results ?? [];
+      /** 官方通道的诊断摘要：失败时把明确错误码带进 explain，模型/用户才知道是欠费还是限流。 */
+      const deepseekNote = detailed.deepseek
+        ? detailed.deepseek.ok
+          ? `（DeepSeek 官方搜索：${detailed.deepseek.count} 条，rerank_score ≥ 1.5 的 ${detailed.deepseek.premium} 条、authority ≥ 3 的 ${detailed.deepseek.highAuthority} 条）`
+          : `（DeepSeek 官方搜索不可用：${detailed.deepseek.error?.code ?? '无结果'}${detailed.deepseek.error ? `：${detailed.deepseek.error.message}` : ''}；已降级到免密钥抓取）`
+        : '';
       if (!results.length) {
         return succeed(this.#compactQueryResult(WEB_TARGET, {
           filters: { query, mode },
           count: 0,
           items: [],
           explain:
-            mode === 'campus'
+            (mode === 'campus'
               ? '校内检索没有返回结果（可能被反爬挡住，或校内站点里没有匹配）—— 如实告诉用户没搜到，不要编造'
-              : '检索没有返回结果（可能被搜索引擎拦截，或还没配置搜索 API 密钥）—— 如实告诉用户没搜到，不要编造',
+              : '检索没有返回结果（可能被搜索引擎拦截，或还没配置搜索 API 密钥）—— 如实告诉用户没搜到，不要编造')
+            + deepseekNote,
         }));
       }
-      const pages = await this.#abortable(
-        readPages(results, { limit: count, log, fetchImpl: this.searchFetch ?? undefined }),
-        signal,
-      );
-      if (!pages) return fail({ code: STOPPED_CODE, message: '这一轮已被用户停止，读正文不再等待' }, { attempt, remaining });
-      const byUrl = new Map(pages.map((page) => [page.url, page]));
+      /**
+       * **一次 search + need_content 拿全**：官方已经把正文带回来了，
+       * 这些条目**不再逐页 Fetch**（每多一次 Fetch 就多花 5 元/1000 次，还多一个往返）。
+       * 只有 `content` 为空的条目（官方没给正文、或走的是抓取结果）才回退到 `readPages`。
+       */
+      const inlinePages = results.map((item) => pageFromSearchContent(item)).filter(Boolean);
+      const inlineByUrl = new Map(inlinePages.map((page) => [page.url, page]));
+      const needsRead = results.filter((item) => !inlineByUrl.has(item.url));
+      let fetchedPages = [];
+      if (needsRead.length) {
+        fetchedPages = await this.#abortable(
+          readPages(needsRead, {
+            limit: count,
+            log,
+            fetchImpl: this.searchFetch ?? undefined,
+            config,
+            signal,
+          }),
+          signal,
+        );
+        if (!fetchedPages) return fail({ code: STOPPED_CODE, message: '这一轮已被用户停止，读正文不再等待' }, { attempt, remaining });
+      }
+      const byUrl = new Map([...inlinePages, ...fetchedPages].map((page) => [page.url, page]));
       /**
        * 校内结果排前面。
        *
@@ -2390,9 +2870,14 @@ export class AiChatService {
           scope: item.scope,
           matchedBy: item.matchedBy ?? null,
           site: item.site ?? null,
-          // 发布日期：只有"栏目列表直读"（`matchedBy: 'column'`）的条目才有（列表页上就写着日期）。
-          // 有了它，模型才能回答"最新的是哪条"；为 null 时**不能**替这条编一个日期。
+          // 发布日期：栏目直读与 DeepSeek 官方结果都有；没有时**不能**替这条编一个日期。
           publishedAt: item.publishedAt ?? null,
+          // DeepSeek 的官方字段：date 判新旧、authority/rerankScore 判可信度、summary 是长摘要
+          date: item.date ?? null,
+          authority: Number.isFinite(item.authority) ? item.authority : null,
+          rerankScore: Number.isFinite(item.rerankScore) ? item.rerankScore : null,
+          summary: item.summary ?? null,
+          siteName: item.siteName ?? null,
           // 正文只在真抓到时才有：`ok:false` 的条目 text 为空、error 说明原因（列表页/PDF/要登录），
           // 模型据此知道"这条只有摘要，别当成读过了"
           text: String(page.text ?? '').slice(0, WEB_TEXT_CHARS),
@@ -2409,8 +2894,11 @@ export class AiChatService {
       const campusCount = items.filter((item) => item.scope === 'campus').length;
       const explain = mode === 'campus'
         ? `校内检索「${query}」：校内站点命中 ${campusCount} 条、公网结果 ${items.length - campusCount} 条，读到 ${read} 篇正文` +
-          (campusCount === 0 ? '（校内站点一条都没命中：免密钥通道对 site: 语法支持很差，已带上学校名重试；下面给的是公网结果，回答时要说明这一点）' : '')
-        : `校外检索「${query}」：搜到 ${results.length} 条，读到 ${read} 篇正文`;
+          (campusCount === 0 && detailed.backend?.kind === 'scrape'
+            ? '（校内站点一条都没命中：免密钥通道对 site: 语法支持很差，已带上学校名重试；下面给的是公网结果，回答时要说明这一点）'
+            : '')
+          + deepseekNote
+        : `校外检索「${query}」：搜到 ${results.length} 条，读到 ${read} 篇正文${deepseekNote}`;
       return succeed(this.#compactQueryResult(WEB_TARGET, {
         filters: { query, mode },
         count: items.length,
@@ -2437,16 +2925,71 @@ export class AiChatService {
       if (signal?.aborted) break;
       if (entry.error || entry.draft?.action === 'query' || entry.draft?.ok === false) continue;
       plan?.start(entry);
+      /**
+       * ★ 短生命周期的 actor 标记。
+       *
+       * 各业务服务（calendar / notes / memory）在自己的写方法里只记**用户**的日志；
+       * AI 自动执行草稿时它们必须知道“这次不是我点的确认”，否则同一笔写入会出现
+       * 一条 actor:'user'（服务端）+ 一条 actor:'ai'（这里），把用户自己的操作记录淹掉。
+       * 标记只在 `commands.execute` 期间存在，try/finally 恢复原值（支持嵌套调用）。
+       *
+       * 为什么不用 AsyncLocalStorage：这里是单机单用户、写操作彼此串行的本地服务；
+       * 一个短标记足够，且不把 Node 私有上下文引入业务服务。极端并发（AI 执行期间
+       * 用户恰好点保存）下服务端会少记一条 user 日志，但**不会把 AI 的写入错记成用户的**
+       * —— 这个方向上的误差比“记错人”安全。
+       */
+      const previousActor = this.services?.__actor;
+      if (this.services) this.services.__actor = 'ai';
       try {
         const result = await this.commands.execute(entry.draft);
         out.push({ entry, draft: entry.draft, result });
         plan?.finish(entry, null);
+        // 审计是旁路：记录失败（理论上 record 永不抛）不能把已经落库的写入标成失败
+        try {
+          this.#recordAiWrite(entry, result);
+        } catch (error) {
+          this.#log('warn', `AI 更改日志记录失败（已忽略）：${error?.message ?? error}`);
+        }
       } catch (error) {
         out.push({ entry, draft: entry.draft, error: { code: error.code ?? 'INTERNAL', message: error.message } });
         plan?.finish(entry, error);
+      } finally {
+        if (this.services) {
+          if (previousActor === undefined) delete this.services.__actor;
+          else this.services.__actor = previousActor;
+        }
       }
     }
     return out;
+  }
+
+  /**
+   * 把一次成功执行的 AI 写操作记进更改日志（actor:'ai'）。
+   *
+   * 为什么由 chat-service 记、而不是让各业务服务自己判断：只有这里同时知道
+   * “这是模型触发的”“执行的哪条草稿”“结果里的真实 id/标题”。服务端只负责用户路径，
+   * 两边各记各的，actor 才不会互相污染（见 #autoExecuteWrites 的标记说明）。
+   */
+  #recordAiWrite(entry, result) {
+    const draft = entry?.draft ?? {};
+    const item = result?.item ?? (Array.isArray(result?.items) ? result.items[0] : null);
+    const affected = Array.isArray(result?.affected) ? result.affected : [];
+    const targetId = item?.id ?? affected[0]?.id ?? draft.filters?.id ?? draft.id;
+    const title = item?.title ?? affected[0]?.title ?? draftName(draft);
+    const action = draft.action ?? 'update';
+    const target = draft.target ?? 'unknown';
+    const after = item ?? affected[0];
+    this.services?.audit?.record({
+      actor: 'ai',
+      source: 'chat',
+      module: target,
+      action,
+      target,
+      ...(targetId === undefined || targetId === null || targetId === '' ? {} : { targetId: String(targetId) }),
+      ...(title ? { title } : {}),
+      summary: result?.explain ?? `AI 自动${PLAN_WRITE_LABELS[action] ?? action}${title ? `「${title}」` : ''}`,
+      ...(after ? { after } : {}),
+    });
   }
 
   /** 只留模型回答需要的字段：整库塞进下一轮提示词既贵又容易跑偏。 */
@@ -2465,9 +3008,12 @@ export class AiChatService {
       // site=校内站点自己的检索接口命中、domain=公网结果但域名在校内、mention=公网结果里提到本校。
       // 工具说明与 README 都向模型承诺了这几个字段，而投影表白名单一开始漏了它们 ——
       // 模型因此分不清"这条是校方页面"还是"公网上提到学校"。
-      // `publishedAt` 是栏目直读条目的**发布日期**（`YYYY-MM-DD`，只知道月份时是 `YYYY-MM`）：
+      // `publishedAt` 是栏目直读/官方结果的**发布日期**（`YYYY-MM-DD`）：
       // 没有它，"最近有什么新闻"就答不出"最新的一条是几月几号"（真机反馈的原话）。
-      web: ['title', 'url', 'snippet', 'source', 'scope', 'matchedBy', 'site', 'publishedAt', 'text', 'chars', 'textSource', 'note', 'ok', 'error'],
+      // `date`/`authority`/`rerankScore`/`summary`/`siteName` 是 DeepSeek 官方 Search 的字段：
+      // 模型要能用"发布时间"与"权威性/相关度"作答，也必须知道 `summary` 是长摘要、`content` 才是正文。
+      // 注意：投影表这一行必须保持单行 —— ai-web-loop 的契约测试按前缀定位它。
+      web: ['title', 'url', 'snippet', 'source', 'scope', 'matchedBy', 'site', 'publishedAt', 'date', 'authority', 'rerankScore', 'summary', 'siteName', 'text', 'chars', 'textSource', 'note', 'ok', 'error'],
     };
     // 模块声明的投影表覆盖内置表（内置三张表保持原样，行为不变）
     const fields = this.queryFields?.[target] ?? FIELDS[target] ?? ['id', 'title'];
@@ -2497,24 +3043,34 @@ export class AiChatService {
   /**
    * 把这一轮"系统真的做了的事"回灌进对话（**每轮**都回灌，不是固定的"第二次调用"）。
    *
-   * 两类结果共用一条注入消息（而不是两条）：
+   * 三类结果共用一条注入消息（而不是拆成几条）：
    *   - `queried`：只读查询的结果（模型据此作答）；
-   *   - `executed`：auto 档**已经落库**的写操作结果（模型据此说清"系统做了什么"，尤其是冲突）。
+   *   - `executed`：auto 档**已经落库**的写操作结果（模型据此说清"系统做了什么"，尤其是冲突）；
+   *   - `deferred`：因**超出本轮执行上限**而没执行的写草稿（模型据此改口，不谎报全办好了）。
    *
-   * 为什么合成一条：两者常常同一轮发生（"先查一下有没有撞，再帮我加一条"），拆成两条会变成
-   * 连续两条 user 消息 —— 上游兼容端点对消息角色交替的校验并不一致，能少踩一个坑就少踩一个。
+   * 为什么合成一条：它们常常同一轮发生（"先查一下有没有撞，再帮我加一条"），拆成几条会变成
+   * 连续几条 user 消息 —— 上游兼容端点对消息角色交替的校验并不一致，能少踩一个坑就少踩一个。
    *
    * 用一条 `role: "user"` 的显式标注消息而不是 `role: "tool"`：我们没走函数调用协议，
    * 各家 OpenAI 兼容端点对 `tool` 消息的校验不一致，而带标注的 user 消息到处都能跑。
    */
-  #withExecutionResults(messages, replyText, { queried = [], executed = [] } = {}) {
-    const sections = [this.#queryInjectionText(queried), this.#writeInjectionText(executed)].filter(Boolean);
+  #withExecutionResults(messages, replyText, { queried = [], executed = [], deferred = [], maxActions = 0 } = {}) {
+    const sections = [
+      this.#queryInjectionText(queried),
+      this.#writeInjectionText(executed, { deferred, maxActions }),
+    ].filter(Boolean);
     if (!sections.length) return messages;
     return [
       ...messages,
       {
         role: 'assistant',
-        content: replyText || (queried.length ? '（我发起了一次只读查询）' : '（我执行了一次写入操作）'),
+        content:
+          replyText ||
+          (queried.length
+            ? '（我发起了一次只读查询）'
+            : executed.length
+              ? '（我执行了一次写入操作）'
+              : '（我有几条写入草稿没有执行）'),
       },
       { role: 'user', content: sections.join('\n\n') },
     ];
@@ -2614,20 +3170,49 @@ export class AiChatService {
    *   1. 只能说系统**回报过**的东西（返回的 id / 标题 / 时间），不许编"已经提醒你了"；
    *   2. `conflicts` 非空时必须**主动**点名冲突条目（标题 + 时刻），不要等用户问；
    *   3. 不许把同一件事再输出一遍草稿 —— 靠 #draftKey 去重兜底，但提示词先说清能少一轮废调用。
+   *
+   * 第二段 `deferred` 是「超出本轮执行上限、没有执行」的那几条：**必须单独说**，
+   * 否则模型会按"我给了草稿 = 系统全办了"的语气收尾，而用户屏幕上明明还有几张待确认卡。
    */
-  #writeInjectionText(executed) {
-    if (!executed?.length) return '';
-    const records = executed.map((entry) => this.#compactWriteResult(entry));
-    const failed = records.filter((item) => item.ok === false);
-    return (
-      '[系统注入] 上面的**写操作已由系统自动执行完毕**（用户选了"自动审批"档，不需要他再点确认）。' +
-      '执行结果（JSON）：\n' +
-      JSON.stringify(records) +
-      '\n请据此用自然语言告诉用户系统**真的做了什么**（用返回的标题与时间，不要编造 id 或没回报过的细节）：' +
-      (failed.length ? '执行失败的条目要如实说没成、并说明原因，绝不能报成成功；' : '') +
-      '如果某条结果里的 conflicts 非空，必须**主动提醒**"这条和已有的哪条日程时间重叠"（点名冲突条目的标题与时刻），不要等用户来问。' +
-      '不要再说"我准备…你确认一下"，也不要重复输出同一条写入草稿。'
-    );
+  #writeInjectionText(executed, { deferred = [], maxActions = 0 } = {}) {
+    const sections = [];
+    if (executed?.length) {
+      const records = executed.map((entry) => this.#compactWriteResult(entry));
+      const failed = records.filter((item) => item.ok === false);
+      sections.push(
+        '[系统注入] 上面的**写操作已由系统自动执行完毕**（用户选了"自动审批"档，不需要他再点确认）。' +
+          '执行结果（JSON）：\n' +
+          JSON.stringify(records) +
+          '\n请据此用自然语言告诉用户系统**真的做了什么**（用返回的标题与时间，不要编造 id 或没回报过的细节）：' +
+          (failed.length ? '执行失败的条目要如实说没成、并说明原因，绝不能报成成功；' : '') +
+          '如果某条结果里的 conflicts 非空，必须**主动提醒**"这条和已有的哪条日程时间重叠"（点名冲突条目的标题与时刻），不要等用户来问。' +
+          '不要再说"我准备…你确认一下"，也不要重复输出同一条写入草稿。',
+      );
+    }
+    if (deferred?.length) {
+      /**
+       * 被截断的草稿只给"哪条没执行"，**不给 id** —— 它们还没落库，没有 id 可给。
+       * 标题来自 `draftName`（与过程清单同一口径），模型据此能点名说清是哪几条。
+       */
+      const brief = deferred.map((entry) => ({
+        action: entry.draft?.action ?? null,
+        target: entry.draft?.target ?? null,
+        title: draftName(entry.draft) || null,
+        explain: entry.draft?.explain ?? null,
+      }));
+      const limitText = maxActions === MAX_ACTIONS_UNLIMITED
+        ? ''
+        : `本轮最多自动执行 ${maxActions} 个操作（设置项「一轮最多执行几个操作」），`;
+      sections.push(
+        `[系统注入] 本轮还有 ${deferred.length} 条写入草稿**没有执行**：${limitText}` +
+          '超出的部分已留成**待确认草稿**，等用户点确认后才会落库。' +
+          '没有执行的是（JSON）：\n' +
+          JSON.stringify(brief) +
+          `\n请**明确告诉用户**"还有 ${deferred.length} 条因为超出本轮上限没有自动执行，需要你确认"，` +
+          '并说清分别是哪几条；**不要**谎称已经全部办好，也不要把它们再输出一遍草稿（确认卡已经在界面上）。',
+      );
+    }
+    return sections.join('\n\n');
   }
 
   /**

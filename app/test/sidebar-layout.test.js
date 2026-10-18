@@ -34,12 +34,14 @@ const VIEWS = [
   { id: 'chat', slot: 'main' },
   { id: 'calendar', slot: 'main' },
   { id: 'todo', slot: 'main' },
+  { id: 'pomodoro', slot: 'main' },
+  { id: 'timetable', slot: 'main' },
   { id: 'lms', slot: 'main' },
   { id: 'academic', slot: 'main' },
   { id: 'notes', slot: 'main' },
-  { id: 'review', slot: 'main' },
   { id: 'transfer', slot: 'main' },
-  { id: 'message', slot: 'main' },
+  // 「消息」已改名为「日志」，但 id 仍是 message（存盘的布局按 id 记，改名不能让用户布局失效）
+  { id: 'message', label: '日志', slot: 'main' },
   { id: 'settings', slot: 'bottom' },
 ];
 
@@ -58,7 +60,7 @@ const target = (value) => (value === null || value === undefined ? null : { zone
 test('默认布局 = 注册表顺序、全部常驻、没有一个收进「更多」', () => {
   const layout = L.resolve(null, VIEWS);
   // ★ 这条是"首次运行与加功能之前逐像素一致"的保证
-  assert.deepEqual(ids(layout.main), ['chat', 'calendar', 'todo', 'lms', 'academic', 'notes', 'review', 'transfer', 'message']);
+  ['chat', 'calendar', 'todo', 'pomodoro', 'timetable', 'lms', 'academic', 'notes', 'transfer', 'message'],
   assert.deepEqual(ids(layout.more), []);
   assert.deepEqual(ids(layout.bottom), ['settings']);
 });
@@ -104,7 +106,7 @@ test('坏数据一律退回默认布局（而不是"尽量解析"）', () => {
     const parsed = L.parse(bad);
     assert.equal(parsed, null, `${JSON.stringify(bad)} 应解析为 null`);
     const layout = L.resolve(parsed, VIEWS);
-    assert.deepEqual(ids(layout.main), ['chat', 'calendar', 'todo', 'lms', 'academic', 'notes', 'review', 'transfer', 'message']);
+  ['chat', 'calendar', 'todo', 'pomodoro', 'timetable', 'lms', 'academic', 'notes', 'transfer', 'message'],
     assert.deepEqual(ids(layout.more), []);
   }
 });

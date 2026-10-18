@@ -46,8 +46,8 @@ export const VOLATILE_FIELDS = Object.freeze(['id', 'createdAt', 'updatedAt']);
  * 传输需要 id，判等不需要 id，两者分开。
  *
  * 为什么是"减法"而不是像直传那样逐个字段列白名单：同步的是**同一个人在另一台设备上的
- * 同一份数据**（不是导入到别人数据里），少搬一个字段（比如笔记的 `ocr`、卡片的
- * `revision`、消息的 `usage`）就是那台设备上永久缺一块。白名单每加一个新字段都要回来改，
+ * 同一份数据**（不是导入到别人数据里），少搬一个字段（比如笔记的 `ocr`、消息的
+ * `usage`）就是那台设备上永久缺一块。白名单每加一个新字段都要回来改，
  * 迟早漏。减法只挡"换台机器就该重新算"的两个时间戳。
  */
 export function project(record) {
@@ -100,20 +100,29 @@ export const SYNC_COLLECTIONS = Object.freeze([
   { name: 'todos', label: '待办', module: 'calendar', store: 'todos', kind: 'collection', secret: null, deleteSync: 'none', duplicateKey: transferKey('todos'), title: transferTitle('todos') },
   { name: 'schedules', label: '日程', module: 'calendar', store: 'schedules', kind: 'collection', secret: null, deleteSync: 'none', duplicateKey: transferKey('schedules'), title: transferTitle('schedules') },
   { name: 'events', label: '事件', module: 'calendar', store: 'events', kind: 'collection', secret: null, deleteSync: 'none', duplicateKey: transferKey('events'), title: transferTitle('events') },
+  /**
+   * 番茄钟**会话账本**同步：这是"已经发生的历史"，换设备后今日/本周统计与周报
+   * 应该对得上，和笔记/待办一样属于用户数据。
+   *
+   * 注意这里**没有** `pomodoro-state`：当前在专注还是休息、还剩多少秒，是"这台设备
+   * 此刻正在发生的事"。把它同步过去会让 A 机开始的计时在 B 机上显示成同一个计时器，
+   * 两边都能暂停/停止，最终谁的状态算数说不清；服务端也把它放在 dataDir 的单例文件里，
+   * 刻意不注册成 JsonStore 集合 —— 不在这份目录里，就不可能被 push/pull 带出去。
+   *
+   * `deleteSync: 'none'`：账本是硬删除（没有 tombstone），与其它业务集合同口径。
+   * 同一段会话在两台设备各记一次的概率很低；按 id 合并 + 内容指纹已经能保证重复同步幂等。
+   */
   {
-    name: 'cards',
-    label: '卡片',
-    module: 'cards',
-    store: 'cards',
+    name: 'pomodoro-sessions',
+    label: '番茄钟记录',
+    module: 'pomodoro',
+    store: 'pomodoroSessions',
     kind: 'collection',
     secret: null,
     deleteSync: 'none',
-    duplicateKey: transferKey('cards'),
-    title: transferTitle('cards'),
-    // 与直传的差别（写进 README）：直传刻意不搬复习进度（那是"我复习到哪了"，导入到别人机器上
-    // 会让对方的复习计划被悄悄改掉）；同步搬 —— 同一账号的同一张卡，"复习到哪了"本来就该一致。
+    duplicateKey: (item) => `${item?.kind ?? ''}@${item?.startedAt ?? ''}@${item?.actualSec ?? ''}`,
+    title: (item) => `${item?.kind === 'break' ? '休息' : '专注'} ${item?.taskTitle || item?.day || item?.id || ''}`.trim(),
   },
-  { name: 'goals', label: '目标', module: 'goals', store: 'goals', kind: 'collection', secret: null, deleteSync: 'none', duplicateKey: transferKey('goals'), title: transferTitle('goals') },
   { name: 'memories', label: '记忆', module: 'memory', store: 'memories', kind: 'collection', secret: null, deleteSync: 'none', duplicateKey: transferKey('memories'), title: transferTitle('memories') },
   { name: 'ai-conversations', label: 'AI 对话', module: 'ai', store: 'aiConversations', kind: 'collection', secret: null, deleteSync: 'none', duplicateKey: transferKey('conversations'), title: transferTitle('conversations') },
   {

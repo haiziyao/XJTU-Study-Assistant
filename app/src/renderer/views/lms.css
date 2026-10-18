@@ -248,6 +248,11 @@
   cursor: not-allowed;
 }
 
+/* 「作业自动变成待办」开关：与自动同步同一张卡，单独一行、留一点间距 */
+.lms-todos-row {
+  margin-top: 8px;
+}
+
 /* 首页顶部状态提示：只在「还没读到登录态」或「读取失败」时出现 */
 .lms-status-notice {
   display: flex;
@@ -477,4 +482,326 @@
 
 .lms-download-status.is-failed {
   color: var(--red);
+}
+
+/* ------------------------------------------------ 课程页：四个板块页签 */
+
+/*
+  页签条要能横向滚动：手机上四块（作业/资料/课程回放/直播）放不进一屏，
+  硬挤会把「课程回放」压成两行。`overflow-x: auto` + `flex: none` 保住每个页签的宽度，
+  用户横滑就能看到最后一块。
+*/
+.lms-tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+  border-bottom: 1px solid var(--line);
+}
+
+.lms-tab {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--t), color var(--t), border-color var(--t);
+}
+
+.lms-tab:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* 选中态：底部一条高亮线（页签条本身有下边框，正好压住它） */
+.lms-tab.active {
+  background: var(--bg-elevated);
+  border-color: var(--line);
+  color: var(--fg);
+  box-shadow: inset 0 -2px 0 var(--blue);
+}
+
+.lms-tab-label {
+  white-space: nowrap;
+}
+
+/* 条数徽标：0 也显示，"这门课没有资料"是有效信息 */
+.lms-tab-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--fg-3);
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.lms-tab.active .lms-tab-count {
+  background: var(--blue);
+  color: #fff;
+}
+
+.lms-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+}
+
+/* 课程页顶部的课程摘要一行（教师 · 学期 · 学分） */
+.lms-course-summary {
+  font-size: 11px;
+  color: var(--fg-3);
+  padding: 2px 0 8px;
+}
+
+/* 活动行右侧的"进详情"箭头 */
+.lms-row-chevron {
+  flex: none;
+  margin-left: auto;
+  color: var(--fg-3);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.lms-row-clickable {
+  position: relative;
+}
+
+.lms-row-clickable:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+/* ------------------------------------------------------ 活动详情页 */
+
+.lms-activity .lms-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.lms-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lms-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* 详情正文：保住换行（作业描述里一行一条要求，挤成一坨就没法读了） */
+.lms-description {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--fg-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------ 附件行 */
+
+.lms-files {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lms-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-base);
+}
+
+.lms-file-icon {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--fg-2);
+  font-size: 13px;
+}
+
+/* 按类型给一点颜色：视频/图片和文档一眼分得开 */
+.lms-file-video {
+  color: var(--purple);
+}
+
+.lms-file-image {
+  color: var(--green);
+}
+
+.lms-file-audio {
+  color: var(--blue);
+}
+
+.lms-file-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.lms-file-name {
+  font-size: 12px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lms-file-meta {
+  font-size: 10px;
+  color: var(--fg-3);
+}
+
+.lms-file-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lms-file-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  text-decoration: none;
+}
+
+/* --------------------------------------------------------- 作业提交 */
+
+.lms-submission {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lms-submission-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-base);
+}
+
+.lms-submission-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lms-submission-text {
+  font-size: 12px;
+  color: var(--fg-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* 直播详情里的「去看这次直播的回放」：按钮 + 时间说明一行排开 */
+.lms-related {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* 回放视频行里的「在线播放」是个 <a>，要按按钮的观感走（它开的是外链，不是 api） */
+.lms-replay-play {
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* 窄屏：附件行改为竖排，按钮不掉到屏幕外 */
+@media (max-width: 760px) {
+  .lms-file-row {
+    flex-wrap: wrap;
+  }
+
+  .lms-file-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .lms-tab {
+    padding: 8px 10px;
+  }
+}
+
+/* 「下载到」一行：标签 + 路径输入 + 保存按钮 */
+.lms-dir-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.lms-dir-label {
+  flex: none;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+
+.lms-dir-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--fg);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.lms-dir-input:focus {
+  outline: none;
+  border-color: var(--blue);
+}
+
+/* 内嵌播放器：地址直接在页面里放，不走系统浏览器（避开权限提升的确认框） */
+.lms-player {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-base);
+}
+
+.lms-player-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lms-player-video {
+  width: 100%;
+  max-height: 52vh;
+  background: #000;
+  border-radius: var(--radius-sm);
 }

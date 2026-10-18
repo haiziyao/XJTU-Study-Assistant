@@ -1075,10 +1075,11 @@ test('AI：提示词讲清「笔记」的边界 —— 不否认它存在、不�
     assert.ok(system.includes('输出 target: "note" 的**写入**草稿'), '要明确禁止输出 note 的写入草稿');
     // target 只能来自各模块声明：不能自己发明（note 写入、lms 之类都不许）。
     // 措辞在 2026-10-13 改过：把"当前有哪些"从写死的一句改成分类清单 ——
-    // 那时新增了记忆/校规/三源检索/卡片/目标/周报，写死的清单立刻就过期了，
+    // 那时新增了记忆/校规/三源检索/周报，写死的清单立刻就过期了，
     // 而模型看不到某个 target 就等于那个功能对它不存在。
+    // 2026-10 再改：复习卡片与学习目标两个 target 随功能一起移除，这里不再列它们。
     assert.ok(system.includes('**只能取下面「领域说明」里真的出现过的那些**'), '协议里要收死 target 取值');
-    for (const target of ['`todo`', '`schedule`', '`event`', '`grade`', '`note`', '`search`', '`card`', '`goal`', '`weekly`', '`web`', '`memory`']) {
+    for (const target of ['`todo`', '`schedule`', '`event`', '`grade`', '`note`', '`search`', '`weekly`', '`web`', '`memory`']) {
       assert.ok(system.includes(target), `已声明的 target 要列进协议：${target}`);
     }
     assert.ok(system.includes('三源统一检索'), '要讲清 search 是干什么的（跨来源一次查完）');

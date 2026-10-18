@@ -1,12 +1,17 @@
 /**
  * 思源学堂（LMS）路由。
  *
- * 全部挂在 `/api/v1/lms` 下，只有「登录 / 验证码 / 同步」三类动作。
+ * 全部挂在 `/api/v1/lms` 下，只有「登录 / 验证码 / 同步 / 作业待办」几类动作。
  * 约定：
- * - 所有写操作都必须先通过 `/lms/sync/preview` 预览，再带 keys 调 `/lms/sync/apply`；
+ * - 日历同步必须先通过 `/lms/sync/preview` 预览，再带 keys 调 `/lms/sync/apply`；
+ * - 作业待办（`/lms/todos/*`）是独立能力：活动同步成功后自动跑，也可手动触发；
  * - `/lms/captcha` 直接回二进制图片，方便 `<img src>` 直接用；
- * - 未登录时统一返回 401 UNAUTHORIZED，前端据此弹登录框。
+ * - 未登录时业务接口统一返回 401；**唯一例外是 `/lms/todos/sync`**：它回 200 + 零计数 + reason，
+ *   让调用方能区分"没有作业"和"没登录所以没同步"（见下方路由处的注释）。
  */
+
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 import { HttpError } from '../../core/http/router.js';
 import { activityTypesOf } from './config.js';
@@ -22,6 +27,40 @@ function requireText(value, field) {
 
 function asBool(value) {
   return value === true || value === 'true' || value === '1' || value === 1;
+}
+
+/**
+ * 按扩展名猜 `Content-Type`。
+ *
+ * 什么时候需要它：学校返回的 blob 响应不一定带 `Content-Type`，而浏览器
+ * 拿到 `application/octet-stream` 的 PDF 会直接下载而不是预览 —— 点「预览」却弹下载框，
+ * 用户会以为按钮坏了。猜不出来才退回 octet-stream。
+ */
+function guessContentType(filename) {
+  const ext = String(filename ?? '').toLowerCase().split('.').pop() ?? '';
+  const table = {
+    pdf: 'application/pdf',
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    svg: 'image/svg+xml',
+    txt: 'text/plain; charset=utf-8',
+    md: 'text/markdown; charset=utf-8',
+    csv: 'text/csv; charset=utf-8',
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+    mp3: 'audio/mpeg',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    zip: 'application/zip',
+  };
+  return table[ext] ?? '';
 }
 
 function normalizeKeys(value) {
@@ -86,6 +125,20 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
 
   router.post(`${P}/settings`, ({ body }) => lms.updateSettings({ autoSync: body?.autoSync, autoSyncIntervalHours: body?.autoSyncIntervalHours }));
 
+  /* ------------------------------------------------------------ 作业 → 待办
+   *
+   * 设计要点：**未登录也返回 200**，但计数全是 0 且带 `reason`。
+   *
+   * 为什么不回 401：调用方（待办页自动刷新、AI、设置页）需要区分「今天没有作业」与
+   * 「登录态失效了，所以这次什么都没同步」。401 会让人以为"作业没有"，而 200 + reason
+   * 才能让界面说清原因。写操作依旧受保护：未登录时服务层一条都不写。
+   */
+  router.get(`${P}/todos/config`, () => lms.todosConfig());
+
+  router.post(`${P}/todos/config`, ({ body }) => lms.updateTodoSettings({ enabled: body?.enabled }));
+
+  router.post(`${P}/todos/sync`, ({ body }) => lms.syncTodos({ refresh: asBool(body?.refresh), refreshDetails: true }));
+
   router.get(`${P}/courses`, async ({ query }) => {
     if (asBool(query.refresh)) return lms.refreshCourses();
     const cached = lms.listCourses();
@@ -130,10 +183,56 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
 
   /**
    * 课程页：课程信息 + 这门课的活动（按 回放/作业/资料/直播 分组）。
-   * 全部走本地缓存，点开课程页不会再打一次学校接口。
+   *
+   * `?refresh=1` 强制重拉这门课的活动（用户点了刷新按钮）；不传时服务层按
+   * `ACTIVITY_TTL_MS` 节流地自动补齐 —— 缓存新鲜就直接读本地，不再打学校接口。
    */
-  router.get(`${P}/courses/:id`, ({ params }) => lms.coursePage(params.id));
+  router.get(`${P}/courses/:id`, ({ params, query }) => lms.coursePage(params.id, { refresh: asBool(query?.refresh) }));
 
+  /**
+   * 回放视频的**字节转发**（`<video>` 直接用这条路由播放）。
+   *
+   * 为什么不把录播站地址直接给 `<video>`：媒体地址通常带防盗链（校验 Referer、要票据），
+   * 而浏览器的 `<video>` 无法自定义 Referer，直接指过去必然加载失败。
+   * 这里由后端带上来源头取流、再流式转发 —— 顺便也绕开了跨域。
+   *
+   * 实现要点：**直接写 `res`**（`pipeline` 到响应），不缓冲整段视频；
+   * 路由层有 `if (res.writableEnded) return;`，所以写完返回即可，不会被再发一次 JSON。
+   */
+  router.get(`${P}/replay/stream`, async ({ req, query, res }) => {
+    const activityId = query?.activityId;
+    if (!activityId) throw HttpError.badRequest('缺少 activityId');
+    const source = await lms.replayStreamSource({ activityId, label: query?.label });
+
+    /*
+     * **转发 Range**：`<video>` 拖进度条靠的就是它。
+     *
+     * 浏览器发 `Range: bytes=N-`，上游回 `206 + Content-Range`；这里原样转发请求头、
+     * 也原样把 206 / Content-Range 传回去。之前写死 `Accept-Ranges: none` 又不转 Range，
+     * 等于告诉浏览器"这片不能跳" —— 进度条能拖、画面不动，用户报的就是这个。
+     */
+    const range = req.headers.range;
+    const upstream = await lms.openReplayStream(source.url, { range });
+    const ok = (upstream.status >= 200 && upstream.status < 300) || upstream.status === 206;
+    if (!ok || !upstream.body) {
+      throw HttpError.upstream(`录播站返回 HTTP ${upstream.status}，取不到录像流`);
+    }
+
+    const pass = (name) => upstream.headers?.get?.(name) ?? null;
+    const headers = {
+      'Content-Type': pass('content-type') || 'video/mp4',
+      'Cache-Control': 'private, max-age=300',
+      // 上游能分段就如实告诉浏览器；不能就写 none，别骗它说可以跳
+      'Accept-Ranges': pass('accept-ranges') || (upstream.status === 206 ? 'bytes' : 'none'),
+    };
+    const length = pass('content-length');
+    if (length) headers['Content-Length'] = length;
+    const contentRange = pass('content-range');
+    if (contentRange) headers['Content-Range'] = contentRange;
+    res.writeHead(upstream.status, headers);
+    await pipeline(Readable.fromWeb(upstream.body), res);
+    // 故意不返回实体：`res.writableEnded` 已为真，路由会直接结束
+  });
   /** 某个回放的视频列表（要联网换录播站票据，所以是显式动作）。 */
   router.get(`${P}/activities/:id/replays`, ({ params }) => lms.replayVideos(params.id));
 
@@ -150,10 +249,14 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
   /** 清掉已结束的任务记录（不删文件）。 */
   router.post(`${P}/downloads/clear`, () => lms.clearDownloads());
 
-  /** 某门课的课件/资料清单。 */
-  router.get(
-    `${P}/courses/:id/materials`,
-    planned('课程资料清单', { params: { id: 'string' }, returns: { items: '[{ id, title, kind, bytes, uploadedAt, downloadable }]' } }),
+  /**
+   * 某门课的课件/资料清单。
+   *
+   * 学堂没有独立的资料接口 —— 资料就是一种课程活动（`type: 'material'`），
+   * 附件挂在它的详情里。`?detail=1` 时顺带把每条资料的附件补上（会多打 N 次详情接口）。
+   */
+  router.get(`${P}/courses/:id/materials`, ({ params, query }) =>
+    lms.materials(params.id, { withDetail: asBool(query?.detail) }),
   );
 
   /** 某门课的讨论区主题。 */
@@ -163,9 +266,41 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
   );
 
   /** 某次作业的提交情况（是否提交、时间、得分、评语、附件）。 */
+  router.get(`${P}/activities/:id/submission`, ({ params }) => lms.submission(params.id));
+
+  /**
+   * 附件/提交文件的字节转发。
+   *
+   * 学校那个 `blob` 地址要 CAS cookie，浏览器直连必 401 —— 所以字节由后端代取再转发。
+   * `inline=1` 时让浏览器直接预览（PDF/图片），否则按下载处理。
+   * `name` 只用于拼 `Content-Disposition`，**绝不参与路径拼接**。
+   */
+  router.get(`${P}/attachments/:id`, async ({ params, query }) => {
+    const result = await lms.attachment(params.id);
+    const inline = asBool(query?.inline);
+    const filename = typeof query?.name === 'string' ? query.name : '';
+    const contentType = result.contentType || guessContentType(filename) || 'application/octet-stream';
+    // 文件名里的非 ASCII（中文课件名很常见）必须走 RFC 5987 的 filename*，
+    // 直接塞进 filename= 会被某些浏览器丢成乱码或截断。
+    const disposition = inline ? 'inline' : 'attachment';
+    const headers = {
+      'Content-Type': contentType,
+      'Content-Length': String(result.bytes.length),
+      'Cache-Control': 'private, max-age=300',
+    };
+    if (filename) {
+      const ascii = filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+      headers['Content-Disposition'] = `${disposition}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+    } else {
+      headers['Content-Disposition'] = disposition;
+    }
+    return { __raw: { status: 200, body: Buffer.from(result.bytes), headers } };
+  });
+
+  /** 课程通知/公告（可按课程过滤）。 */
   router.get(
-    `${P}/activities/:id/submission`,
-    planned('作业提交情况', { params: { id: 'string' }, returns: { submitted: 'boolean', submittedAt: 'string?', score: 'number?', comment: 'string?', files: 'array' } }),
+    `${P}/notices`,
+    planned('课程通知与公告', { params: { courseId: 'string?' }, returns: { items: '[{ id, courseId, courseName, title, publishedAt, body }]' } }),
   );
 
   /** 课程通知/公告（可按课程过滤）。 */

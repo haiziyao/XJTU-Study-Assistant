@@ -61,6 +61,59 @@ export const WEB_SEARCH_MODES = Object.freeze(['web', 'campus']);
 /** 支持"填了 key 就优先走 API"的四家。数组顺序 = auto 模式下的优先级。 */
 export const SEARCH_PROVIDERS = Object.freeze(['tavily', 'brave', 'serper', 'bing']);
 
+// ---------------------------------------------------------------------------
+// DeepSeek 官方 Search / Fetch（新通道，2026-10 上线）
+// ---------------------------------------------------------------------------
+
+/**
+ * DeepSeek 官方检索的固定路径。根地址由 `config.searchApiBase` 给出（默认官方，可指向自建代理）。
+ *
+ * 为什么单独成一家而不是塞进 `SEARCH_PROVIDERS`：
+ *   ① 它用的是**AI 接入的 `apiKey`**（同一个 DeepSeek 账号、同一份账单），不是 `searchApiKeys` 里的
+ *      某一家搜索服务；混进那张表会让 `resolveSearchBackend` 的 auto 优先级与打码逻辑全乱；
+ *   ② 它比另外四家多两件事 —— `need_content` 能一次带回全文、`Fetch` 能直接返回 Markdown 正文。
+ */
+export const DEEPSEEK_SEARCH_PATH = '/v1/tools/search';
+export const DEEPSEEK_FETCH_PATH = '/v1/tools/fetch';
+/** `count` 的官方上限（1–50）。注意它只是"返回几条"，与"读几篇正文"无关。 */
+export const DEEPSEEK_COUNT_MAX = 50;
+/** Search 请求超时：开了 `need_content` 时响应会明显更大（N 条全文），所以比普通搜索宽。 */
+export const DEEPSEEK_SEARCH_TIMEOUT_MS = 20_000;
+/** Fetch 单页超时。 */
+export const DEEPSEEK_FETCH_TIMEOUT_MS = 20_000;
+/** 408/429/5xx 的重试次数（**不含首次**）与退避基数。 */
+export const DEEPSEEK_RETRY_MAX = 2;
+export const DEEPSEEK_RETRY_BASE_MS = 300;
+/** 重试总时长上限：QPS 恢复通常只要几秒，等太久不如直接降级抓取。 */
+export const DEEPSEEK_RETRY_TOTAL_MS = 5_000;
+/** 返回体的安全上限（开了 need_content 时一整页 JSON 可能很大）。 */
+const DEEPSEEK_BODY_MAX = 8_000_000;
+
+/**
+ * 官方接口的明确错误码。
+ *
+ * 为什么 402 与 429 必须分开：
+ *   - **402（余额不足）重试没有意义** —— 再等也不会自动有钱，只能让用户去充值；
+ *     所以它必须是一个**不可重试**的明确错误，且文案要直接说"账户余额不足"；
+ *   - **429（QPS 超限）重试有意义** —— 官方 QPS 是账号粒度 5，退避几百毫秒往往就能过。
+ * 把两者混成"搜索失败"，用户会以为网络坏了，实际是欠费或被限流，处理方式完全不同。
+ */
+export const SEARCH_ERROR_CODES = Object.freeze({
+  BALANCE_EXHAUSTED: 'SEARCH_BALANCE_EXHAUSTED',
+  KEY_INVALID: 'SEARCH_KEY_INVALID',
+  RATE_LIMITED: 'SEARCH_RATE_LIMITED',
+  FETCH_FORBIDDEN: 'SEARCH_FETCH_FORBIDDEN',
+  FETCH_NOT_FOUND: 'SEARCH_FETCH_NOT_FOUND',
+});
+
+/** `need_content` 直接带回的正文来源标记（与 container/body/meta-description 并列）。 */
+export const DEEPSEEK_CONTENT_NOTE =
+  '这段正文由 DeepSeek 官方 Search 的 need_content 直接返回（官方已做正文抽取），不是本地容器解析。';
+/** DeepSeek Fetch 返回 Markdown 正文时附给模型的口径。 */
+export const DEEPSEEK_FETCH_NOTE =
+  '这段正文由 DeepSeek 官方 Fetch API 返回（Markdown 格式、官方已去掉导航等噪声），不是本地容器解析。';
+
+
 /**
  * 校内站点后缀。`*.xjtu.edu.cn` 覆盖教务/图书馆/学院/研究生院等子站。
  * 判据用**后缀**而不是硬编码主机名，新开一个子站不用改代码。
@@ -1158,28 +1211,78 @@ export function normalizeSearchKeys(config = {}) {
   const single = String(config.searchApiKey ?? '').trim();
   if (single) {
     const wanted = SEARCH_PROVIDERS.includes(config.searchProvider) ? config.searchProvider : null;
-    const target = wanted ?? SEARCH_PROVIDERS.find((provider) => !keys[provider]) ?? SEARCH_PROVIDERS[0];
-    if (target && !keys[target]) keys[target] = single;
+    // 显式选 DeepSeek 时，这个字段是"官方搜索的覆盖 key"（见 resolveDeepSeekKey），
+    // **不能**再喂给 Tavily/Brave/…：那会把 DeepSeek 的 key 发给别家，还让打码界面显示错的服务。
+    if (String(config.searchProvider ?? '').trim().toLowerCase() !== 'deepseek') {
+      const target = wanted ?? SEARCH_PROVIDERS.find((provider) => !keys[provider]) ?? SEARCH_PROVIDERS[0];
+      if (target && !keys[target]) keys[target] = single;
+    }
   }
   return keys;
 }
 
 /**
+ * DeepSeek 官方接口用哪把钥匙。
+ *
+ * 默认复用「AI 接入」里的 `apiKey`：Search / Fetch 与 Chat 是同一个 DeepSeek 账号、同一份余额，
+ * 用户不用再单独配一份；只有**显式**把 `searchProvider` 选成 `deepseek` 时，才允许用
+ * `searchApiKey` 覆盖它 —— 自建代理常常要另一枚 token。
+ *
+ * `auto` 下**绝不**把 `searchApiKey` 当 DeepSeek key：那是 Tavily/Brave/Serper/Bing 的通用密钥字段，
+ * 误用会把某家的 key 发给 DeepSeek，既搜不到也泄露了密钥。
+ */
+export function resolveDeepSeekKey(config = {}) {
+  const provider = String(config.searchProvider ?? 'auto').trim().toLowerCase();
+  const override = provider === 'deepseek' ? String(config.searchApiKey ?? '').trim() : '';
+  return override || String(config.apiKey ?? '').trim();
+}
+
+/** `searchApiBase` 归一化：去掉末尾斜杠；脏值回落官方地址（配置层已校验，这里只保证拼接一定对）。 */
+export function deepSeekApiBase(config = {}) {
+  const raw = String(config.searchApiBase ?? '').trim() || 'https://api.deepseek.com';
+  try {
+    const url = new URL(raw);
+    if (!/^https?:$/.test(url.protocol) || !url.hostname) return 'https://api.deepseek.com';
+    return raw.replace(/\/+$/, '');
+  } catch {
+    return 'https://api.deepseek.com';
+  }
+}
+
+/** 是否允许用官方 Fetch 读单页：有 key、不是"强制只抓取"、且没关掉正文。 */
+export function resolveDeepSeekFetch(config = {}) {
+  const apiKey = resolveDeepSeekKey(config);
+  if (!apiKey) return null;
+  const provider = String(config.searchProvider ?? 'auto').trim().toLowerCase();
+  // `scrape` 是用户明确要求"只用免密钥抓取"，这时偷偷调官方 Fetch 会**产生费用**，不能做
+  if (provider === 'scrape') return null;
+  // `searchNeedContent=false` 等于"只要链接与摘要"：正文抓取也一并关掉，省掉计费与 token
+  if (config.searchNeedContent === false) return null;
+  return { apiKey, baseUrl: deepSeekApiBase(config) };
+}
+
+/**
  * 决定这一轮用哪个后端。
  *
- * 规则（用户已拍板的口径）：
- *   - `searchProvider = 'auto'`（默认）：**有 key 就用 API**（按 tavily → brave → serper → bing 优先），
- *     一个 key 都没有就退回解析结果页；
+ * 规则（用户已拍板的口径，2026-10 加入 DeepSeek 官方）：
+ *   - `searchProvider = 'auto'`（默认）：**有 AI 接入密钥就优先用 DeepSeek 官方 Search**；
+ *     没配 DeepSeek key 时再看 Tavily/Brave/Serper/Bing 的密钥；一个都没有就解析结果页；
+ *   - `searchProvider = 'deepseek'`：有 key 就用官方接口；没有就退回结果页并说明；
  *   - `searchProvider = 'tavily'|'brave'|'serper'|'bing'`：指定的那家有 key 就用它；
  *     没 key 则退到"其它有 key 的"；再没有就退回结果页，并在 reason 里说明；
  *   - `searchProvider = 'scrape'`：强制只解析结果页（哪怕配了 key）。
  *
- * @returns {{kind:'api'|'scrape', id:string, providers:string[], reason:string}}
+ * 为什么官方优先：它一次 `search + need_content` 就能拿回 N 条正文（按成功请求计费，
+ * 一次约 0.005 元），而抓取路径要打 3 个结果页引擎、还要逐页抓正文 —— 又慢又常被反爬挡。
+ * 但**抓取路径永远保留**：没 key、欠费、QPS 打满、代理不可达时，它是唯一的兜底。
+ *
+ * @returns {{kind:'deepseek'|'api'|'scrape', id:string, providers:string[], reason:string}}
  */
 export function resolveSearchBackend(config = {}) {
   const wanted = String(config.searchProvider ?? 'auto').trim().toLowerCase();
   const keys = normalizeSearchKeys(config);
   const available = SEARCH_PROVIDERS.filter((provider) => keys[provider]);
+  const deepseekKey = resolveDeepSeekKey(config);
 
   if (wanted === 'scrape') {
     return {
@@ -1187,6 +1290,26 @@ export function resolveSearchBackend(config = {}) {
       id: 'scrape',
       providers: SCRAPE_ENGINES.map((engine) => engine.id),
       reason: '配置要求只用结果页解析（searchProvider=scrape），不调用搜索 API',
+    };
+  }
+
+  // `deepseek` 显式指定，或 `auto` 检测到 AI 接入密钥 → 优先官方
+  if (wanted === 'deepseek' || (wanted === 'auto' && deepseekKey)) {
+    if (deepseekKey) {
+      return {
+        kind: 'deepseek',
+        id: 'deepseek',
+        providers: ['deepseek'],
+        reason: wanted === 'deepseek'
+          ? '使用 DeepSeek 官方 Search API（searchProvider=deepseek）'
+          : '自动选择：DeepSeek 官方搜索（检测到「AI 接入」里已配置密钥）',
+      };
+    }
+    return {
+      kind: 'scrape',
+      id: 'scrape',
+      providers: SCRAPE_ENGINES.map((engine) => engine.id),
+      reason: '指定了 DeepSeek 官方搜索，但「AI 接入」里没有可用的 API key → 退回解析结果页',
     };
   }
 
@@ -1265,6 +1388,450 @@ async function callApiProvider(provider, { query, limit, key, fetchImpl, endpoin
 }
 
 // ---------------------------------------------------------------------------
+// DeepSeek 官方 Search / Fetch
+// ---------------------------------------------------------------------------
+//
+// 为什么这条通道值得单独实现：
+//   - **一次 search + need_content:true 就把 N 条正文带回来了**。官方按"成功请求次数"计费
+//     （Search 5 元/1000 次、Fetch 同价），所以 1 次 Search 拿 8 条全文 ≈ 0.005 元；
+//     换成"Search 一次 + 逐页 Fetch 8 次"就是 9 次 ≈ 0.045 元 —— 贵 9 倍，还多 8 次往返延迟。
+//   - Fetch 返回的是官方抽好的 Markdown，省掉我们那套"正文容器猜测"（VSB 模板一改版就会失手）。
+//   - 但**失败/欠费/限流时抓取路径必须还在**：官方接口不可用不代表网页读不到，
+//     降级到搜狗/360/Bing/百度结果页 + 本地正文提取，至少还能给出真实链接与正文。
+
+const defaultDeepSeekSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 退避等待函数允许注入：测试把 300ms 压到 1ms，不用真的等。 */
+function deepSeekSleepFn(custom) {
+  return typeof custom === 'function' ? custom : defaultDeepSeekSleep;
+}
+
+/** 从上游错误体里抠一句人能看懂的话（可能是 JSON，也可能是 HTML/纯文本）。 */
+function upstreamErrorMessage(text) {
+  const source = String(text ?? '').trim();
+  if (!source) return '';
+  try {
+    const json = JSON.parse(source);
+    const detail = json?.error?.message ?? json?.error ?? json?.message ?? json?.detail;
+    if (detail) return String(detail).slice(0, 300);
+  } catch {
+    /* 不是 JSON，按纯文本处理 */
+  }
+  return source.replace(/\s+/g, ' ').slice(0, 300);
+}
+
+/**
+ * HTTP 状态码 → 明确错误。
+ *
+ * 402 与 429 的差别是这里最要紧的一条：
+ *   - 402 余额不足：**不可重试**，文案必须直说"账户余额不足"；
+ *   - 429 QPS 超限：**可重试**，退避几百毫秒通常就恢复。
+ * 4xx 里只有 408/429 可重试（其余重试只会白烧请求）；5xx 一律可重试。
+ */
+function deepSeekStatusError(status, detail, { operation = '搜索', fetch = false } = {}) {
+  const suffix = detail ? `：${detail}` : '';
+  if (status === 400) {
+    return { code: 'SEARCH_BAD_REQUEST', message: `DeepSeek ${operation}参数非法（400）${suffix}`, retryable: false, status };
+  }
+  if (status === 401) {
+    return {
+      code: SEARCH_ERROR_CODES.KEY_INVALID,
+      message: `DeepSeek API key 无效（401），${operation}接口不可用${suffix}`,
+      retryable: false,
+      status,
+    };
+  }
+  if (status === 402) {
+    return {
+      code: SEARCH_ERROR_CODES.BALANCE_EXHAUSTED,
+      // Search 用需求里指定的原话；Fetch 换一个准确的"抓取接口"说法
+      message: fetch ? 'DeepSeek 账户余额不足，抓取接口不可用' : 'DeepSeek 账户余额不足，搜索接口不可用',
+      detail,
+      retryable: false,
+      status,
+    };
+  }
+  if (status === 403) {
+    return {
+      code: fetch ? SEARCH_ERROR_CODES.FETCH_FORBIDDEN : 'SEARCH_FORBIDDEN',
+      message: `${operation}被 DeepSeek 安全策略拒绝（403）${suffix}`,
+      retryable: false,
+      status,
+    };
+  }
+  if (status === 404) {
+    return {
+      code: fetch ? SEARCH_ERROR_CODES.FETCH_NOT_FOUND : 'SEARCH_NOT_FOUND',
+      message: fetch ? `这一页拿不到可用正文（404）${suffix}` : `DeepSeek 搜索没有可用结果（404）${suffix}`,
+      retryable: false,
+      status,
+    };
+  }
+  if (status === 408) {
+    return { code: 'SEARCH_UPSTREAM_TIMEOUT', message: `DeepSeek ${operation}读取响应超时（408）${suffix}`, retryable: true, status };
+  }
+  if (status === 413) {
+    return { code: 'SEARCH_TOO_LARGE', message: `这一页太大，DeepSeek ${operation}拒绝处理（413）${suffix}`, retryable: false, status };
+  }
+  if (status === 429) {
+    return {
+      code: SEARCH_ERROR_CODES.RATE_LIMITED,
+      message: `DeepSeek ${operation}触发 QPS 限制（429，账号粒度 5 QPS）${suffix}`,
+      retryable: true,
+      status,
+    };
+  }
+  if (status >= 500) {
+    return { code: `SEARCH_UPSTREAM_${status}`, message: `DeepSeek ${operation}服务端错误（${status}）${suffix}`, retryable: true, status };
+  }
+  return { code: `SEARCH_HTTP_${status}`, message: `DeepSeek ${operation}返回 HTTP ${status}${suffix}`, retryable: false, status };
+}
+
+/** 一次官方接口 POST（Search / Fetch 共用）。`signal` 是用户停止信号，要和超时信号合并。 */
+async function deepSeekPost({ endpoint, apiKey, payload, fetchImpl, signal, timeoutMs }) {
+  const doFetch = typeof fetchImpl === 'function' ? fetchImpl : globalThis.fetch;
+  if (typeof doFetch !== 'function') {
+    return { ok: false, status: 0, error: '当前运行环境没有可用的 fetch（Node 版本过低？）' };
+  }
+  const timer = withTimeout(timeoutMs);
+  let combined = timer.signal;
+  if (signal && typeof signal === 'object') {
+    // AbortSignal.any 在 Node 20.3+ 才有；没有就退回超时信号（停止信号仍会在 fetch 外被上层检查）
+    combined = typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function'
+      ? AbortSignal.any([timer.signal, signal])
+      : timer.signal;
+  }
+  try {
+    const response = await doFetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal: combined,
+    });
+    if (!response) return { ok: false, status: 0, error: 'fetch 没有返回 Response' };
+    const status = Number(response.status ?? 0);
+    let body = '';
+    try {
+      body = String((await response.text()) ?? '');
+    } catch (error) {
+      return { ok: false, status, error: `读取响应体失败：${describeError(error)}`, aborted: Boolean(signal?.aborted) };
+    }
+    if (body.length > DEEPSEEK_BODY_MAX) body = body.slice(0, DEEPSEEK_BODY_MAX);
+    return { ok: Boolean(response.ok), status, body, aborted: Boolean(signal?.aborted) };
+  } catch (error) {
+    return { ok: false, status: 0, error: describeError(error), aborted: Boolean(signal?.aborted) };
+  } finally {
+    timer.done();
+  }
+}
+
+/**
+ * 日期归一化：官方给 RFC3339（UTC）或 null；我们同时留原值（date）与 `YYYY-MM-DD`（publishedAt）。
+ *
+ * `publishedAt` 取**本机时区**的日期，不是直接用 UTC 的日期：真网实测官方会把北京时间当天 0 点
+ * 编码成前一天 `16:00Z`（如 2026-10-10 的稿件给 `2026-10-09T16:00:00Z`），直接切 UTC 日期会少一天，
+ * "最近新闻"就会排错/说错日期。`date` 仍保留 UTC ISO 原值，排序/跨时区核对都不丢精度。
+ */
+function normalizeDeepSeekDate(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  const time = Date.parse(raw);
+  if (!Number.isFinite(time)) return null;
+  const date = new Date(time);
+  const pad = (n) => String(n).padStart(2, '0');
+  return {
+    iso: date.toISOString(),
+    date: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+  };
+}
+
+/** 一条官方结果 → 我们内部的 item 形状（保留 rerankScore/authority/summary/date/siteName/content）。 */
+function mapDeepSeekResult(raw, { scope, needContent }) {
+  if (!raw || typeof raw !== 'object') return null;
+  const url = String(raw.url ?? '').trim();
+  const title = collapseInline(raw.title ?? '');
+  if (!url || !title || isJunkUrl(url)) return null;
+  const item = {
+    title,
+    url,
+    // snippet 是短摘要（100–200 字），summary 是给模型读的长摘要（600–800 字）；两个都留。
+    snippet: collapseInline(raw.snippet ?? '').slice(0, 400),
+    source: 'deepseek-search',
+    scope,
+  };
+  if (raw.summary) item.summary = String(raw.summary).trim();
+  if (needContent && raw.content) item.content = String(raw.content);
+  const score = Number(raw.rerank_score);
+  if (Number.isFinite(score)) item.rerankScore = score;
+  const authority = Number(raw.authority);
+  if (Number.isFinite(authority)) item.authority = authority;
+  const date = normalizeDeepSeekDate(raw.date);
+  if (date) {
+    item.date = date.iso;
+    // 现有投影/提示词都认 publishedAt：映射到它，"最近新闻"才能按日期排
+    item.publishedAt = date.date;
+  }
+  if (raw.site_name) item.siteName = collapseInline(raw.site_name);
+  return item;
+}
+
+/** 官方结果的排序：rerank_score 降序 → authority 降序 → date 新者优先 → 原顺序（稳定）。 */
+function sortDeepSeekItems(items) {
+  const timestamp = (item) => {
+    const time = Date.parse(item?.date ?? item?.publishedAt ?? '');
+    return Number.isFinite(time) ? time : 0;
+  };
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => {
+      const left = Number.isFinite(a.item.rerankScore) ? a.item.rerankScore : -1;
+      const right = Number.isFinite(b.item.rerankScore) ? b.item.rerankScore : -1;
+      if (right !== left) return right - left;
+      const authorityLeft = Number.isFinite(a.item.authority) ? a.item.authority : -1;
+      const authorityRight = Number.isFinite(b.item.authority) ? b.item.authority : -1;
+      if (authorityRight !== authorityLeft) return authorityRight - authorityLeft;
+      const dateDiff = timestamp(b.item) - timestamp(a.item);
+      if (dateDiff) return dateDiff;
+      return a.index - b.index;
+    })
+    .map((entry) => entry.item);
+}
+
+/**
+ * 调 DeepSeek 官方 Search。
+ *
+ * @param {object} options
+ * @param {string} options.query 检索词（1–128 字，支持 `site:` / `-site:` / 引号短语 / `lang:` / `after:` / `before:`）
+ * @param {number} [options.count] 返回条数（1–50；**不是读几篇**）
+ * @param {boolean} [options.needContent] 是否让官方直接带回全文（默认 true）
+ * @param {string} [options.oriQuestion] 用户原始问题（帮助官方理解意图）
+ * @param {string} [options.localization] 结果本地化用的 IP（可选，未传则由官方按服务端位置判断）
+ * @param {string} options.apiKey DeepSeek API key
+ * @param {string} [options.baseUrl] API 根地址（默认官方；可指向自建代理）
+ * @param {Function} [options.fetchImpl] 注入 fetch（测试用本地假服务器）
+ * @param {AbortSignal} [options.signal] 用户停止信号
+ * @param {Function|object} [options.log]
+ * @returns {Promise<{items:Array, error:null|{code:string,message:string,retryable:boolean,status?:number},
+ *   status:number, attempts:number, elapsedMs:number, empty?:boolean}>}
+ *   **永不 throw**：欠费/密钥无效/限流都折叠成 `error.code`，由上层决定"降级抓取"还是"直接报错"。
+ */
+export async function searchDeepSeek({
+  query,
+  count = SEARCH_LIMIT_DEFAULT,
+  needContent = true,
+  oriQuestion = '',
+  localization,
+  apiKey,
+  baseUrl = 'https://api.deepseek.com',
+  fetchImpl,
+  signal,
+  log,
+  endpoint,
+  timeoutMs = DEEPSEEK_SEARCH_TIMEOUT_MS,
+  retryMax = DEEPSEEK_RETRY_MAX,
+  retryBaseMs = DEEPSEEK_RETRY_BASE_MS,
+  sleep,
+  scope = 'web',
+} = {}) {
+  const warn = makeLogger(log);
+  const text = String(query ?? '').trim();
+  const key = String(apiKey ?? '').trim();
+  const limit = clampInt(count, 1, DEEPSEEK_COUNT_MAX, SEARCH_LIMIT_DEFAULT);
+  const base = String(baseUrl ?? '').trim().replace(/\/+$/, '') || 'https://api.deepseek.com';
+  const url = endpoint || `${base}${DEEPSEEK_SEARCH_PATH}`;
+  const wait = deepSeekSleepFn(sleep);
+
+  if (!text) {
+    return { items: [], error: { code: 'SEARCH_BAD_REQUEST', message: '检索词为空，未发起请求', retryable: false }, status: 0, attempts: 0, elapsedMs: 0 };
+  }
+  if (!key) {
+    return {
+      items: [],
+      error: { code: SEARCH_ERROR_CODES.KEY_INVALID, message: '没有可用的 DeepSeek API key（请在「AI 接入」里配置）', retryable: false },
+      status: 0,
+      attempts: 0,
+      elapsedMs: 0,
+    };
+  }
+
+  const payload = { query: text, count: limit, need_content: Boolean(needContent) };
+  if (oriQuestion) payload.ori_question = String(oriQuestion);
+  if (localization) payload.localization = String(localization);
+
+  const startedAt = Date.now();
+  let attempts = 0;
+  let lastStatus = 0;
+  for (;;) {
+    attempts += 1;
+    const response = await deepSeekPost({ endpoint: url, apiKey: key, payload, fetchImpl, signal, timeoutMs });
+    lastStatus = response.status ?? 0;
+    if (response.ok) {
+      let json;
+      try {
+        json = JSON.parse(response.body);
+      } catch (error) {
+        const failure = {
+          code: 'SEARCH_BAD_RESPONSE',
+          message: `DeepSeek Search 返回的不是合法 JSON（${error.message}），可能被网关拦了`,
+          retryable: false,
+          status: lastStatus,
+        };
+        warn(failure.message, 'warn');
+        return { items: [], error: failure, status: lastStatus, attempts, elapsedMs: Date.now() - startedAt };
+      }
+      if (!json || typeof json !== 'object' || !Array.isArray(json.results)) {
+        const failure = { code: 'SEARCH_BAD_RESPONSE', message: 'DeepSeek Search 响应结构不符合预期（缺少 results 数组）', retryable: false, status: lastStatus };
+        warn(failure.message, 'warn');
+        return { items: [], error: failure, status: lastStatus, attempts, elapsedMs: Date.now() - startedAt };
+      }
+      const items = sortDeepSeekItems(
+        json.results.map((raw) => mapDeepSeekResult(raw, { scope, needContent })).filter(Boolean),
+      );
+      return {
+        items,
+        error: null,
+        status: lastStatus,
+        attempts,
+        elapsedMs: Date.now() - startedAt,
+        empty: items.length === 0,
+        count: limit,
+        needContent: Boolean(needContent),
+      };
+    }
+
+    const failure = response.aborted
+      ? { code: 'SEARCH_ABORTED', message: '检索已被用户停止', retryable: false, status: lastStatus }
+      : lastStatus > 0
+        ? deepSeekStatusError(lastStatus, upstreamErrorMessage(response.body))
+        : { code: 'SEARCH_NETWORK_ERROR', message: `DeepSeek Search 请求失败：${response.error ?? '无响应'}`, retryable: false, status: 0 };
+
+    const elapsed = Date.now() - startedAt;
+    if (!failure.retryable || attempts > retryMax || elapsed >= DEEPSEEK_RETRY_TOTAL_MS) {
+      warn(`DeepSeek Search 失败（第 ${attempts} 次，${failure.code}）：${failure.message}`, 'warn');
+      return { items: [], error: failure, status: lastStatus, attempts, elapsedMs: elapsed };
+    }
+    // 指数退避：300ms → 600ms → …；同时受"单次 2s、总时长 5s"两道闸门限制
+    const delay = Math.min(retryBaseMs * 2 ** (attempts - 1), 2_000, Math.max(0, DEEPSEEK_RETRY_TOTAL_MS - elapsed));
+    warn(`DeepSeek Search 返回 HTTP ${lastStatus}（${failure.code}），${delay}ms 后重试（第 ${attempts} 次请求，最多重试 ${retryMax} 次）`, 'warn');
+    await wait(delay);
+  }
+}
+
+/**
+ * 调 DeepSeek 官方 Fetch 读单页。**永不 throw**：失败返回 `{ ok:false, error }`，
+ * 由 `readPages` 决定回退到本地正文提取。
+ *
+ * Fetch 的 403（安全策略拒绝）/ 404（拿不到可用正文）**不重试** —— 重试也还是同一页；
+ * 408/429/5xx 才退避重试。
+ */
+export async function fetchDeepSeekPage({
+  url,
+  apiKey,
+  baseUrl = 'https://api.deepseek.com',
+  fetchImpl,
+  signal,
+  log,
+  endpoint,
+  timeoutMs = DEEPSEEK_FETCH_TIMEOUT_MS,
+  retryMax = DEEPSEEK_RETRY_MAX,
+  retryBaseMs = DEEPSEEK_RETRY_BASE_MS,
+  sleep,
+} = {}) {
+  const warn = makeLogger(log);
+  const target = String(url ?? '').trim();
+  const key = String(apiKey ?? '').trim();
+  let parsed;
+  try {
+    parsed = new URL(target);
+  } catch {
+    parsed = null;
+  }
+  // 官方要求：≤8192、必须是带 host 的 http/https、不能带用户名密码
+  if (
+    !parsed
+    || !/^https?:$/.test(parsed.protocol)
+    || !parsed.hostname
+    || parsed.username
+    || parsed.password
+    || target.length > 8192
+  ) {
+    return {
+      ok: false,
+      error: { code: 'SEARCH_FETCH_BAD_URL', message: 'Fetch 只接受带主机名、不带用户名密码的 http(s) 网址（≤8192 字符）', retryable: false },
+      status: 0,
+      attempts: 0,
+    };
+  }
+  if (!key) {
+    return {
+      ok: false,
+      error: { code: SEARCH_ERROR_CODES.KEY_INVALID, message: '没有可用的 DeepSeek API key', retryable: false },
+      status: 0,
+      attempts: 0,
+    };
+  }
+  const base = String(baseUrl ?? '').trim().replace(/\/+$/, '') || 'https://api.deepseek.com';
+  const endpointUrl = endpoint || `${base}${DEEPSEEK_FETCH_PATH}`;
+  const wait = deepSeekSleepFn(sleep);
+  const startedAt = Date.now();
+  let attempts = 0;
+  let lastStatus = 0;
+  for (;;) {
+    attempts += 1;
+    const response = await deepSeekPost({ endpoint: endpointUrl, apiKey: key, payload: { url: target }, fetchImpl, signal, timeoutMs });
+    lastStatus = response.status ?? 0;
+    if (response.ok) {
+      let json;
+      try {
+        json = JSON.parse(response.body);
+      } catch (error) {
+        return {
+          ok: false,
+          error: { code: 'SEARCH_BAD_RESPONSE', message: `Fetch 返回的不是合法 JSON（${error.message}）`, retryable: false, status: lastStatus },
+          status: lastStatus,
+          attempts,
+        };
+      }
+      const content = String(json?.content ?? '').trim();
+      if (!content) {
+        return {
+          ok: false,
+          error: { code: 'SEARCH_FETCH_EMPTY', message: 'Fetch 拿不到可用正文（可能是纯脚本渲染/空页）', retryable: false, status: lastStatus },
+          status: lastStatus,
+          attempts,
+        };
+      }
+      return {
+        ok: true,
+        title: collapseInline(json?.title ?? ''),
+        content,
+        status: lastStatus,
+        attempts,
+        elapsedMs: Date.now() - startedAt,
+        error: null,
+      };
+    }
+
+    const failure = response.aborted
+      ? { code: 'SEARCH_ABORTED', message: '抓取已被用户停止', retryable: false, status: lastStatus }
+      : lastStatus > 0
+        ? deepSeekStatusError(lastStatus, upstreamErrorMessage(response.body), { operation: '抓取', fetch: true })
+        : { code: 'SEARCH_NETWORK_ERROR', message: `DeepSeek Fetch 请求失败：${response.error ?? '无响应'}`, retryable: false, status: 0 };
+    const elapsed = Date.now() - startedAt;
+    if (!failure.retryable || attempts > retryMax || elapsed >= DEEPSEEK_RETRY_TOTAL_MS) {
+      return { ok: false, error: failure, status: lastStatus, attempts, elapsedMs: elapsed };
+    }
+    const delay = Math.min(retryBaseMs * 2 ** (attempts - 1), 2_000, Math.max(0, DEEPSEEK_RETRY_TOTAL_MS - elapsed));
+    warn(`DeepSeek Fetch 返回 HTTP ${lastStatus}（${failure.code}），${delay}ms 后重试`, 'warn');
+    await wait(delay);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 去重 / 过滤
 // ---------------------------------------------------------------------------
 
@@ -1294,6 +1861,14 @@ function normalizeResult(raw, scope) {
   // 发布日期必须在这里透传：去重是所有通道的必经之路（campus 档尤其），
   // 漏掉它，"最新这条是几月几号"会在最后一步丢掉，模型就只能含糊其辞。
   if (raw.publishedAt) out.publishedAt = String(raw.publishedAt);
+  // ---- DeepSeek 官方通道的附加字段：同样只在"原条目带了"时才写出去 ----
+  // （理由同上：dedupeResults 的既有用例会逐字段 deepStrictEqual，不能凭空多出 undefined 键）
+  if (typeof raw.summary === 'string' && raw.summary) out.summary = raw.summary;
+  if (typeof raw.content === 'string' && raw.content) out.content = raw.content;
+  if (Number.isFinite(raw.rerankScore)) out.rerankScore = raw.rerankScore;
+  if (Number.isFinite(raw.authority)) out.authority = raw.authority;
+  if (raw.date) out.date = String(raw.date);
+  if (raw.siteName) out.siteName = String(raw.siteName);
   return out;
 }
 
@@ -2513,6 +3088,32 @@ export function campusScopedQuery(query, { school = '西安交通大学' } = {})
 }
 
 /**
+ * campus 档**官方通道**的检索词：优先用 `site:` 语法（DeepSeek 官方是真认这个语法的）。
+ *
+ * 与 `campusScopedQuery` 的分工：
+ *   - 官方接口认 `site:` → 只写 `site:`，干净且精确；能从问法里认出具体站点（"航院"→sae）就收窄到该站；
+ *     认不出就用 `site:xjtu.edu.cn` 覆盖全校子站；多个站点用 `OR` 连接（如 `site:a OR site:b`）；
+ *   - 免密钥结果页基本不认 `site:` → 继续用 `campusScopedQuery`（补校名、域名后置过滤）。
+ * 调用方自己写了 `site:` 就照它说的做，别擅自改词。
+ */
+export function deepSeekCampusQuery(query, { sites, site, hosts } = {}) {
+  const text = String(query ?? '').trim();
+  if (!text) return text;
+  if (/\bsite\s*:/i.test(text)) return text;
+  const target = site ?? findCampusSiteForQuery(text, sites);
+  const list = Array.isArray(hosts) && hosts.length
+    ? hosts
+    : target?.host
+      ? [target.host]
+      : ['xjtu.edu.cn'];
+  const clauses = list
+    .map((host) => String(host).trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, ''))
+    .filter(Boolean)
+    .map((host) => `site:${host}`);
+  return `${text} ${clauses.join(' OR ')}`;
+}
+
+/**
  * 检索网页，返回候选结果。
  *
  * @param {object} options
@@ -2548,6 +3149,10 @@ export async function searchWebDetailed({
   probes,
   sites,
   probeCampus = true,
+  oriQuestion = '',
+  localization,
+  retryDelayMs,
+  signal,
 } = {}) {
   const warn = makeLogger(log);
   const notes = [];
@@ -2560,27 +3165,108 @@ export async function searchWebDetailed({
   const scope = mode === 'campus' ? 'campus' : 'web';
   const max = normalizeSearchLimit(limit, { fallback: config?.searchMaxPages });
   const backend = resolveSearchBackend(config);
+  const endpointMap = endpoints ?? config?.searchEndpoints ?? {};
+  const apiKeys = normalizeSearchKeys(config);
+  const campusProbeList = probes ?? config?.campusProbes;
+  const campusSiteList = sites ?? config?.campusSites;
+  const deepseekEnabled = backend.kind === 'deepseek';
+  const deepseekSettings = deepseekEnabled
+    ? {
+      apiKey: resolveDeepSeekKey(config),
+      baseUrl: deepSeekApiBase(config),
+      needContent: config?.searchNeedContent !== false,
+    }
+    : null;
 
   if (!text) {
     note('检索词为空，未发起任何请求（这不是"没有结果"，是"没问问题"）');
-    return { query: '', mode: scope, limit: max, backend, campus: null, results: [], notes };
+    return { query: '', mode: scope, limit: max, backend, campus: null, deepseek: null, results: [], notes };
   }
   if (config?.searchEnabled === false) {
     note('设置里的「联网检索」总开关是关闭的（searchEnabled=false），本轮不检索，也不会假装搜到内容');
-    return { query: text, mode: scope, limit: max, backend, campus: null, results: [], notes };
+    return { query: text, mode: scope, limit: max, backend, campus: null, deepseek: null, results: [], notes };
   }
 
   warn(`开始检索：mode=${scope} limit=${max} 后端=${backend.id}（${backend.reason}）`);
 
+  /**
+   * 官方通道的"质量标注"：满足阈值就如实写进 notes，让模型/界面自己判断证据强度。
+   * ≥1.5 优质、authority ≥3 高权威 —— 都是官方文档给的口径，不是我们编的。
+   */
+  const qualityNote = (outcome) =>
+    `rerank_score ≥ 1.5 的优质结果 ${outcome.premium ?? 0} 条、authority ≥ 3 的高权威结果 ${outcome.highAuthority ?? 0} 条`
+    + `（排序：rerank_score 降序 → authority 降序 → date 新者优先）`;
+
+  const decorate = (outcome, searchQuery) => {
+    const items = Array.isArray(outcome.items) ? outcome.items : [];
+    return {
+      ...outcome,
+      query: searchQuery,
+      premium: items.filter((item) => Number.isFinite(item.rerankScore) && item.rerankScore >= 1.5).length,
+      highAuthority: items.filter((item) => Number.isFinite(item.authority) && item.authority >= 3).length,
+    };
+  };
+
+  /** 调一次官方 Search（带统一的重试退避参数注入，测试可把退避压到 1ms）。 */
+  const runDeepSeek = (searchQuery, searchScope) => searchDeepSeek({
+    query: searchQuery,
+    count: max,
+    needContent: deepseekSettings.needContent,
+    oriQuestion,
+    localization,
+    apiKey: deepseekSettings.apiKey,
+    baseUrl: deepseekSettings.baseUrl,
+    endpoint: endpointMap.deepseek ?? undefined,
+    fetchImpl,
+    signal,
+    log: warn,
+    retryBaseMs: retryDelayMs,
+    scope: searchScope,
+  }).then((outcome) => decorate(outcome, searchQuery));
+
+  let deepseekReport = null;
+  let deepseekCampusHit = false;
+
   // 没有密钥时把这件事说清楚：用户/模型要知道现在是"免密钥通道"，结果可能更少更糙
   if (backend.kind === 'scrape') note(`未配置搜索 API 密钥，走免密钥通道：${backend.reason}`);
+  if (deepseekEnabled) {
+    note(
+      `使用 DeepSeek 官方检索：${backend.reason}（need_content=${deepseekSettings.needContent}；`
+      + 'Search / Fetch 各 5 元/1000 次成功请求、QPS 各 5、失败不计费）',
+    );
+  }
 
-  const apiKeys = normalizeSearchKeys(config);
-  const endpointMap = endpoints ?? config?.searchEndpoints ?? {};
-  const campusProbeList = probes ?? config?.campusProbes;
-  const campusSiteList = sites ?? config?.campusSites;
+  // ---- campus 档第 ⓪ 条通道：DeepSeek 官方 `site:` 检索（有 key 时优先） ------------------
+  // 官方接口认 `site:`，一次请求就能拿到校内页面 + 正文 + 发布日期 + 权威性，
+  // 比"站内直搜 + 栏目直读 + 结果页"三路并发更准、更省（只计 1 次成功请求）。
+  // **但它是会失败的**：欠费/限流/代理不可达/`site:` 真没结果 —— 这时必须回退到下面的
+  // 站内直搜与栏目列表直读，那两条是本地零计费通道，不能因为接了官方就把它们删掉。
+  const collected = [];
+  if (scope === 'campus' && deepseekEnabled) {
+    const campusQuery = deepSeekCampusQuery(text, { sites: campusSiteList });
+    deepseekReport = await runDeepSeek(campusQuery, 'campus');
+    const campusItems = deepseekReport.items.filter((item) => isCampusUrl(item.url));
+    if (campusItems.length) {
+      deepseekCampusHit = true;
+      // 命中就是"站内搜索命中的校方页面"：matchedBy 记 `site`（与原来的站内直搜同一档证据强度）
+      collected.push(...campusItems.map((item) => ({ ...item, scope: 'campus', matchedBy: 'site' })));
+      note(
+        `DeepSeek 校园检索：用 site: 语法「${campusQuery}」返回 ${deepseekReport.items.length} 条，`
+        + `其中 ${campusItems.length} 条落在 *.xjtu.edu.cn（matchedBy=site）。${qualityNote(deepseekReport)}`,
+      );
+      if (deepseekReport.items.length > campusItems.length) {
+        note(`另有 ${deepseekReport.items.length - campusItems.length} 条不在校内域名内，已丢弃（campus 档只保留校内页面）`);
+      }
+    } else {
+      note(
+        `DeepSeek 校园检索用 site: 语法没有拿到校内结果`
+        + `${deepseekReport.error ? `（${deepseekReport.error.code}：${deepseekReport.error.message}）` : '（results 为空或都不在校内域名）'}`
+        + ' → 回退到现有「站内直搜 / 栏目列表直读」通道',
+      );
+    }
+  }
 
-  // ---- campus 档第 ⓪ 条通道：栏目列表直读 + ① 站内直搜（通道顺序就是优先级） ----------
+  // ---- campus 档第 ① 条通道：栏目列表直读 + 站内直搜（通道顺序就是优先级） ----------
   // 为什么站内直搜排最前：这是"命中了就必然是校内的东西"的通道 —— 结果直接来自校内站点
   // 自己的检索接口，不可能像公共搜索引擎那样把北大/北航的教务处塞进来。
   // 真网实测（2026-10-13）：12 个站点可直搜，单站 0.3–6.5s，站点级并发 3。
@@ -2588,11 +3274,13 @@ export async function searchWebDetailed({
   // 但真机反馈证明它**在"最近有什么新闻"上会失手**（列表页没被站内搜索收录/收录滞后），
   // 所以多一条 ⓪：问法像"要最新列表"、又能从问法里认出目标站点时，**并行**去读那个站点的
   // 栏目列表（`readSiteNews`）。两路并行是为了不把校园档的等待时间再加一份。
-  const collected = [];
+  //
+  // 官方通道命中时（`deepseekCampusHit`）整段跳过：结果已经又准又带正文，再打十几个校内站点
+  // 只会更慢，而且会把官方结果挤掉。
   let siteSearch = null;
   let columnRead = null;
   let columnSite = null;
-  if (scope === 'campus') {
+  if (scope === 'campus' && !deepseekCampusHit) {
     columnSite = looksLikeNewsQuery(text) ? findCampusSiteForQuery(text, campusSiteList) : null;
     const siteSearchJob = searchCampusSites({
       query: text,
@@ -2645,13 +3333,14 @@ export async function searchWebDetailed({
   if (scope === 'campus') {
     // campus 档第 ② 条通道：公共结果页（`site:` 收窄 + 校名）。它是**覆盖补充** ——
     // 新开的子站、没有检索入口的站、要登录才看得到的站，站内直搜都够不到，仍靠它兜一层。
-    tasks.push({ scope: 'campus', query: campusScopedQuery(text) });
+    // 官方 `site:` 已经命中时不再跑：结果已经覆盖校内，重复打引擎只会更慢。
+    if (!deepseekCampusHit) tasks.push({ scope: 'campus', query: campusScopedQuery(text) });
   } else {
-    tasks.push({ scope: 'web', query: text });
+    tasks.push({ scope: 'web', query: text, deepseek: deepseekEnabled });
   }
 
   let campus = null;
-  if (scope === 'campus' && probeCampus) {
+  if (scope === 'campus' && !deepseekCampusHit && probeCampus) {
     campus = await detectCampusNetwork({ fetchImpl, probes: campusProbeList, log: warn });
     if (campus.onCampus) {
       tasks.push({ scope: 'web', query: text });
@@ -2664,7 +3353,29 @@ export async function searchWebDetailed({
   // ---- 执行 ---------------------------------------------------------------
   for (const task of tasks) {
     let items = [];
-    if (backend.kind === 'api') {
+    if (task.deepseek) {
+      const outcome = await runDeepSeek(task.query, task.scope);
+      deepseekReport = deepseekReport ?? outcome;
+      if (outcome.items.length) {
+        items = outcome.items;
+        note(
+          `DeepSeek 官方搜索返回 ${items.length} 条（count=${max}，need_content=${deepseekSettings.needContent}）。`
+          + `${qualityNote(outcome)}`,
+        );
+      } else {
+        // 空结果/失败都要降级：官方不计费，但用户要的是"搜到东西"，不是"知道官方挂了"
+        note(
+          `DeepSeek 官方搜索没有返回结果`
+          + `${outcome.error ? `（${outcome.error.code}：${outcome.error.message}）` : '（results 为空；空结果不计费）'}`
+          + ' → 降级到免密钥通道（结果页解析）',
+        );
+        if (outcome.error?.code === 'SEARCH_ABORTED' || signal?.aborted) {
+          note('检索已被用户停止，不再执行降级抓取');
+        } else {
+          items = await scrapeSearch({ query: task.query, limit: max, fetchImpl, endpoints: endpointMap, log: warn, note });
+        }
+      }
+    } else if (backend.kind === 'api') {
       const provider = backend.providers[0];
       const { items: apiItems, error } = await callApiProvider(provider, {
         query: task.query,
@@ -2713,9 +3424,38 @@ export async function searchWebDetailed({
   const scoreOf = (item) => (
     columnBoost && item.matchedBy === 'column' ? 1 : relevanceScore(terms, item)
   );
+  /**
+   * 官方通道的排序口径（有 `rerankScore` / `authority` 时启用）：
+   *   **rerank_score 降序 → authority 降序 → date 新者优先**。
+   * 没有这些字段的（抓取路径、栏目直读）继续沿用原来的相关度打分，
+   * 两组混在一起时官方结果排前面（官方给的是"相关性+权威性"的双重信号，比关键词覆盖率可信）。
+   * `date` 新者优先让"最近有什么新闻"能直接按发布时间排，而不是靠关键词碰运气。
+   */
+  const dateTimestamp = (item) => {
+    const time = Date.parse(item?.date ?? item?.publishedAt ?? '');
+    return Number.isFinite(time) ? time : 0;
+  };
+  const hasOfficialSignals = (item) => Number.isFinite(item?.rerankScore) || Number.isFinite(item?.authority);
   const ranked = dedupeResults(collected)
     .map((item, index) => ({ item, index, score: scoreOf(item) }))
-    .sort((a, b) => b.score - a.score || matchedByRank(a.item.matchedBy) - matchedByRank(b.item.matchedBy) || a.index - b.index)
+    .sort((a, b) => {
+      const officialA = hasOfficialSignals(a.item);
+      const officialB = hasOfficialSignals(b.item);
+      if (officialA !== officialB) return officialA ? -1 : 1;
+      if (officialA && officialB) {
+        const scoreA = Number.isFinite(a.item.rerankScore) ? a.item.rerankScore : -1;
+        const scoreB = Number.isFinite(b.item.rerankScore) ? b.item.rerankScore : -1;
+        if (scoreB !== scoreA) return scoreB - scoreA;
+        const authorityA = Number.isFinite(a.item.authority) ? a.item.authority : -1;
+        const authorityB = Number.isFinite(b.item.authority) ? b.item.authority : -1;
+        if (authorityB !== authorityA) return authorityB - authorityA;
+        const dateDiff = dateTimestamp(b.item) - dateTimestamp(a.item);
+        if (dateDiff) return dateDiff;
+      }
+      return b.score - a.score
+        || matchedByRank(a.item.matchedBy) - matchedByRank(b.item.matchedBy)
+        || a.index - b.index;
+    })
     .map((entry) => entry.item);
   const deduped = ranked;
 
@@ -2775,7 +3515,35 @@ export async function searchWebDetailed({
   // `siteSearch`/`columnRead` 分别是站内直搜与栏目列表直读的**诊断报告**（含逐页 ok/count/error），
   // 对话层用它如实解释"哪条通道出了什么问题"，界面也能显示"这次读的是哪个栏目页"
   return {
-    query: text, mode: scope, limit: max, backend, campus, siteSearch, columnRead, results, notes,
+    query: text,
+    mode: scope,
+    limit: max,
+    backend,
+    campus,
+    siteSearch,
+    columnRead,
+    /**
+     * 官方通道的诊断（没有走官方时是 null）：
+     * `error.code` 可能是 SEARCH_BALANCE_EXHAUSTED / SEARCH_KEY_INVALID / SEARCH_RATE_LIMITED…
+     * 对话层/设置页据此如实告诉用户"是欠费、key 无效还是被限流"，而不是笼统说"没搜到"。
+     */
+    deepseek: deepseekReport
+      ? {
+        ok: !deepseekReport.error && deepseekReport.items.length > 0,
+        error: deepseekReport.error,
+        status: deepseekReport.status,
+        attempts: deepseekReport.attempts,
+        elapsedMs: deepseekReport.elapsedMs,
+        query: deepseekReport.query,
+        count: deepseekReport.items.length,
+        needContent: deepseekSettings.needContent,
+        premium: deepseekReport.premium,
+        highAuthority: deepseekReport.highAuthority,
+        campusHit: deepseekCampusHit,
+      }
+      : null,
+    results,
+    notes,
   };
 }
 
@@ -2844,11 +3612,18 @@ export const PAGE_TEXT_MIN_CHARS = 200;
 export const VSB_CONTENT_ENDPOINT_SHAPE =
   'content.jsp?urltype=news.NewsContentUrl&wbtreeid=<treeid>&wbnewsid=<newsid>（2026-10-13 实测：返回整页，不是正文片段）';
 
-/** 正文来源标记：容器 / 整页 / meta 摘要。模型侧据此区分"读了全文"与"只看到摘要"。 */
+/**
+ * 正文来源标记：容器 / 整页 / meta 摘要 / DeepSeek 官方（Search 的 need_content、Fetch 的 Markdown）。
+ * 模型侧据此区分"读了全文"与"只看到摘要"，以及"这段是官方抽取的还是本地解析的"。
+ */
 export const PAGE_TEXT_VIA = Object.freeze({
   container: 'container',
   body: 'body',
   meta: 'meta-description',
+  /** Search 的 `need_content:true` 直接带回的正文。 */
+  deepseekContent: 'deepseek-content',
+  /** DeepSeek Fetch API 返回的 Markdown 正文。 */
+  deepseekFetch: 'deepseek-fetch',
 });
 
 /** 摘要兜底时附给模型的口径：**必须**跟着正文一起回灌，否则模型会把摘要当全文承诺细节。 */
@@ -3076,17 +3851,77 @@ export function extractPageText(html, { maxChars = READ_MAX_CHARS } = {}) {
 }
 
 /**
+ * 一条官方结果如果已经带正文（Search 的 `need_content:true`），直接把它当"读到的正文"。
+ *
+ * 为什么需要这个短路：官方按**成功请求次数**计费，Search 一次已经把全文带回来了，
+ * 再对同一批 URL 逐页 Fetch 就是白花 N 次钱（还慢 N 个往返）。
+ * 这也是"1 次 search + need_content"比"search + 逐页 Fetch"便宜的根本原因。
+ */
+export function pageFromSearchContent(result, { maxChars = READ_MAX_CHARS } = {}) {
+  const text = String(result?.content ?? '').trim();
+  if (!text) return null;
+  return {
+    title: String(result?.title ?? ''),
+    url: String(result?.url ?? ''),
+    ok: true,
+    text: truncateText(text, maxChars),
+    via: PAGE_TEXT_VIA.deepseekContent,
+    note: DEEPSEEK_CONTENT_NOTE,
+    error: null,
+  };
+}
+
+/**
  * 读一个页面。**永远不 throw**：失败折叠成 `{ ok:false, error }`。
+ *
+ * 顺序：**官方 Search 已带正文 → DeepSeek Fetch → 本地正文提取**。
+ * 后两步的分工：Fetch 返回官方抽好的 Markdown（省掉容器猜测），
+ * 但它会 403/404/429，失败时**必须**回退本地提取 —— 否则一条本来能读的校内页面就白丢了。
  *
  * 失败条目也照旧带 `via` / `note`（哪怕没有正文）：调用方与测试可以无条件读这两个字段，
  * 少一类"忘了兜 undefined"的形状错误。
  */
-async function readOnePage(result, { fetchImpl, maxChars, timeoutMs }) {
+async function readOnePage(result, { fetchImpl, maxChars, timeoutMs, deepseek, signal, retryDelayMs, endpoints, fetchTimeoutMs, warn }) {
   const { title = '', url = '' } = result ?? {};
+  // Search 的 need_content 已经给了正文：一次请求拿全，不再逐页 Fetch（省 N 次计费与往返）
+  const inline = pageFromSearchContent(result, { maxChars });
+  if (inline) return inline;
   const failed = (error) => ({ title, url, ok: false, text: '', via: PAGE_TEXT_VIA.body, note: null, error });
+
+  // ---- 官方 Fetch（有 key 且没被 scrape / searchNeedContent=false 关掉时）----
+  let fetchFailure = null;
+  if (deepseek?.apiKey) {
+    const fetched = await fetchDeepSeekPage({
+      url,
+      apiKey: deepseek.apiKey,
+      baseUrl: deepseek.baseUrl,
+      endpoint: endpoints?.deepseekFetch ?? undefined,
+      fetchImpl,
+      signal,
+      timeoutMs: fetchTimeoutMs ?? DEEPSEEK_FETCH_TIMEOUT_MS,
+      retryBaseMs: retryDelayMs,
+    });
+    if (fetched.ok) {
+      return {
+        title: fetched.title || title,
+        url,
+        ok: true,
+        text: truncateText(fetched.content, maxChars),
+        via: PAGE_TEXT_VIA.deepseekFetch,
+        note: DEEPSEEK_FETCH_NOTE,
+        error: null,
+      };
+    }
+    fetchFailure = fetched.error ?? { code: 'SEARCH_FETCH_FAILED', message: 'Fetch 失败' };
+    if (typeof warn === 'function') {
+      warn(`DeepSeek Fetch 失败（${fetchFailure.code}：${fetchFailure.message}）→ 回退本地正文提取：${url}`, 'warn');
+    }
+  }
+
   const response = await requestText(fetchImpl, url, { timeoutMs, accept: 'text/html,application/xhtml+xml' });
   if (!response.ok) {
-    return failed(response.error ?? `HTTP ${response.status}`);
+    const reason = response.error ?? `HTTP ${response.status}`;
+    return failed(fetchFailure ? `${reason}；DeepSeek Fetch：${fetchFailure.message}` : reason);
   }
   const type = String(response.contentType ?? '').toLowerCase();
   // 非网页正文（PDF/图片/JSON 接口）不硬啃：如实报错，让模型知道"这一页读不了"
@@ -3097,8 +3932,13 @@ async function readOnePage(result, { fetchImpl, maxChars, timeoutMs }) {
   if (!page.text) {
     return failed('页面没有可提取的正文（可能是纯脚本渲染或空页）');
   }
-  // via / note 跟着正文一起回灌：模型必须知道这段是"正文容器里的全文"还是"meta 摘要兜底"
-  return { title, url, ok: true, text: page.text, via: page.via, note: page.note, error: null };
+  // via / note 跟着正文一起回灌：模型必须知道这段是"正文容器里的全文"还是"meta 摘要兜底"；
+  // 若刚才 Fetch 失败，也要如实说明"这段是回退本地提取的"。
+  const fallbackNote = fetchFailure
+    ? `（DeepSeek Fetch 未成功：${fetchFailure.code}，已回退本地正文提取）`
+    : '';
+  const note = [page.note, fallbackNote].filter(Boolean).join('') || null;
+  return { title, url, ok: true, text: page.text, via: page.via, note, error: null };
 }
 
 /**
@@ -3115,19 +3955,27 @@ async function readOnePage(result, { fetchImpl, maxChars, timeoutMs }) {
  * @param {Function} [options.fetchImpl]
  * @param {number} [options.concurrency=3] 并发（收敛到 1–4）
  * @param {number} [options.maxChars=4000]
+ * @param {object} [options.config] AI 配置切片：有 DeepSeek key 且没选 scrape 时优先用官方 Fetch
+ * @param {AbortSignal} [options.signal] 用户停止信号
  * @returns {Promise<Array<{title:string,url:string,ok:boolean,text:string,
- *   via:'container'|'body'|'meta-description',note:string|null,error:string|null}>>}
+ *   via:'container'|'body'|'meta-description'|'deepseek-content'|'deepseek-fetch',note:string|null,error:string|null}>>}
  *   `via` 说明这段文字是**从哪来的**：`container` 站内正文容器 / `body` 整页清洗 /
- *   `meta-description` meta 摘要兜底（此时 `note` 会给模型一句"这是摘要不是全文"的口径）。
+ *   `meta-description` meta 摘要兜底 / `deepseek-content` Search 的 need_content /
+ *   `deepseek-fetch` 官方 Fetch 的 Markdown（后两者 `note` 会说明"官方抽取，不是本地容器"）。
  */
 export async function readPages(results, options = {}) {
-  const { fetchImpl, concurrency, maxChars = READ_MAX_CHARS, timeoutMs = READ_TIMEOUT_MS, log } = options;
+  const {
+    fetchImpl, concurrency, maxChars = READ_MAX_CHARS, timeoutMs = READ_TIMEOUT_MS, log,
+    config = {}, signal, retryDelayMs, endpoints, fetchTimeoutMs,
+  } = options;
   const warn = makeLogger(log);
   const list = (Array.isArray(results) ? results : []).filter((item) => item && typeof item.url === 'string' && item.url);
   const limit = clamp(options.limit, 1, SEARCH_LIMIT_MAX, SEARCH_LIMIT_MAX);
   const targets = list.slice(0, limit);
   const pool = clamp(concurrency, 1, READ_CONCURRENCY_MAX, READ_CONCURRENCY_DEFAULT);
   if (!targets.length) return [];
+  // 官方 Fetch 的启用条件集中在一个函数里（有 key、不是 scrape、need_content 没关）
+  const deepseek = resolveDeepSeekFetch(config);
 
   const out = new Array(targets.length);
   let cursor = 0;
@@ -3137,7 +3985,9 @@ export async function readPages(results, options = {}) {
       cursor += 1;
       if (index >= targets.length) return;
       try {
-        out[index] = await readOnePage(targets[index], { fetchImpl, maxChars, timeoutMs });
+        out[index] = await readOnePage(targets[index], {
+          fetchImpl, maxChars, timeoutMs, deepseek, signal, retryDelayMs, endpoints, fetchTimeoutMs, warn,
+        });
       } catch (error) {
         // readOnePage 已经吞了绝大多数异常；这里再兜一层，保证"绝不拖垮整批"
         out[index] = {
@@ -3173,10 +4023,26 @@ export async function searchAndRead({
   read = true,
   concurrency,
   maxChars = READ_MAX_CHARS,
+  oriQuestion = '',
+  localization,
+  retryDelayMs,
+  signal,
 } = {}) {
-  const found = await searchWebDetailed({ query, mode, limit, config, fetchImpl, log, endpoints, probes });
+  const found = await searchWebDetailed({
+    query, mode, limit, config, fetchImpl, log, endpoints, probes, oriQuestion, localization, retryDelayMs, signal,
+  });
   const pages = read
-    ? await readPages(found.results, { limit: found.limit, fetchImpl, concurrency, maxChars, log })
+    ? await readPages(found.results, {
+      limit: found.limit,
+      fetchImpl,
+      concurrency,
+      maxChars,
+      log,
+      config,
+      signal,
+      retryDelayMs,
+      endpoints,
+    })
     : [];
   return { ...found, pages };
 }
@@ -3195,11 +4061,12 @@ export const WEB_SEARCH_TOOL = Object.freeze({
   name: 'web_search',
   title: '联网检索',
   description:
-    '联网检索网页：先搜到候选结果（标题 / 真实链接 / 摘要），再抓取正文。'
-    + '两种模式：web=校外全网（按相关度自动在搜狗/360/Bing/百度之间选引擎）；'
-    + 'campus=校内优先（问"最近/最新有什么"时会**同时直读校方栏目列表页**，'
-    + '拿到最新几条的标题+链接+发布日期；再直搜校内站点自己的检索接口，再公共结果页，'
-    + '最后把提到本校的公网结果并入；每条都标 matchedBy=column|site|domain|mention）。'
+    '联网检索网页：先搜到候选结果（标题 / 真实链接 / 摘要 / 可选正文），再抓取正文。'
+    + '有 DeepSeek API key 时优先用官方 Search（一次 need_content 请求直接带回全文，'
+    + '并带 rerank_score/authority/date；失败自动降级）；'
+    + '两种模式：web=校外全网（可走官方，或按相关度自动在搜狗/360/Bing/百度之间选引擎）；'
+    + 'campus=校内优先（有 key 时先用官方 site: 语法，再用站内直搜、栏目列表直读、公共结果页兜底；'
+    + '每条都标 matchedBy=column|site|domain|mention）。'
     + '返回的都是**真实抓到的**内容；抓不到会明确报错，绝不能凭空写链接。',
   mutates: false,
   params: {
@@ -3217,7 +4084,8 @@ export const WEB_SEARCH_PROMPT = `【联网检索（web_search）】
 - **必须引用真实 URL**：每个结论后面用 markdown 链接写出它来自哪一条结果，形如 [教务处通知](https://dean.xjtu.edu.cn/xxx)。**只允许引用系统真实返回过的 URL**。
 - **绝对不许编造链接、标题、日期或引文**。编一个看起来很像的校内链接，比"没查到"糟糕得多。
 - **搜不到就直说**：没有结果或检索失败时，如实告诉用户"这次没搜到 / 检索被拦截了"，可以说明你试过什么（例如"没配置搜索 API 密钥、结果页被反爬挡住"），并给出可行的下一步（换个说法再搜、自己打开某网址、等会儿再试）。**不要**用"根据我的知识"来掩盖一次失败的检索。
-- **正文与摘要要分清**：每条结果都带 \`textSource\` —— \`container\`/\`body\` 是**抓到的正文**，\`meta-description\` 表示**只拿到了页面摘要**（此时 \`note\` 会写明"这是摘要，不是正文全文"）。看到 \`meta-description\` 就说"这条只看到标题与摘要"，只按摘要里确实出现的信息回答，**不要补充摘要之外的细节，也不要说"全文里还写了…"**。没有正文（\`ok:false\`）的条目同样如实说明。
+- **正文与摘要要分清**：每条结果都带 \`textSource\` —— \`container\`/\`body\`/\`deepseek-content\`/\`deepseek-fetch\` 是**抓到的正文**（后两者来自 DeepSeek 官方抽取），\`meta-description\` 表示**只拿到了页面摘要**（此时 \`note\` 会写明"这是摘要，不是正文全文"）。看到 \`meta-description\` 就说"这条只看到标题与摘要"，只按摘要里确实出现的信息回答，**不要补充摘要之外的细节，也不要说"全文里还写了…"**。没有正文（\`ok:false\`）的条目同样如实说明。
+- **官方结果的字段**：结果里带 \`date\` 时按时间判断新旧；带 \`authority\`/\`rerankScore\` 时优先采信高权威、高相关的结果；\`summary\` 是给你读的长摘要，\`content\` 才是正文。
 - **问"最近/最新有什么"时**：campus 档会**自动同时直读校方栏目列表页**（该站的新闻/通知/讲座栏目），这些条目 \`matchedBy\` 是 \`column\`、**带 \`publishedAt\`（发布日期）**。回答"最新的是哪条""最近有什么"就**按 \`publishedAt\` 排序**说，并把日期写出来（例如"最新的一条是 6 月 20 日的《…》"）；\`publishedAt\` 只有 \`YYYY-MM\` 时说明"只标到月份"，**不要补一个具体日子**。栏目条目只给了标题+链接+日期（没有正文），**不要假装读过正文细节**；需要正文就用 \`{"action":"query","target":"web","fields":{"url":"<那条的 url>"}}\` 直读那一篇（这一步同样会真的去抓，抓不到会如实报错）。
 - **校内信息的边界**：campus 档只保证把检索收窄到校内站点，**不等于**登录了校内系统。需要登录才能看到的成绩、作业、课表，仍然要用本地已同步的数据回答，不要假装看到了网页。`;
 
@@ -3286,6 +4154,19 @@ export default {
   detectAntiBot,
   requestText,
   campusScopedQuery,
+  deepSeekCampusQuery,
+  searchDeepSeek,
+  fetchDeepSeekPage,
+  resolveDeepSeekKey,
+  deepSeekApiBase,
+  resolveDeepSeekFetch,
+  pageFromSearchContent,
+  SEARCH_ERROR_CODES,
+  DEEPSEEK_SEARCH_PATH,
+  DEEPSEEK_FETCH_PATH,
+  DEEPSEEK_COUNT_MAX,
+  DEEPSEEK_CONTENT_NOTE,
+  DEEPSEEK_FETCH_NOTE,
   CAMPUS_SITE_SEARCH,
   MATCHED_BY_RANK,
   SCRAPE_ENGINE_IDS,

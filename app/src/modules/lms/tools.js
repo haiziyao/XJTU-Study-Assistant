@@ -53,12 +53,21 @@ export const LMS_TOOL_SPECS = [
   },
   {
     name: 'lms_activities',
-    description: '列出课程活动（作业 / 资料 / 回放 / 直播）',
+    description: '列出课程活动（作业 / 资料 / 回放 / 直播）；作业的截止日（deadline）与是否已提交都在这条契约里',
     method: 'GET',
     path: '/lms/activities',
     requiresAuth: true,
     mutates: false,
     params: { courseId: 'number?', type: 'homework|material|lesson|lecture_live?', refresh: 'boolean?' },
+    returns: {
+      items:
+        '[{ id, courseId, courseName, type, typeLabel, title, startTime, endTime, deadline, submitted, userSubmitCount }]',
+    },
+    /**
+     * `deadline` 是给 AI 用的**归一化字段**：学堂原始数据只有 `endTime`，
+     * 而"哪天要交"只需要日期。有没有截止日直接决定作业会不会进待办（见 todos-bridge.js）。
+     */
+    hint: '作业的 deadline 是 YYYY-MM-DD（北京时间）；没有 deadline 的作业不会进待办，也不会被编一个日期。',
   },
   {
     name: 'lms_sync_preview',
@@ -138,14 +147,13 @@ export const LMS_TOOL_SPECS = [
   },
   {
     name: 'lms_course_materials',
-    description: '列出某门课程的课件与资料（文件名、类型、大小、上传时间、是否可下载）',
+    description: '列出某门课程的课件与资料（学堂把资料当成一种课程活动，附件挂在活动详情里）',
     method: 'GET',
     path: '/lms/courses/{id}/materials',
     requiresAuth: true,
     mutates: false,
-    implemented: false,
-    params: { id: 'string' },
-    returns: { items: '[{ id, title, kind, bytes, uploadedAt, downloadable }]' },
+    params: { id: 'string', detail: 'boolean?' },
+    returns: { items: '[{ id, title, startTime, uploads: [{ id, name, kind, size, downloadUrl, previewUrl }] }]' },
   },
   {
     name: 'lms_assignment_submission',
@@ -154,9 +162,8 @@ export const LMS_TOOL_SPECS = [
     path: '/lms/activities/{id}/submission',
     requiresAuth: true,
     mutates: false,
-    implemented: false,
     params: { id: 'string' },
-    returns: { submitted: 'boolean', submittedAt: 'string?', score: 'number?', comment: 'string?', files: 'array' },
+    returns: { submitted: 'boolean', count: 'number', submissions: '[{ id, score, status, submittedAt, comment, instructorComment, uploads }]' },
   },
   {
     name: 'lms_notices',

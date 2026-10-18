@@ -39,6 +39,19 @@ const MAX_ESTIMATED_HOURS = 24 * 30;
 /** 分类长度上限。24 个字足够说清「期末复习 / 实验室 / 英语六级」，再长就成备注了。 */
 const MAX_CATEGORY_LENGTH = 24;
 /**
+ * 批量操作一次最多 200 个 id。
+ *
+ * 为什么是 200：正常用户一次多选的是「一屏附近」的待办（手机上更少），200 已经远超真实
+ * 使用量；而这个上限真正防的是**误操作** —— 前端 bug / 脚本把整个库的 id 塞进来时，
+ * 一次 DELETE 就能清空几百条数据。200 条分批做只多花几次点击，误删却无法挽回，所以宁可
+ * 在服务端硬拦（400 TOO_MANY_IDS），也不靠界面自觉。
+ */
+const MAX_BULK_IDS = 200;
+/** 批量操作允许的动作。未知 action 必须 400，不能静默当 delete/complete。 */
+const BULK_ACTIONS = ['delete', 'complete', 'uncomplete', 'category'];
+/** dryRun 回给界面的样例条数：预览只需要"确认选对了"，8 条足够，不必回传全部记录。 */
+const BULK_SAMPLE_LIMIT = 8;
+/**
  * 层级上限 3 层（父 / 子 / 孙）。
  *
  * 为什么是 3 而不是不限：
@@ -50,6 +63,17 @@ const MAX_CATEGORY_LENGTH = 24;
  *   既能拆开、又能一眼看全、还能安全撤销的边界。
  */
 const MAX_DEPTH = 3;
+/**
+ * **只读字段**：由番茄钟（pomodoro 模块）在会话结算时累加，客户端一个字都不能改。
+ *
+ * 它们出现在 `KNOWN_FIELDS` 里（让乱写的人拿到"这是只读字段"的明确 400，而不是被
+ * 当成未知字段去猜拼写），但**刻意不放进 `EDITABLE`**：
+ * - `#rebuild` 用「当前记录 + patch」重建，只挑 EDITABLE —— 不在里面就不会被 patch 覆盖；
+ * - 更新时 `normalize` 也不产出它，集合层的 merge 会原样保留已累计的秒数。
+ * 如果放进 EDITABLE，普通改标题也会把它一起重建；一旦 normalize 给默认 0，
+ * 用户攒了几小时的专注时长就会在改标题时被清零。
+ */
+const READONLY_FIELDS = ['spentSelfSec'];
 /** 可写字段白名单：更新时用「当前记录 + patch」重建，避免未知字段落库。 */
 const EDITABLE = [
   'title',
@@ -78,12 +102,14 @@ const EDITABLE = [
  *   而提示词、前端、模型都容易顺手把它写进待办（真机缺陷 S3 就是这么来的）。
  * - `id` 允许出现但**被忽略**：模型给 update 草稿时常把 id 一并塞进 `fields`，
  *   拿它定位可以，写进数据不行（那是另一条记录的主键，落进文件就是脏数据）。
+ * - `spentSelfSec` 出现在这里只为给"只读"的明确报错（见 READONLY_FIELDS 的注释），
+ *   它不在 EDITABLE 里，因此不是可写字段。
  */
-const KNOWN_FIELDS = new Set([...EDITABLE, 'estimatedMinutes', 'id']);
+const KNOWN_FIELDS = new Set([...EDITABLE, ...READONLY_FIELDS, 'estimatedMinutes', 'id']);
 
 /** 报错时摆在最前面的字段清单（人/模型照着改一次就能对）。 */
 const KNOWN_FIELD_LIST =
-  'title / deadline / estimatedHours（小时，可小数；也收 estimatedMinutes，整数分钟） / priority / completed / description / tags / category / parentId';
+  'title / deadline / estimatedHours（小时，可小数；也收 estimatedMinutes，整数分钟） / priority / completed / description / tags / category / parentId（spentSelfSec 只读，由番茄钟维护）';
 
 /**
  * 单个别名的归一化（不认识的键原样返回）。
@@ -272,6 +298,22 @@ function normalize(rawInput, { partial = false } = {}) {
   const input = normalizeInput(rawInput);
   const data = {};
 
+  /**
+   * 只读字段就算"认识"也不能写：明确 400，而不是静默丢掉。
+   *
+   * 为什么不是默默忽略：客户端传 `spentSelfSec` 只可能有两个意图 —— 补录/迁移，或
+   * 试图把统计改成好看的数。两种都不该由这条接口决定；告诉它"这是番茄钟自动累计的"
+   * 比假装写成功更诚实，也不会让用户以为自己的补录生效了。
+   */
+  for (const field of READONLY_FIELDS) {
+    if (input[field] !== undefined) {
+      throw HttpError.badRequest(`字段 ${field} 是只读的：由番茄钟在会话结算时自动累计，不能直接修改`, {
+        field,
+        code: 'READONLY_FIELD',
+      });
+    }
+  }
+
   if (input.title !== undefined) data.title = requireTitle(input.title);
   else if (!partial) data.title = requireTitle(undefined);
 
@@ -412,8 +454,37 @@ function subtreeHeight(id, byId) {
   return height;
 }
 
+/**
+ * `id -> 自己 + 全部后代` 的专注秒数（`spentSec`）。
+ *
+ * 为什么现算而不是把秒数写进祖先：
+ * - 番茄钟只把 N 秒写进**当前待办**的 `spentSelfSec`。如果同时给每一层祖先的
+ *   `spentSec` 也加 N，那么"父任务自己专注 100 秒、子任务专注 50 秒"时，父的
+ *   存储值会是 100 + 50，而它再被汇总到祖父时又会被加一次 —— 多层就是重复累计；
+ * - 父子关系可以移动、子任务可以删除。写死的聚合值在移动/删除后必然过期，
+ *   而派生值每次都按当前树重算，天然不会留下"祖父多了 30 分钟"这种脏数字。
+ *
+ * 算法：每条记录的 `spentSelfSec` 沿 parentId 往上加，最多 3 层；用 `seen` 防历史
+ * 脏数据成环时死循环。O(n × 深度)，在待办量级下可忽略。
+ */
+function spentStatsIndex(records) {
+  const byId = new Map(records.map((item) => [item.id, item]));
+  const index = new Map();
+  for (const record of records) {
+    const own = Math.max(0, Math.round(Number(record.spentSelfSec) || 0));
+    let cursor = record;
+    const seen = new Set();
+    while (cursor && !seen.has(cursor.id)) {
+      seen.add(cursor.id);
+      index.set(cursor.id, (index.get(cursor.id) ?? 0) + own);
+      cursor = cursor.parentId ? byId.get(cursor.parentId) : null;
+    }
+  }
+  return index;
+}
+
 /** 只出现在响应里的派生字段。 */
-function decorate(item, today, children = NO_CHILDREN) {
+function decorate(item, today, children = NO_CHILDREN, spentSec = 0) {
   const hours = item.estimatedHours ?? 1;
   const complexity = complexityOfHours(hours);
   return {
@@ -424,6 +495,10 @@ function decorate(item, today, children = NO_CHILDREN) {
     category: item.category ?? '',
     parentId: item.parentId ?? null,
     autoCompletedBy: item.autoCompletedBy ?? null,
+    // 番茄钟累计的**自己的**专注秒数（落库；只读，见 READONLY_FIELDS）
+    spentSelfSec: Math.max(0, Math.round(Number(item.spentSelfSec) || 0)),
+    // 派生：自己 + 全部后代，**实时**计算（存下来会在移动/删除子任务后过期）
+    spentSec: Math.max(0, Math.round(Number(spentSec) || 0)),
     // 派生：只算直接子级，且是**实时**算的（存下来必然过期）
     childCount: children.count,
     childDoneCount: children.done,
@@ -437,9 +512,13 @@ function decorate(item, today, children = NO_CHILDREN) {
 }
 
 export class TodoService {
-  constructor({ store, broadcast = () => {} }) {
+  constructor({ store, broadcast = () => {}, services = null, audit = null }) {
     this.store = store;
     this.broadcast = broadcast;
+    // 与 ScheduleService 同一口径：AI 执行草稿期间（services.__actor === 'ai'）不记 user 日志，
+    // 由 chat-service 记一条 actor:'ai'（见 chat-service 的 #autoExecuteWrites）。
+    this.services = services;
+    this.audit = audit;
   }
 
   get collection() {
@@ -542,9 +621,10 @@ export class TodoService {
     return out;
   }
 
-  /** 单条记录的响应形状（含直接子级统计）。 */
+  /** 单条记录的响应形状（含直接子级统计 + 自己与后代的专注秒数）。 */
   #decorate(item) {
-    return decorate(item, todayKey(), childStatsIndex(this.#alive()).get(item.id));
+    const alive = this.#alive();
+    return decorate(item, todayKey(), childStatsIndex(alive).get(item.id), spentStatsIndex(alive).get(item.id));
   }
 
   /**
@@ -610,8 +690,11 @@ export class TodoService {
 
     // 子级统计按**全部存活记录**算，不按过滤后的集合算：
     // 父行的 `2/3` 说的是"这一步拆成了几步、勾完几步"，不该因为当前只看未完成就变样。
-    const index = childStatsIndex(this.#alive());
-    const decorated = items.map((item) => decorate(item, today, index.get(item.id)));
+    // 专注秒数同理：父行的 spentSec 是"这棵子树一共投入了多少"，不能被筛选条件改变。
+    const alive = this.#alive();
+    const index = childStatsIndex(alive);
+    const spent = spentStatsIndex(alive);
+    const decorated = items.map((item) => decorate(item, today, index.get(item.id), spent.get(item.id)));
     // 不传 limit 就不截断（与旧 /schedules 行为一致）；日历聚合拿全量自己分桶
     const capped = Number(limit);
     return limit !== undefined && limit !== '' && Number.isFinite(capped) && capped > 0
@@ -705,6 +788,48 @@ export class TodoService {
     return Number.isFinite(capped) && capped > 0 ? items.slice(0, capped) : items;
   }
 
+  /**
+   * 番茄钟结算时把「自己」的专注秒数记到待办上（**唯一**允许写 `spentSelfSec` 的入口）。
+   *
+   * 为什么是"加到当前待办、祖先自动派生"：
+   * - 只写一处，就不存在"父任务上加了两次 / 移动子树后祖父多算"的重复累计；
+   * - `decorate` 的 `spentSec` 按当前父子树现算（自己 + 全部后代），所以从子任务到
+   *   祖父每一层都能看见这笔投入，而数据里没有一份会过期的聚合值；
+   * - 参考实现只给直接父级加一次，在 3 层待办下会让祖父级少算 —— 这是有意的偏离。
+   *
+   * **已完成 / 已删除的待办不累计**：返回 `{added:0, skipped}`，不报错（番茄钟不应因为
+   * 用户中途勾掉了任务而崩），也不写库。调用方不需要重复判断完成态。
+   *
+   * 写库走集合层的 merge（不是 `update()`）：`update()` 会用「当前记录 + patch」重建
+   * 完整字段，而 `spentSelfSec` 是只读字段，不该走客户端可写的那条路径。服务内部直接
+   * 写这一个字段是安全的 —— 这里就是"拥有这个字段的模块"。
+   *
+   * @param {string} id 待办 id
+   * @param {number} seconds 要累计的秒数（正数）
+   * @param {{notify?: boolean}} [options] `notify:false` 时不广播（番茄钟每 5 秒
+   *   实时入账，若每次都广播，前台会每 5 秒整体重画一次，用户正在填的设置会被冲掉）
+   * @returns {Promise<{id:string, added:number, spentSelfSec:number, skipped?:string}|null>}
+   */
+  async addSpentSec(id, seconds, { notify = true } = {}) {
+    const current = this.collection.get(String(id ?? ''));
+    if (!current || current.deletedAt) return null;
+    const amount = Math.max(0, Math.round(Number(seconds) || 0));
+    if (!amount) return { id: current.id, added: 0, spentSelfSec: current.spentSelfSec ?? 0 };
+    if (current.completed) {
+      return { id: current.id, added: 0, skipped: 'completed', spentSelfSec: current.spentSelfSec ?? 0 };
+    }
+    const spentSelfSec = Math.max(0, Math.round(Number(current.spentSelfSec) || 0)) + amount;
+    const updated = await this.collection.update(current.id, { spentSelfSec });
+    if (!updated) return null;
+    if (notify) {
+      this.broadcast?.({
+        type: 'data_changed',
+        payload: { target: 'todo', action: 'spend', id: current.id, spentSelfSec },
+      });
+    }
+    return { id: updated.id, added: amount, spentSelfSec: updated.spentSelfSec };
+  }
+
   /** 统计：以「过滤后的集合」为准（不受 limit 影响），口径见 docs/接口文档.md。 */
   stats(items) {
     const total = items.length;
@@ -740,17 +865,22 @@ export class TodoService {
 
   async create(input) {
     const data = normalize(input);
+    // 新待办从 0 开始计专注；normalize 不产出这个字段（只读，见 READONLY_FIELDS），
+    // 所以在**落库这一步**补默认值，更新路径碰不到它
+    data.spentSelfSec = 0;
     // 父级必须在写入前验证：落库之后再发现父不存在，就只能靠启动修复去擦屁股
     this.#assertParent(data.parentId);
     if (data.completed && !data.completedAt) data.completedAt = new Date().toISOString();
     const created = await this.collection.insert(data);
     this.broadcast({ type: 'data_changed', payload: { target: 'todo', action: 'create', id: created.id } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'todo', action: 'create', targetId: created.id, title: created.title, after: created });
     return this.#decorate(created);
   }
 
   /** 只校验、不落库（与 create 同一条归一化路径），供 dryRun 预览与 AI 草稿预校验。 */
   preview(input) {
     const data = normalize(input);
+    data.spentSelfSec = 0;
     // dryRun 也要提前报"父不存在 / 超 3 层"：否则确认卡看起来没问题，点确认才 400
     this.#assertParent(data.parentId);
     if (data.completed && !data.completedAt) data.completedAt = new Date().toISOString();
@@ -799,6 +929,7 @@ export class TodoService {
    * 被悄悄重新勾上 —— 那是改动用户的数据。
    */
   async update(id, patch = {}) {
+    const before = this.collection.get(id);
     const incoming = normalizeInput(patch);
     const data = this.#rebuild(id, patch);
     const updated = await this.collection.update(id, data);
@@ -810,6 +941,7 @@ export class TodoService {
     }
 
     this.broadcast({ type: 'data_changed', payload: { target: 'todo', action: 'update', id } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'todo', action: 'update', targetId: id, title: updated?.title, before, after: updated });
     const item = this.#decorate(updated);
     // 级联影响清单只挂在这条写响应上（GET 不会带它，它描述的是"这次操作做了什么"）
     item.cascaded = cascaded;
@@ -875,12 +1007,13 @@ export class TodoService {
    * 能继续被勾选 / 编辑 / 筛选，前端也不必为"父已删除"发明第四种渲染状态。
    */
   async remove(id) {
-    this.get(id);
+    const current = this.get(id);
     const detachedChildren = this.#childrenOf(id).map((item) => item.id);
     // 先断开再删：任何时刻都不存在"指向不存在记录"的中间状态
     for (const childId of detachedChildren) await this.collection.update(childId, { parentId: null });
     await this.collection.remove(id);
     this.broadcast({ type: 'data_changed', payload: { target: 'todo', action: 'delete', id } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'todo', action: 'delete', targetId: id, title: current.title, before: current });
     return { id, deleted: true, detachedChildren };
   }
 
@@ -896,7 +1029,160 @@ export class TodoService {
       const result = await this.remove(id);
       detachedChildren.push(...result.detachedChildren);
     }
+    if (list.length && this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'todo', action: 'bulk', summary: `批量删除 ${list.length} 条待办`, before: { ids: list, count: list.length } });
     return { ids: list, deleted: list.length, detachedChildren };
+  }
+
+  /**
+   * 批量操作：`delete` / `complete` / `uncomplete` / `category`。
+   *
+   * 设计原则：**批量动作不是另一套语义，而是把单条语义原样跑一遍**。
+   * - `delete` 逐条走 `remove()`（而不是集合层的 `removeMany`）：删父不级联删子、
+   *   把直接子级的 `parentId` 置空这条规则写在 `remove()` 里。绕过它直接删集合会留下
+   *   悬空 parentId —— 子任务从树形视图里消失、AI 也查不到归属，这是静默的数据损坏。
+   * - `complete` 逐条走 `update()`：父完成要级联完成所有后代并写 `autoCompletedBy`，
+   *   这个级联只在 `update()` 里。批量里另写一份"把 completed 设成 true"会漏掉标记，
+   *   之后取消父任务时就再也分不清哪些子任务是被连带完成的。
+   * - `uncomplete` 同样走 `update()`：它只回滚 `autoCompletedBy === 父` 的后代，
+   *   **用户手动完成的子任务保持完成**（见 #revertCascade 的注释）。批量取消若图省事
+   *   把子树全设成未完成，用户亲手勾掉的进度就没了 —— 那是数据丢失，不是"撤销"。
+   * - `category` 也走 `update()`：长度 ≤24 / 空串 = 未分类这些规则在 normalize 里，
+   *   复用同一条写路径，批量与单条才不会对同一个分类给出两种结果。
+   *
+   * `changed` 只数**目标记录**里真正发生变化的条数（不含被级联的后代）；级联影响单独放在
+   * `cascaded` 里，与单条接口的 `cascaded` 口径一致。这样界面说「已处理 3 条」时，
+   * 不会把 30 个被连带完成的孙辈混进去。
+   *
+   * `dryRun` 只回 `matched` 与最多 8 条 `{id,title}` 样例，一个字段都不写：确认卡/预览
+   * 必须能在落库前让用户看清"这一批到底是哪些"，否则批量删除就成了盲操作。
+   *
+   * @param {object} input
+   * @param {'delete'|'complete'|'uncomplete'|'category'} input.action
+   * @param {string[]} input.ids 待办 id（最多 200 个；重复 id 只算一次）
+   * @param {string} [input.category] `category` 动作必填，空串 = 未分类
+   * @param {boolean} [input.dryRun]
+   * @returns {Promise<{action:string, matched:number, changed:number,
+   *   skipped:Array<{id:string, reason:string}>, dryRun:boolean,
+   *   sample?:Array<{id:string, title:string}>, cascaded?:object, detachedChildren?:string[]}>}
+   */
+  async bulk({ action, ids, category, dryRun = false } = {}) {
+    if (!BULK_ACTIONS.includes(action)) {
+      throw HttpError.badRequest(`字段 action 不合法：可选 ${BULK_ACTIONS.join(' / ')}`, {
+        field: 'action',
+        allowed: [...BULK_ACTIONS],
+      });
+    }
+    if (!Array.isArray(ids) || !ids.length) {
+      throw HttpError.badRequest(`字段 ids 必填：待办 id 数组（一次最多 ${MAX_BULK_IDS} 个）`, { field: 'ids' });
+    }
+    // 上限在**去重 / 查库之前**判：用户/脚本送来 500 个 id 时，不该先跑 500 次查询再报错
+    if (ids.length > MAX_BULK_IDS) {
+      throw HttpError.badRequest(
+        `一次最多批量操作 ${MAX_BULK_IDS} 条待办（这次 ${ids.length} 条），请分批操作`,
+        { field: 'ids', code: 'TOO_MANY_IDS', max: MAX_BULK_IDS, count: ids.length },
+      );
+    }
+    const unique = [];
+    for (const raw of ids) {
+      if (typeof raw !== 'string' || !raw.trim()) {
+        throw HttpError.badRequest('字段 ids 不合法：每一项都必须是待办 id（字符串）', {
+          field: 'ids',
+          code: 'INVALID_IDS',
+        });
+      }
+      const id = raw.trim();
+      if (!unique.includes(id)) unique.push(id);
+    }
+
+    // category 动作的取值在查库前校验：参数本身写错（太长 / 不是字符串）与记录无关，
+    // 没必要等遍历到第一条才发现。空串是合法值（未分类），不能当"没传"处理。
+    let nextCategory = '';
+    if (action === 'category') {
+      if (category === undefined) {
+        throw HttpError.badRequest('category 动作必须传 category（空串 = 未分类）', { field: 'category' });
+      }
+      nextCategory = category === null ? '' : optionalText(category, 'category', MAX_CATEGORY_LENGTH) ?? '';
+    }
+
+    const preview = booleanValue(dryRun, 'dryRun', { optional: true, fallback: false });
+    const skipped = [];
+    const records = [];
+    for (const id of unique) {
+      const item = this.collection.get(id);
+      // `deletedAt` 只作为同步/迁移的兜底：对待办来说它已经不存在，不能拿来操作
+      if (!item || item.deletedAt) skipped.push({ id, reason: 'not_found' });
+      else records.push(item);
+    }
+
+    if (preview) {
+      return {
+        action,
+        matched: records.length,
+        changed: 0,
+        skipped,
+        dryRun: true,
+        // 样例只给 id + 标题：预览要回答"选中的是哪些"，不是把整条记录（含派生字段）再传一遍
+        sample: records.slice(0, BULK_SAMPLE_LIMIT).map((item) => ({ id: item.id, title: item.title })),
+      };
+    }
+
+    let changed = 0;
+    const cascaded = { completed: [], reverted: [] };
+    const detachedChildren = [];
+
+    for (const record of records) {
+      // 重新读一次当前记录：前面的父任务可能已经级联改过它。
+      // 拿循环开始时的快照判断「是否已完成」会把刚被连带完成的子任务再写一遍，
+      // 导致 changed 虚高、skipped 漏报 already（而用户看到的条数就不对了）。
+      const current = this.collection.get(record.id);
+      if (!current || current.deletedAt) {
+        skipped.push({ id: record.id, reason: 'not_found' });
+        continue;
+      }
+
+      if (action === 'delete') {
+        // 逐条调用单条删除：子级解绑规则只在这里维护（理由见方法头）
+        const result = await this.remove(current.id);
+        detachedChildren.push(...result.detachedChildren);
+        changed += 1;
+      } else if (action === 'complete') {
+        if (current.completed) {
+          skipped.push({ id: current.id, reason: 'already' });
+          continue;
+        }
+        // 走 update 而不是直接写 completed：级联完成 + autoCompletedBy 标记都在那里
+        const updated = await this.update(current.id, { completed: true });
+        cascaded.completed.push(...(updated.cascaded?.completed ?? []));
+        changed += 1;
+      } else if (action === 'uncomplete') {
+        if (!current.completed) {
+          skipped.push({ id: current.id, reason: 'already' });
+          continue;
+        }
+        // 只回滚被这条父任务连带完成的子任务，手动完成的不动（见 #revertCascade）
+        const updated = await this.update(current.id, { completed: false });
+        cascaded.reverted.push(...(updated.cascaded?.reverted ?? []));
+        changed += 1;
+      } else if (action === 'category') {
+        if ((current.category ?? '') === nextCategory) {
+          // 已经在这个分类里：不写库，避免把"没变化"虚报成 changed
+          skipped.push({ id: current.id, reason: 'unchanged' });
+          continue;
+        }
+        await this.update(current.id, { category: nextCategory });
+        changed += 1;
+      }
+    }
+
+    return {
+      action,
+      matched: records.length,
+      changed,
+      skipped,
+      dryRun: false,
+      ...(action === 'delete' ? { detachedChildren } : {}),
+      ...(action === 'complete' || action === 'uncomplete' ? { cascaded } : {}),
+    };
   }
 
   /**

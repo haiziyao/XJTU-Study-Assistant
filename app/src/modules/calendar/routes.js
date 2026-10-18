@@ -171,6 +171,19 @@ export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1'
   /** 顺延：未完成且截止日早于目标周一的待办，挪到目标周的同一星期几（已过则落到周一）。 */
   router.post(`${P}/todos/rollover`, async ({ body }) => todos.rollover(body ?? {}));
 
+  /**
+   * 批量操作（多选模式）：`{ action, ids, category?, dryRun? }`。
+   *
+   * `action`：`delete` / `complete` / `uncomplete` / `category`；单次最多 200 个 id
+   * （超出 400 `TOO_MANY_IDS`，理由见 todo-service 的 MAX_BULK_IDS）。
+   * 响应：`{ action, matched, changed, skipped:[{id,reason}], dryRun }`；
+   * `dryRun` 额外带 `sample`（最多 8 条 `{id,title}`），且不写任何数据。
+   *
+   * 放在 `/todos/:id` 之前只是可读性安排：路由按「方法 + 路径」精确匹配，
+   * `POST /todos/bulk` 与 `POST /todos/:id/completed` 的路径段数不同，不会互相抢。
+   */
+  router.post(`${P}/todos/bulk`, async ({ body }) => todos.bulk(body ?? {}));
+
   router.post(`${P}/todos`, async ({ body }) => {
     const item = await todos.create(body ?? {});
     return { __status: 201, item };
@@ -225,6 +238,27 @@ export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1'
   router.get(`${P}/schedules/agenda`, ({ query }) => schedules.agenda({ date: query.date }));
 
   router.get(`${P}/schedules/stats`, ({ query }) => schedules.stats({ from: query.from, to: query.to }));
+
+  /**
+   * 批量删除（先预览后确认）+ 回收站。**必须注册在 `/schedules/:id` 之前**：
+   * 路由按注册顺序匹配，否则 `GET /schedules/trash` 会被 `:id` 当成 id="trash" 吃掉（404 日程不存在）。
+   *
+   * body 契约见 schedule-service.bulkDelete：默认 dryRun（只预览）；只有 dryRun:false + confirm:true
+   * 才真的删；清空全部还要 confirmText:"删除"。只动 schedules 集合。
+   */
+  router.post(`${P}/schedules/bulk-delete`, async ({ body }) => schedules.bulkDelete(body ?? {}));
+
+  /** 回收站概况（只给批次与条数，不含记录正文）。 */
+  router.get(`${P}/schedules/trash`, () => schedules.trashList());
+
+  /** 撤销：恢复某一批（同 id 已存在则跳过）。 */
+  router.post(`${P}/schedules/trash/restore`, async ({ body }) => {
+    if (!body?.trashId) throw HttpError.badRequest('trashId 为必填');
+    return schedules.restoreTrash(body.trashId);
+  });
+
+  /** 清空回收站（破坏性：要 confirm:true，理由与批量删除一致）。 */
+  router.post(`${P}/schedules/trash/clear`, async ({ body }) => schedules.clearTrash(body ?? {}));
 
   router.post(`${P}/schedules`, async ({ body }) => {
     assertSchedulePayload(body, { requireStartTime: true });

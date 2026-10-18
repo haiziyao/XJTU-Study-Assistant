@@ -19,7 +19,7 @@
 
 (function () {
   /** 默认勾选：所有"接收侧写得进去"的集合（对话/消息收不下，见目录里的原因）。 */
-  const DEFAULT_SELECTED = ['memories', 'notes', 'todos', 'schedules', 'events', 'cards', 'goals'];
+  const DEFAULT_SELECTED = ['memories', 'notes', 'todos', 'schedules', 'events'];
 
   const PLATFORM_LABEL = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' };
 
@@ -277,6 +277,12 @@
     await load();
   });
 
+  const revokeLanToken = (id) => run(`revoke:${id}`, async () => {
+    const result = await PC.api(`/transfer/gateway/revoke/${encodeURIComponent(id)}`, { method: 'POST', body: {} });
+    PC.toast(result.revoked ? '已撤销这台设备' : '这台设备已经失效');
+    await load();
+  });
+
   /** 复制：优先用剪贴板 API（失败就提示手动选中，绝不假装成功）。 */
   async function copyText(text, okText) {
     try {
@@ -461,7 +467,8 @@
       return;
     }
 
-    const urls = gateway.urls ?? [];
+    const certificate = gateway.certificate ?? {};
+    const urls = gateway.httpsUrls?.length ? gateway.httpsUrls : (gateway.urls ?? []);
     if (!urls.length) {
       box.appendChild(alertBox('没找到局域网地址', '这台机器现在没有非回环的 IPv4 地址（可能没连 Wi-Fi）。连上网络后重新打开本页。', 'warn'));
     } else {
@@ -473,16 +480,30 @@
         list.appendChild(row);
       }
       box.appendChild(list);
+      if (gateway.httpsUrls?.[0] && window.PCQRCode?.svg) {
+        const qr = mk('details', 'tf-qr');
+        qr.appendChild(mk('summary', '', '显示手机版访问二维码'));
+        const visual = mk('div', 'tf-qr-visual');
+        visual.innerHTML = window.PCQRCode.svg(gateway.httpsUrls[0], 5);
+        visual.appendChild(mk('div', 'tf-card-note', '手机安装并信任证书后，扫描此二维码打开安全版。'));
+        qr.appendChild(visual);
+        box.appendChild(qr);
+      }
     }
 
-    box.appendChild(
-      mk(
-        'div',
-        'tf-card-note',
-        '手机做法：Safari 打开上面的地址 → 输入本页显示的 6 位配对码 → 进入后再「分享 → 添加到主屏幕」，桌面上就有一个像 App 一样的图标。',
-      ),
-    );
-    box.appendChild(mk('div', 'tf-card-note', `一台设备输一次码可连续用 30 分钟（Cookie 到期后重新输码即可）。现在有 ${gateway.tokenCount} 台设备被授权。`));
+    if (certificate.ready) {
+      const caUrl = certificate.caUrls?.[0];
+      if (caUrl) {
+        const certRow = mk('div', 'tf-lan-row');
+        certRow.append(mk('code', 'tf-lan-url', caUrl), button('复制证书地址', 'ghost-btn', () => copyText(caUrl, '证书地址已复制')));
+        box.appendChild(certRow);
+      }
+      box.appendChild(mk('div', 'tf-card-note', '首次使用：手机浏览器打开证书地址并安装。iPhone 还需进入“设置 → 通用 → 关于本机 → 证书信任设置”启用完全信任；Android 在安全设置中安装 CA 证书。然后打开上面的 HTTPS 地址、输入配对码，再添加到主屏幕。'));
+    } else {
+      box.appendChild(alertBox('安全入口正在准备', certificate.error || 'Windows 正在生成本机专属证书。稍等几秒后刷新本页；在 HTTPS 就绪前无法安装离线版。', certificate.error ? 'warn' : 'info'));
+    }
+    box.appendChild(mk('div', 'tf-card-note', '打开安全版并输入配对码后，可从浏览器菜单选择“添加到主屏幕”，以后就能像 App 一样启动。'));
+    box.appendChild(mk('div', 'tf-card-note', `一台设备授权后可连续使用 ${Math.max(1, Math.round((gateway.tokenTtlMs || 2592000000) / 86400000))} 天，可随时单独撤销。现在有 ${gateway.tokenCount} 台设备被授权。`));
 
     // 已授权设备：只显示"能认出是谁"的信息（完整令牌不出现在任何接口响应里）
     const tokens = gateway.tokens ?? [];
@@ -494,6 +515,7 @@
         main.appendChild(mk('div', 'tf-log-title', session.label));
         main.appendChild(mk('div', 'tf-log-meta', `令牌 ${session.id}… · 到期 ${formatStamp(session.expiresAt)}`));
         row.appendChild(main);
+        row.appendChild(button(ui.busy === `revoke:${session.id}` ? '撤销中…' : '撤销', 'ghost-btn', () => revokeLanToken(session.id)));
         list.appendChild(row);
       }
       box.appendChild(list);
@@ -511,7 +533,7 @@
     box.appendChild(
       alertBox(
         '安全边界（照实说）',
-        '只监听局域网、不出公网，内容也不加密 —— 配对码就是门票：同一局域网里拿到配对码的人，能看到成绩、笔记与对话。公共 Wi-Fi（咖啡厅/酒店/学校开放网络）下不建议打开；用完就关掉，或点上面的「全部注销」。',
+        '只监听局域网、不出公网；手机版正式入口使用本机 HTTPS 加密。配对码仍是门票：同一局域网里拿到配对码且信任证书的人可以访问本机数据。公共 Wi-Fi 下仍不建议打开；用完可关掉入口或撤销设备。',
         'warn',
       ),
     );

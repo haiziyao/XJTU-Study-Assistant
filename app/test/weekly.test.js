@@ -9,8 +9,11 @@
  *   2. **"不偷偷花钱"是契约**。`GET /weekly/report` 必须永远不调用模型，只有 POST generate 才调 ——
  *      这条只能靠假上游的调用计数来证明（mock.state.calls）；
  *   3. **降级不是错误**：没有密钥时必须 200 + `fallback: true` + `reason`，且 stats 照样完整；
- *   4. **缺模块不能拖垮接口**：`cards` / `goals` 由别的智能体并行开发，用只在 `onlyModules`
- *      里装配 weekly/notes/calendar 的实例来证明"它们不在时接口仍 200、missing 如实列出"。
+ *   4. **缺模块不能拖垮接口**：用只在 `onlyModules` 里装配 weekly/notes/calendar 的实例来证明
+ *      "AI 对话 / 成绩不在时接口仍 200、missing 如实列出"。
+ *
+ * 统计来源**只有四个**（AI 对话 / 笔记 / 待办 / 成绩）。间隔重复卡片与学习目标两个功能
+ * 已整体移除，本测试同时断言 `stats` 里不会重新长出这两项。
  *
  * 不访问真实网络：AI 全部指向本地 mock（test/helpers/ai-mock.js）。
  */
@@ -68,10 +71,6 @@ async function startApp({ onlyModules, ai } = {}) {
   };
 }
 
-/** 模块（或它的集合）到底装没装 —— 用来让断言在"并行开发的模块还没落地"时依然成立。 */
-const installed = (ctx, id, collection) =>
-  Boolean(ctx.app.modules?.some?.((mod) => mod.id === id)) || ctx.app.store.collectionNames.includes(collection);
-
 const missingOf = (stats, source) => stats.missing.find((item) => item.source === source) ?? null;
 
 // ---------------------------------------------------------------- 模块装配
@@ -91,6 +90,9 @@ test('周报：模块出现在 /modules 里，集合落在 weekly-reports.json',
     // 服务是共享注册表里的一员（ai 模块之后仍能拿到它）
     assert.ok(ctx.app.services.weekly, 'services.weekly 应该存在');
     assert.ok(ctx.app.services.commands.targets.includes('weekly'), '指令 target weekly 要注册');
+    // 本次移除的两个模块不该再出现在后端模块表里
+    const ids = (listed.body.items ?? []).map((item) => item.id);
+    for (const gone of ['cards', 'goals']) assert.equal(ids.includes(gone), false, `${gone} 模块必须整体移除`);
   } finally {
     await ctx.close();
   }
@@ -135,35 +137,19 @@ test('周报：GET /weekly/report 的数字与各模块接口造出来的完全�
     assert.equal(chat.status, 200);
     const callsAfterSeeding = mock.state.calls;
 
-    // ④ 卡片与目标：这两个模块由别的智能体并行开发，**装了就按它们自己的接口造数据并断言**，
-    //    没装就只断言 missing 里的 unavailable（这样这份测试在两种世界下都是可信的）
-    const hasCards = installed(ctx, 'cards', 'cards');
-    if (hasCards) {
-      const card = await ctx.call('POST', '/cards', { front: '线代：特征值是什么？', back: 'Ax = λx 的 λ' });
-      assert.equal(card.status, 201);
-      const reviewed = await ctx.call('POST', `/cards/${card.body.item.id}/review`, { grade: 'good' });
-      assert.equal(reviewed.status, 200, '复习一次，让 lastReviewedAt 落在区间内');
-      assert.ok(reviewed.body.item.lastReviewedAt);
-    }
-    const hasGoals = installed(ctx, 'goals', 'goals');
-    if (hasGoals) {
-      const long = await ctx.call('POST', '/goals', { title: '刷完线代 300 题', kind: 'goal', targetDate: addDays(today, 3) });
-      assert.equal(long.status, 201);
-      const overdueGoal = await ctx.call('POST', '/goals', { title: '交大作业', kind: 'deadline', targetDate: addDays(today, -1) });
-      assert.equal(overdueGoal.status, 201);
-      // 推进度 = 一次真实的"进度推进"动作（本模块**不**从它推断"进度变化量"，理由见 sources.js）
-      const progressed = await ctx.call('POST', `/goals/${long.body.item.id}/progress`, { delta: 20 });
-      assert.equal(progressed.status, 200);
-      assert.equal(progressed.body.item.progress, 20);
-    }
-
-    // ⑤ 读周报（区间 = 今天这一天）：数字必须与上面造的**完全一致**
+    // ④ 读周报（区间 = 今天这一天）：数字必须与上面造的**完全一致**
     const result = await ctx.call('GET', `/weekly/report?from=${today}&to=${today}`);
     assert.equal(result.status, 200);
     assert.equal(result.body.from, today);
     assert.equal(result.body.to, today);
     assert.equal(result.body.days, 1);
     const stats = result.body.stats;
+
+    // 统计项只有四个来源：卡片 / 目标不但在 missing 里没有，连字段都不该存在
+    for (const gone of ['cards', 'goals']) {
+      assert.equal(Object.prototype.hasOwnProperty.call(stats, gone), false, `${gone} 统计项必须彻底移除`);
+      assert.equal(missingOf(stats, gone), null, `${gone} 不该再出现在 missing 里`);
+    }
 
     assert.equal(stats.conversations.newConversations, 1);
     assert.equal(stats.conversations.messages, 2);
@@ -185,44 +171,11 @@ test('周报：GET /weekly/report 的数字与各模块接口造出来的完全�
     assert.equal(stats.schedule.todosDueSoon, 1, '背单词 3 天后到期（今天到期那条已完成，不算）');
     assert.equal(stats.schedule.attention[0].title, '补交物理作业', '逾期排在最前面');
 
-    // cards：一次复习之后 → 这张卡不再"现在到期"，"本周复习过的卡片数"= 1；
-    // "复习次数/新学会"因为 cards 只存 lastReviewedAt + reps（没有流水）而如实为 null
-    if (hasCards) {
-      assert.equal(stats.cards.total, 1);
-      assert.equal(stats.cards.due, 0, 'good 评分把这张卡排到了明天之后，所以"现在到期"是 0');
-      assert.equal(stats.cards.reviewedCards, 1, '按 lastReviewedAt 落点统计，这是精确口径');
-      assert.equal(stats.cards.reviews, null, '没有复习流水，不许把"复习过的卡片数"冒充"复习次数"');
-      assert.equal(stats.cards.learned, null);
-      assert.equal(missingOf(stats, 'cards')?.reason, 'partial');
-      assert.match(missingOf(stats, 'cards').detail, /流水/);
-    }
-    // goals：两条目标（一条 3 天后、一条已逾期）→ 逾期/临近各 1；进度变化量算不出来，如实 null
-    if (hasGoals) {
-      assert.equal(stats.goals.total, 2);
-      assert.equal(stats.goals.active, 2);
-      assert.equal(stats.goals.updated, 2, '两条今天都动过（一条还推进了进度）');
-      assert.equal(stats.goals.overdue, 1, 'targetDate 在昨天的那条');
-      assert.equal(stats.goals.dueSoon, 1, 'targetDate 在 3 天后的那条');
-      assert.equal(stats.goals.completed, 0);
-      assert.equal(stats.goals.progressChanges, null, '目标没有进度流水，不许猜"进度前进了多少"');
-      assert.match(missingOf(stats, 'goals')?.detail ?? '', /流水/);
-    }
-
     // 成绩：装好了 academic 但一条成绩都没有 → gpa 是 null（不是 0）、没有变化
     assert.ok(stats.grades, 'academic 装配了就该有 grades');
     assert.equal(stats.grades.gpa, null);
     assert.equal(stats.grades.changed, false);
 
-    // cards / goals 允许"还没装配"：装了就必须有对象，没装就必须 null + missing
-    for (const [id, collection] of [['cards', 'cards'], ['goals', 'goals']]) {
-      if (installed(ctx, id, collection)) {
-        assert.ok(stats[id], `${id} 已装配时 ${id} 必须有对象`);
-        assert.equal(missingOf(stats, id)?.reason === 'unavailable', false, `${id} 已装配时不许报 unavailable`);
-      } else {
-        assert.equal(stats[id], null, `${id} 没装配时必须 null（不是 0）`);
-        assert.equal(missingOf(stats, id)?.reason, 'unavailable');
-      }
-    }
     assert.equal(stats.partial, stats.missing.length > 0);
 
     // ⑤ GET 绝不调用模型：上游调用次数在读取前后不变
@@ -285,9 +238,11 @@ test('周报：没有配置 AI 密钥时 generate 走降级 —— ok + fallback
     assert.equal(stats.schedule.todosCreated, 1);
     assert.equal(generated.body.report.includes('新写 3 篇笔记'), true, `规则小结要用真实数字：${generated.body.report}`);
     assert.equal(generated.body.report.includes('学习投入'), true);
-    assert.equal(generated.body.report.includes('复习与笔记'), true);
+    assert.equal(generated.body.report.includes('笔记与成绩'), true);
     assert.equal(generated.body.report.includes('需要注意的事'), true);
     assert.equal(/小时/.test(generated.body.report), false, '系统没有"学习时长"数据源，任何路径都不许出现小时数');
+    // 已移除功能的概念不许被报告重新编出来
+    assert.equal(/卡片|学习目标|复习/.test(generated.body.report), false, `报告不该提已移除的功能：${generated.body.report}`);
     assert.ok(generated.body.report.length <= 2000);
 
     // 落库了，GET 立刻能读到（并且是缓存）
@@ -346,7 +301,9 @@ test('周报：同一周第二次 generate 命中缓存（不加调用），forc
     assert.match(prompt, /只依据/);
     assert.match(prompt, /学习时长/);
     assert.match(prompt, /400 字/);
-    assert.match(prompt, /学习投入|复习与笔记|需要注意的事/);
+    assert.match(prompt, /学习投入|笔记与成绩|需要注意的事/);
+    // 提示词不许再提已移除的功能，否则模型会照着旧概念编数字
+    assert.equal(/卡片|学习目标/.test(prompt), false, '统计提示词里不该出现已移除功能的概念');
   } finally {
     await ctx.close();
     await mock.close();
@@ -355,8 +312,8 @@ test('周报：同一周第二次 generate 命中缓存（不加调用），forc
 
 // ---------------------------------------------------------------- 缺模块
 
-test('周报：缺 cards / goals 时 missing 如实列出、接口仍 200、其它来源照常有数', async () => {
-  // 只装配 weekly + notes + calendar：cards / goals / academic / ai 都不在
+test('周报：缺 AI 对话 / 成绩时 missing 如实列出、接口仍 200、其它来源照常有数', async () => {
+  // 只装配 weekly + notes + calendar：ai / academic 都不在
   const ctx = await startApp({ onlyModules: ['weekly', 'notes', 'calendar'] });
   try {
     const today = todayKey();
@@ -367,7 +324,7 @@ test('周报：缺 cards / goals 时 missing 如实列出、接口仍 200、其�
     assert.equal(result.status, 200, '缺模块绝不能把接口打挂');
     const stats = result.body.stats;
 
-    for (const source of ['cards', 'goals', 'conversations', 'grades']) {
+    for (const source of ['conversations', 'grades', 'pomodoro']) {
       assert.equal(stats[source], null, `${source} 没装配时必须 null`);
       const item = missingOf(stats, source);
       assert.ok(item, `${source} 必须出现在 missing 里`);
@@ -386,8 +343,9 @@ test('周报：缺 cards / goals 时 missing 如实列出、接口仍 200、其�
     assert.equal(generated.body.ok, true);
     assert.equal(generated.body.fallback, true);
     assert.equal(generated.body.report.includes('缺：'), true, `降级正文要列缺失来源：${generated.body.report}`);
-    assert.equal(generated.body.report.includes('复习卡片'), true);
-    assert.equal(generated.body.stats.missing.length, 4);
+    assert.equal(/AI 对话/.test(generated.body.report), true);
+    assert.equal(/成绩/.test(generated.body.report), true);
+    assert.equal(generated.body.stats.missing.length, 3);
   } finally {
     await ctx.close();
   }

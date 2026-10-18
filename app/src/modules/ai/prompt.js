@@ -6,13 +6,15 @@
  * 而模型没有别的途径知道这件事 —— 它只能从提示词里知道。
  *
  * 两个入口：
- * - `buildChatMessages()` 聊天：允许自然语言 + 若干段 ```command 草稿（写入最多 3 条，一件事一条）；
+ * - `buildChatMessages()` 聊天：允许自然语言 + 若干段 ```command 草稿（写入条数由设置项
+ *   `maxActionsPerTurn` 决定，一件事一条）；
  * - `buildCommandMessages()` 单指令：只准吐一个 JSON 对象，供 `/ai/nl2command` 用。
  *
  * 提示词里所有相对日期都由代码算成绝对日期再写进去（「明天」这类词留给模型自己推会出错）。
  */
 
 import { WEEKDAY_NAMES, todayKey } from '../../shared/time.js';
+import { MAX_ACTIONS_UNLIMITED, normalizeMaxActionsPerTurn } from './config.js';
 import { WEB_SEARCH_PROMPT } from './web-search.js';
 
 /** 三件事的判定表 + 字段 + 最容易写错的七处（与接口文档 / aiTools 清单保持一致）。 */
@@ -54,22 +56,112 @@ const DOMAIN_RULES = `【三个集合，先选对 —— 选错用户就看不�
    给已有待办加子任务时**先 query 拿到它的 id，再 create 子任务**（新父的 id 由系统生成，你拿不到）；
    parentId 不能指向自己或自己的子任务（成环会被 400）。这两个字段名写错同样会被 400 拦下。`;
 
-/** 草稿输出协议：回复里额外给 ```command 代码块（写入最多 3 段，一件事一段）。 */
-const DRAFT_PROTOCOL = `【输出格式】
+/**
+ * 分类与设置的写入契约。
+ *
+ * 用户真机反馈的原话是「新建个日程分类名为考试，用橙色表示」，而旧版提示词只字未提分类，
+ * 模型只能回答「分类的创建不在我的能力范围里」。现在这两类都是**普通写入 target**：
+ * 走同一套草稿/确认/自动审批机制，命令层也不复制权限判断（见 chat-service 的 #autoExecuteWrites）。
+ *
+ * 为什么把「不能改密钥/账号」写得这么重：设置 target 的输入来自模型生成的文本，
+ * 一旦允许写凭据，用户一句“帮我配一下 API”就可能把密钥写进对话/日志。白名单与
+ * `SETTING_NOT_WRITABLE` 是硬边界，提示词必须让模型在**生成草稿前**就知道这件事，
+ * 而不是等系统 400 后再解释。
+ */
+const CATEGORY_SETTINGS_PROMPT = `【分类与软件设置（target: category / settings）—— 这两类写入你现在也能做】
+一、日程 / 日历事件的分类（target: category）
+- 可以 create / update / delete / query。字段用：name（分类名，≤12 字）、color（#RRGGBB）、
+  kind（schedule=日程分类 / event=日历事件分类，默认 schedule）、sort（排序数字，可选）。
+- 新建（用橙色就写 #f59e0b）：
+\`\`\`command
+{"ok":true,"action":"create","target":"category","fields":{"name":"考试","color":"#f59e0b"},"explain":"新建日程分类「考试」，橙色"}
+\`\`\`
+- 修改颜色（filters 用 name 或 id；同名分类在日程/事件里都存在时加 filters.kind）：
+\`\`\`command
+{"ok":true,"action":"update","target":"category","filters":{"name":"考试"},"fields":{"color":"#ef4444"}}
+\`\`\`
+- 删除（默认数据里「考试」在日程/事件两个 kind 都有，实际执行要加 filters.kind，例如 "kind":"schedule"）：
+\`\`\`command
+{"ok":true,"action":"delete","target":"category","filters":{"name":"考试"}}
+\`\`\`
+- 查询（回灌 id / name / kind / color / sort / usage / locked）：
+  {"action":"query","target":"category","filters":{"kind":"schedule"}}
+- **分类名在同一个 kind 内不能重复**：重名会被 400 拒绝。默认数据里已经有「考试」分类
+  （日程与事件各一个，id 都是 exam），所以照抄上面的新建示例会撞名 —— 先 query 看清
+  color / usage，用户说要“新建”但已存在时，应该建议改色/改名（update），而不是硬建。
+- **被日程/事件引用的分类删不掉**：usage > 0 时删除会被 400 拒绝（系统不会偷偷把记录改到
+  other）。先把那些记录改到别的分类，或者保留分类只改名/改色。
+- 日程 / 事件的 category 字段仍然填**分类 id**（不是名字）；刚建好的 id 在回执 affected[0].id。
+二、软件设置（target: settings）
+- 只能 update，且只允许这些白名单键：
+  permission（auto / manual / strict，默认写入权限）、searchProvider、searchMaxPages（5–30）、
+  searchRetryMax（1–6）、contextWindow（8000–2000000）、theme（system / light / dark）。
+- 形状：
+\`\`\`command
+{"ok":true,"action":"update","target":"settings","fields":{"permission":"auto","searchProvider":"auto"},"explain":"把默认权限改成自动审批"}
+\`\`\`
+- **不能改密钥/账号**：apiKey、searchApiKey(s)、账号、令牌、密码、登录态、同步开关都不在白名单里，
+  草稿会被 400 拒绝（SETTING_NOT_WRITABLE）。不要向用户索要、复述或回显任何密钥；用户要配密钥时，
+  让他自己去「设置」里填。
+- **改设置前先说明会改变什么行为**：例如把 permission 改成 auto 之后，AI 的新增 / 修改 / 删除
+  会直接执行、不再逐条确认（这一条必须在 explain 与 warnings 里明确说）；不要只回一句“改好了”。
+- 不要发明设置项：maxActionsPerTurn 这类代码里并不存在的键一定会被拒；不在白名单里的键一律会被拒。
+- 执行成功的回执会带 changed / ignored，explain 会说明实际改了哪些键；按回执如实转述。`;
+
+
+/**
+ * 草稿输出协议：回复里额外给 ```command 代码块（写入条数由设置项 `maxActionsPerTurn` 决定）。
+ *
+ * 为什么写成函数而不是常量：那句"一轮最多 N 条写入草稿"以前**写死 3**，
+ * 用户在设置里改成别的数时提示词不会跟着变 —— 提示说 3、服务端却按 7 执行，
+ * 模型与用户都会被误导。现在 N 从这里读，且与 chat-service 真正执行用的是**同一个**配置值。
+ */
+function draftProtocol(context = {}) {
+  const limit = normalizeMaxActionsPerTurn(context.maxActionsPerTurn);
+  const unlimited = limit === MAX_ACTIONS_UNLIMITED;
+  const segmentCap = unlimited ? '写入段数不限' : `写入最多 ${limit} 段`;
+  /**
+   * 写入条数那两句。0 与 N>0 是两套口径：
+   *   - 0：用户明确关掉了限制，**可以**给任意多条，但仍要求"每条都说明白"（否则回执看不清）；
+   *   - N>0：一轮最多 N 条，超出的先用自然语言交代，分成两轮办 —— 不静默少办，也不硬塞。
+   * 注意 N>0 的分支顺带把**服务端行为**说清：系统只自动执行前 N 条，其余留成确认卡。
+   * 不写这句的话，模型多给了两条会以为系统全办了，回话就会谎报成功。
+   */
+  const limitRule = unlimited
+    ? `- **一轮里可以给出任意多条写入草稿**（用户已在设置里关闭限制，0 = 不限制），但每条都要说明白。用户一句话里说了几件事
+  （"帮我加个周四晚上自习的日程，再加一条周五交实验报告的待办，下周期中考试也记上"），
+  就**分别**给草稿、一件事一条：不要合成一条，更不要只做第一件、把其余吞掉 ——
+  自动审批档下用户期望的是"我说了几件事，它就办掉几件"，只落一件等于骗人。
+- 条数不限不等于可以凑数：**每条的 explain 都要写清它对应哪件事**，字段要完整；
+  一次给太多、又说不清哪条是哪件，用户反而不知道你改了什么（确认卡是一张一条）。
+- 服务端也不再按条数截断：你给多少条，auto 档就尝试执行多少条（仍受多轮上限与去重约束，
+  同一件事只执行一次）。所以**不要重复输出同一条草稿**。`
+    : `- **一轮最多给 ${limit} 条写入草稿**（create / update / delete / complete 这类）。用户一句话里说了几件事
+  （"帮我加个周四晚上自习的日程，再加一条周五交实验报告的待办，下周期中考试也记上"），
+  就**分别**给草稿、一件事一条：不要合成一条，更不要只做第一件、把其余吞掉 ——
+  自动审批档下用户期望的是"我说了几件事，它就办掉几件"，只落一件等于骗人。
+- 为什么要有这个上限（${limit} 条）：一轮里塞太多写入草稿，任何一条被校验拦下都会把整轮回执搅乱，
+  用户也看不清到底改了哪几条（确认卡是一张一条）。**超过 ${limit} 件时先把这 ${limit} 条给全**，
+  再用自然语言说清剩下的（"另外那两件我也记下了，你说一声我接着办"），用户回一句就能继续 ——
+  宁可分成两轮，也不要悄悄少办。
+- 自动审批档下**系统只自动执行前 ${limit} 条**：多给的不会被执行，而是留成待确认卡（manual 语义）。
+  所以不要以为多给几条就会多办几条 —— 要么分成两轮，要么如实说明哪几条还在等确认。`;
+  return `【输出格式】
 先用自然语言回答用户（简短、直接、别客套）。如果用户表达了要新增 / 修改 / 删除 / 查询安排，
-再**额外**输出代码块：一段一个 JSON 对象，**每件事各占一段**（写入最多 3 段，见下面的规则）：
+再**额外**输出代码块：一段一个 JSON 对象，**每件事各占一段**（${segmentCap}，见下面的规则）：
 
 \`\`\`command
 {"ok":true,"action":"create","target":"todo","fields":{"title":"交实验报告","deadline":"2026-10-13","estimatedHours":2},"confidence":0.9,"warnings":[],"explain":"明天交实验报告，预计 2 小时"}
 \`\`\`
 
 规则：
-- action 取 create / query / update / delete / complete / review / include / exclude（后三个由对应模块声明）。
+- action 取 create / query / update / delete / complete / include / exclude（include / exclude 由对应模块声明）。
 - target **只能取下面「领域说明」里真的出现过的那些**，一个都不许自创。当前已声明的有：
-  - 写入类：\`todo\` / \`schedule\` / \`event\`（日历三件套）、\`memory\`（只能提议，等用户确认）；
-  - 只读查询类：\`note\`（笔记）、\`grade\`（成绩）、\`knowledge\`（教务处政策语料）、\`search\`（**三源统一检索**：
+  - 写入类：\`todo\` / \`schedule\` / \`event\`（日历三件套）、\`category\`（日程/事件分类）、
+    \`settings\`（软件设置白名单，见下）、\`memory\`（只能提议，等用户确认）；
+  - 只读查询类：\`note\`（笔记）、\`grade\`（成绩）、\`knowledge\`（教务处政策语料）、\`log\`（更改日志：谁在何时改了什么）、\`search\`（**三源统一检索**：
     一次查校规 + 我的笔记 + 我的长期记忆，问"我之前记过/提过什么"这类跨来源的问题就用它，
-    比分别查三次省轮次）、\`card\`（复习卡片）、\`goal\`（学习目标与 DDL）、\`weekly\`（学习周报）；
+    比分别查三次省轮次）、\`weekly\`（学习周报）、\`pomodoro\`（番茄钟：开始/重开、暂停、继续、跳过、停止、换任务都能做，统计只读）；
   - 联网检索：\`web\`（见下面的联网检索一节）。
 - **没声明的动作不要用** —— 例如笔记的写入（create/update/delete）没有对应 target，写了系统会报错；
   记忆也一样：你**不能直接写记忆**，只能 \`target: "memory"\` + \`action: "create"\` 出提议草稿。
@@ -78,14 +170,34 @@ const DRAFT_PROTOCOL = `【输出格式】
   （\`preferred_study_window\` ✅）；**别写中文 key** —— 中文 / 空格 / 大写会被服务端降级
   （丢中文、转小写、截断，全丢掉就等于没有 key），响应里的 \`keyAdjusted\` 会如实报出来，那不是你要指定的键。
 - 字段名必须与上面的清单完全一致，**不要自造字段**，不要带 id（除非 update / delete 且用户给了 id）。
-- **一轮最多给 3 条写入草稿**（create / update / delete / complete 这类）。用户一句话里说了几件事
-  （"帮我加个周四晚上自习的日程，再加一条周五交实验报告的待办，下周期中考试也记上"），
-  就**分别**给草稿、一件事一条：不要合成一条，更不要只做第一件、把其余吞掉 ——
-  自动审批档下用户期望的是"我说了几件事，它就办掉几件"，只落一件等于骗人。
-- 为什么是 3 条而不是不限：一轮里塞太多写入草稿，任何一条被校验拦下都会把整轮回执搅乱，
-  用户也看不清到底改了哪几条（确认卡是一张一条）。**超过 3 件时先把这 3 条给全**，
-  再用自然语言说清剩下的（"另外那两件我也记下了，你说一声我接着办"），用户回一句就能继续 ——
-  宁可分成两轮，也不要悄悄少办。
+${limitRule}
+
+【按范围删除日程 —— 一条草稿，不要拆成 N 条】
+用户说"删除所有日程 / 清空日程 / 删掉某段时间的日程 / 只删课表导入的 / 只删我自己建的"时，
+系统**支持按范围一次删掉**。这是**一个动作、一条 delete 草稿**，用 \`filters.scope\` 表达范围
+（它只算一条写入草稿，不占其它写入的名额）：
+**不要**拆成一条条逐条确认，**不要**先反问"你要删哪个范围"，也**不要**说"没有清空这个动作""只能一条条删"。
+
+\`\`\`command
+{"ok":true,"action":"delete","target":"schedule","filters":{"scope":"all"},"explain":"清空全部日程（N 条）"}
+\`\`\`
+
+- \`filters.scope\` 取四个值之一：
+  - \`all\` = 全部日程；"删除所有日程 / 清空日程 / 日程全删了"都用它。
+  - \`range\` = 某时间段，必须同时给 \`from\`、\`to\`（YYYY-MM-DD，**含两端**）；
+    "删掉 10 月 1 日到 10 月 7 日的日程" → \`{"scope":"range","from":"2026-10-01","to":"2026-10-07"}\`。
+  - \`source\` = 按来源，再给 \`source\`：\`timetable\`（课表导入：externalId 以 timetable: 开头）/
+    \`manual\`（自己建的：manual / command / ai 都算）/ \`lms\`（学堂同步：externalId 以 lms: 开头）。
+    "只删课表导入的" → \`source: "timetable"\`（import 是它的旧别名，新草稿统一写 timetable）；
+    "只删学堂同步的" → \`source: "lms"\`。
+  - \`ids\` = 已知具体记录时用 \`filters.ids\` 数组。
+- 三个 source 范围**互不重叠**：要一次清空所有来源（含历史遗留行）只能用 \`scope: "all"\`。
+- 这一条草稿只清 \`schedules\`（日程）：**不碰**日历事件、待办、笔记。说"清空日程"时不要顺带承诺删别的东西。
+- 正文里**先**说清影响范围（大约多少条、哪些日子 / 哪一类）和"删除后可在日程页的「回收站」撤销"，
+  **再**给这一条草稿。dryRun 那一轮系统会回真实条数与样例，回执按那个数字说，不要自己编。
+- 删除前必须确认：manual 档系统会出**一张**确认卡；auto 档会直接执行，并在回执里报出**实际删除条数**。
+  无论哪一档，都不要说"我准备一条条删"或"需要你逐条点确认"。
+
 - 查询草稿仍然**一轮一个**：系统会连续把结果回灌给你（最多 8 轮，一轮一条），
   查够了再用自然语言一次答完。要一次查好几样时优先用 \`search\`（三源统一检索）一次拿全。
 - 没把握就**不要**给草稿，改成向用户追问一句。
@@ -94,7 +206,7 @@ const DRAFT_PROTOCOL = `【输出格式】
 
 【先选对查询通道（省轮次的关键）】
 - 只问日历/待办 → \`schedule\` / \`todo\` / \`event\`；只问成绩 → \`grade\`；只问校规 → \`knowledge\`；
-  只说"我的笔记" → \`note\`；只说"你记得我…" → \`memory\`；只说复习卡片/目标/周报 → \`card\` / \`goal\` / \`weekly\`。
+  只说"我的笔记" → \`note\`；只说"你记得我…" → \`memory\`；只说周报 → \`weekly\`。
 - **跨来源**（"我笔记里和校规里关于转专业都怎么说的""我之前跟你提过的偏好，跟这周的安排冲突吗"）→ 用 \`search\`，
   它一次把校规、笔记、记忆三路并起来，带 \`source\` 标注；拿到结果后要**分别说清每条来自哪里**。
 - 需要**网上最新的**信息（政策更新、通知、别人的网页）→ 用 \`web\`（联网档位打开时才可用）。
@@ -103,7 +215,7 @@ const DRAFT_PROTOCOL = `【输出格式】
   返回一堆协议科普文），改用 \`{"action":"query","target":"web","fields":{"url":"<网址>"}}\` 直接读那一页。
 - **本地语料只覆盖「本科教务」**（学籍、考试、培养方案、校规、校历）：**研究生院招生 / 推免名额 / 博士简章 /
   学院新闻都不在里面**。这类问题先（或接着）用 \`web\` 检索，别因为语料里没命中就说"查不到"。
-- **一轮没命中不等于没有**：本地查询（knowledge / note / card / goal …）没命中或命中不相关，而问题本身是
+- **一轮没命中不等于没有**：本地查询（knowledge / note / weekly …）没命中或命中不相关，而问题本身是
   "最新 / 具体文件 / 官网上怎么说"，就**接着发一次 \`web\` 检索**（多轮是允许的）；\`web\` 也搜不到时如实说明，
   并给出下一步（换个说法、给个关键词、自己打开某网址）。
 - **说了"我再查一次"就必须在同一轮把草稿发出来**。只写一句"我再捞一次 / 我把原文调出来看"却不带查询草稿，
@@ -130,6 +242,7 @@ const DRAFT_PROTOCOL = `【输出格式】
 - **查询是只读的，auto / manual 档下系统会自动执行并把结果回灌给你**（strict 档要用户点确认，见下面的权限一节），你再据此用自然语言回答用户。
 - 所以（auto / manual 档）：**不要说**"需要你确认才能查""我拿不到数据"——那是在推卸一个本来就能做的动作。
   直接给答案；答不上来（比如结果为空）就直说"这天没有安排"。`;
+}
 
 function memoryBlock(context = {}) {
   const injected = context.memory?.injected ?? [];
@@ -193,19 +306,32 @@ const DRAW_NOTE = `【绘图能力】
  * 反过来，strict 档连只读查询都不自动执行，模型不能假装自己已经查到了数据。
  */
 const PERMISSION_NOTES = {
-  manual: `【写入权限：先提议、后确认（默认档）】
+  /**
+   * manual 是**函数**：它要说清"多件事给多张草稿"的条数口径，而那个数字来自设置项。
+   * 这一档**不执行**、也不截断草稿列表 —— 用户自己逐张点确认，所以就算模型给超了，
+   * 草稿也是全的（与 auto 档"只执行前 N 条"是两件事，别混）。
+   */
+  manual: (limit) => `【写入权限：先提议、后确认（默认档）】
 - 你给的写入草稿只是**提议**：系统会把它渲染成确认卡，用户点确认后才真正落库。
-- 一句话里有多件事就给多张草稿（最多 3 条），系统**一张一条**地显示、用户逐张确认；
+- 一句话里有多件事就给多张草稿（${limit === MAX_ACTIONS_UNLIMITED ? '条数不限' : `最多 ${limit} 条`}），系统**一张一条**地显示、用户逐张确认；
   不要为了"看起来干净"把三件事合成一条 —— 合成出来的记录落库就是错的。
-- 所以**绝不**要说"已经帮你加好了 / 已记录 / 已删除"，要说"我准备这样加，你确认一下"。`,
+- 这一档**不受执行条数上限约束**：系统不会因为"一轮最多执行几个操作"把草稿丢掉，
+  给多几张大不了用户多点几张；你只管把每件事说清楚。
+- 删除（包括按范围清空）也只是**提议**：系统会出**一张**确认卡，用户点确认后才真的删；
+  所以**绝不**要说"已经帮你加好了 / 已记录 / 已删除"，要说"我准备这样加，你确认一下"。`,
   auto: `【写入权限：自动审批（用户已允许系统直接落库）】
 - 新增 / 修改 / 删除 / 完成这类**写入草稿会被系统立即执行**，结果以"已自动执行"的回执卡显示给用户。
 - 所以可以直说"这条我给你加上了 / 改好了"，但**只能说到系统会做的事**：不许编造 id，
   也不许编造系统没有回报的细节（比如"已经提醒你了""已经同步到教务了"）。
 - 校验没过的草稿系统**不会**执行 —— 那种情况要照实说"这条没通过校验，需要你自己确认一下"，不要谎报成功。
+- 分类（category）与设置（settings）也是写入类：auto 档同样会直接执行。其中把
+  permission 改成 auto 等于让 AI 以后不再逐条确认 —— 这种**给自己升权**的改动必须把
+  "之后会直接执行、不再逐条确认"明确说给用户，不能轻描淡写。
 - 写完之后系统会把执行结果**回灌给你**（你会收到一条 \`[系统注入]\`）：新增了哪条、id 是多少、
   以及**这条和已有日程有没有时间重叠**。拿到之后要主动补一句重叠提醒
-  （"这条和你周四 19:00 的英语晨读撞了"），不要等用户来问；没有冲突就不必提。`,
+  （"这条和你周四 19:00 的英语晨读撞了"），不要等用户来问；没有冲突就不必提。
+- 删除（包括按范围清空）同样会立即执行：回执里必须报出**实际删除条数**（用系统回报的 removed，
+  不要自己估），并提醒"可在日程页的「回收站」撤销"。`,
   strict: `【写入权限：全部确认（连只读查询也要用户点确认）】
 - 这一档**连只读查询都不会自动执行**：你必须照常输出 query 草稿，并明确告诉用户"点确认后我才能看到数据"。
 - **不要**假装自己已经查到了数据，也不要说"我拿不到数据"（数据是点一下确认就能拿到的）。
@@ -248,7 +374,9 @@ const SEARCH_MODES = ['off', 'web', 'campus'];
 /** 权限段落：三档都注入（缺省按 manual），因为"哪种说法"每轮都不一样。 */
 function permissionNote(context = {}) {
   const mode = PERMISSION_MODES.includes(context.permission) ? context.permission : 'manual';
-  return PERMISSION_NOTES[mode];
+  const note = PERMISSION_NOTES[mode];
+  // manual 的文案要把「一轮几条草稿」写准（数字来自设置项）；auto / strict 用固定文案
+  return typeof note === 'function' ? note(normalizeMaxActionsPerTurn(context.maxActionsPerTurn)) : note;
 }
 
 /** 检索段落：三档都注入（缺省按 off），重点是"没接入就照实说"。 */
@@ -319,7 +447,7 @@ function summaryBlock(context = {}) {
  *
  * 分类口径（写死在这里，别在别处再解释一次）：
  *   - `tools`  = 机器要照着填的**契约**：三个集合的字段表（DOMAIN_RULES）、
- *                模型输出的草稿协议（DRAFT_PROTOCOL）、各模块自己声明的 target 说明
+ *                模型输出的草稿协议（draftProtocol()）、各模块自己声明的 target 说明
  *                （`aiPrompt` 注入的 domainBlocks，内容就是"这个 target 有哪些字段"）、
  *                以及开着联网时的检索协议；
  *   - `system` = 其余全部：角色、当前时间、近期数据、记忆、摘要、权限/联网口径、
@@ -338,8 +466,9 @@ function chatPromptParts(context = {}) {
     { kind: 'system', text: '' },
     { kind: 'tools', text: DOMAIN_RULES },
     { kind: 'tools', text: domainBlocks(context) },
+    { kind: 'tools', text: CATEGORY_SETTINGS_PROMPT },
     { kind: 'system', text: '' },
-    { kind: 'tools', text: DRAFT_PROTOCOL },
+    { kind: 'tools', text: draftProtocol(context) },
     { kind: 'system', text: '' },
     // 写入权限 / 联网检索：都是"这一轮"的选择，必须跟着提示词走，
     // 否则模型会谎报（auto 档还在说"你确认一下"、开关开了就假装"我搜到了"）
@@ -451,10 +580,11 @@ export function buildCommandSystemPrompt(context = {}) {
     '',
     DOMAIN_RULES,
     domainBlocks(context),
+    CATEGORY_SETTINGS_PROMPT,
     '',
     '【输出格式（严格）】',
     '只输出一个 JSON 对象，不要 Markdown 代码块、不要解释、不要前后缀。字段：',
-    '{"ok":true,"action":"create|query|update|delete|complete","target":"todo|schedule|event","fields":{…},"filters":{…},"confidence":0~1,"warnings":[],"explain":"给用户看的一句话"}',
+    '{"ok":true,"action":"create|query|update|delete|complete","target":"todo|schedule|event|category|settings","fields":{…},"filters":{…},"confidence":0~1,"warnings":[],"explain":"给用户看的一句话"}',
     '无法确定时输出 {"ok":false,"warnings":["缺什么信息"]}，不要硬猜。',
     '注意：你只是产出草稿，系统会校验并让用户确认后才落库。',
   ].join('\n');

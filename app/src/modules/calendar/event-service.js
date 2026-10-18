@@ -64,11 +64,15 @@ function normalize(rawInput, { partial = false, categories = null } = {}) {
 }
 
 export class EventService {
-  constructor({ store, broadcast = () => {}, categories = null }) {
+  constructor({ store, broadcast = () => {}, categories = null, services = null, audit = null }) {
     this.store = store;
     this.broadcast = broadcast;
     /** 分类注册表（可编辑）；缺省时一律落到 other。 */
     this.categories = categories;
+    // 与 ScheduleService 同一口径：`services.__actor === 'ai'` 时不记（chat-service 会记），
+    // 避免 AI 的一次写入同时出现“服务端 user + chat ai”两条日志。
+    this.services = services;
+    this.audit = audit;
   }
 
   get collection() {
@@ -144,6 +148,7 @@ export class EventService {
     if (!data.endDate) data.endDate = data.startDate;
     const created = await this.collection.insert(data);
     this.broadcast({ type: 'data_changed', payload: { target: 'event', action: 'create', id: created.id } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'event', action: 'create', targetId: created.id, title: created.title, after: created });
     return created;
   }
 
@@ -160,13 +165,15 @@ export class EventService {
     if (!data.endDate) data.endDate = data.startDate;
     const updated = await this.collection.update(id, data);
     this.broadcast({ type: 'data_changed', payload: { target: 'event', action: 'update', id } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'event', action: 'update', targetId: id, title: updated.title, before: current, after: updated });
     return updated;
   }
 
   async remove(id) {
-    this.get(id);
+    const current = this.get(id);
     await this.collection.remove(id);
     this.broadcast({ type: 'data_changed', payload: { target: 'event', action: 'delete', id } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'event', action: 'delete', targetId: id, title: current.title, before: current });
     return { id, deleted: true };
   }
 

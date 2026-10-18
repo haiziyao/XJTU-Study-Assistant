@@ -1,0 +1,378 @@
+/*
+ * 学习周报面板（待办页的子功能）样式。
+ *
+ * 类名统一 `wk-` 前缀（本面板独占）；按钮借用外壳的 `.primary-btn` / `.ghost-btn`。
+ * CSP 是 `style-src 'self'`：宽度/缩进/颜色一律用类与主题令牌，不写行内 style。
+ */
+
+/* 待办页里的周报容器：与 `.todo-list` 同样的滚动契约（flex 子项 + 自己滚）。
+   `min-width: 0` 是关键 —— 否则长统计行会把面板撑得比窗口宽。 */
+.todo-weekly-host {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.wk-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px 20px;
+  min-width: 0;
+}
+
+.wk-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.wk-head-main {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.wk-title-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.wk-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.wk-range {
+  font-size: 12px;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.wk-sub {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+.wk-back {
+  flex: none;
+}
+
+.wk-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+/* 说明条与提示 */
+.wk-note {
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  font-size: 11.5px;
+  line-height: 1.75;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+.wk-empty {
+  padding: 14px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--fg-3);
+  line-height: 1.7;
+}
+
+/* 错误 / 降级提示 */
+.wk-alert {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--orange);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.wk-alert.fail { border-left-color: var(--red); }
+.wk-alert-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--orange);
+  margin-bottom: 3px;
+}
+.wk-alert.fail .wk-alert-title { color: var(--red); }
+.wk-alert-msg {
+  font-size: 11.5px;
+  line-height: 1.75;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+/* 面板区块 */
+.wk-card {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  min-width: 0;
+}
+
+.wk-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.wk-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.wk-subtitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-2);
+  margin-bottom: 6px;
+}
+
+/* 统计表：桌面一行、窄屏两行；值允许换行，绝不横向溢出 */
+.wk-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wk-table-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: 12px;
+  min-width: 0;
+}
+.wk-table-row:last-child { border-bottom: 0; }
+
+.wk-table-key {
+  flex: none;
+  width: 76px;
+  color: var(--fg-3);
+}
+
+.wk-table-value {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* 缺失项 */
+.wk-missing {
+  padding: 10px 12px;
+  border: 1px solid var(--orange);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}
+.wk-missing-title {
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--orange);
+}
+.wk-missing-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+/* 正文：富文本组件按 Markdown 段落渲染，段落间距由这里给 */
+.wk-report {
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+.wk-report .rt-p { margin: 0 0 8px; white-space: pre-wrap; }
+.wk-report .rt-p:last-child { margin-bottom: 0; }
+
+.wk-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.wk-hint {
+  font-size: 11px;
+  color: var(--fg-3);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* 历史列表 */
+.wk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wk-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  min-width: 0;
+}
+.wk-row.current { border-color: var(--blue); }
+
+.wk-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.wk-row-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.wk-row-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.wk-row-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.wk-row-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.wk-danger.confirming {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* 小标 */
+.wk-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+.wk-badge.ok { border-color: var(--green); color: var(--green); }
+.wk-badge.fail { border-color: var(--red); color: var(--red); }
+.wk-badge.ext { border-style: dashed; }
+
+/* 窄屏（协作者把两栏断点改到 900px）：统计行上下排、按钮换行、字号抬一档 */
+@media (max-width: 900px) {
+  .wk-panel {
+    padding: 10px 10px calc(20px + env(safe-area-inset-bottom, 0px));
+    gap: 10px;
+  }
+
+  .wk-head {
+    gap: 8px;
+  }
+
+  .wk-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .wk-actions .primary-btn,
+  .wk-actions .ghost-btn {
+    flex: 1 1 auto;
+  }
+
+  .wk-table-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+
+  .wk-table-key {
+    width: auto;
+  }
+
+  .wk-table-value {
+    font-size: 12.5px;
+    line-height: 1.65;
+  }
+
+  .wk-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .wk-row-actions {
+    justify-content: flex-end;
+    width: 100%;
+  }
+
+  .wk-report {
+    font-size: 14px;
+  }
+
+  .wk-note,
+  .wk-sub,
+  .wk-row-meta {
+    font-size: 12px;
+  }
+
+  /* 手机上不接受任何横向滚动：容器兜底裁掉（内容自身已经 overflow-wrap） */
+  .todo-weekly-host {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+}

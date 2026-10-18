@@ -248,13 +248,18 @@ function calendarToolbar() {
   } else title.textContent = PCUtil.fmtCN(state.calendar.anchor);
 
   const spacer = mk('div', 'spacer');
+  // 批量删除放在工具栏：它是"清理日程"的入口，和「+ 新建」同层，用户不用先进某一天的详情
+  const bulk = mk('button', 'ghost-btn calendar-bulk-btn', '批量删除');
+  bulk.type = 'button';
+  bulk.title = '按范围清空日程（先预览、可撤销）';
+  bulk.addEventListener('click', () => openBulkDelete());
   const add = mk('button', 'primary-btn', '+ 新建');
   add.type = 'button';
   add.addEventListener('click', () =>
     openEditor({ target: 'schedule', defaults: { date: state.calendar.anchor } }),
   );
 
-  bar.append(seg, nav, title, spacer, add);
+  bar.append(seg, nav, title, spacer, bulk, add);
   return bar;
 }
 
@@ -889,17 +894,35 @@ const todoView = {
   render(ctx) {
     ctx.mount.innerHTML = '';
     todoState();
+    // 「学习周报」是待办页的子功能（不占左栏入口）：打开时**替换**列表那一块内容，
+    // 关掉就回到待办 —— 主列表不会被压扁，也不会让人误以为待办页变成了周报页。
+    const weekly = weeklyPanel();
+    if (weekly?.isOpen?.()) {
+      const host = mk('section', 'todo-weekly-host');
+      ctx.mount.appendChild(host);
+      weekly.mount?.(host);
+      return;
+    }
     ctx.mount.appendChild(todoToolbar());
     // 分类筛选条在**列表之上**、与状态分段分开：分类是"看哪一类"，
     // 状态是"看哪种完成度"，两者可以叠加（例如「期末复习」+「未完成」）。
     const categoryBar = mk('div', 'todo-cat-bar');
     ctx.mount.appendChild(categoryBar);
     paintTodoCategoryBar(categoryBar);
+    // 批量操作条：多选模式下的「已选 N 项 + 操作」。空着时不占高度（CSS :empty），
+    // 由 renderTodoList 在拿到**筛选后的可见行**之后再填 —— 全选/计数的范围必须和列表一致。
+    const batchHost = mk('div', 'todo-batch-host');
+    ctx.mount.appendChild(batchHost);
     const list = mk('div', 'todo-list');
     ctx.mount.appendChild(list);
-    renderTodoList(list);
+    renderTodoList(list, batchHost);
   },
 };
+
+/** 学习周报面板：由 `views/weekly-panel.js` 通过 `PCModules.service('weeklyPanel')` 提供。 */
+function weeklyPanel() {
+  return window.PCModules?.getService?.('weeklyPanel') ?? null;
+}
 
 function todoToolbar() {
   const state = PC.state;
@@ -916,6 +939,9 @@ function todoToolbar() {
     const button = mk('button', `seg-btn${state.todo.filter === key ? ' active' : ''}`, label);
     button.type = 'button';
     button.addEventListener('click', () => {
+      // 筛选一变，已勾选的行可能已经不在列表里：**清空勾选**。
+      // 批量操作只能作用在用户当前看得见的数据上，否则会出现"我以为删了 3 条，其实删了 30 条"。
+      clearTodoSelection();
       state.todo.filter = key;
       PC.refresh();
     });
@@ -983,8 +1009,32 @@ function todoToolbar() {
     }
   });
 
+  // 「学习周报」入口：与筛选 / 快速添加同一条工具条，一眼能找到；点开后替换下面的列表。
+  const weekly = weeklyPanel();
+  const weeklyBtn = mk('button', 'ghost-btn todo-weekly-btn', '学习周报');
+  weeklyBtn.type = 'button';
+  weeklyBtn.title = '打开学习周报（这一周的统计与历史，不占左栏入口）';
+  weeklyBtn.setAttribute('aria-pressed', weekly?.isOpen?.() ? 'true' : 'false');
+  weeklyBtn.addEventListener('click', () => {
+    weeklyPanel()?.toggle?.();
+    PC.refresh();
+  });
+
+  // 「选择」进入多选模式：批量完成 / 取消完成 / 改分类 / 删除。
+  // 按钮本身只切换模式，真正的操作都在下面的批量条里 —— 避免工具栏被四五个批量按钮撑满。
+  const selecting = todoSelection().active;
+  const selectMode = mk('button', `ghost-btn todo-select-btn${selecting ? ' active' : ''}`, selecting ? '退出选择' : '选择');
+  selectMode.type = 'button';
+  selectMode.setAttribute('aria-pressed', selecting ? 'true' : 'false');
+  selectMode.title = selecting ? '退出多选模式' : '多选：批量完成 / 改分类 / 删除';
+  selectMode.addEventListener('click', () => {
+    // 进出都清空勾选（setTodoSelectMode 里做），不把上一轮的残留带进下一轮
+    setTodoSelectMode(!selecting);
+    PC.refresh();
+  });
+
   const row2 = mk('div', 'toolbar-row');
-  row2.append(quick, create, rollover);
+  row2.append(quick, create, rollover, weeklyBtn, selectMode);
   bar.append(seg, row2);
   return bar;
 }
@@ -1030,6 +1080,8 @@ async function paintTodoCategoryBar(bar) {
     button.dataset.category = name ?? '__all__';
     button.title = `${label}：共 ${count} 条${open === undefined ? '' : ` · 未完成 ${open} 条`}`;
     button.addEventListener('click', () => {
+      // 同状态筛选：分类一变，当前勾选可能落在筛选之外，先清空（见 todoToolbar 里的同类注释）
+      clearTodoSelection();
       // 再点一次当前分类 = 取消筛选（不用专门做一个"清除"按钮）
       state.category = state.category === name && name !== null ? null : name;
       PC.refresh();
@@ -1049,6 +1101,202 @@ function todoCollapsed(id) {
   return Boolean(todoState().collapsed[id]);
 }
 
+/* ------------------------------------------------------- 待办：多选 + 批量操作 */
+
+/**
+ * 多选状态挂在 `state.todo.select` 上（与分类筛选同一处，理由同 todoState）。
+ *
+ * - `active`：是否处于多选模式（决定行首画勾选框还是完成按钮）；
+ * - `ids`：已选中的 id。用 Set 是因为勾选/取消是高频操作；更重要的是，**它只装当前
+ *   列表里可见的行** —— renderTodoList 每次渲染都会把筛选后不在列表里的 id 裁掉
+ *   （见 paintTodoBatch），全选也只遍历这一次渲染出来的 visible 数组。
+ *   批量删除是破坏性操作，"选中了但看不见"的东西绝不能跟着一起被删。
+ */
+function todoSelection() {
+  const state = todoState();
+  if (!state.select || typeof state.select !== 'object') state.select = { active: false, ids: new Set() };
+  if (!(state.select.ids instanceof Set)) state.select.ids = new Set(state.select.ids ?? []);
+  return state.select;
+}
+
+/** 进入 / 退出多选：两个方向都清空勾选，避免上一轮的残留被下一轮误处理。 */
+function setTodoSelectMode(active) {
+  const selection = todoSelection();
+  selection.active = Boolean(active);
+  selection.ids.clear();
+}
+
+/** 只清勾选、保留多选模式：筛选条件变化时用（行可能已经不在列表里）。 */
+function clearTodoSelection() {
+  todoSelection().ids.clear();
+}
+
+/** 勾选 / 取消一条（**不**碰它的子任务；要连子任务请用行内的「含子项」）。 */
+function toggleTodoSelected(id) {
+  const selection = todoSelection();
+  if (selection.ids.has(id)) selection.ids.delete(id);
+  else selection.ids.add(id);
+}
+
+/** 一棵子树（自己 + 全部后代）的 id；树由 /todos?tree=1 返回，最多 3 层。 */
+function todoSubtreeIds(item) {
+  const out = [item.id];
+  for (const child of item.children ?? []) out.push(...todoSubtreeIds(child));
+  return out;
+}
+
+/**
+ * 「含子项」：一次性选中 / 取消选中自己与全部后代。
+ *
+ * 为什么不把"父行勾选"直接做成连带子项：父子是"一件事拆成几步"，勾父只代表这一步
+ * 本身完成，子任务往往还没做；自动勾子是替用户编造完成状态。所以默认分开，
+ * 想要整棵子树时再点这个小按钮 —— 一个显式动作，结果可预期，也更容易撤销。
+ */
+function toggleTodoSubtree(item) {
+  const selection = todoSelection();
+  const ids = todoSubtreeIds(item);
+  const allSelected = ids.every((id) => selection.ids.has(id));
+  for (const id of ids) {
+    if (allSelected) selection.ids.delete(id);
+    else selection.ids.add(id);
+  }
+}
+
+const BULK_ACTION_LABEL = { delete: '删除', complete: '完成', uncomplete: '取消完成', category: '改分类' };
+
+/**
+ * 批量操作条：`已选 N 项` + 全选 + 完成 / 取消完成 / 改分类 / 删除 / 取消选择。
+ *
+ * `visible` 是**这一次渲染真正画出来的行**（已过服务端筛选 + 树展开）。全选只遍历它，
+ * 已选 id 也在渲染时按它裁剪：多选模式的边界就是用户眼前的列表，绝不偷偷扩大。
+ */
+function todoBatchBar(visible) {
+  const selection = todoSelection();
+  const bar = mk('div', 'todo-batch');
+  bar.appendChild(mk('span', 'todo-batch-count', `已选 ${selection.ids.size} 项`));
+
+  // 全选 = 选中/取消选中**当前可见**的全部行。直接遍历 visible，而不是"把所有 id 拉下来"：
+  // 后者会把筛选条件之外的待办也卷进来，用户看到的 3 条和实际处理的 300 条对不上。
+  const allSelected = visible.length > 0 && visible.every((item) => selection.ids.has(item.id));
+  const selectAll = mk('button', 'ghost-btn todo-batch-btn todo-batch-selectall', allSelected ? '全不选' : '全选');
+  selectAll.type = 'button';
+  selectAll.title = `只对当前筛选后可见的 ${visible.length} 条生效`;
+  selectAll.addEventListener('click', () => {
+    if (allSelected) for (const item of visible) selection.ids.delete(item.id);
+    else for (const item of visible) selection.ids.add(item.id);
+    PC.refresh();
+  });
+
+  const actions = mk('div', 'todo-batch-actions');
+  const actionButton = (label, className, handler) => {
+    const button = mk('button', `${className} todo-batch-btn`, label);
+    button.type = 'button';
+    button.addEventListener('click', handler);
+    actions.appendChild(button);
+    return button;
+  };
+
+  actionButton('完成', 'ghost-btn', () => runTodoBulk('complete'));
+  actionButton('取消完成', 'ghost-btn', () => runTodoBulk('uncomplete'));
+
+  // 「改分类」：行内展开一个输入框（带 datalist），而不是 window.prompt ——
+  // Electron 渲染进程不支持 prompt()，且自由输入 + 已有分类建议才是分类该有的交互。
+  const categoryPanel = mk('div', 'todo-batch-category hidden');
+  const categoryInput = mk('input', 'cat-input todo-batch-cat-input');
+  categoryInput.type = 'text';
+  categoryInput.maxLength = 24; // 与服务端 ≤24 字规则一致，先在这里拦住超长输入
+  categoryInput.placeholder = '分类（留空 = 未分类）';
+  categoryInput.setAttribute('list', 'todo-batch-category-options');
+  const datalist = mk('datalist');
+  datalist.id = 'todo-batch-category-options';
+  let categoryLoaded = false;
+  const openCategory = () => {
+    categoryPanel.classList.remove('hidden');
+    if (!categoryLoaded) {
+      categoryLoaded = true;
+      PC.api('/todos/categories')
+        .then((payload) => {
+          for (const row of payload.items ?? []) {
+            if (!row.name) continue; // 未分类不需要建议
+            const suggest = mk('option');
+            suggest.value = row.name;
+            datalist.appendChild(suggest);
+          }
+        })
+        .catch(() => {});
+    }
+    categoryInput.focus();
+  };
+  actionButton('改分类', 'ghost-btn', openCategory);
+  const categoryApply = mk('button', 'primary-btn todo-batch-btn', '应用分类');
+  categoryApply.type = 'button';
+  categoryApply.addEventListener('click', () => runTodoBulk('category', { category: categoryInput.value.trim() }));
+  categoryPanel.append(categoryInput, datalist, categoryApply);
+
+  actionButton('删除', 'danger-btn', () => {
+    const count = todoSelection().ids.size;
+    if (!count) {
+      PC.toast('请先选择待办');
+      return;
+    }
+    // 二次确认要说清两件事：删几条、父任务的子任务会怎样。
+    // 「删除父不级联删子」是服务端的既定语义，用户点删除前就该知道。
+    if (!window.confirm(`将删除 ${count} 条，父任务的子任务会变成独立待办。确定继续？`)) return;
+    runTodoBulk('delete');
+  });
+  actionButton('取消选择', 'ghost-btn', () => {
+    setTodoSelectMode(false);
+    PC.refresh();
+  });
+
+  bar.append(selectAll, actions, categoryPanel);
+  return bar;
+}
+
+/**
+ * 执行批量操作并收尾：退出多选 + 刷新 + toast `changed` 条数。
+ *
+ * 不在本地逐条改状态：`complete` 有级联、`delete` 有子级解绑，只有服务端知道真实影响面；
+ * 前端照服务端回的 `changed` / `skipped` 说话，才不会出现"界面说 3 条、库里实际 1 条"。
+ */
+async function runTodoBulk(action, extra = {}) {
+  const selection = todoSelection();
+  const ids = [...selection.ids];
+  if (!ids.length) {
+    PC.toast('请先选择待办');
+    return;
+  }
+  try {
+    const result = await PC.api('/todos/bulk', { method: 'POST', body: { action, ids, ...extra } });
+    const cascaded = result.cascaded?.completed?.length
+      ? `，连带完成 ${result.cascaded.completed.length} 个子任务`
+      : result.cascaded?.reverted?.length
+        ? `，恢复 ${result.cascaded.reverted.length} 个连带完成的子任务`
+        : '';
+    const skipped = result.skipped?.length ? `，跳过 ${result.skipped.length} 条` : '';
+    PC.toast(`已${BULK_ACTION_LABEL[action] ?? action} ${result.changed} 条${cascaded}${skipped}`);
+    // 批量完成后退出多选：不留一个还勾着一堆已处理数据的界面（再点一下又容易误操作）
+    setTodoSelectMode(false);
+    PC.refresh();
+  } catch (error) {
+    PC.toast(error.message);
+  }
+}
+
+/** 列表渲染完后填批量条：先裁掉不在当前可见列表里的勾选，再按可见行决定全选文案。 */
+function paintTodoBatch(batchHost, visible) {
+  const selection = todoSelection();
+  if (!selection.active) {
+    selection.ids.clear();
+    batchHost.replaceChildren();
+    return;
+  }
+  const visibleIds = new Set(visible.map((item) => item.id));
+  // 数据刷新后，已选中的行可能已经被筛掉/删掉：裁剪掉，保证「已选 N 项」与能操作的范围一致
+  for (const id of [...selection.ids]) if (!visibleIds.has(id)) selection.ids.delete(id);
+  batchHost.replaceChildren(todoBatchBar(visible));
+}
+
 /**
  * 待办列表：数据全部来自 `/todos?tree=1`（待办是独立集合，不再从 schedules 里挑 allDay 行）。
  *
@@ -1056,12 +1304,14 @@ function todoCollapsed(id) {
  * 以前按截止日分桶；有了父子关系之后再按截止日平铺，子任务会和父任务被拆到不同桶里，
  * 用户看不出"这几步属于同一件事"。截止日仍显示在每行 meta 里，信息没丢。
  */
-async function renderTodoList(host) {
+async function renderTodoList(host, batchHost) {
   const state = PC.state;
   const todo = todoState();
   const today = PCUtil.todayKey();
   const weekStart = PCUtil.startOfWeek(today);
   const weekEnd = PCUtil.addDays(weekStart, 6);
+  // 多选模式下行首改画勾选框，所以列表本身要带一个类；CSS 据此隐藏逐条编辑/删除按钮
+  host.classList.toggle('selecting', todoSelection().active);
 
   const params = new URLSearchParams({ tree: '1', limit: '300' });
   if (todo.filter === 'today') params.set('date', today);
@@ -1086,6 +1336,7 @@ async function renderTodoList(host) {
   } catch (error) {
     host.innerHTML = '';
     host.appendChild(errorBox(error));
+    paintTodoBatch(batchHost, []);
     return;
   }
 
@@ -1096,8 +1347,13 @@ async function renderTodoList(host) {
   if (!roots.length) {
     host.appendChild(emptyBox(todoEmptyText(state.todo.filter)));
     renderTodoFooter(host, stats);
+    // 空列表也要把批量条收干净（勾选的行已经不存在了，不能留一个还能点"删除"的条）
+    paintTodoBatch(batchHost, []);
     return;
   }
+
+  // 这次真正渲染出来的行（含子任务）。全选 / 已选裁剪都以它为准 —— 见 paintTodoBatch。
+  const visible = [];
 
   // 分类分组：条数多的在前；并列时未分类沉底（与 /todos/categories 的口径一致）
   const groups = new Map();
@@ -1124,20 +1380,29 @@ async function renderTodoList(host) {
     );
     host.appendChild(header);
     const rows = mk('div', 'rows');
-    appendTodoTree(rows, list, 1);
+    appendTodoTree(rows, list, 1, visible);
     host.appendChild(rows);
   }
 
   renderTodoFooter(host, stats);
+  paintTodoBatch(batchHost, visible);
 }
 
-/** 递归渲染一棵待办树（最多 3 层：服务端已保证不会更深）。 */
-function appendTodoTree(rows, list, depth) {
+/**
+ * 递归渲染一棵待办树（最多 3 层：服务端已保证不会更深）。
+ *
+ * `visible` 收集这次真正画出来的行。多选模式下**强制展开**：如果收起父任务，
+ * 子行就没被渲染，此时"全选"到底选不选那些看不见的子任务会变成一道没有正确答案的题。
+ * 全展开后，"可见" = "当前筛选结果"，勾选、计数、批量操作三者的范围完全一致。
+ */
+function appendTodoTree(rows, list, depth, visible) {
+  const forceOpen = todoSelection().active;
   for (const item of list) {
     rows.appendChild(todoRow(item, depth));
+    visible?.push(item);
     const children = item.children ?? [];
-    if (!children.length || todoCollapsed(item.id)) continue;
-    appendTodoTree(rows, children, depth + 1);
+    if (!children.length || (!forceOpen && todoCollapsed(item.id))) continue;
+    appendTodoTree(rows, children, depth + 1, visible);
   }
 }
 
@@ -1182,6 +1447,8 @@ const COMPLEXITY_COLOR = {
  */
 function todoRow(item, depth = 1) {
   const today = PCUtil.todayKey();
+  const selection = todoSelection();
+  const selecting = selection.active;
   const row = mk('div', `todo-row priority-${item.priority ?? 0} todo-level-${depth}`);
   if (item.completed) row.classList.add('done');
   if (item.isOverdue) row.classList.add('overdue');
@@ -1190,16 +1457,37 @@ function todoRow(item, depth = 1) {
   // 被父任务连带完成的子任务：给一个轻标记，让"我没勾它、它怎么完成了"有答案
   if (item.autoCompletedBy) row.classList.add('auto-done');
 
-  const check = mk('button', 'check', item.completed ? '✓' : '');
-  check.type = 'button';
-  check.title = item.completed ? '恢复待办' : '标记完成';
-  check.addEventListener('click', () => setTodoCompleted(item.id, !item.completed));
+  /**
+   * 行首控件：
+   * - 普通模式 → 完成勾选框（原来的语义）；
+   * - 多选模式 → **选择勾选框**。两者不复用同一个按钮：完成/选择是两个动作，
+   *   同一个位置既能"选择"又能"完成"会让用户分不清点下去到底发生了什么。
+   */
+  let check;
+  if (selecting) {
+    const picked = selection.ids.has(item.id);
+    check = mk('button', `todo-select-check${picked ? ' checked' : ''}`, picked ? '✓' : '');
+    check.type = 'button';
+    check.title = picked ? `取消选择「${item.title}」` : `选择「${item.title}」`;
+    check.setAttribute('aria-pressed', picked ? 'true' : 'false');
+    check.addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleTodoSelected(item.id);
+      PC.refresh();
+    });
+  } else {
+    check = mk('button', 'check', item.completed ? '✓' : '');
+    check.type = 'button';
+    check.title = item.completed ? '恢复待办' : '标记完成';
+    check.addEventListener('click', () => setTodoCompleted(item.id, !item.completed));
+  }
 
   const main = mk('div', 'tr-main');
   const titleLine = mk('div', 'tr-title');
 
-  // 展开 / 收起：默认展开（`collapsed` 里没有它就是展开），只在有子任务时出现
-  if (item.hasChildren) {
+  // 展开 / 收起：默认展开（`collapsed` 里没有它就是展开），只在有子任务时出现。
+  // 多选模式下不画它：列表已强制全展开（见 appendTodoTree），收起会让"全选"范围变得含糊。
+  if (item.hasChildren && !selecting) {
     const collapsed = todoCollapsed(item.id);
     const toggle = mk('button', 'todo-parent-toggle', collapsed ? '▸' : '▾');
     toggle.type = 'button';
@@ -1217,6 +1505,21 @@ function todoRow(item, depth = 1) {
   titleLine.appendChild(mk('span', null, item.title));
   if (item.hasChildren) {
     titleLine.appendChild(mk('span', 'todo-progress', `${item.childDoneCount}/${item.childCount}`));
+  }
+  /**
+   * 「含子项」：只出现在多选模式的父行上。默认勾父**不会**连带勾子（见 toggleTodoSubtree
+   * 的注释），这个按钮给"我要整棵子树"留一个显式入口，而不是把两种语义混进同一个勾选框。
+   */
+  if (selecting && item.hasChildren) {
+    const pickSub = mk('button', 'todo-pick-sub', '含子项');
+    pickSub.type = 'button';
+    pickSub.title = `连同 ${todoSubtreeIds(item).length - 1} 个子任务一起选择 / 取消`;
+    pickSub.addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleTodoSubtree(item);
+      PC.refresh();
+    });
+    titleLine.appendChild(pickSub);
   }
   if (item.autoCompletedBy) {
     const tag = mk('span', 'tag auto', '连带完成');
@@ -1244,6 +1547,17 @@ function todoRow(item, depth = 1) {
   const actions = mk('div', 'ri-actions');
   actions.appendChild(iconBtn('编辑', '✎', () => openEditor({ target: 'todo', id: item.id })));
   actions.appendChild(iconBtn('删除', '🗑', () => removeTodo(item.id, item.title), 'danger'));
+
+  if (selecting) {
+    row.classList.add('selectable');
+    // 多选模式下点整行都能勾选（手机上 20px 的方框太难点）。
+    // 行内按钮（勾选框 / 含子项 / 展开）自己在监听器里 stopPropagation，不会切换两次。
+    row.addEventListener('click', (event) => {
+      if (event.target.closest?.('button')) return;
+      toggleTodoSelected(item.id);
+      PC.refresh();
+    });
+  }
 
   row.append(check, main, actions);
   return row;
@@ -1589,6 +1903,321 @@ function placeholderView(title, desc, bullets) {
       ctx.mount.appendChild(box);
     },
   };
+}
+
+/* ================================================================ 批量删除 / 回收站 */
+
+/**
+ * 批量删除的范围选项。
+ *
+ * 为什么把「课表导入」「学堂同步」「手动创建」拆成三个 source 选项，而不是让用户填自由文本：
+ * 这三类是用户真实会说的几句话（真机上模型列出来的正是"只删自己手建的 / 连课程一起清空"）。
+ * 课表与学堂必须分开：两边写入的 source 都是 import，只看 source 会把学堂记录一起删掉；
+ * 界面直接给按钮，用户不必理解 source / externalId 这些内部词。
+ */
+const BULK_SCOPES = [
+  { value: 'all', label: '全部日程', hint: '清空日程页的所有安排（不含日历事件、待办与笔记）' },
+  { value: 'range', label: '某时间段', hint: '删除开始与结束日期之间的日程（含两端）' },
+  {
+    value: 'timetable',
+    label: '仅课表导入的课程',
+    hint: '只删课表导入写入的日程（externalId 以 timetable: 开头，不含学堂同步）',
+  },
+  {
+    value: 'lms',
+    label: '仅学堂同步的',
+    hint: '只删思源学堂同步写入的日程（externalId 以 lms: 开头，不含课表导入）',
+  },
+  { value: 'manual', label: '仅手动创建的', hint: '你自己创建或让 AI / 指令创建的日程，不含任何导入' },
+];
+
+/** 把界面上的单选翻译成服务端契约（scope / from / to / source）。 */
+function bulkInputOf(choice, from, to) {
+  if (choice === 'all') return { scope: 'all' };
+  if (choice === 'range') return { scope: 'range', from: from.value, to: to.value };
+  // timetable / lms / manual 与服务的 source 取值一一对应，不需要再翻译
+  return { scope: 'source', source: choice };
+}
+
+/**
+ * 「批量删除」弹层：先选范围 → 预览条数与样例 → 二次确认 → 可撤销。
+ *
+ * 三个交互约束都是故意的：
+ *   1. **必须先预览**才能点红按钮：直接给一个"删除全部"按钮，误点一次就没了几百条；
+ *   2. **全部范围要勾选**「我知道这会清空全部日程」：这是唯一会动到整个日程库的选项；
+ *   3. **撤销按钮就在同一个弹层**：删除完不用去别处找回收站，手滑了当场能撤回。
+ *
+ * 样式全部走类名（CSP 禁内联 style），窄屏单列在 calendar.css 的 @media 里。
+ */
+function openBulkDelete() {
+  const state = PC.state;
+  const anchor = state.calendar?.anchor ?? PCUtil.todayKey();
+  const mask = mk('div', 'modal-mask');
+  const modal = mk('div', 'modal bulk-modal');
+
+  const head = mk('div', 'modal-head');
+  head.appendChild(mk('div', 'toolbar-title', '批量删除日程'));
+  const closeBtn = iconBtn('关闭', '✕', () => close());
+  head.appendChild(closeBtn);
+
+  const body = mk('div', 'modal-body');
+  body.appendChild(
+    mk('div', 'bulk-note', '先选范围并预览，确认后才会删除；删除的日程会留在「回收站」，可以撤销。'),
+  );
+
+  /** 默认选「仅课表导入的课程」：它是最常见的一次性清理，也最不容易误伤用户手建的数据。 */
+  let choice = 'timetable';
+  let lastPreview = null;
+  let undoId = null;
+  let busy = false;
+
+  const scopeBox = mk('div', 'bulk-scopes');
+  const radios = [];
+  for (const scope of BULK_SCOPES) {
+    const row = mk('label', 'bulk-scope');
+    const radio = mk('input', 'bulk-radio');
+    radio.type = 'radio';
+    radio.name = 'bulk-scope';
+    radio.value = scope.value;
+    radio.checked = scope.value === choice;
+    const text = mk('span', 'bulk-scope-text');
+    text.append(mk('span', 'bulk-scope-label', scope.label));
+    if (scope.hint) text.append(mk('span', 'bulk-scope-hint', scope.hint));
+    row.append(radio, text);
+    radio.addEventListener('change', () => {
+      choice = scope.value;
+      paintScope();
+      invalidatePreview('范围已改变，请重新点「预览」。');
+    });
+    radios.push(radio);
+    scopeBox.appendChild(row);
+  }
+  body.appendChild(scopeBox);
+
+  const rangeRow = mk('div', 'bulk-range hidden');
+  const fromInput = mk('input', 'bulk-from');
+  fromInput.type = 'date';
+  fromInput.value = PCUtil.startOfMonth(anchor);
+  const toInput = mk('input', 'bulk-to');
+  toInput.type = 'date';
+  // 默认区间 = 当前视图这个月（下个月 1 号往回退一天）
+  toInput.value = PCUtil.addDays(PCUtil.addMonths(anchor, 1), -1);
+  rangeRow.append(field('开始日期', fromInput), field('结束日期', toInput));
+  for (const input of [fromInput, toInput]) {
+    input.addEventListener('change', () => invalidatePreview('日期已改变，请重新点「预览」。'));
+  }
+  body.appendChild(rangeRow);
+
+  const allWarn = mk('label', 'bulk-all-warn hidden');
+  const allCheck = mk('input', 'bulk-all-check');
+  allCheck.type = 'checkbox';
+  allWarn.append(allCheck, mk('span', null, '我知道这会清空全部日程'));
+  allCheck.addEventListener('change', () => paintConfirm());
+  body.appendChild(allWarn);
+
+  const previewBox = mk('div', 'bulk-preview');
+  previewBox.appendChild(mk('div', 'bulk-preview-empty', '点「预览」查看将删除哪些日程。'));
+  body.appendChild(previewBox);
+
+  const actions = mk('div', 'bulk-actions');
+  const previewBtn = mk('button', 'ghost-btn bulk-preview-btn', '预览将删除的日程');
+  previewBtn.type = 'button';
+  const undoBtn = mk('button', 'ghost-btn bulk-undo', '撤销上次删除');
+  undoBtn.type = 'button';
+  undoBtn.disabled = true;
+  actions.append(previewBtn, undoBtn);
+  body.appendChild(actions);
+
+  const error = mk('div', 'modal-error');
+  const foot = mk('div', 'modal-foot');
+  foot.appendChild(mk('div', 'spacer'));
+  const cancel = mk('button', 'ghost-btn', '取消');
+  cancel.type = 'button';
+  const confirm = mk('button', 'danger-btn bulk-confirm', '确认删除');
+  confirm.type = 'button';
+  foot.append(cancel, confirm);
+
+  modal.append(head, body, error, foot);
+  mask.appendChild(modal);
+  document.body.appendChild(mask);
+
+  mask.addEventListener('click', (event) => {
+    if (event.target === mask) close();
+  });
+  const onKey = (event) => {
+    if (event.key === 'Escape') close();
+  };
+  document.addEventListener('keydown', onKey);
+
+  function close() {
+    document.removeEventListener('keydown', onKey);
+    mask.remove();
+  }
+
+  /** 范围显隐 + 全部范围的强提示。 */
+  function paintScope() {
+    rangeRow.classList.toggle('hidden', choice !== 'range');
+    allWarn.classList.toggle('hidden', choice !== 'all');
+    for (const radio of radios) radio.checked = radio.value === choice;
+    paintConfirm();
+  }
+
+  function setBusy(next) {
+    busy = next;
+    previewBtn.disabled = next;
+    previewBtn.textContent = next ? '处理中…' : '预览将删除的日程';
+    paintConfirm();
+  }
+
+  /**
+   * 红按钮的启用条件：**已经预览过、有记录可删、且（全部范围已勾选确认）**。
+   * 不满足时保持禁用 —— 光靠文案提醒挡不住误点。
+   */
+  function paintConfirm() {
+    const ready = Boolean(lastPreview) && lastPreview.count > 0 && (choice !== 'all' || allCheck.checked);
+    confirm.disabled = busy || !ready;
+    undoBtn.disabled = busy || !undoId;
+    confirm.textContent = lastPreview?.count > 0 ? `确认删除 ${lastPreview.count} 条` : '确认删除';
+  }
+
+  function invalidatePreview(message) {
+    lastPreview = null;
+    previewBox.replaceChildren(mk('div', 'bulk-preview-empty', message ?? '请先预览。'));
+    paintConfirm();
+  }
+
+  /** 预览结果：条数 + 前几条样例（标题 + 日期），用户据此判断删的是不是这一批。 */
+  function paintPreview(result) {
+    previewBox.replaceChildren();
+    if (!result.count) {
+      previewBox.appendChild(mk('div', 'bulk-preview-empty', '没有符合条件的日程，不需要删除。'));
+      return;
+    }
+    const count = mk('div', 'bulk-count');
+    count.append(mk('span', null, '将删除 '), mk('strong', null, String(result.count)), mk('span', null, ' 条日程'));
+    previewBox.appendChild(count);
+    const samples = result.samples ?? [];
+    if (samples.length) {
+      const list = mk('div', 'bulk-samples');
+      for (const item of samples) {
+        const row = mk('div', 'bulk-sample');
+        row.append(
+          mk('span', 'bulk-sample-title', item.title ?? item.id ?? '未命名'),
+          mk('span', 'bulk-sample-date', `${item.date ?? ''} ${item.startTime ?? ''}`.trim()),
+        );
+        list.appendChild(row);
+      }
+      if (result.count > samples.length) {
+        list.appendChild(mk('div', 'bulk-more', `…另有 ${result.count - samples.length} 条未列出`));
+      }
+      previewBox.appendChild(list);
+    }
+    if (result.bySource) {
+      const { manual = 0, command = 0, ai = 0, import: imported = 0, lms = 0 } = result.bySource;
+      // manual / command / ai 分开报：用户核对"删得对不对"时，混成一个数等于没信息
+      previewBox.appendChild(
+        mk('div', 'bulk-mix', `手动 ${manual} · 指令 ${command} · AI ${ai} · 课表 ${imported} · 学堂 ${lms}（条）`),
+      );
+    }
+    if (choice === 'all') {
+      previewBox.appendChild(mk('div', 'bulk-warning', '注意：这会清空全部日程（不含日历事件、待办和笔记）。'));
+    }
+  }
+
+  async function runPreview() {
+    if (busy) return;
+    error.textContent = '';
+    const input = bulkInputOf(choice, fromInput, toInput);
+    if (input.scope === 'range') {
+      if (!input.from || !input.to) {
+        error.textContent = '请填写开始和结束日期';
+        return;
+      }
+      if (input.to < input.from) {
+        error.textContent = '结束日期不能早于开始日期';
+        return;
+      }
+    }
+    setBusy(true);
+    try {
+      const result = await PC.api('/schedules/bulk-delete', { method: 'POST', body: { ...input, dryRun: true } });
+      lastPreview = result;
+      paintPreview(result);
+    } catch (err) {
+      lastPreview = null;
+      error.textContent = err.message;
+      previewBox.replaceChildren(mk('div', 'bulk-preview-empty', '预览失败，请重试。'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runDelete() {
+    if (busy || !lastPreview || lastPreview.count === 0) return;
+    if (choice === 'all' && !allCheck.checked) return;
+    error.textContent = '';
+    const input = bulkInputOf(choice, fromInput, toInput);
+    setBusy(true);
+    try {
+      // 全部范围必须带中文确认词：服务端用它挡住"程序顺手清了整个库"
+      const body = {
+        ...input,
+        dryRun: false,
+        confirm: true,
+        ...(input.scope === 'all' ? { confirmText: '删除' } : {}),
+      };
+      const result = await PC.api('/schedules/bulk-delete', { method: 'POST', body });
+      PC.toast(`已删除 ${result.removed} 条，可在「回收站」撤销`);
+      lastPreview = null;
+      previewBox.replaceChildren(mk('div', 'bulk-preview-empty', `已删除 ${result.removed} 条日程。`));
+      PC.refresh();
+      await refreshUndo();
+    } catch (err) {
+      error.textContent = err.message;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 回收站里有批次时「撤销上次删除」才可用（没有记录就没有可撤的）。 */
+  async function refreshUndo() {
+    try {
+      const trash = await PC.api('/schedules/trash');
+      const latest = trash.items?.[0] ?? null;
+      undoId = latest?.id ?? null;
+      undoBtn.textContent = latest ? `撤销上次删除（${latest.count} 条）` : '撤销上次删除';
+    } catch {
+      undoId = null;
+    }
+    paintConfirm();
+  }
+
+  async function runUndo() {
+    if (busy || !undoId) return;
+    error.textContent = '';
+    setBusy(true);
+    try {
+      const result = await PC.api('/schedules/trash/restore', { method: 'POST', body: { trashId: undoId } });
+      const skipped = result.skipped ? `，跳过 ${result.skipped} 条已存在的记录` : '';
+      PC.toast(`已恢复 ${result.restored} 条${skipped}`);
+      lastPreview = null;
+      previewBox.replaceChildren(mk('div', 'bulk-preview-empty', `已恢复 ${result.restored} 条日程。`));
+      PC.refresh();
+      await refreshUndo();
+    } catch (err) {
+      error.textContent = err.message;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  previewBtn.addEventListener('click', runPreview);
+  confirm.addEventListener('click', runDelete);
+  undoBtn.addEventListener('click', runUndo);
+  cancel.addEventListener('click', close);
+
+  paintScope();
+  refreshUndo();
 }
 
 /* ================================================================ 新建 / 编辑弹层 */
