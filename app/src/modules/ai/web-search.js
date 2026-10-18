@@ -59,7 +59,7 @@ export const READ_CONCURRENCY_DEFAULT = 3;
 export const WEB_SEARCH_MODES = Object.freeze(['web', 'campus']);
 
 /** 支持"填了 key 就优先走 API"的四家。数组顺序 = auto 模式下的优先级。 */
-export const SEARCH_PROVIDERS = Object.freeze(['tavily', 'brave', 'serper', 'bing']);
+export const SEARCH_PROVIDERS = Object.freeze(['tavily', 'brave', 'serper', 'bing', 'deepseek']);
 
 /**
  * 校内站点后缀。`*.xjtu.edu.cn` 覆盖教务/图书馆/学院/研究生院等子站。
@@ -1075,6 +1075,40 @@ async function scrapeSearch({ query, limit, fetchImpl, endpoints = {}, note }) {
  * `endpoints` 允许覆盖 URL —— 测试注入本地假服务器，也方便接自建网关。
  */
 const API_PROVIDERS = {
+  /**
+   * DeepSeek Search —— `POST https://api.deepseek.com/v1/tools/search`。
+   *
+   * 与聊天接口**分开计费**（5 元/1000 次成功请求，QPS 5），所以默认不启用：
+   * 用户要在设置里显式填密钥并选中它。同一个 Bearer key 也用于 Fetch。
+   *
+   * 它比另外几家多两个对我们有用的东西：
+   *   · **原生搜索语法** `site:` / `OR` / `after:` / `before:` / `lang:` —— 正好对上
+   *     "限定校内站点 + 只看上次同步之后"这类需求；
+   *   · 每条带 `date`（RFC3339 UTC，可直接当 publishedAt）、`summary`、`authority`、
+   *     `rerank_score`（≥1.5 为优质；`authority` ≥3 为极权威源）。
+   */
+  deepseek: {
+    id: 'deepseek',
+    label: 'DeepSeek Search',
+    endpoint: 'https://api.deepseek.com/v1/tools/search',
+    build: (query, limit, key) => ({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      // count 的合法区间是 1–50（文档明确），越界会被 400 拒掉
+      body: JSON.stringify({ query, count: Math.min(50, Math.max(1, Number(limit) || 10)), need_content: false }),
+    }),
+    parse: (json) =>
+      (json?.results ?? []).map((item) => ({
+        title: item?.title,
+        url: item?.url,
+        // snippet 优先：summary/content 更长，混进提示词会挤掉别的条目
+        snippet: item?.snippet || item?.summary || '',
+        publishedAt: item?.date ?? null,
+        authority: item?.authority ?? null,
+        siteName: item?.site_name ?? null,
+        source: 'deepseek',
+      })),
+  },
   tavily: {
     id: 'tavily',
     label: 'Tavily',
