@@ -963,7 +963,7 @@ app/
 | **输入区控件** | `app.js` 的 `composeSelect` / `renderControls` + `shell.css` | ✅ 下拉菜单去掉 ✓（选中项＝整行淡蓝底 + 蓝字，固定 `min-height` 所以行高一致、高光不会错位）；图标 19px 无边框，颜色即状态；输入框两行高、底部小字提示删除 |
 | **知识库检索（校规）** | `modules/knowledge/` + `prompt.js` 的 `aiPrompt` | ✅ 对话里问「转专业要什么条件」会走**只读** `target: "knowledge"` 草稿检索语料：命中片段（不是全文）+ 出处 URL 一起回灌，回答必须带出处、查不到要说不知道（§15.5 三条硬规则）。打分＝标题×8 + 正文，长度归一；`kind` 为 portal/attachments 的篇目仍能被标题搜到，片段会如实说"正文在图片或附件里" |
 | **设置 → 知识库** | `views/knowledge-settings.js` | ✅ 语料概况（来源 / 生成时间 / 栏目表 / 篇数字数）、「重新读取索引」（跑完抓取脚本不用重启）、「自检」（索引与文件是否一致）。**故意没有"从网上下载"的按钮** —— 联网抓教务处必须由用户显式跑脚本 |
-| **联网搜索开关** | `app.js` 的 `renderControls()` + `prompt.js` | 🚧 **只有开关与状态位**（不联网 / 从校外网搜索 / 从校内网搜索），检索通道**还没接入** —— 打开后模型会**如实说"联网检索还没接入"**，绝不编造搜到的内容 |
+| **联网搜索开关** | `app.js` 的 `renderControls()` + `prompt.js` | ✅ 开关与状态位（不联网 / 从校外网搜索 / 从校内网搜索）；检索通道已接入（DeepSeek 官方 Search / Fetch + 免密钥结果页抓取 + 校内站点直搜 / 栏目直读），详见下面的「联网检索」两节 |
 | **公式与富文本** | `kit/richtext.js`（零依赖，纯字符串→HTML） | ✅ Markdown 子集 + LaTeX 子集（分数/根号/上下标/求和/希腊字母/函数/向量/文本）；识别不了的命令**原样显示**不静默吞；流式半截公式不崩。刻意**不引** MathJax/KaTeX —— CSP 是 `default-src 'self'` 且零依赖 |
 | **AI 绘图** | `prompt.js` 的 `DRAW_NOTE` + `chat-service.js` 的 `DRAW_KEYWORDS` + `richtext.js` 的 sanitize | ✅ 按 dschat2 的 ```svg 约定；比 dschat2 多两条本地约束：**禁用 `style` 属性**（CSP 会拦）与深色背景配色。设置页可开关；关掉后说「画个图」仍临时触发 |
 | **附件 / 思考强度 / 权限** | `app.js` 的 `readFile` / `composeSelect` + `chat-service.js` 的 `normalizeAttachments` / `buildUserContent` / `#autoExecuteWrites` | ✅ 附件：图片走多模态、文本内联（单文件 2 万字、合计 6 万字上限）、其它只登记文件名；**base64 不落库**。思考强度映射官方 `reasoning_effort`（none/low/high/max；默认 high = 官方默认，关闭思考必须显式传 `none`）。思维链 `reasoning_content` 收成默认折叠的「思考过程」卡。**看图只有 `deepseek-flash` 支持**，格式只认 JPEG/PNG/GIF/WebP。权限三档决定查询是否自动执行、写操作是否要确认（`auto` 会替你点确认，风险自负） |
@@ -975,6 +975,42 @@ app/
 | **课程页 + 回放下载** | `views/lms.js` 的 `lmsCourseView()` + `modules/lms/replay-download.js` | ✅ 课程页单独一屏（返回键 + 可折叠分节）；回放走录播站三步取链（lms player-url → embed-token → captures），下载先写 `.part` 再改名、进度节流广播或轮询、可取消、同视频不重复下、超时只管到响应头 |
 | **学堂首页只留两张卡** | `views/lms.js` 的 `lmsPaint()` | ✅ 顶部「账号与同步」工具条与「账号状态」卡（账号 / 上次同步 / 缓存 / 服务地址 / 退出登录）整体删除，只留「自动同步」小卡 + 「课程」；未登录时给引导卡（「去设置里登录」跳设置页），登录态快照带 1s TTL，设置页登录/退出后切回来立刻重新取状态 |
 | provider 注册位 | `src/server/index.js` 的 `services = { store, commands, aiBridge, hub, broadcast }` | ✅ 模块在自己的 `createServices({ services })` 里就能注册 provider |
+
+### DeepSeek 官方 Search / Fetch：一次请求拿全，抓取路径永远兜底
+
+2026-10 接入 DeepSeek 官方检索接口（`POST {searchApiBase}/v1/tools/search` 与 `/v1/tools/fetch`，
+Bearer 鉴权）。**默认 `searchProvider: 'auto'`：只要「AI 接入」里配了 DeepSeek API key 就走官方，
+没 key / 欠费 / 限流 / 代理不可达时自动降级到原来的结果页抓取**（抓取路径一行没删）。
+
+- **计费与 QPS**：Search 与 Fetch 各 **5 元/1000 次成功请求**（Search 需 200 且 results 非空、
+  Fetch 需返回正文；失败/空结果不计费），QPS 各 **5（账号粒度）**。
+  `count` 只影响条数、不影响价格，所以 **一次 `search + need_content:true` 拿 N 条全文
+  远便宜于 `search + 逐页 Fetch N 次`**（1 次 vs 1+N 次）—— 这就是 `searchNeedContent` 默认 true、
+  且正文已带回时**不再逐页 Fetch** 的原因。
+- **配置**（设置 → 对话设置）：`searchProvider` 新增 `deepseek` 与 `auto`；
+  `searchApiBase`（默认 `https://api.deepseek.com`，可指向自建代理）；
+  `searchNeedContent`（默认 true，关掉就不取全文、也不逐页 Fetch）。
+  DeepSeek 官方通道默认复用「AI 接入」的 `apiKey`（同一账号、同一份账单），
+  只有显式选 `deepseek` 时 `searchApiKey` 才会覆盖它。
+- **字段**：官方结果归一化后额外保留 `rerankScore`（0–3，≥1.5 优质）、`authority`（0–4，≥3 高权威）、
+  `summary`（600–800 字长摘要）、`date`（RFC3339，同时映射成 `publishedAt: YYYY-MM-DD`）、
+  `siteName`、`content`（need_content 的全文）。排序：**`rerank_score` 降序 → `authority` 降序 →
+  `date` 新者优先**；没有这些字段的抓取结果仍按原来的关键词相关度排。`notes` 会如实写
+  "优质 N 条 / 高权威 N 条"。
+- **campus 档**：有 key 时先用官方 `site:` 语法（认得出站点就收窄到该站，例如
+  `来访 交流 site:sae.xjtu.edu.cn`；认不出就 `site:xjtu.edu.cn`；多站用 `OR` 连接），
+  命中标 `matchedBy: 'site'`。**`site:` 返回空/失败时才回退**到原来的「站内直搜 / 栏目列表直读 /
+  公共结果页」，两条本地通道原样保留。有 key 时 `ori_question` 传用户原话（不是模型改写的检索词）。
+- **正文**：`readPages` 的顺序变成 **Search 已带 content → DeepSeek Fetch（Markdown）→ 本地容器提取**。
+  `via` 新增 `deepseek-content` / `deepseek-fetch`（与 `container` / `body` / `meta-description` 并列），
+  `note` 如实说明"官方抽取"还是"Fetch 失败后回退本地"。Fetch 的 403/404 不重试、直接回退；
+  408/429/5xx 才指数退避（最多 2 次、总时长 ≤5s）。
+- **错误码**：401 → `SEARCH_KEY_INVALID`；**402 → `SEARCH_BALANCE_EXHAUSTED`
+  （"DeepSeek 账户余额不足，搜索接口不可用"，不重试）**；429 → `SEARCH_RATE_LIMITED`（可重试）；
+  4xx（除 408/429）不重试，5xx 可重试。设置页"试一下"会直接显示后端、错误码与每条的
+  `rerank_score` / `authority` / `date` / 正文来源。
+- **诚实边界**：`localization`（本地化结果用的 IP）没有传 —— 官方会按服务端出口位置判断；
+  官方通道与抓取通道的 `matchedBy` 语义保持一致；官方不可用时结果可能更少更糙，`notes` 会写明原因。
 
 ### 联网检索（`web_search`）：校内直搜优先 + 按相关度选引擎
 
@@ -1229,8 +1265,8 @@ curl -sX POST localhost:3210/api/v1/ai/chat/stop -H 'Content-Type: application/j
 - **原生 function calling 与更多轮次**：现在是「文本草稿 + 最多 5 轮回灌」的循环（见上），
   要变成模型自己按 `aiTools` 清单挑 HTTP 工具，得先解决各兼容端点对 `tools` / `role:"tool"` 校验不一致的问题；
   顺带可以做失败重试、并行查询与每轮预算；
-- **联网搜索的检索通道**：开关与状态位已经在输入框下面（校外网 / 校内网），
-  真正抓取还没接 —— 校外网要一个搜索服务（Tavily / 博查 / Bing…），校内网可以复用学堂与教务的登录态；
+- **联网搜索的更多后端**：DeepSeek 官方 Search / Fetch 与免密钥结果页抓取已接（见上）；
+  还可以补博查等国内搜索服务，校内网可以复用学堂与教务的登录态；
 - **会话列表 UI**：会话已经落库（`aiConversations` / `aiMessages`，设置页能看到数量、能一键清空），
   但还没有"历史对话列表 + 点开某条继续聊"的界面；`state.conversationId` 目前只活在内存里，
   重开窗口会开新会话（`GET /ai/conversations` 已经能列出历史）；
