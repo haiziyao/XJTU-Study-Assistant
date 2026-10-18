@@ -353,6 +353,236 @@
     mount.appendChild(content);
   }
 
+  /* ------------------------------------------------------------ 设置分区 */
+
+  /**
+   * 「设置 → 通知」：来源勾选、自定义站点、保留期。
+   *
+   * 全部**改动即时生效**（不设"保存"按钮）：这三个都是"改一下就想要结果"的开关，
+   * 攒着等用户点保存只会多一种"我改了但它没生效"的困惑。
+   * 失败时把那一条的 error 显示出来，并**回滚本地草稿**（重新拉一遍服务端状态）。
+   */
+  const settingsUi = {
+    mount: null,
+    settings: null,
+    sources: [],
+    busy: false,
+    error: null,
+    /** 新增自定义站点的输入框内容（只在保存成功前保留）。 */
+    draft: { label: '', url: '' },
+  };
+
+  async function loadSettings() {
+    settingsUi.busy = true;
+    settingsUi.error = null;
+    settingsPaint();
+    try {
+      const [settings, sources] = await Promise.all([
+        PC.api('/notifications/settings'),
+        PC.api('/notifications/sources'),
+      ]);
+      settingsUi.settings = settings;
+      settingsUi.sources = sources.items ?? [];
+    } catch (error) {
+      settingsUi.error = error?.message ?? String(error);
+    } finally {
+      settingsUi.busy = false;
+      settingsPaint();
+    }
+  }
+
+  /** 提交一份设置补丁；失败时重新拉服务端状态（把界面拉回真相，免得显示成"已保存"）。 */
+  async function saveSettings(patch, { quiet = false } = {}) {
+    settingsUi.busy = true;
+    settingsUi.error = null;
+    settingsPaint();
+    try {
+      settingsUi.settings = await PC.api('/notifications/settings', { method: 'POST', body: patch });
+      if (!quiet) PC.toast?.('已保存');
+    } catch (error) {
+      settingsUi.error = error?.message ?? String(error);
+      await loadSettings();
+      return false;
+    } finally {
+      settingsUi.busy = false;
+    }
+    settingsPaint();
+    return true;
+  }
+
+  function settingsCard(title, hintText) {
+    const card = mk('div', 'card');
+    const head = mk('div', 'card-head');
+    head.appendChild(mk('div', 'card-title', title));
+    card.appendChild(head);
+    const body = mk('div', 'card-body');
+    if (hintText) body.appendChild(mk('div', 'notif-hint', hintText));
+    card.appendChild(body);
+    return { card, body };
+  }
+
+  /** 保留期选择。`0` = 永久保留。 */
+  function retentionCard() {
+    const { card, body } = settingsCard(
+      '保留期',
+      '同步时会删掉超出保留期的通知，防止一直占着磁盘。📌 固定的条目永不清理。',
+    );
+    const row = mk('div', 'notif-setting-row');
+    const select = mk('select', 'notif-retention');
+    const options = [
+      [7, '7 天'],
+      [30, '30 天'],
+      [90, '90 天（默认）'],
+      [180, '180 天'],
+      [365, '1 年'],
+      [0, '永久保留（不清理）'],
+    ];
+    for (const [value, text] of options) {
+      const option = mk('option', null, text);
+      option.value = String(value);
+      select.appendChild(option);
+    }
+    select.value = String(settingsUi.settings?.retentionDays ?? 90);
+    select.disabled = settingsUi.busy;
+    select.addEventListener('change', () => {
+      void saveSettings({ retentionDays: Number(select.value) });
+    });
+    row.append(mk('span', 'notif-setting-label', '保留最近'), select);
+    body.appendChild(row);
+    return card;
+  }
+
+  /** 来源勾选：内置（含"已知不可用"）+ 自定义。 */
+  function sourcesCard() {
+    const { card, body } = settingsCard(
+      '通知来源',
+      '勾上就会在「同步最新」时去抓。标记「已知不可用」的站点仍可勾选，但同步时会跳过并说明原因。',
+    );
+    const enabled = new Set(settingsUi.settings?.enabledSiteIds ?? []);
+    const list = mk('div', 'notif-source-list');
+    for (const source of settingsUi.sources) {
+      const label = mk('label', 'check-field notif-source-item');
+      const box = mk('input', `notif-source-${source.custom ? 'custom' : 'builtin'}`);
+      box.type = 'checkbox';
+      box.checked = enabled.has(source.id);
+      box.disabled = settingsUi.busy;
+      box.addEventListener('change', () => {
+        const next = new Set(settingsUi.settings?.enabledSiteIds ?? []);
+        if (box.checked) next.add(source.id);
+        else next.delete(source.id);
+        void saveSettings({ enabledSiteIds: [...next] }, { quiet: true });
+      });
+      label.appendChild(box);
+      const text = mk('span', 'notif-source-text');
+      text.appendChild(mk('span', 'notif-source-name', source.label));
+      text.appendChild(mk('span', 'notif-source-host', source.host || ''));
+      if (source.custom) text.appendChild(mk('span', 'notif-badge', '自定义'));
+      if (!source.working) {
+        const badge = mk('span', 'notif-badge notif-badge-warn', '已知不可用');
+        if (source.reason) badge.title = source.reason;
+        text.appendChild(badge);
+      }
+      label.appendChild(text);
+      list.appendChild(label);
+    }
+    body.appendChild(list);
+    return card;
+  }
+
+  /** 自定义站点：列表 + 新增表单。 */
+  function customSourcesCard() {
+    const { card, body } = settingsCard(
+      '自定义站点',
+      '填一个**入口页** URL 就行（比如某个学院的首页），同步时会自动从首页找通知栏目页。',
+    );
+
+    const current = settingsUi.settings?.customSources ?? [];
+    if (current.length) {
+      const list = mk('div', 'notif-custom-list');
+      for (const site of current) {
+        const line = mk('div', 'notif-custom-row');
+        line.appendChild(mk('span', 'notif-custom-name', site.label));
+        line.appendChild(mk('span', 'notif-custom-url', site.url));
+        const del = mk('button', 'ghost-btn notif-custom-remove', '删除');
+        del.type = 'button';
+        del.disabled = settingsUi.busy;
+        del.addEventListener('click', () => {
+          const next = current.filter((item) => item.id !== site.id).map((item) => ({ label: item.label, url: item.url }));
+          void saveSettings({ customSources: next });
+        });
+        line.appendChild(del);
+        list.appendChild(line);
+      }
+      body.appendChild(list);
+    } else {
+      body.appendChild(mk('div', 'notif-hint', '还没有自定义站点。'));
+    }
+
+    const form = mk('div', 'notif-custom-form');
+    const nameInput = mk('input', 'notif-custom-label-input');
+    nameInput.type = 'text';
+    nameInput.placeholder = '站点名称，如「能动学院」';
+    nameInput.value = settingsUi.draft.label;
+    nameInput.disabled = settingsUi.busy;
+    nameInput.addEventListener('input', () => {
+      settingsUi.draft.label = nameInput.value;
+    });
+
+    const urlInput = mk('input', 'notif-custom-url-input');
+    urlInput.type = 'text';
+    urlInput.placeholder = '入口页 URL，如 https://epe.xjtu.edu.cn/';
+    urlInput.value = settingsUi.draft.url;
+    urlInput.disabled = settingsUi.busy;
+    urlInput.addEventListener('input', () => {
+      settingsUi.draft.url = urlInput.value;
+    });
+
+    const add = mk('button', 'primary-btn notif-custom-add', '添加');
+    add.type = 'button';
+    add.disabled = settingsUi.busy;
+    add.addEventListener('click', async () => {
+      const label = String(settingsUi.draft.label ?? '').trim();
+      const url = String(settingsUi.draft.url ?? '').trim();
+      if (!label || !url) {
+        settingsUi.error = '站点名称和入口页 URL 都要填';
+        settingsPaint();
+        return;
+      }
+      const next = [...current.map((item) => ({ label: item.label, url: item.url })), { label, url }];
+      const ok = await saveSettings({ customSources: next });
+      if (ok) {
+        settingsUi.draft = { label: '', url: '' };
+        settingsPaint();
+      }
+    });
+
+    form.append(nameInput, urlInput, add);
+    body.appendChild(form);
+    body.appendChild(
+      mk('div', 'notif-hint', '不能填内网或本机地址（这是安全限制，防止被当成代理去访问内网服务）。'),
+    );
+    return card;
+  }
+
+  function settingsPaint() {
+    const mount = settingsUi.mount;
+    if (!mount) return;
+    mount.replaceChildren();
+
+    const wrap = mk('div', 'notif-settings');
+    if (settingsUi.error) wrap.appendChild(mk('div', 'notif-error', `设置没保存成功：${settingsUi.error}`));
+    if (settingsUi.busy) wrap.appendChild(mk('div', 'notif-hint', '正在保存…'));
+
+    if (!settingsUi.settings) {
+      wrap.appendChild(mk('div', 'notif-hint', '正在读取通知设置…'));
+      mount.appendChild(wrap);
+      return;
+    }
+
+    wrap.append(retentionCard(), sourcesCard(), customSourcesCard());
+    mount.appendChild(wrap);
+  }
+
   /* ---------------------------------------------------------------- 注册 */
 
   const notificationsView = {
@@ -374,6 +604,18 @@
     render: (ctx) => notificationsView.render(ctx),
   });
 
+  // 设置分区：排在「对话设置」(61) 之后 —— 它管的是"通知抓什么、留多久"，与对话无直接关系
+  window.PCModules.registerSettingsSection({
+    id: 'notifications.settings',
+    title: '通知',
+    order: 62,
+    render(mount) {
+      settingsUi.mount = mount;
+      settingsPaint();
+      void loadSettings();
+    },
+  });
+
   // 测试缝：只暴露既有函数，不加任何"测试专用逻辑"
-  window.__PC_NOTIF_TEST__ = { ui, paint, visible, load, sync, readBody, fmt, fmtPublished };
+  window.__PC_NOTIF_TEST__ = { ui, paint, visible, load, sync, readBody, fmt, fmtPublished, settingsUi, loadSettings };
 })();
