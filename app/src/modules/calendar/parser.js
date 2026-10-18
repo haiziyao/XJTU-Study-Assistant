@@ -354,8 +354,11 @@ export class CommandParser {
         fields.deadline = single.dateKey;
         spans.push(single.dateKey, single.matched);
       } else {
-        fields.deadline = today;
-        warnings.push('未识别到截止日，默认今天');
+        // 待办的截止日是**可选**的：没识别到日期就不设，绝不替他编一个今天。
+        // 编出来的假期限会污染逾期提醒；用户之后在待办页补日期即可。
+        // （日程 / 事件仍必须有日期，见下面的分支 —— 它们没有"无日期"形态。）
+        fields.deadline = null;
+        warnings.push('未识别到截止日，不设截止日');
       }
       const duration = parseDurationExpr(text);
       if (duration) {

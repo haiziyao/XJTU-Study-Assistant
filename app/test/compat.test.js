@@ -129,6 +129,15 @@ test('标记行解析：新增日程 / 删除日程 / 新增待办 / 新增学�
   assert.equal(drafts[4].fields.endDate, '2026-06-28');
 });
 
+test('标记行新增待办没写日期时 deadline 为 null，不再默认今天', () => {
+  const { drafts } = parseMarkup('[新增待办] 交实验报告');
+  assert.equal(drafts.length, 1);
+  assert.equal(drafts[0].target, 'todo');
+  assert.equal(drafts[0].fields.deadline, null);
+  assert.equal(drafts[0].warnings.some((text) => text.includes('默认今天')), false);
+  assert.match(drafts[0].explain, /不设截止日/);
+});
+
 test('RRULE 生成（含 BYDAY / UNTIL / COUNT）', () => {
   assert.equal(toRrule({ type: 'weekly', interval: 2, weekdays: [1, 3], until: { mode: 'date', date: '2026-12-31' } }), 'FREQ=WEEKLY;BYDAY=MO,WE;INTERVAL=2;UNTIL=20261231T235959Z');
   assert.equal(toRrule({ type: 'daily', interval: 1, until: { mode: 'count', count: 10 } }), 'FREQ=DAILY;COUNT=10');
