@@ -36,7 +36,7 @@ import path from 'node:path';
 import { HttpError } from '../../core/http/router.js';
 
 import { JsonFile } from './secret-store.js';
-import { SEARCH_PROVIDERS, normalizeSearchKeys, resolveSearchBackend } from './web-search.js';
+import { SEARCH_PROVIDERS, normalizeSearchKeys, resolveDeepSeekKey, resolveSearchBackend } from './web-search.js';
 
 /** 默认指向 DeepSeek 的 OpenAI 兼容端点；换任何同协议的服务只需改 baseUrl + model。 */
 export const AI_DEFAULTS = Object.freeze({
@@ -75,14 +75,30 @@ export const AI_DEFAULTS = Object.freeze({
    */
   searchRetryMax: 3,
   /**
-   * 搜索服务：`auto`（默认，有 key 就用 API）/ `tavily` / `brave` / `serper` / `bing` /
-   * `scrape`（强制解析结果页，哪怕配了 key）。
+   * 搜索服务：`auto`（默认，有 key 就用官方接口）/ `deepseek`（DeepSeek 官方 Search API）/
+   * `tavily` / `brave` / `serper` / `bing` / `scrape`（强制解析结果页，哪怕配了 key）。
+   *
+   * `deepseek` 与 `auto` 用的是**「AI 接入」里的 `apiKey`**（同一个 DeepSeek 账号、同一份账单）；
+   * 只有显式选了 `deepseek` 时才允许用 `searchApiKey` 覆盖它（自建代理常见这种需求）。
    */
   searchProvider: 'auto',
   /** 单个搜索密钥：配合 `searchProvider` 用；`''` 表示清空。 */
   searchApiKey: '',
   /** 每个服务各自的密钥（优先于 `searchApiKey`）：`{ tavily, brave, serper, bing }`。 */
   searchApiKeys: Object.freeze({}),
+  /**
+   * DeepSeek 官方 Search / Fetch 的 API 根地址（可指向自建代理）。
+   * 实际端点是 `${searchApiBase}/v1/tools/search` 与 `${searchApiBase}/v1/tools/fetch`。
+   */
+  searchApiBase: 'https://api.deepseek.com',
+  /**
+   * 检索时是否让官方接口直接带回全文（请求体 `need_content`，默认 true）。
+   *
+   * 为什么默认开：官方按**成功请求次数**计费（Search 5 元/1000 次、Fetch 同价），
+   * 一次 `search + need_content:true` 拿到 N 条正文，比"search 一次 + 逐页 Fetch N 次"
+   * 便宜 N 倍；关掉只在"只要链接和摘要、不想要正文"时才有意义。
+   */
+  searchNeedContent: true,
 });
 
 /** 允许被持久化的字段白名单：接口不能往里塞任意键。 */
@@ -102,6 +118,8 @@ export const AI_CONFIG_FIELDS = Object.freeze([
   'searchProvider',
   'searchApiKey',
   'searchApiKeys',
+  'searchApiBase',
+  'searchNeedContent',
 ]);
 
 /** 「网络搜索最大条数」的合法区间（与 web-search.js 的 SEARCH_LIMIT_MIN/MAX 一致）。 */
@@ -124,8 +142,8 @@ export const SEARCH_RETRY_MAX = 6;
 export const CONTEXT_WINDOW_MIN = 8_000;
 export const CONTEXT_WINDOW_MAX = 2_000_000;
 
-/** `searchProvider` 的合法取值：auto + 四家 API + 强制只解析结果页。 */
-export const SEARCH_PROVIDER_VALUES = Object.freeze(['auto', 'scrape', ...SEARCH_PROVIDERS]);
+/** `searchProvider` 的合法取值：auto + DeepSeek 官方 + 四家 API + 强制只解析结果页。 */
+export const SEARCH_PROVIDER_VALUES = Object.freeze(['auto', 'scrape', 'deepseek', ...SEARCH_PROVIDERS]);
 
 const str = (value) => (value === undefined || value === null ? undefined : String(value).trim());
 
@@ -185,6 +203,23 @@ function normSearchRetryMax(value, fallback = AI_DEFAULTS.searchRetryMax) {
   const base = num(fallback, { fallback: AI_DEFAULTS.searchRetryMax, min: SEARCH_RETRY_MIN, max: SEARCH_RETRY_MAX });
   const parsed = num(value, { fallback: base, min: SEARCH_RETRY_MIN, max: SEARCH_RETRY_MAX });
   return Math.min(SEARCH_RETRY_MAX, Math.max(SEARCH_RETRY_MIN, Math.trunc(parsed)));
+}
+
+/**
+ * `searchApiBase` 的宽松归一化：不是合法的 http(s) 根地址就回落默认。
+ * **不在末尾保留斜杠**：拼接 `/v1/tools/search` 时不能出现 `//v1`。
+ */
+function normSearchApiBase(value, fallback = AI_DEFAULTS.searchApiBase) {
+  const base = String(fallback ?? AI_DEFAULTS.searchApiBase).trim().replace(/\/+$/, '') || AI_DEFAULTS.searchApiBase;
+  const text = str(value);
+  if (!text) return base;
+  try {
+    const url = new URL(text);
+    if (!/^https?:$/.test(url.protocol) || !url.hostname) return base;
+    return text.replace(/\/+$/, '');
+  } catch {
+    return base;
+  }
 }
 
 /**
@@ -314,6 +349,36 @@ export function assertAiConfigInput(input = {}) {
     }
   }
 
+  // DeepSeek 官方搜索的根地址：必须是 http(s) 且带 host（拼接时会直接接 `/v1/tools/...`）
+  const apiBase = input.searchApiBase;
+  if (apiBase !== undefined && apiBase !== null && apiBase !== '') {
+    if (typeof apiBase !== 'string') {
+      throw HttpError.badRequest('搜索 API 地址必须是字符串', { field: 'searchApiBase' });
+    }
+    let parsed;
+    try {
+      parsed = new URL(apiBase.trim());
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || !/^https?:$/.test(parsed.protocol) || !parsed.hostname) {
+      throw HttpError.badRequest(
+        `搜索 API 地址必须是带主机名的 http(s) 地址，收到 ${JSON.stringify(apiBase)}`,
+        { field: 'searchApiBase' },
+      );
+    }
+  }
+
+  // need_content 是布尔开关：只接受 0/1 与 true/false 这几种写法
+  const needContent = input.searchNeedContent;
+  if (needContent !== undefined && needContent !== null && needContent !== '') {
+    const text = String(needContent).trim().toLowerCase();
+    const legal = typeof needContent === 'boolean' || ['1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'].includes(text);
+    if (!legal) {
+      throw HttpError.badRequest(`need_content 开关只能是 true / false，收到 ${JSON.stringify(needContent)}`, { field: 'searchNeedContent' });
+    }
+  }
+
   const keys = input.searchApiKeys;
   if (keys !== undefined && keys !== null) {
     if (typeof keys !== 'object' || Array.isArray(keys)) {
@@ -364,6 +429,12 @@ export function normalizeAiConfig(input = {}, base = AI_DEFAULTS) {
   const wantedProvider = String(raw.searchProvider ?? base.searchProvider ?? 'auto').trim().toLowerCase();
   out.searchProvider = SEARCH_PROVIDER_VALUES.includes(wantedProvider) ? wantedProvider : 'auto';
   if (raw.searchApiKey !== undefined) out.searchApiKey = raw.searchApiKey;
+  // DeepSeek 官方接口地址：脏值/非 http(s) 静默回落默认，保证拼接出来的端点一定可用
+  out.searchApiBase = normSearchApiBase(raw.searchApiBase, base.searchApiBase);
+  out.searchNeedContent = bool(
+    raw.searchNeedContent === undefined ? base.searchNeedContent : raw.searchNeedContent,
+    base.searchNeedContent !== false,
+  );
   // 每家的密钥按"服务名"**合并**（旧值保留、新值覆盖），这样只改一家的 key 不会把别家清掉；
   // 想清掉某一家就显式传空串（合并后统一把空值剔除）。
   const mergedKeys = { ...(base.searchApiKeys ?? {}), ...(raw.searchApiKeys ?? {}) };
@@ -388,7 +459,10 @@ export function maskAiConfig(config = {}) {
   const key = config.apiKey ?? '';
   const searchKeys = normalizeSearchKeys(config);
   const backend = resolveSearchBackend(config);
-  const effectiveSearchKey = searchKeys[backend.id] ?? '';
+  // DeepSeek 官方通道复用 AI 接入的 apiKey：末四位提示也取它，否则界面上会显示"配了 key 但没有提示"。
+  // 显式 provider=deepseek 时 searchApiKey 可以覆盖它（见 resolveDeepSeekKey），提示也跟着走。
+  const deepseekKey = resolveDeepSeekKey(config);
+  const effectiveSearchKey = backend.id === 'deepseek' ? deepseekKey : (searchKeys[backend.id] ?? '');
   return {
     provider: config.provider,
     baseUrl: config.baseUrl,
@@ -409,10 +483,16 @@ export function maskAiConfig(config = {}) {
     /** 一个回合内最多联网检索几次（界面上的「检索重试上限」）。 */
     searchRetryMax: config.searchRetryMax,
     searchProvider: config.searchProvider,
-    /** 这一轮**实际**会用的通道：tavily / brave / serper / bing，或 scrape（免密钥解析结果页）。 */
+    /** DeepSeek 官方 Search / Fetch 的根地址（自建代理时与官方不同）。 */
+    searchApiBase: config.searchApiBase,
+    /** 检索时是否让官方接口直接带回全文（need_content）。 */
+    searchNeedContent: config.searchNeedContent !== false,
+    /** 这一轮**实际**会用的通道：deepseek / tavily / brave / serper / bing，或 scrape（免密钥解析结果页）。 */
     searchBackend: backend.id,
     searchBackendReason: backend.reason,
     hasSearchKey: Object.keys(searchKeys).length > 0,
+    /** DeepSeek 官方搜索复用 AI 接入的 apiKey，所以有没有它要单独说明。 */
+    hasDeepSeekKey: Boolean(resolveDeepSeekKey(config)),
     searchKeyHint: effectiveSearchKey ? `…${effectiveSearchKey.slice(-4)}` : null,
     searchKeys: Object.fromEntries(
       SEARCH_PROVIDERS.map((provider) => [
@@ -455,6 +535,8 @@ export function aiConfigFromEnv(env = process.env) {
     searchRetryMax: env.PC_AI_SEARCH_RETRY_MAX,
     searchProvider: env.PC_AI_SEARCH_PROVIDER,
     searchApiKey: env.PC_AI_SEARCH_API_KEY,
+    searchApiBase: env.PC_AI_SEARCH_API_BASE,
+    searchNeedContent: env.PC_AI_SEARCH_NEED_CONTENT,
     searchApiKeys: {
       tavily: env.PC_AI_TAVILY_API_KEY,
       brave: env.PC_AI_BRAVE_API_KEY,

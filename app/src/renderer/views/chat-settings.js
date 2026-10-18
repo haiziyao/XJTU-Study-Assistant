@@ -21,7 +21,8 @@
 (function () {
   const SECTION_ID = 'chat.settings';
   const PROVIDER_LABEL = {
-    auto: '自动（有密钥就用 API，没有就解析结果页）',
+    auto: '自动（有 key 用官方）',
+    deepseek: 'DeepSeek 官方搜索（推荐，需 API key / 5 元每千次）',
     scrape: '只用免密钥通道（解析 Bing / 百度结果页）',
     tavily: 'Tavily',
     brave: 'Brave Search',
@@ -148,7 +149,22 @@
       field(
         '搜索服务',
         provider,
-        '不填密钥也能用：会自动解析 Bing / 百度 的结果页，只是结果更少、也可能被反爬挡住。',
+        '自动：有「AI 接入」里的 DeepSeek API key 就用官方搜索（一次请求带回全文），没有就解析结果页。'
+          + '计费：Search / Fetch 各 5 元/1000 次**成功**请求（失败或空结果不计费），QPS 各 5（账号粒度）；'
+          + '所以「一次 search + need_content」比「search + 逐页 Fetch」便宜得多。',
+      ),
+    );
+
+    const needContent = mk('input');
+    needContent.type = 'checkbox';
+    needContent.checked = config.searchNeedContent !== false;
+    needContent.id = 'cs-search-need-content';
+    mount.appendChild(
+      field(
+        '检索时直接取回全文（need_content）',
+        needContent,
+        '默认开：一次 Search 就把每条的正文一起带回来，省掉逐页 Fetch 的 N 次计费与往返。'
+          + '关掉后只拿标题/摘要/来源，读到正文的条数会变少。',
       ),
     );
 
@@ -157,12 +173,14 @@
     key.autocomplete = 'off';
     key.placeholder = config.searchApiKey
       ? `已保存（${config.searchApiKey}），留空不改`
-      : 'API Key（Tavily / Brave / Serper / Bing 任一）';
+      : 'API Key（DeepSeek 官方复用「AI 接入」里的密钥；Tavily / Brave / Serper / Bing 填这里）';
     mount.appendChild(
       field(
         '搜索 API 密钥',
         key,
-        '填了就用官方 API（更稳、更准）；留空表示不改动，输入 - 表示清除已保存的密钥。',
+        'DeepSeek 官方搜索默认用「AI 接入」里配置的 key（同一账号、同一份账单）；'
+          + '只有把「搜索服务」显式选成 DeepSeek 时，这里填的 key 才会覆盖它（自建代理常用）。'
+          + '留空表示不改动，输入 - 表示清除已保存的密钥。',
       ),
     );
 
@@ -225,6 +243,7 @@
         searchEnabled: enabled.checked,
         searchProvider: provider.value,
         searchMaxPages: value,
+        searchNeedContent: needContent.checked,
       };
       // 同上：范围与 config.js 的 SEARCH_RETRY_MIN/MAX（1–6）一致，改一边记得改另一边
       const retryValue = Number(retry.value);
@@ -319,13 +338,28 @@
   function renderProbe(result) {
     const box = mk('div', 'cs-probe-result');
     const backend = result.backend ?? {};
+    const backendLabel = backend.kind === 'api'
+      ? `API（${(backend.providers ?? []).join('、')}）`
+      : backend.kind === 'deepseek'
+        ? 'DeepSeek 官方搜索（Search / Fetch）'
+        : '免密钥通道（解析结果页）';
     const lines = [
-      `后端：${backend.kind === 'api' ? `API（${(backend.providers ?? []).join('、')}）` : '免密钥通道（解析结果页）'} · ${backend.reason ?? ''}`,
+      `后端：${backendLabel} · ${backend.reason ?? ''}`,
       `上限：${result.limit} 个网页 · 搜到 ${result.count} 条 · 读到正文 ${result.read} 篇${result.mode === 'campus' ? ' · 校内通道' : ''}`,
     ];
     if (result.campus) {
       lines.push(
         `校内探测：${result.campus.onCampus ? '校内域名可达（已并走公网检索）' : '校内域名不可达（只做校内站点定向）'}`,
+      );
+    }
+    // 官方通道的诊断：欠费 / key 无效 / 限流都要在界面上说清楚，不能只显示"没搜到"
+    if (result.deepseek) {
+      const info = result.deepseek;
+      lines.push(
+        info.error
+          ? `DeepSeek：${info.error.code} · ${info.error.message}${info.campusHit ? '' : '（已尝试降级抓取）'}`
+          : `DeepSeek：成功 ${info.count} 条（尝试 ${info.attempts} 次，${info.elapsedMs}ms；`
+            + `rerank_score ≥ 1.5 的 ${info.premium} 条、authority ≥ 3 的 ${info.highAuthority} 条）`,
       );
     }
     for (const line of lines) box.appendChild(mk('div', 'cs-probe-line', line));
@@ -348,6 +382,14 @@
       hit.appendChild(mk('div', 'cs-hit-title', item.title || item.url));
       hit.appendChild(mk('div', 'cs-hit-url', item.url));
       if (item.snippet) hit.appendChild(mk('div', 'cs-hit-snippet', item.snippet));
+      // 官方字段逐条摊开：rerank_score / authority / date / 来源 —— 用户能自己判断这条可不可信
+      const facts = [];
+      if (Number.isFinite(item.rerankScore)) facts.push(`rerank_score ${item.rerankScore.toFixed(2)}${item.rerankScore >= 1.5 ? '（优质）' : ''}`);
+      if (Number.isFinite(item.authority)) facts.push(`authority ${item.authority}${item.authority >= 3 ? '（高权威）' : ''}`);
+      if (item.date || item.publishedAt) facts.push(`date ${item.date ?? item.publishedAt}`);
+      if (item.siteName) facts.push(`来源 ${item.siteName}`);
+      if (item.textSource) facts.push(`正文 ${item.textSource}`);
+      if (facts.length) hit.appendChild(mk('div', 'cs-hit-meta', facts.join(' · ')));
       hit.appendChild(
         mk(
           'div',

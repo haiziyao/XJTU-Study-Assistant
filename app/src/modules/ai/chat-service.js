@@ -30,8 +30,8 @@ import { maskAiConfig, AI_DEFAULTS, SEARCH_RETRY_MIN, SEARCH_RETRY_MAX } from '.
 import { extractDrafts, previewDrafts } from './drafts.js';
 import { buildChatSystemPrompt, buildCommandSystemPrompt, describeChatPrompt, estimateTokens } from './prompt.js';
 import {
+  pageFromSearchContent,
   readPages,
-  searchWeb,
   searchWebDetailed,
   SEARCH_LIMIT_DEFAULT,
   normalizeSearchLimit,
@@ -1489,6 +1489,8 @@ export class AiChatService {
               signal,
               plan,
               searchBudget,
+              // 用户原话透传给 DeepSeek 官方 Search 的 ori_question（帮助理解检索意图）
+              oriQuestion: trimmed,
             })
           : [];
         queried.push(...fresh);
@@ -2116,7 +2118,7 @@ export class AiChatService {
    * 为什么必须自动执行：模型看不见数据，就会一直说"我拿不到/需要你确认"，
    * 而用户问的是"我明天有什么日程"——这种问题应该直接给答案。
    */
-  async #runReadOnlyQueries(previewed, { searchMode = 'off', signal = null, plan = null, searchBudget = null } = {}) {
+  async #runReadOnlyQueries(previewed, { searchMode = 'off', signal = null, plan = null, searchBudget = null, oriQuestion = '' } = {}) {
     const out = [];
     for (const entry of previewed) {
       if (entry.draft?.action !== 'query') continue;
@@ -2126,7 +2128,7 @@ export class AiChatService {
       // 联网检索走自己的执行器：它要读**用户在界面上选的通道**（校外/校内/关），
       // 而那个信息只存在于这一次请求里，命令服务那边看不到（理由见 #runWebQuery）。
       if (entry.draft.target === WEB_TARGET) {
-        out.push(await this.#runWebQuery(entry, { searchMode, signal, plan, searchBudget }));
+        out.push(await this.#runWebQuery(entry, { searchMode, signal, plan, searchBudget, oriQuestion }));
         continue;
       }
       /**
@@ -2170,15 +2172,35 @@ export class AiChatService {
    *
    * 不写库、不进对话，纯只读的一次尝试。
    */
-  async searchPreview({ query, mode = 'web', limit } = {}) {
+  async searchPreview({ query, mode = 'web', limit, oriQuestion } = {}) {
     const config = this.config.get() ?? {};
     const scope = WEB_SEARCH_MODES.includes(mode) ? mode : 'web';
     const configured = normalizeSearchLimit(config.searchMaxPages, { fallback: SEARCH_LIMIT_DEFAULT });
     const max = normalizeSearchLimit(limit, { fallback: configured });
     const log = (level, message) => this.#log(level, message);
-    const detailed = await searchWebDetailed({ query, mode: scope, limit: max, config, log, fetchImpl: this.searchFetch ?? undefined });
-    const pages = await readPages(detailed.results, { limit: max, log, fetchImpl: this.searchFetch ?? undefined });
-    const byUrl = new Map(pages.map((page) => [page.url, page]));
+    const detailed = await searchWebDetailed({
+      query,
+      mode: scope,
+      limit: max,
+      config,
+      log,
+      fetchImpl: this.searchFetch ?? undefined,
+      // 试搜没有"对话原话"可用，就把检索词本身当 ori_question 传过去
+      oriQuestion: oriQuestion ?? query,
+    });
+    /**
+     * **一次搜索拿全**：官方 `need_content:true` 已经把正文带回来了，
+     * 这些条目不要再走 `readPages`（那会多花 N 次 Fetch 计费）；只有 content 为空的才回退抓取。
+     */
+    const inlinePages = detailed.results
+      .map((item) => pageFromSearchContent(item))
+      .filter(Boolean);
+    const inlineByUrl = new Map(inlinePages.map((page) => [page.url, page]));
+    const needsRead = detailed.results.filter((item) => !inlineByUrl.has(item.url));
+    const fetchedPages = needsRead.length
+      ? await readPages(needsRead, { limit: max, log, fetchImpl: this.searchFetch ?? undefined, config })
+      : [];
+    const byUrl = new Map([...inlinePages, ...fetchedPages].map((page) => [page.url, page]));
     const items = detailed.results.map((item) => {
       const page = byUrl.get(item.url) ?? {};
       return {
@@ -2189,6 +2211,13 @@ export class AiChatService {
         scope: item.scope,
         matchedBy: item.matchedBy ?? null,
         site: item.site ?? null,
+        // 官方结果的新字段：设置页的"试一下"要能显示 rerank_score / authority / date / 来源
+        summary: item.summary ?? null,
+        date: item.date ?? null,
+        publishedAt: item.publishedAt ?? null,
+        authority: Number.isFinite(item.authority) ? item.authority : null,
+        rerankScore: Number.isFinite(item.rerankScore) ? item.rerankScore : null,
+        siteName: item.siteName ?? null,
         ok: page.ok !== false,
         error: page.error ?? null,
         chars: String(page.text ?? '').length,
@@ -2204,6 +2233,7 @@ export class AiChatService {
       limit: detailed.limit,
       backend: detailed.backend,
       campus: detailed.campus,
+      deepseek: detailed.deepseek,
       notes: detailed.notes,
       count: items.length,
       read: items.filter((item) => item.chars > 0).length,
@@ -2232,7 +2262,7 @@ export class AiChatService {
     try {
       const pages = await readPages(
         urls.map((url) => ({ title: url, url })),
-        { limit, log, fetchImpl: this.searchFetch ?? undefined },
+        { limit, log, fetchImpl: this.searchFetch ?? undefined, config },
       );
       const items = pages.map((page) => ({
         title: page.title && page.title !== page.url ? page.title : page.url,
@@ -2272,7 +2302,7 @@ export class AiChatService {
    * 「联网关掉了」的口径：不搜，并且**明确告诉模型原因**（它会照实转告用户），
    * 而不是返回空结果让它以为"网上没有"。
    */
-  async #runWebQuery(entry, { searchMode = 'off', signal = null, plan = null, searchBudget = null } = {}) {
+  async #runWebQuery(entry, { searchMode = 'off', signal = null, plan = null, searchBudget = null, oriQuestion = '' } = {}) {
     const draft = entry.draft;
     /**
      * 记一步"没做成"。
@@ -2349,29 +2379,68 @@ export class AiChatService {
     const log = (level, message) => this.#log(level, message);
     plan?.start(entry);
     try {
-      const results = await this.#abortable(
-        searchWeb({ query, mode, limit: count, config, log, fetchImpl: this.searchFetch ?? undefined }),
+      /**
+       * 用 `searchWebDetailed` 而不是 `searchWeb`：要拿 `deepseek` 诊断（欠费/限流/key 无效）
+       * 与 `backend`，才能在 explain 里如实说明"官方挂了、已降级"，而不是笼统说"没搜到"。
+       */
+      const detailed = await this.#abortable(
+        searchWebDetailed({
+          query,
+          mode,
+          limit: count,
+          config,
+          log,
+          fetchImpl: this.searchFetch ?? undefined,
+          // 用户原话透传给官方 Search 的 ori_question（帮助理解检索意图）
+          oriQuestion,
+          signal,
+        }),
         signal,
       );
       // 停止信号到了：这次检索不再等结果（底层请求自己在后台结束，结果丢弃）
-      if (!results) return fail({ code: STOPPED_CODE, message: '这一轮已被用户停止，检索结果不再等待' }, { attempt, remaining });
+      if (!detailed) return fail({ code: STOPPED_CODE, message: '这一轮已被用户停止，检索结果不再等待' }, { attempt, remaining });
+      const results = detailed.results ?? [];
+      /** 官方通道的诊断摘要：失败时把明确错误码带进 explain，模型/用户才知道是欠费还是限流。 */
+      const deepseekNote = detailed.deepseek
+        ? detailed.deepseek.ok
+          ? `（DeepSeek 官方搜索：${detailed.deepseek.count} 条，rerank_score ≥ 1.5 的 ${detailed.deepseek.premium} 条、authority ≥ 3 的 ${detailed.deepseek.highAuthority} 条）`
+          : `（DeepSeek 官方搜索不可用：${detailed.deepseek.error?.code ?? '无结果'}${detailed.deepseek.error ? `：${detailed.deepseek.error.message}` : ''}；已降级到免密钥抓取）`
+        : '';
       if (!results.length) {
         return succeed(this.#compactQueryResult(WEB_TARGET, {
           filters: { query, mode },
           count: 0,
           items: [],
           explain:
-            mode === 'campus'
+            (mode === 'campus'
               ? '校内检索没有返回结果（可能被反爬挡住，或校内站点里没有匹配）—— 如实告诉用户没搜到，不要编造'
-              : '检索没有返回结果（可能被搜索引擎拦截，或还没配置搜索 API 密钥）—— 如实告诉用户没搜到，不要编造',
+              : '检索没有返回结果（可能被搜索引擎拦截，或还没配置搜索 API 密钥）—— 如实告诉用户没搜到，不要编造')
+            + deepseekNote,
         }));
       }
-      const pages = await this.#abortable(
-        readPages(results, { limit: count, log, fetchImpl: this.searchFetch ?? undefined }),
-        signal,
-      );
-      if (!pages) return fail({ code: STOPPED_CODE, message: '这一轮已被用户停止，读正文不再等待' }, { attempt, remaining });
-      const byUrl = new Map(pages.map((page) => [page.url, page]));
+      /**
+       * **一次 search + need_content 拿全**：官方已经把正文带回来了，
+       * 这些条目**不再逐页 Fetch**（每多一次 Fetch 就多花 5 元/1000 次，还多一个往返）。
+       * 只有 `content` 为空的条目（官方没给正文、或走的是抓取结果）才回退到 `readPages`。
+       */
+      const inlinePages = results.map((item) => pageFromSearchContent(item)).filter(Boolean);
+      const inlineByUrl = new Map(inlinePages.map((page) => [page.url, page]));
+      const needsRead = results.filter((item) => !inlineByUrl.has(item.url));
+      let fetchedPages = [];
+      if (needsRead.length) {
+        fetchedPages = await this.#abortable(
+          readPages(needsRead, {
+            limit: count,
+            log,
+            fetchImpl: this.searchFetch ?? undefined,
+            config,
+            signal,
+          }),
+          signal,
+        );
+        if (!fetchedPages) return fail({ code: STOPPED_CODE, message: '这一轮已被用户停止，读正文不再等待' }, { attempt, remaining });
+      }
+      const byUrl = new Map([...inlinePages, ...fetchedPages].map((page) => [page.url, page]));
       /**
        * 校内结果排前面。
        *
@@ -2390,9 +2459,14 @@ export class AiChatService {
           scope: item.scope,
           matchedBy: item.matchedBy ?? null,
           site: item.site ?? null,
-          // 发布日期：只有"栏目列表直读"（`matchedBy: 'column'`）的条目才有（列表页上就写着日期）。
-          // 有了它，模型才能回答"最新的是哪条"；为 null 时**不能**替这条编一个日期。
+          // 发布日期：栏目直读与 DeepSeek 官方结果都有；没有时**不能**替这条编一个日期。
           publishedAt: item.publishedAt ?? null,
+          // DeepSeek 的官方字段：date 判新旧、authority/rerankScore 判可信度、summary 是长摘要
+          date: item.date ?? null,
+          authority: Number.isFinite(item.authority) ? item.authority : null,
+          rerankScore: Number.isFinite(item.rerankScore) ? item.rerankScore : null,
+          summary: item.summary ?? null,
+          siteName: item.siteName ?? null,
           // 正文只在真抓到时才有：`ok:false` 的条目 text 为空、error 说明原因（列表页/PDF/要登录），
           // 模型据此知道"这条只有摘要，别当成读过了"
           text: String(page.text ?? '').slice(0, WEB_TEXT_CHARS),
@@ -2409,8 +2483,11 @@ export class AiChatService {
       const campusCount = items.filter((item) => item.scope === 'campus').length;
       const explain = mode === 'campus'
         ? `校内检索「${query}」：校内站点命中 ${campusCount} 条、公网结果 ${items.length - campusCount} 条，读到 ${read} 篇正文` +
-          (campusCount === 0 ? '（校内站点一条都没命中：免密钥通道对 site: 语法支持很差，已带上学校名重试；下面给的是公网结果，回答时要说明这一点）' : '')
-        : `校外检索「${query}」：搜到 ${results.length} 条，读到 ${read} 篇正文`;
+          (campusCount === 0 && detailed.backend?.kind === 'scrape'
+            ? '（校内站点一条都没命中：免密钥通道对 site: 语法支持很差，已带上学校名重试；下面给的是公网结果，回答时要说明这一点）'
+            : '')
+          + deepseekNote
+        : `校外检索「${query}」：搜到 ${results.length} 条，读到 ${read} 篇正文${deepseekNote}`;
       return succeed(this.#compactQueryResult(WEB_TARGET, {
         filters: { query, mode },
         count: items.length,
@@ -2465,9 +2542,12 @@ export class AiChatService {
       // site=校内站点自己的检索接口命中、domain=公网结果但域名在校内、mention=公网结果里提到本校。
       // 工具说明与 README 都向模型承诺了这几个字段，而投影表白名单一开始漏了它们 ——
       // 模型因此分不清"这条是校方页面"还是"公网上提到学校"。
-      // `publishedAt` 是栏目直读条目的**发布日期**（`YYYY-MM-DD`，只知道月份时是 `YYYY-MM`）：
+      // `publishedAt` 是栏目直读/官方结果的**发布日期**（`YYYY-MM-DD`）：
       // 没有它，"最近有什么新闻"就答不出"最新的一条是几月几号"（真机反馈的原话）。
-      web: ['title', 'url', 'snippet', 'source', 'scope', 'matchedBy', 'site', 'publishedAt', 'text', 'chars', 'textSource', 'note', 'ok', 'error'],
+      // `date`/`authority`/`rerankScore`/`summary`/`siteName` 是 DeepSeek 官方 Search 的字段：
+      // 模型要能用"发布时间"与"权威性/相关度"作答，也必须知道 `summary` 是长摘要、`content` 才是正文。
+      // 注意：投影表这一行必须保持单行 —— ai-web-loop 的契约测试按前缀定位它。
+      web: ['title', 'url', 'snippet', 'source', 'scope', 'matchedBy', 'site', 'publishedAt', 'date', 'authority', 'rerankScore', 'summary', 'siteName', 'text', 'chars', 'textSource', 'note', 'ok', 'error'],
     };
     // 模块声明的投影表覆盖内置表（内置三张表保持原样，行为不变）
     const fields = this.queryFields?.[target] ?? FIELDS[target] ?? ['id', 'title'];
