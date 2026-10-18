@@ -39,6 +39,19 @@ const MAX_ESTIMATED_HOURS = 24 * 30;
 /** 分类长度上限。24 个字足够说清「期末复习 / 实验室 / 英语六级」，再长就成备注了。 */
 const MAX_CATEGORY_LENGTH = 24;
 /**
+ * 批量操作一次最多 200 个 id。
+ *
+ * 为什么是 200：正常用户一次多选的是「一屏附近」的待办（手机上更少），200 已经远超真实
+ * 使用量；而这个上限真正防的是**误操作** —— 前端 bug / 脚本把整个库的 id 塞进来时，
+ * 一次 DELETE 就能清空几百条数据。200 条分批做只多花几次点击，误删却无法挽回，所以宁可
+ * 在服务端硬拦（400 TOO_MANY_IDS），也不靠界面自觉。
+ */
+const MAX_BULK_IDS = 200;
+/** 批量操作允许的动作。未知 action 必须 400，不能静默当 delete/complete。 */
+const BULK_ACTIONS = ['delete', 'complete', 'uncomplete', 'category'];
+/** dryRun 回给界面的样例条数：预览只需要"确认选对了"，8 条足够，不必回传全部记录。 */
+const BULK_SAMPLE_LIMIT = 8;
+/**
  * 层级上限 3 层（父 / 子 / 孙）。
  *
  * 为什么是 3 而不是不限：
@@ -1009,6 +1022,158 @@ export class TodoService {
       detachedChildren.push(...result.detachedChildren);
     }
     return { ids: list, deleted: list.length, detachedChildren };
+  }
+
+  /**
+   * 批量操作：`delete` / `complete` / `uncomplete` / `category`。
+   *
+   * 设计原则：**批量动作不是另一套语义，而是把单条语义原样跑一遍**。
+   * - `delete` 逐条走 `remove()`（而不是集合层的 `removeMany`）：删父不级联删子、
+   *   把直接子级的 `parentId` 置空这条规则写在 `remove()` 里。绕过它直接删集合会留下
+   *   悬空 parentId —— 子任务从树形视图里消失、AI 也查不到归属，这是静默的数据损坏。
+   * - `complete` 逐条走 `update()`：父完成要级联完成所有后代并写 `autoCompletedBy`，
+   *   这个级联只在 `update()` 里。批量里另写一份"把 completed 设成 true"会漏掉标记，
+   *   之后取消父任务时就再也分不清哪些子任务是被连带完成的。
+   * - `uncomplete` 同样走 `update()`：它只回滚 `autoCompletedBy === 父` 的后代，
+   *   **用户手动完成的子任务保持完成**（见 #revertCascade 的注释）。批量取消若图省事
+   *   把子树全设成未完成，用户亲手勾掉的进度就没了 —— 那是数据丢失，不是"撤销"。
+   * - `category` 也走 `update()`：长度 ≤24 / 空串 = 未分类这些规则在 normalize 里，
+   *   复用同一条写路径，批量与单条才不会对同一个分类给出两种结果。
+   *
+   * `changed` 只数**目标记录**里真正发生变化的条数（不含被级联的后代）；级联影响单独放在
+   * `cascaded` 里，与单条接口的 `cascaded` 口径一致。这样界面说「已处理 3 条」时，
+   * 不会把 30 个被连带完成的孙辈混进去。
+   *
+   * `dryRun` 只回 `matched` 与最多 8 条 `{id,title}` 样例，一个字段都不写：确认卡/预览
+   * 必须能在落库前让用户看清"这一批到底是哪些"，否则批量删除就成了盲操作。
+   *
+   * @param {object} input
+   * @param {'delete'|'complete'|'uncomplete'|'category'} input.action
+   * @param {string[]} input.ids 待办 id（最多 200 个；重复 id 只算一次）
+   * @param {string} [input.category] `category` 动作必填，空串 = 未分类
+   * @param {boolean} [input.dryRun]
+   * @returns {Promise<{action:string, matched:number, changed:number,
+   *   skipped:Array<{id:string, reason:string}>, dryRun:boolean,
+   *   sample?:Array<{id:string, title:string}>, cascaded?:object, detachedChildren?:string[]}>}
+   */
+  async bulk({ action, ids, category, dryRun = false } = {}) {
+    if (!BULK_ACTIONS.includes(action)) {
+      throw HttpError.badRequest(`字段 action 不合法：可选 ${BULK_ACTIONS.join(' / ')}`, {
+        field: 'action',
+        allowed: [...BULK_ACTIONS],
+      });
+    }
+    if (!Array.isArray(ids) || !ids.length) {
+      throw HttpError.badRequest(`字段 ids 必填：待办 id 数组（一次最多 ${MAX_BULK_IDS} 个）`, { field: 'ids' });
+    }
+    // 上限在**去重 / 查库之前**判：用户/脚本送来 500 个 id 时，不该先跑 500 次查询再报错
+    if (ids.length > MAX_BULK_IDS) {
+      throw HttpError.badRequest(
+        `一次最多批量操作 ${MAX_BULK_IDS} 条待办（这次 ${ids.length} 条），请分批操作`,
+        { field: 'ids', code: 'TOO_MANY_IDS', max: MAX_BULK_IDS, count: ids.length },
+      );
+    }
+    const unique = [];
+    for (const raw of ids) {
+      if (typeof raw !== 'string' || !raw.trim()) {
+        throw HttpError.badRequest('字段 ids 不合法：每一项都必须是待办 id（字符串）', {
+          field: 'ids',
+          code: 'INVALID_IDS',
+        });
+      }
+      const id = raw.trim();
+      if (!unique.includes(id)) unique.push(id);
+    }
+
+    // category 动作的取值在查库前校验：参数本身写错（太长 / 不是字符串）与记录无关，
+    // 没必要等遍历到第一条才发现。空串是合法值（未分类），不能当"没传"处理。
+    let nextCategory = '';
+    if (action === 'category') {
+      if (category === undefined) {
+        throw HttpError.badRequest('category 动作必须传 category（空串 = 未分类）', { field: 'category' });
+      }
+      nextCategory = category === null ? '' : optionalText(category, 'category', MAX_CATEGORY_LENGTH) ?? '';
+    }
+
+    const preview = booleanValue(dryRun, 'dryRun', { optional: true, fallback: false });
+    const skipped = [];
+    const records = [];
+    for (const id of unique) {
+      const item = this.collection.get(id);
+      // `deletedAt` 只作为同步/迁移的兜底：对待办来说它已经不存在，不能拿来操作
+      if (!item || item.deletedAt) skipped.push({ id, reason: 'not_found' });
+      else records.push(item);
+    }
+
+    if (preview) {
+      return {
+        action,
+        matched: records.length,
+        changed: 0,
+        skipped,
+        dryRun: true,
+        // 样例只给 id + 标题：预览要回答"选中的是哪些"，不是把整条记录（含派生字段）再传一遍
+        sample: records.slice(0, BULK_SAMPLE_LIMIT).map((item) => ({ id: item.id, title: item.title })),
+      };
+    }
+
+    let changed = 0;
+    const cascaded = { completed: [], reverted: [] };
+    const detachedChildren = [];
+
+    for (const record of records) {
+      // 重新读一次当前记录：前面的父任务可能已经级联改过它。
+      // 拿循环开始时的快照判断「是否已完成」会把刚被连带完成的子任务再写一遍，
+      // 导致 changed 虚高、skipped 漏报 already（而用户看到的条数就不对了）。
+      const current = this.collection.get(record.id);
+      if (!current || current.deletedAt) {
+        skipped.push({ id: record.id, reason: 'not_found' });
+        continue;
+      }
+
+      if (action === 'delete') {
+        // 逐条调用单条删除：子级解绑规则只在这里维护（理由见方法头）
+        const result = await this.remove(current.id);
+        detachedChildren.push(...result.detachedChildren);
+        changed += 1;
+      } else if (action === 'complete') {
+        if (current.completed) {
+          skipped.push({ id: current.id, reason: 'already' });
+          continue;
+        }
+        // 走 update 而不是直接写 completed：级联完成 + autoCompletedBy 标记都在那里
+        const updated = await this.update(current.id, { completed: true });
+        cascaded.completed.push(...(updated.cascaded?.completed ?? []));
+        changed += 1;
+      } else if (action === 'uncomplete') {
+        if (!current.completed) {
+          skipped.push({ id: current.id, reason: 'already' });
+          continue;
+        }
+        // 只回滚被这条父任务连带完成的子任务，手动完成的不动（见 #revertCascade）
+        const updated = await this.update(current.id, { completed: false });
+        cascaded.reverted.push(...(updated.cascaded?.reverted ?? []));
+        changed += 1;
+      } else if (action === 'category') {
+        if ((current.category ?? '') === nextCategory) {
+          // 已经在这个分类里：不写库，避免把"没变化"虚报成 changed
+          skipped.push({ id: current.id, reason: 'unchanged' });
+          continue;
+        }
+        await this.update(current.id, { category: nextCategory });
+        changed += 1;
+      }
+    }
+
+    return {
+      action,
+      matched: records.length,
+      changed,
+      skipped,
+      dryRun: false,
+      ...(action === 'delete' ? { detachedChildren } : {}),
+      ...(action === 'complete' || action === 'uncomplete' ? { cascaded } : {}),
+    };
   }
 
   /**

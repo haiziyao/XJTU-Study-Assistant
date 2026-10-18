@@ -171,6 +171,19 @@ export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1'
   /** 顺延：未完成且截止日早于目标周一的待办，挪到目标周的同一星期几（已过则落到周一）。 */
   router.post(`${P}/todos/rollover`, async ({ body }) => todos.rollover(body ?? {}));
 
+  /**
+   * 批量操作（多选模式）：`{ action, ids, category?, dryRun? }`。
+   *
+   * `action`：`delete` / `complete` / `uncomplete` / `category`；单次最多 200 个 id
+   * （超出 400 `TOO_MANY_IDS`，理由见 todo-service 的 MAX_BULK_IDS）。
+   * 响应：`{ action, matched, changed, skipped:[{id,reason}], dryRun }`；
+   * `dryRun` 额外带 `sample`（最多 8 条 `{id,title}`），且不写任何数据。
+   *
+   * 放在 `/todos/:id` 之前只是可读性安排：路由按「方法 + 路径」精确匹配，
+   * `POST /todos/bulk` 与 `POST /todos/:id/completed` 的路径段数不同，不会互相抢。
+   */
+  router.post(`${P}/todos/bulk`, async ({ body }) => todos.bulk(body ?? {}));
+
   router.post(`${P}/todos`, async ({ body }) => {
     const item = await todos.create(body ?? {});
     return { __status: 201, item };
