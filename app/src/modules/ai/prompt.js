@@ -155,7 +155,7 @@ function draftProtocol(context = {}) {
 \`\`\`
 
 规则：
-- action 取 create / query / update / delete / complete / include / exclude（include / exclude 由对应模块声明）。
+- action 取 create / query / update / delete / complete / uncomplete / include / exclude（include / exclude 由对应模块声明）。
 - target **只能取下面「领域说明」里真的出现过的那些**，一个都不许自创。当前已声明的有：
   - 写入类：\`todo\` / \`schedule\` / \`event\`（日历三件套）、\`category\`（日程/事件分类）、
     \`settings\`（软件设置白名单，见下）、\`memory\`（只能提议，等用户确认）；
@@ -176,7 +176,7 @@ ${limitRule}
 用户说"删除所有日程 / 清空日程 / 删掉某段时间的日程 / 只删课表导入的 / 只删我自己建的"时，
 系统**支持按范围一次删掉**。这是**一个动作、一条 delete 草稿**，用 \`filters.scope\` 表达范围
 （它只算一条写入草稿，不占其它写入的名额）：
-**不要**拆成一条条逐条确认，**不要**先反问"你要删哪个范围"，也**不要**说"没有清空这个动作""只能一条条删"。
+**不要**拆成一条条逐条确认，**不要**先反问"你要删哪个范围"，也**不要**声称系统没有按范围处理的通道。
 
 \`\`\`command
 {"ok":true,"action":"delete","target":"schedule","filters":{"scope":"all"},"explain":"清空全部日程（N 条）"}
@@ -196,7 +196,42 @@ ${limitRule}
 - 正文里**先**说清影响范围（大约多少条、哪些日子 / 哪一类）和"删除后可在日程页的「回收站」撤销"，
   **再**给这一条草稿。dryRun 那一轮系统会回真实条数与样例，回执按那个数字说，不要自己编。
 - 删除前必须确认：manual 档系统会出**一张**确认卡；auto 档会直接执行，并在回执里报出**实际删除条数**。
-  无论哪一档，都不要说"我准备一条条删"或"需要你逐条点确认"。
+  无论哪一档，都不要说"我准备逐条删"或"需要你逐条点确认"。
+
+【按范围删除/完成待办 —— 一条草稿，不要拆成 N 条】
+用户说"删掉所有已完成的待办 / 把学堂同步的待办全删掉 / 把所有未完成的待办都完成"时，
+待办系统**支持按范围一次处理**（删除、完成、取消完成都行）。这是**一个动作、一条草稿**，
+用 \`filters.scope\` 表达范围（它只算一条写入草稿，不占其它写入的名额）：
+**不要**拆成 N 条逐项确认，**不要**先反问"你要删哪一批"，也**不要**声称待办没有按范围处理的通道。
+
+删除示例（"删掉所有已完成的待办"）：
+
+\`\`\`command
+{"ok":true,"action":"delete","target":"todo","filters":{"scope":"completed"},"explain":"删除所有已完成的待办（N 条）"}
+\`\`\`
+
+删除学堂同步示例（"把学堂同步的待办全删掉"）：
+
+\`\`\`command
+{"ok":true,"action":"delete","target":"todo","filters":{"scope":"lms"},"explain":"删除学堂同步的待办（N 条）"}
+\`\`\`
+
+- \`filters.scope\` 取六个值之一：
+  - \`all\` = 全部待办（含已完成、未完成，含你自己建的和学堂同步的）；
+  - \`completed\` = 只看已完成的待办；\`incomplete\` = 只看未完成的待办；
+  - \`lms\` = 学堂同步的待办（\`externalId\` 以 \`lms:\` 开头）；
+  - \`manual\` = 不是学堂同步的待办（自己建的 / 指令或 AI 建的）；
+  - \`ids\` = 已知具体记录时用 \`filters.ids\` 数组。
+- \`complete\` / \`uncomplete\` 同样是一条草稿，例如把未完成的全部完成：
+  \`{"ok":true,"action":"complete","target":"todo","filters":{"scope":"incomplete"},"explain":"完成所有未完成的待办（N 条）"}\`。
+- **\`scope:"lms"\` 删掉的待办下次同步会重新生成**：这不是永久清除。正文里必须主动提醒用户
+  （"这些是学堂同步的，下次同步会回来；要彻底清掉得在学堂侧处理对应作业"），不要只报"已删除 N 条"。
+- \`scope:"all"\` 会动到**全部**待办（含用户自己建的）。正文先说清影响面，确认卡会再警告一次；
+  不要把它说成"只清理导入的"。
+- dryRun 那一轮系统会回真实条数与样例，回执按实际数字说，不要自己编。超过 200 条时系统会分批发，
+  \`explain\` 会说明分了几批；不要拿这个上限当拒绝理由。
+- manual 档只出**一张**确认卡；auto 档直接执行并在回执里报实际删除/完成条数。
+  **不要**声称待办没有按范围处理的通道、必须逐项手动操作，也不要用"一轮最多只能改几条"拒绝这个动作。
 
 - 查询草稿仍然**一轮一个**：系统会连续把结果回灌给你（最多 8 轮，一轮一条），
   查够了再用自然语言一次答完。要一次查好几样时优先用 \`search\`（三源统一检索）一次拿全。
@@ -584,7 +619,7 @@ export function buildCommandSystemPrompt(context = {}) {
     '',
     '【输出格式（严格）】',
     '只输出一个 JSON 对象，不要 Markdown 代码块、不要解释、不要前后缀。字段：',
-    '{"ok":true,"action":"create|query|update|delete|complete","target":"todo|schedule|event|category|settings","fields":{…},"filters":{…},"confidence":0~1,"warnings":[],"explain":"给用户看的一句话"}',
+    '{"ok":true,"action":"create|query|update|delete|complete|uncomplete","target":"todo|schedule|event|category|settings","fields":{…},"filters":{…},"confidence":0~1,"warnings":[],"explain":"给用户看的一句话"}',
     '无法确定时输出 {"ok":false,"warnings":["缺什么信息"]}，不要硬猜。',
     '注意：你只是产出草稿，系统会校验并让用户确认后才落库。',
   ].join('\n');
