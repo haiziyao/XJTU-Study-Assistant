@@ -691,3 +691,126 @@ function addDays(key, n) {
   const date = new Date(y, m - 1, d + n);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
+
+
+// ---------------------------------------------------------------------------
+// 重复日程的查询要展开（真机 bug：课表导入后 AI 说"你没有日程"）
+// ---------------------------------------------------------------------------
+
+/**
+ * 真机事故：课表导入的 24 条日程 `date` 都是**首次发生日**（2026-09-14 起每周重复），
+ * 而 AI 的 schedule 查询走的是 `list({from,to})` —— 只按 `date` 过滤，不展开 repeat。
+ * 于是问"这周有什么课"时一条都命中不了，AI 只能回答"你没有日程"，用户界面上却看得到。
+ * 这条用例锁住：区间查询必须走 `range()`，返回"每一次发生"并带 occurrenceDate。
+ */
+test('日程查询：按区间查重复日程会展开成每一次发生（带 occurrenceDate 与原日程 id）', async () => {
+  const { app, call } = await startApp();
+  try {
+    const created = await call('POST', '/schedules', {
+      title: '材料力学',
+      date: '2026-09-14',
+      startTime: '08:00',
+      endTime: '09:40',
+      repeat: { type: 'weekly', interval: 1, weekdays: [1], until: { mode: 'date', date: '2027-01-11' } },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body)?.slice(0, 200));
+    const scheduleId = created.body.item.id;
+
+    // 9 月 14 日是周一，10 月 19 日也是周一 → 区间查询应命中这一次
+    const queried = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { from: '2026-10-19', to: '2026-10-25' } },
+      dryRun: true,
+    });
+    assert.equal(queried.status, 200, JSON.stringify(queried.body)?.slice(0, 240));
+    assert.equal(queried.body.count, 1, `一条每周重复的日程在单周区间内应只展开出一次，实际 count=${queried.body.count}`);
+    const hit = queried.body.items.find((item) => item.title === '材料力学');
+    assert.ok(hit, '应当命中材料力学这一次');
+    assert.equal(hit.occurrenceDate, '2026-10-19', '展开出的日期应是这一次发生的日期');
+    assert.equal(hit.id, scheduleId, 'id 仍是原日程 id，方便模型后续改/删');
+    assert.equal(hit.isRepeatInstance, true);
+
+    // 单日查询同样要展开
+    const oneDay = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { date: '2026-10-19' } },
+      dryRun: true,
+    });
+    assert.ok((oneDay.body.items ?? []).some((item) => item.title === '材料力学' && item.occurrenceDate === '2026-10-19'));
+
+    // 按原日程 id 定位单条仍然可用（filters.id 分支不经过展开，不能受合成 id 影响）
+    const byId = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'update', target: 'schedule', filters: { id: scheduleId }, fields: { location: '主楼 A101' } },
+      dryRun: true,
+    });
+    assert.deepEqual(byId.body.planned?.ids, [scheduleId], 'filters.id 必须直接定位到原日程');
+
+    // 区间查询会展开出 5 次（10/19、10/26、11/2、11/9、11/16），但写操作只能定位到 1 条原日程
+    const rangeUpdate = await call('POST', '/commands/execute', {
+      draft: {
+        ok: true,
+        action: 'update',
+        target: 'schedule',
+        filters: { from: '2026-10-19', to: '2026-11-22' },
+        fields: { location: '主楼 A101' },
+      },
+      dryRun: true,
+    });
+    assert.deepEqual(rangeUpdate.body.planned?.ids, [scheduleId], '展开出的同一条日程在写操作里必须按原日程去重');
+
+    // 不重复的日程在区间内照旧能查到
+    await call('POST', '/schedules', { title: '一次性会议', date: '2026-10-20', startTime: '15:00', endTime: '16:00' });
+    const mixed = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { from: '2026-10-19', to: '2026-10-25' } },
+      dryRun: true,
+    });
+    assert.ok((mixed.body.items ?? []).some((item) => item.title === '一次性会议'));
+  } finally {
+    await app.close();
+  }
+});
+
+/**
+ * 展开器不能只认「每周」：`interval:2`（隔周）与 `until: date`（提前结课）都是真实课表
+ * 会出现的形状。查询若把它们当成"每周无限重复"，AI 就会在没课的那周报出一节课，
+ * 或者在课程已经结束后还继续排课 —— 和"查不到课"一样是在骗用户。
+ */
+test('日程查询：隔周重复与 until 截止的日程只展开命中的那几次', async () => {
+  const { app, call } = await startApp();
+  try {
+    // 每两周的周一：9/14 起 → 命中 9/14、9/28、10/12、10/26 …，10/19 那周没有课
+    await call('POST', '/schedules', {
+      title: '大学物理',
+      date: '2026-09-14',
+      startTime: '10:00',
+      endTime: '11:40',
+      repeat: { type: 'weekly', interval: 2, weekdays: [1], until: { mode: 'date', date: '2026-12-31' } },
+    });
+    // 每周三，但 10/7 之后结课：10/19 那周不应该再出现
+    await call('POST', '/schedules', {
+      title: '已经结课的英语',
+      date: '2026-09-16',
+      startTime: '08:00',
+      endTime: '09:40',
+      repeat: { type: 'weekly', interval: 1, weekdays: [3], until: { mode: 'date', date: '2026-10-07' } },
+    });
+
+    const offWeek = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { from: '2026-10-19', to: '2026-10-25' } },
+      dryRun: true,
+    });
+    assert.equal(offWeek.status, 200);
+    assert.equal(offWeek.body.items.some((item) => item.title === '大学物理'), false, '隔周课程不应在间隔周出现');
+    assert.equal(offWeek.body.items.some((item) => item.title === '已经结课的英语'), false, 'until 之后不应再展开');
+
+    const onWeek = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { from: '2026-10-26', to: '2026-11-01' } },
+      dryRun: true,
+    });
+    const physics = (onWeek.body.items ?? []).find((item) => item.title === '大学物理');
+    assert.ok(physics, '到上课周必须能查到');
+    assert.equal(physics.occurrenceDate, '2026-10-26', '隔周课程应落在 10/26');
+    assert.equal(physics.isRepeatInstance, true);
+    assert.equal(onWeek.body.items.some((item) => item.title === '已经结课的英语'), false, '截止后任何一周都不应再展开');
+  } finally {
+    await app.close();
+  }
+});

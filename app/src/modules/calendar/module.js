@@ -72,6 +72,27 @@ export default {
    * - `childCount` / `childDoneCount` / `hasChildren`：缺了它就说不清"这一步拆成几步、做到哪了"。
    */
   aiQueryFields: {
+    /**
+     * 日程查询走 `range()` 展开重复后，每条是「某一天的那一次」：
+     * `occurrenceDate` 是这次发生的日期，`id` / `scheduleId` 是**原日程 id**
+     * （改/删要用它 —— `range()` 内部的 `${id}:${date}` 是合成 id，集合里没有这条记录）。
+     * 展开结果里没有 `date`（那是 `list()` 路径上的首次发生日）；只给 `date` 不给
+     * `occurrenceDate`，模型会把「每周重复的课」当成只在 9 月 14 日上一次。
+     */
+    schedule: [
+      'id',
+      'scheduleId',
+      'occurrenceDate',
+      'date',
+      'title',
+      'category',
+      'priority',
+      'startTime',
+      'endTime',
+      'location',
+      'estimatedMinutes',
+      'isRepeatInstance',
+    ],
     todo: [
       'id',
       'title',

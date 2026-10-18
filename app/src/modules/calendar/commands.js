@@ -61,6 +61,46 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
   const targetService = (target) =>
     target === 'todo' ? todos : target === 'schedule' ? schedules : target === 'event' ? events : null;
 
+  /**
+   * 按时间范围查日程：把重复规则展开成「每一次发生」。
+   *
+   * 为什么必须走 `range()` 而不是 `list()`：`list({from,to})` 只拿 `date`（**首次发生日**）
+   * 做过滤，课表导入的每周课程存的是 9 月 14 日 —— 问「这周有什么课」时自然一条都命中不了。
+   * 真机上用户界面里明明有 24 条课，AI 却回答「你没有日程」，根因就在这里。
+   * `range()` 与日历日/周视图用的是同一套展开逻辑，保证「界面看得到」和「AI 查得到」不会漂移。
+   *
+   * `id` 覆盖成**原日程 id**（`range()` 内部的 occurrence id 是 `${id}:${date}`）：
+   * 模型拿到 `id` 后会直接用于后续改/删，而带日期后缀的合成 id 在集合里根本不存在，
+   * 传回来只会 404；「这是哪一天」由 `occurrenceDate` 单独表达。
+   * 只传 from 或只传 to 时退回 `list()`：`range()` 要求两端都有，硬造另一端会把
+   * 「某天以后的全部」展开成没有边界的查询。
+   */
+  function scheduleOccurrences(filters = {}) {
+    const day = filters.date;
+    const from = day ?? filters.from;
+    const to = day ?? filters.to;
+    if (!from || !to) return null;
+    return schedules
+      .range({ from, to, category: filters.category, keyword: filters.keyword })
+      .map((occurrence) => ({ ...occurrence, id: occurrence.scheduleId }));
+  }
+
+  /**
+   * 写操作按**原日程**去重。
+   *
+   * 展开后同一条重复日程会在区间里出现多次（每周一次），而 update/delete 一次只该动
+   * 这一条记录本身：不去重会把「改/删本周的课」变成对同一 id 重复调用 N 次，
+   * 回执里的条数也从「改了 1 条日程」变成「发生了 5 次」。
+   */
+  function uniqueByScheduleId(items) {
+    const seen = new Set();
+    return items.filter((item) => {
+      if (seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    });
+  }
+
   /** 按 filters 定位待操作记录；id 优先。三个集合的过滤条件形状一致，但各自独立查询。 */
   function locate(draft) {
     const filters = draft.filters ?? {};
@@ -80,6 +120,13 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
     }
     if (draft.target === 'schedule') {
       if (filters.id) return [schedules.get(filters.id)];
+      /**
+       * 写操作（改/删）也要能命中重复日程的"某一次发生"，否则「删掉这节材料力学」
+       * 会因为 `date` 存的是首次发生日而找不到 —— 与查询是同一个根因。
+       * 但真正落库时一条日程只能改/删一次，所以先按原日程 id 去重。
+       */
+      const occurrences = scheduleOccurrences(filters);
+      if (occurrences) return uniqueByScheduleId(occurrences);
       return schedules.list({
         from: filters.from,
         to: filters.to,
@@ -228,12 +275,19 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
         };
       }
       if (draft.target === 'schedule') {
-        const items = schedules.list({
-          from: filters.from,
-          to: filters.to,
-          category: filters.category,
-          keyword: filters.keyword,
-        });
+        /**
+         * 查询是 AI 回答「这周有什么课」的唯一数据来源，必须展开重复规则：
+         * 走 `list()` 只会看到首次发生日，模型就会得出「你没有日程」的错误结论。
+         * 与 locate 共用 `scheduleOccurrences`，避免查询和改/删各有一套「一条日程算几天」的口径。
+         */
+        const items =
+          scheduleOccurrences(filters) ??
+          schedules.list({
+            from: filters.from,
+            to: filters.to,
+            category: filters.category,
+            keyword: filters.keyword,
+          });
         return {
           filters,
           items,
