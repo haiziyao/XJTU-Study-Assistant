@@ -223,18 +223,24 @@ ipcMain.handle('potato:openExternal', async (_event, url) => {
   const raw = String(url ?? '').trim();
   if (!/^https?:\/\//i.test(raw)) throw new Error('只支持 http / https 地址');
 
-  if (process.platform === 'win32') {
-    // detached + unref：不让子进程拖住应用退出；失败只可能抛在 spawn 这一下
-    /*
-     * ★ 用**绝对路径**，且**不再静默吞掉 error**。
-     *
-     * 上一版是 `spawn('explorer.exe', …)` + `child.on('error', () => {})`：
-     * 一旦 PATH 里解析不到（Electron 的 spawn 环境与终端不同，这是常见情形），
-     * 就会走 'error' 分支被悄悄吃掉 —— 用户看到的就是"点了没反应"，没有任何提示。
-     * 现在：优先绝对路径；起不来就退回 `shell.openExternal`，并把 `via` 告诉渲染层。
-     */
-    const explorer = `${process.env.SystemRoot ?? 'C:\\Windows'}\\explorer.exe`;
+  /*
+   * 次序：**先官方做法 `shell.openExternal`，失败才降级到 explorer.exe**。
+   *
+   * 上一版反过来（explorer 优先），实测"explorer 起来了但什么也没发生"：
+   * 提升权限的进程 spawn 出的 explorer.exe 会立刻退出（Explorer 是单例），
+   * 请求并没有交到**已经在运行的那个非提升 Explorer** 手里 —— 所以静默无声。
+   * `shell.openExternal` 至少是官方路径，系统会给出明确反馈（哪怕是那个权限提示框）。
+   */
+  try {
+    await shell.openExternal(raw);
+    return { ok: true, url: raw, via: 'shell', elevated: isElevated() };
+  } catch (error) {
+    if (process.platform !== 'win32') {
+      return { ok: false, url: raw, error: error?.message ?? String(error), elevated: isElevated() };
+    }
+    // Windows 上还是给 explorer 一次机会（某些环境它确实能过）
     try {
+      const explorer = `${process.env.SystemRoot ?? 'C:\\Windows'}\\explorer.exe`;
       const child = spawn(explorer, [raw], { detached: true, stdio: 'ignore', windowsHide: true });
       await new Promise((resolve, reject) => {
         // 只等"进程起来了"这一下：explorer 成功时退出码也常非 0，不能等 exit
@@ -242,21 +248,30 @@ ipcMain.handle('potato:openExternal', async (_event, url) => {
         child.once('error', reject);
       });
       child.unref();
-      return { ok: true, url: raw, via: 'explorer' };
-    } catch (error) {
-      // explorer 起不来（少见）：退回 ShellExecute。它可能触发权限提示，但至少是个动作
-      try {
-        await shell.openExternal(raw);
-        return { ok: true, url: raw, via: 'shell', fallbackReason: error?.message ?? String(error) };
-      } catch (second) {
-        return { ok: false, url: raw, error: second?.message ?? String(second) };
-      }
+      return { ok: true, url: raw, via: 'explorer', elevated: isElevated() };
+    } catch (second) {
+      return { ok: false, url: raw, error: second?.message ?? String(second), elevated: isElevated() };
     }
   }
-
-  await shell.openExternal(raw);
-  return { ok: true, url: raw, via: 'shell' };
 });
+
+/**
+ * 本进程是不是以管理员身份运行。
+ *
+ * 只用来**如实告诉用户**为什么链接打不开：Windows 会拦截"提升进程 → 非提升浏览器"
+ * 的交接。这个判断本身不改变行为，但能让提示从"点不开"变成"因为你是管理员运行的"。
+ */
+function isElevated() {
+  if (process.platform !== 'win32') return false;
+  try {
+    // `net session` 只有管理员能成功执行（非管理员会返回非 0）
+    const { execFileSync } = require('node:child_process');
+    execFileSync('net', ['session'], { stdio: 'ignore', windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
 ipcMain.handle('potato:pickDirectory', async (_event, options = {}) => {
   const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
     title: typeof options?.title === 'string' && options.title ? options.title : '选择文件夹',

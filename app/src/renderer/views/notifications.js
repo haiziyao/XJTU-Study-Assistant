@@ -84,7 +84,19 @@
             return;
           }
           ui.error = null;
-          PC.toast?.(`已交给${result?.via === 'explorer' ? '资源管理器' : '系统'}打开`);
+          /*
+           * 成功也要说清"是不是管理员运行的"：
+           * 提升进程把 URL 交给非提升浏览器时，Windows 会弹权限提示或直接吞掉。
+           * 用户看到「已交给系统打开」却什么都没发生时，这条信息就是唯一的解释。
+           */
+          if (result?.elevated) {
+            ui.error =
+              '已交给系统打开。注意：本程序以【管理员身份】运行，Windows 可能拦截它与浏览器的交接；'
+              + `若浏览器没反应，请以普通权限重开本程序，或复制链接手动打开：${raw}`;
+            paint();
+          } else {
+            PC.toast?.('已用默认浏览器打开');
+          }
         })
         .catch((error) => {
           ui.error = `没能拉起浏览器（${error?.message ?? error}）。可以复制下面的链接手动打开。`;
