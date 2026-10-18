@@ -830,6 +830,12 @@
 }
 
 /* 打磨点：正文小字从 --fg-3 提到 --fg-2 */
+/* 没有截止日的待办：把"无截止时间"弱化成提示，而不是让它看起来像个日期 */
+.todo-no-deadline {
+  color: var(--fg-3);
+  font-style: italic;
+}
+
 .tr-meta {
   font-size: 11px;
   color: var(--fg-2);
