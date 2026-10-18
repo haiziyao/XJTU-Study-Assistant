@@ -38,7 +38,8 @@ const VIEWS = [
   { id: 'academic', slot: 'main' },
   { id: 'notes', slot: 'main' },
   { id: 'transfer', slot: 'main' },
-  { id: 'message', slot: 'main' },
+  // 「消息」已改名为「日志」，但 id 仍是 message（存盘的布局按 id 记，改名不能让用户布局失效）
+  { id: 'message', label: '日志', slot: 'main' },
   { id: 'settings', slot: 'bottom' },
 ];
 

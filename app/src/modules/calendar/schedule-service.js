@@ -109,11 +109,18 @@ function normalize(rawInput, { partial = false, categories = null } = {}) {
 }
 
 export class ScheduleService {
-  constructor({ store, broadcast = () => {}, categories = null }) {
+  constructor({ store, broadcast = () => {}, categories = null, services = null, audit = null }) {
     this.store = store;
     this.broadcast = broadcast;
     /** 分类注册表（可编辑）；缺省时一律落到 other。 */
     this.categories = categories;
+    /**
+     * `services` 用来读**短生命周期**的 actor 标记：AI 在 chat-service 执行草稿期间会把它置为
+     * `'ai'`。为 `'ai'` 时本服务不记日志 —— 那条日志由 chat-service 统一记（带 AI 草稿的完整回执），
+     * 这样一次 AI 写入只产生一条 actor:'ai' 的记录，而不是“服务端一条 user + chat 一条 ai”。
+     */
+    this.services = services;
+    this.audit = audit;
   }
 
   get collection() {
@@ -234,6 +241,7 @@ export class ScheduleService {
     const data = normalize(input, { categories: this.categories });
     const created = await this.collection.insert(data);
     this.broadcast({ type: 'data_changed', payload: { target: 'schedule', action: 'create', id: created.id } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'schedule', action: 'create', targetId: created.id, title: created.title, after: created });
     return created;
   }
 
@@ -254,13 +262,15 @@ export class ScheduleService {
     const data = normalize(merged, { partial: false, categories: this.categories });
     const updated = await this.collection.update(id, data);
     this.broadcast({ type: 'data_changed', payload: { target: 'schedule', action: 'update', id } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'schedule', action: 'update', targetId: id, title: updated.title, before: current, after: updated });
     return updated;
   }
 
   async remove(id) {
-    this.get(id);
+    const current = this.get(id);
     await this.collection.remove(id);
     this.broadcast({ type: 'data_changed', payload: { target: 'schedule', action: 'delete', id } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'schedule', action: 'delete', targetId: id, title: current.title, before: current });
     return { id, deleted: true };
   }
 

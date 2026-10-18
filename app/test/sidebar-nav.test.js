@@ -150,6 +150,10 @@ test('左栏按注册表顺序渲染，默认没有「更多」，高亮与面�
       '默认顺序应等于注册表顺序',
     );
     assert.equal(ctx.refs.navMore.hidden, true, '★ 默认不该出现「更多」（首次运行零变化）');
+    // 左栏第 8 项原来的「消息」已改名为「日志」（id 保持 message，用户已存盘的布局不会失效）
+    assert.equal(ctx.sandbox.window.PCModules.get('message').label, '日志');
+    assert.match(ctx.buttonFor('message').textContent, /日志/);
+    assert.doesNotMatch(ctx.buttonFor('message').textContent, /消息/);
     assert.deepEqual(Array.from(ctx.refs.navBottom.children.map((n) => n.dataset.view)), ['settings']);
     // 启动时 view = calendar、面板展开 → 日历高亮
     assert.deepEqual(Array.from(ctx.activeIds()), ['calendar']);
