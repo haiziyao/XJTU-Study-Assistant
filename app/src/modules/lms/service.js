@@ -10,6 +10,8 @@
  * - 所有面向 HTTP 的失败都翻译成带状态码的 HttpError，路由层不再判断。
  */
 
+import { constants } from 'node:fs';
+import { access, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
 import { HttpError } from '../../core/http/router.js';
@@ -28,11 +30,28 @@ const ACTIVITY_TTL_MS = 10 * 60 * 1000;
 const USER_RETRY_MS = 60 * 1000;
 /** 单次预览最多补拉多少条作业详情（详情接口一个活动一次请求）。 */
 const MAX_DETAIL_FETCH = 40;
+/**
+ * 单次附件转发的字节上限。
+ *
+ * 附件走 `request()` 会整份读进内存（回放视频另走流式下载），所以必须有个上限：
+ * 没有它，一个几百 MB 的课件就能把进程内存打爆。超过就明确报错让用户去学堂下，
+ * 而不是悄悄占满内存再被系统杀掉。
+ */
+const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
 
 const courseRecordId = (courseId) => `lms:course:${courseId}`;
 const activityRecordId = (activityId) => `lms:activity:${activityId}`;
 
 export class LmsService {
+  /**
+   * 每门课最近一次自动拉活动的时间：`courseId → 毫秒时间戳`。只活在内存里。
+   *
+   * 为什么不能用全局的 `state.lastActivitiesAt` 做节流：那个是"任何一门课刷新过"
+   * 就会更新，于是刷完 A 再点 B 会被判成"新鲜"，B 的四个板块一直是空的。
+   * 这个 Map 让"每门课最多每 10 分钟自动拉一次"：既不会空着，也不会来回点就狂打学校接口。
+   */
+  #courseFetchedAt;
+
   /**
    * @param {object} options
    * @param {object} options.auth **共享的全局认证服务**（`services.auth`，order=5）。
@@ -84,9 +103,12 @@ export class LmsService {
       lastSyncAt: null,
       autoSync: false,
       autoSyncIntervalHours: 6,
+      /** 回放下载目录（null = 用 dataDir/downloads）。改它要同步给下载器。 */
+      downloadDir: null,
       lastAutoSyncAt: null,
     };
     this.autoSyncTimer = undefined;
+    this.#courseFetchedAt = new Map();
   }
 
   // ---------------------------------------------------------------- 对外状态
@@ -146,6 +168,7 @@ export class LmsService {
     return {
       status: this.state.status,
       user: this.state.user,
+        downloadDir: this.state.downloadDir ?? null,
       mfa: this.state.mfa,
       captchaRequired: Boolean(this.sharedAuth?.status?.().captchaRequired),
       error: this.state.error,
@@ -184,6 +207,9 @@ export class LmsService {
     this.state.autoSync = Boolean(meta.autoSync);
     this.state.autoSyncIntervalHours = Number(meta.autoSyncIntervalHours) > 0 ? Number(meta.autoSyncIntervalHours) : 6;
     this.state.lastAutoSyncAt = meta.lastAutoSyncAt ?? null;
+    // 下载目录是用户设置过的，重启后要接着用（下载器持有自己那份路径，一并同步）
+    this.state.downloadDir = typeof meta.downloadDir === 'string' && meta.downloadDir ? meta.downloadDir : null;
+    if (this.state.downloadDir) this.downloads.downloadDir = this.state.downloadDir;
     // 用户名等展示信息跟着本模块的元信息走（0644 业务数据）。
     // 它**不再**随会话票据走 —— 票据归 auth 管，且票据文件里刻意不放 PII。
     // 存下来是为了重启后界面能立刻显示"谁登录着"，而不必先发一次网络请求。
@@ -340,12 +366,38 @@ export class LmsService {
   /**
    * 课程页数据：课程信息 + 这门课的活动按类型分组。
    *
-   * 全部来自本地缓存（`POST /lms/activities/refresh` 负责刷新），
-   * 打开课程页不该再打一次学校接口 —— 那会让"点一下课程"变成几秒白屏。
+   * **为什么要自动拉一次**：以前这里只读本地缓存，而"打开课程"不会触发任何刷新 ——
+   * 用户点进一门课，四个板块全空，必须自己去点「刷新本课活动」才看得到东西。
+   * 现在按 `ACTIVITY_TTL_MS` 节流地自动补：缓存新鲜就直接用，过期或这门课一条都没有才打学校接口。
+   *
+   * 自动刷新失败**不抛错**：已经有缓存就照常显示，把错误放进 `refreshError` 让页面提示一句。
+   * 一门课的活动拉取失败不该让整页打不开。
+   *
+   * @param {string|number} courseId
+   * @param {{refresh?: boolean}} [options] `refresh: true` 强制拉取（用户点了刷新按钮）
    */
-  coursePage(courseId) {
+  async coursePage(courseId, { refresh = false } = {}) {
     const record = this.store.lmsCourses.all().find((item) => Number(item.courseId) === Number(courseId));
     if (!record) throw HttpError.notFound(`本地没有课程 ${courseId}（先刷新课程）`);
+
+    const cached = this.listActivities({ courseIds: [courseId] }).items;
+    let refreshError = null;
+    // ★ 节流要**按课程**算，不能用全局的 `lastActivitiesAt`：
+    //   那个时间戳是"任何一门课刷新过"就会更新，于是刷完 A 再点 B 会被判成"新鲜"，
+    //   B 的四个板块就一直是空的 —— 而这正是这次要修的症状之一。
+    const key = String(courseId);
+    const fetchedAt = this.#courseFetchedAt.get(key) ?? 0;
+    const fresh = Date.now() - fetchedAt < ACTIVITY_TTL_MS;
+    if (refresh || !fresh) {
+      try {
+        await this.refreshActivities({ courseIds: [Number(courseId)] });
+        this.#courseFetchedAt.set(key, Date.now());
+      } catch (error) {
+        // 自动刷新失败不抛：已有缓存就照常显示，把错误放进 refreshError 让页面说一句
+        refreshError = error?.message ?? String(error);
+      }
+    }
+
     const course = courseView(record);
     const items = this.listActivities({ courseIds: [courseId] }).items;
     const groups = { replay: [], homework: [], material: [], live: [], other: [] };
@@ -367,7 +419,123 @@ export class LmsService {
       groups,
       counts: Object.fromEntries(Object.entries(groups).map(([key, list]) => [key, list.length])),
       fetchedAt: this.state.lastActivitiesAt,
+      refreshError,
       loggedIn: this.state.status === 'ready',
+    };
+  }
+
+  /**
+   * 某门课的「资料」清单。
+   *
+   * 学堂没有独立的资料接口 —— 资料就是一种课程活动（`type: 'material'`），
+   * 附件挂在它的详情里。所以这里返回的是"这门课的资料类活动"，
+   * `withDetail: true` 时才顺带把每条的附件补上（会多打 N 次详情接口，默认不做）。
+   */
+  async materials(courseId, { withDetail = false } = {}) {
+    const record = this.store.lmsCourses.all().find((item) => Number(item.courseId) === Number(courseId));
+    if (!record) throw HttpError.notFound(`本地没有课程 ${courseId}（先刷新课程）`);
+    const items = this.listActivities({ courseIds: [courseId], type: 'material' }).items;
+    const list = items.map((item) => ({ ...item, uploads: [] }));
+    if (withDetail) {
+      // 串行补详情：资料通常十几条，并发打学校接口更容易触发限流
+      for (const item of list) {
+        try {
+          const detail = await this.activityDetail(item.id);
+          item.uploads = detail.item?.uploads ?? [];
+          item.description = detail.item?.description ?? '';
+        } catch {
+          // 单条详情拿不到就留空，不影响其它资料
+        }
+      }
+    }
+    return { items: list, count: list.length, courseName: record.name ?? null };
+  }
+
+  /**
+   * 某个附件/提交文件的原始字节。
+   *
+   * 前端拿到的是 `/lms/attachments/:id` 这样的**本机地址**：
+   * 学校那个 blob 地址要 CAS cookie，浏览器直连必 401，所以字节只能由后端代取再转发。
+   * `filename` 只用于拼 `Content-Disposition`，**绝不参与任何路径拼接**。
+   */
+  async attachment(uploadId) {
+    // ★ 参数非法要**在调上游之前**就挡掉：`#guard` 会把任何异常翻译成 502 "取附件失败"，
+    //   于是一个明显的 400（id 写错了）会被伪装成学校那边出错，排查时非常误导。
+    const id = Number(uploadId);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw HttpError.badRequest(`附件 id 非法：${uploadId}`, { field: 'id' });
+    }
+    await this.#ensureReady();
+    const blob = await this.#guard(() => this.api.attachmentBlob(id), '取附件失败');
+    const bytes = blob?.bytes ?? new Uint8Array(0);
+    if (!bytes.length) throw HttpError.notFound(`附件 ${uploadId} 是空的（或没有下载权限）`);
+    // 防御：附件本应是课件/文档。真有超大文件时宁可明确报错，也不要把它整份读进内存。
+    if (bytes.length > MAX_ATTACHMENT_BYTES) {
+      throw HttpError.badRequest(
+        `附件太大（${humanSize(bytes.length)}），超过单次转发上限 ${humanSize(MAX_ATTACHMENT_BYTES)}，请在学堂里下载`,
+      );
+    }
+    return { bytes, contentType: blob?.contentType ?? '' };
+  }
+
+  /**
+   * 找出「这条回放的这一路视频」的可取地址，供 `/lms/replay/stream` 转发。
+   *
+   * 为什么必须由后端转发，而不是把录播站地址直接给 `<video>`：
+   * 录播站的媒体地址通常带**防盗链**（校验 Referer、需要票据）。浏览器的 `<video>`
+   * 无法自定义 Referer，直接指向它就会加载失败 —— 用户看到的就是"这个地址播不了"。
+   * 由后端带上正确的来源头去取、再流式转发给浏览器，这两个问题一起解决。
+   *
+   * @param {{activityId: string|number, label?: string}} input `label` 是视频标签（高清 / 教室录像…）
+   */
+  async replayStreamSource({ activityId, label } = {}) {
+    await this.#ensureReady();
+    const record = this.store.lmsActivities.get(activityRecordId(activityId));
+    if (!record) throw HttpError.notFound(`本地没有活动 ${activityId}（先刷新活动）`);
+    const activity = activityView(record);
+    const result = await this.#guard(
+      () => this.api.replayVideos(activity, { lessonId: activity.id }),
+      '取回放地址失败',
+    );
+    const videos = result?.videos ?? [];
+    if (!videos.length) throw HttpError.notFound('这条回放没有可播放的视频');
+    const wanted = String(label ?? '').trim();
+    const picked = (wanted ? videos.find((item) => String(item.labelText ?? '') === wanted) : null) ?? videos[0];
+    const url = picked.playUrl || picked.downloadUrl;
+    if (!url) throw HttpError.notFound('这一路视频没有可用的播放地址');
+    return { url, labelText: picked.labelText ?? '', replayCode: result.replayCode ?? null };
+  }
+
+  /**
+   * 打开回放视频的上游字节流（带上录播站要求的来源头）。
+   *
+   * 注意：媒体地址带票据，**不要打日志**。
+   */
+  async openReplayStream(url, { range } = {}) {
+    const rms = this.config.rmsBaseUrl;
+    const headers = { Referer: `${rms}/`, Origin: rms, Accept: '*/*' };
+    // Range 必须原样带给上游：`<video>` 拖进度条靠它，后端不转上游就不会回 206
+    if (range) headers.Range = range;
+    return this.api.streamMedia(url, { headers });
+  }
+  /**
+   * 某次作业的提交记录（个人 / 小组由 `api.submissions()` 自动判别）。
+   *
+   * 「我交没交、多少分、老师怎么评的」是作业板块最要紧的三件事 ——
+   * 以前这条路由是 501，详情页只能说"不知道"。
+   */
+  async submission(activityId) {
+    await this.#ensureReady();
+    const submissions = await this.#guard(
+      () => this.api.submissions(activityId),
+      '拉取作业提交记录失败',
+    );
+    const list = Array.isArray(submissions) ? submissions : [];
+    return {
+      activityId: String(activityId),
+      submitted: list.length > 0,
+      count: list.length,
+      submissions: list,
     };
   }
 
@@ -489,7 +657,7 @@ export class LmsService {
   // ---------------------------------------------------------------- 设置 / 自动同步
 
   /** 修改同步设置（目前只有自动同步开关与间隔）。 */
-  async updateSettings({ autoSync, autoSyncIntervalHours } = {}) {
+  async updateSettings({ autoSync, autoSyncIntervalHours, downloadDir } = {}) {
     if (autoSync !== undefined) this.state.autoSync = Boolean(autoSync);
     if (autoSyncIntervalHours !== undefined) {
       const hours = Number(autoSyncIntervalHours);
@@ -497,6 +665,26 @@ export class LmsService {
         throw HttpError.badRequest('autoSyncIntervalHours 必须是 1~168 之间的小时数');
       }
       this.state.autoSyncIntervalHours = hours;
+    }
+    if (downloadDir !== undefined) {
+      // 校验在**这里**做，而且必须是绝对路径：相对路径会跟着进程工作目录跑，
+      // 用户以为下到 D:\课件、实际落在 app\ 下面，事后很难找。
+      const target = String(downloadDir ?? '').trim();
+      if (!target) throw HttpError.badRequest('下载目录不能为空', { field: 'downloadDir' });
+      if (!path.isAbsolute(target)) {
+        throw HttpError.badRequest('下载目录必须填绝对路径（例如 D:\\课件\\思源学堂）', { field: 'downloadDir' });
+      }
+      try {
+        // 不存在就建出来；建不出来（盘符不对、没权限）就在这一步明确报错，
+        // 而不是等下载跑到写入时才失败。
+        await mkdir(target, { recursive: true });
+        await access(target, constants.W_OK);
+      } catch (error) {
+        throw HttpError.badRequest(`这个目录不可用：${error.message}`, { field: 'downloadDir' });
+      }
+      this.state.downloadDir = target;
+      // 下载器持有自己的那份路径，改设置要同步过去（否则要重启才生效）
+      this.downloads.downloadDir = target;
     }
     await this.#persistMeta();
     if (this.state.autoSync) this.startAutoSync();
@@ -708,6 +896,7 @@ export class LmsService {
       lastAutoSyncAt: this.state.lastAutoSyncAt,
       /** 展示用的账号信息 —— 不是凭据，凭据在 auth-session.json（0600）。 */
       user: this.state.user,
+        downloadDir: this.state.downloadDir ?? null,
     });
   }
 

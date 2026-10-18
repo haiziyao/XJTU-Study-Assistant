@@ -138,14 +138,13 @@ export const LMS_TOOL_SPECS = [
   },
   {
     name: 'lms_course_materials',
-    description: '列出某门课程的课件与资料（文件名、类型、大小、上传时间、是否可下载）',
+    description: '列出某门课程的课件与资料（学堂把资料当成一种课程活动，附件挂在活动详情里）',
     method: 'GET',
     path: '/lms/courses/{id}/materials',
     requiresAuth: true,
     mutates: false,
-    implemented: false,
-    params: { id: 'string' },
-    returns: { items: '[{ id, title, kind, bytes, uploadedAt, downloadable }]' },
+    params: { id: 'string', detail: 'boolean?' },
+    returns: { items: '[{ id, title, startTime, uploads: [{ id, name, kind, size, downloadUrl, previewUrl }] }]' },
   },
   {
     name: 'lms_assignment_submission',
@@ -154,9 +153,8 @@ export const LMS_TOOL_SPECS = [
     path: '/lms/activities/{id}/submission',
     requiresAuth: true,
     mutates: false,
-    implemented: false,
     params: { id: 'string' },
-    returns: { submitted: 'boolean', submittedAt: 'string?', score: 'number?', comment: 'string?', files: 'array' },
+    returns: { submitted: 'boolean', count: 'number', submissions: '[{ id, score, status, submittedAt, comment, instructorComment, uploads }]' },
   },
   {
     name: 'lms_notices',

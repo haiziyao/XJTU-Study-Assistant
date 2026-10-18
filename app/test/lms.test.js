@@ -654,7 +654,14 @@ test('思源学堂：同步计划在缺少 today 时直接报错', () => {
 test('LMS：预置接口返回 501 而不是 404（让 AI 能区分"没实现"和"路径写错"）', async () => {
   const { LMS_TOOL_SPECS } = await import('../src/modules/lms/tools.js');
   const planned = LMS_TOOL_SPECS.filter((tool) => tool.implemented === false);
-  assert.ok(planned.length >= 5, '至少要有几个预置契约');
+  // 钉住**具体哪几个**还没实现，而不是"至少几个"：
+  //   · 实现了就回来改这条（资料清单 / 作业提交就是这么翻过来的），
+  //   · 新增预置契约也会在这里失败，逼着把契约和实现放一起看。
+  assert.deepEqual(
+    planned.map((tool) => tool.name).sort(),
+    ['lms_discussion_topics', 'lms_grades', 'lms_notices'],
+    '未实现工具的清单变了：要么刚实现完（请同步这条断言），要么新增了预置契约',
+  );
 
   const dir = await mkdtemp(path.join(tmpdir(), 'potato-lms-planned-'));
   const app = await createServer({ dataDir: dir });
