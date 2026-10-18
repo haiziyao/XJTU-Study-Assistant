@@ -125,7 +125,7 @@ test('视图注册表：顺序、插槽与跨模块服务符合外壳约定', as
     // 「传输」（order 66）排在「笔记系统」之后、「消息」之前：它属于"学习工作流"，不是系统级功能
     // 学习周报不再占左栏入口：它是「待办」页里的一个面板（views/weekly-panel.js），
     // 因此这里**不该**再出现周报入口（学习周报是待办页里的面板）。
-    assert.deepEqual(main, ['chat', 'calendar', 'todo', 'lms', 'academic', 'notes', 'transfer', 'message']);
+    assert.deepEqual(main, ['chat', 'calendar', 'todo', 'lms', 'notifications', 'academic', 'notes', 'transfer', 'message']);
     // 左栏底部固定为设置
     assert.deepEqual(bottom, ['settings']);
 

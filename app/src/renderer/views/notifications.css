@@ -1,0 +1,206 @@
+/*
+ * 通知视图样式。
+ *
+ * 原则：**未读要一眼看出来，已读要退到背景里**，固定要有明确标记但不抢标题。
+ * 两个时间（发布 / 发现）必须能区分，所以给它们不同的弱化层级。
+ */
+
+.notif-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.notif-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.notif-title-lg {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.notif-hint {
+  font-size: 12px;
+  color: var(--fg-3);
+  line-height: 1.5;
+}
+
+/* 顶部统计条：一行小胶囊，不占视线但把关键数字都给全 */
+.notif-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.notif-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  font-size: 11px;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+
+.notif-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.notif-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-base);
+}
+
+.notif-row:last-child {
+  border-bottom: none;
+}
+
+/* 未读：左侧一道亮条 + 标题加粗。比"用背景色整行染色"克制，列表看着不花 */
+.notif-row.is-unread {
+  border-left: 3px solid var(--blue);
+  padding-left: 9px;
+}
+
+.notif-row.is-unread .notif-title {
+  font-weight: 600;
+}
+
+.notif-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.notif-title {
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.45;
+  text-decoration: none;
+  word-break: break-word;
+}
+
+.notif-title:hover {
+  color: var(--blue);
+  text-decoration: underline;
+}
+
+/* 已读的标题退一档，让未读自然跳出来 */
+.notif-row:not(.is-unread) .notif-title {
+  color: var(--fg-2);
+}
+
+.notif-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.notif-site {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+
+/* 校方没给发布日期时要显出来，不能悄悄留空让人以为是今天 */
+.notif-date-missing {
+  font-style: italic;
+  opacity: 0.8;
+}
+
+.notif-seen {
+  opacity: 0.85;
+}
+
+.notif-flag {
+  color: var(--amber, #d99b2b);
+  white-space: nowrap;
+}
+
+.notif-actions {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.notif-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--fg-2);
+  font-size: 13px;
+}
+
+/* 同步逐站结果：失败的用红框标出来，别让用户以为"那个站没有新通知" */
+.notif-report {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.notif-report-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-2);
+  margin-bottom: 2px;
+}
+
+.notif-report-row {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.notif-report-row.is-error {
+  color: var(--red, #d9534f);
+}
+
+.notif-report-site {
+  flex: none;
+  min-width: 88px;
+  color: var(--fg-2);
+}
+
+.notif-report-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* 窄屏：动作按钮换到标题下面，别把标题挤成一条细线 */
+@media (max-width: 720px) {
+  .notif-row {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .notif-actions {
+    align-self: flex-end;
+  }
+}
