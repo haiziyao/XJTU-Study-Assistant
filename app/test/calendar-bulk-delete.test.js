@@ -8,7 +8,7 @@
  * 重点覆盖「删错就回不来」的几处：
  *   - 默认 dryRun（不传 dryRun:false 就只预览）；
  *   - 三个安全阀（confirm / confirmText）各自 400，且错误里回带预览数字；
- *   - 四个 scope 的命中口径（尤其 import 的判据与 lms 的区别）；
+ *   - 四个 scope 的命中口径（尤其 timetable: / lms: 前缀的区分，不看 source）；
  *   - events / todos / notes **一条都不能少**（清空日程 ≠ 清空所有数据）；
  *   - 回收站能原样恢复、同 id 已存在要 skip、连删 60 批不会无限涨；
  *   - 指令层与 AI 都只产出**一条** scope:'all' 草稿，而不是 N 条逐条确认。
@@ -33,26 +33,32 @@ const SCHEDULES = [
   { id: 'm1', title: '手建一', date: '2026-03-01', source: 'manual' },
   { id: 'm2', title: '手建二', date: '2026-03-02', source: 'manual' },
   { id: 'm3', title: '手建三', date: '2026-03-03', source: 'manual' },
-  // 指令 / AI 建的：source 不是 manual，但用户视角是"自己建的" → manual 桶
+  // 指令 / AI 建的：source 不是 manual，但过滤上是"非导入" → 都算进 source:'manual'
   { id: 'c1', title: '指令建的', date: '2026-03-04', source: 'command' },
   { id: 'a1', title: 'AI 建的', date: '2026-03-05', source: 'ai' },
   // 课表导入：source=import + timetable: 前缀（正常形状）
   { id: 't1', title: '高数', date: '2026-03-06', source: 'import', externalId: 'timetable:2025-2026-2:高等数学:1:1-2:aaaa1111' },
-  // source=import 但没有 externalId（历史 / 手工导入）→ 仍算 import
+  // source=import 但没有 externalId（历史 / 手工导入）：bySource 归 import，
+  // 但它没有 timetable: 前缀，所以 source:'timetable' 不删它 —— 只有 scope:'all' / ids 能清
   { id: 't2', title: '大物', date: '2026-03-07', source: 'import' },
-  // source=manual 但带 timetable: 前缀 → 按判据仍算 import（前缀是更可靠的凭证）
+  // source=manual 但带 timetable: 前缀 → 按"前缀优先"判据算课表导入（不看 source）
   { id: 't3', title: '线代', date: '2026-03-08', source: 'manual', externalId: 'timetable:2025-2026-2:线性代数:2:3-4:bbbb2222' },
-  // 学堂同步：source 也是 import，但 externalId 是 lms: —— import 判据会命中它
+  // 学堂同步：source 也是 import，但 externalId 是 lms: —— 不能算进课表范围
   { id: 'l1', title: '学堂作业', date: '2026-03-09', source: 'import', externalId: 'lms:homework:1001' },
-  // 只有 source=lms（真实数据里不存在，这里用来钉住 lms 分桶与 manual 的边界）
+  // source=lms 且带 lms: 前缀（真实数据里 source 也是 import，这里钉住前缀判据）
   { id: 'l2', title: '学堂直播', date: '2026-03-10', source: 'lms', externalId: 'lms:live:1002' },
 ];
 
 const ALL_IDS = SCHEDULES.map((item) => item.id);
-/** 按任务给定的 import 判据：source==='import' || externalId.startsWith('timetable:')。 */
-const IMPORT_IDS = ['t1', 't2', 't3', 'l1'];
+/** 课表范围只认 timetable: 前缀：t1 正常、t3 是"source=manual 但前缀是课表"。 */
+const TIMETABLE_IDS = ['t1', 't3'];
+/** 学堂范围只认 lms: 前缀：l1 的 source=import、l2 的 source=lms，都命中。 */
+const LMS_IDS = ['l1', 'l2'];
+/** source:'manual' = 非导入（manual / command / ai 都算）。 */
 const MANUAL_IDS = ['m1', 'm2', 'm3', 'c1', 'a1'];
-const LMS_IDS = ['l2'];
+/** bySource 新形状：manual / command / ai 分开计数。 */
+const ALL_BY_SOURCE = { manual: 3, command: 1, ai: 1, import: 3, lms: 2 };
+const TIMETABLE_BY_SOURCE = { manual: 0, command: 0, ai: 0, import: 2, lms: 0 };
 
 async function startApp({ ai } = {}) {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'potato-bulk-'));
@@ -186,7 +192,7 @@ test("批量删除：范围不是 all 时不需要 confirmText（confirm 就够�
 
 /* ================================================================ 2. 四个 scope */
 
-test("scope:'all'：清空全部 schedules，bySource 三桶正确，回收站文件 0600", async () => {
+test("scope:'all'：清空全部 schedules，bySource 五桶正确，回收站文件 0600", async () => {
   const { app, call, dataDir } = await startApp();
   try {
     await seed(app);
@@ -198,7 +204,8 @@ test("scope:'all'：清空全部 schedules，bySource 三桶正确，回收站�
     });
     assert.equal(result.status, 200);
     assert.equal(result.body.removed, 10);
-    assert.deepEqual(result.body.bySource, { manual: 5, import: 3, lms: 2 });
+    // manual / command / ai 分开计数；timetable: 前缀归 import，lms: 前缀归 lms
+    assert.deepEqual(result.body.bySource, ALL_BY_SOURCE);
     assert.match(result.body.trashId, /^trash-/);
     assert.equal((await idsOf(call)).length, 0);
     assert.equal((await call('GET', '/schedules/stats')).body.total, 0);
@@ -207,7 +214,7 @@ test("scope:'all'：清空全部 schedules，bySource 三桶正确，回收站�
     assert.equal(trash.body.count, 1);
     assert.equal(trash.body.items[0].count, 10);
     assert.equal(trash.body.items[0].scope, 'all');
-    assert.deepEqual(trash.body.items[0].bySource, { manual: 5, import: 3, lms: 2 });
+    assert.deepEqual(trash.body.items[0].bySource, ALL_BY_SOURCE);
     assert.equal(trash.body.items[0].items, undefined, '回收站概况不能回记录正文');
 
     const fileStat = await stat(path.join(dataDir, 'schedules-trash.json'));
@@ -253,24 +260,58 @@ test("scope:'range'：只删 date 落在 [from,to] 内的（含两端）", async
   }
 });
 
-test("scope:'source'（import）：只删 source==='import' 或 timetable: 前缀，lms-only 留下", async () => {
+test("scope:'source'（timetable）：只删 timetable: 前缀，不碰 lms 与手动", async () => {
   const { app, call } = await startApp();
   try {
     await seed(app);
-    const preview = await call('POST', '/schedules/bulk-delete', { scope: 'source', source: 'import' });
-    assert.equal(preview.body.count, 4);
-    assert.deepEqual(preview.body.samples.map((item) => item.id), IMPORT_IDS);
+    const preview = await call('POST', '/schedules/bulk-delete', { scope: 'source', source: 'timetable' });
+    assert.equal(preview.body.count, 2);
+    assert.equal(preview.body.source, 'timetable');
+    assert.deepEqual(preview.body.samples.map((item) => item.id), TIMETABLE_IDS);
+    assert.deepEqual(preview.body.bySource, TIMETABLE_BY_SOURCE, '课表导入在 bySource 里归 import 桶');
+
+    // 旧别名 import 等价于 timetable：同样只看前缀，不再按 source=import 误伤学堂记录
+    const alias = await call('POST', '/schedules/bulk-delete', { scope: 'source', source: 'import' });
+    assert.equal(alias.body.count, 2);
+    assert.equal(alias.body.source, 'timetable', '别名要归一化成 timetable 回显');
 
     const result = await call('POST', '/schedules/bulk-delete', {
       scope: 'source',
-      source: 'import',
+      source: 'timetable',
       dryRun: false,
       confirm: true,
     });
-    assert.equal(result.body.removed, 4);
-    // import 判据按任务给定口径：l1（source=import + lms: 前缀）也会被删，但分桶按 lms 记
-    assert.deepEqual(result.body.bySource, { manual: 0, import: 3, lms: 1 });
-    assert.deepEqual(await idsOf(call), ['a1', 'c1', 'l2', 'm1', 'm2', 'm3']);
+    assert.equal(result.body.removed, 2);
+    assert.deepEqual(result.body.bySource, TIMETABLE_BY_SOURCE);
+    const left = await idsOf(call);
+    assert.deepEqual(left, ['a1', 'c1', 'l1', 'l2', 'm1', 'm2', 'm3', 't2']);
+    // lms 前缀与手动记录一条都不能少；t2（source=import 但没有前缀）也不该被课表范围删掉
+    for (const id of ['l1', 'l2', 'm1', 'c1', 'a1', 't2']) assert.ok(left.includes(id), `${id} 不应被课表范围删除`);
+  } finally {
+    await app.close();
+  }
+});
+
+test("scope:'source'（lms）：只删 lms: 前缀，不碰 timetable 与手动", async () => {
+  const { app, call } = await startApp();
+  try {
+    await seed(app);
+    const preview = await call('POST', '/schedules/bulk-delete', { scope: 'source', source: 'lms' });
+    assert.equal(preview.body.count, 2);
+    assert.deepEqual(preview.body.samples.map((item) => item.id), LMS_IDS);
+    assert.deepEqual(preview.body.bySource, { manual: 0, command: 0, ai: 0, import: 0, lms: 2 });
+
+    const result = await call('POST', '/schedules/bulk-delete', {
+      scope: 'source',
+      source: 'lms',
+      dryRun: false,
+      confirm: true,
+    });
+    assert.equal(result.body.removed, 2);
+    const left = await idsOf(call);
+    assert.deepEqual(left, ['a1', 'c1', 'm1', 'm2', 'm3', 't1', 't2', 't3']);
+    // 课表前缀与手动记录一条都不能少
+    for (const id of ['t1', 't2', 't3', 'm1', 'c1', 'a1']) assert.ok(left.includes(id), `${id} 不应被学堂范围删除`);
   } finally {
     await app.close();
   }
@@ -290,6 +331,8 @@ test("scope:'source'（manual）：只删自己建的（manual/command/ai），�
       confirm: true,
     });
     assert.equal(result.body.removed, 5);
+    // 过滤仍是"非导入"（三类都删），但 bySource 把 manual / command / ai 分开报
+    assert.deepEqual(result.body.bySource, { manual: 3, command: 1, ai: 1, import: 0, lms: 0 });
     assert.deepEqual(await idsOf(call), ['l1', 'l2', 't1', 't2', 't3']);
     // source 写错 / 没写都是 400：不能把未知来源当成 manual 删掉用户数据
     const bad = await call('POST', '/schedules/bulk-delete', { scope: 'source', source: 'imported' });
@@ -514,7 +557,7 @@ test("指令层：dryRun 返回 planned:'bulk' + count/samples，确认后走服
     assert.equal(result.status, 200);
     assert.equal(result.body.removed, 10);
     assert.match(result.body.trashId, /^trash-/);
-    assert.deepEqual(result.body.bySource, { manual: 5, import: 3, lms: 2 });
+    assert.deepEqual(result.body.bySource, ALL_BY_SOURCE);
     assert.match(result.body.explain, /已删除 10 条日程/);
     assert.ok(result.body.warnings.some((text) => /这会清空全部日程/.test(text)));
     assert.equal((await idsOf(call)).length, 0);
@@ -538,12 +581,18 @@ test('指令层：range / source 的 filters 也走批量删除（不再逐条 l
     });
     assert.equal(range.body.count, 3);
     assert.match(range.body.explain, /时间段 2026-03-02 至 2026-03-04/);
-    const source = await call('POST', '/commands/execute', {
-      draft: { ok: true, action: 'delete', target: 'schedule', filters: { scope: 'source', source: 'import' } },
+    const timetable = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'delete', target: 'schedule', filters: { scope: 'source', source: 'timetable' } },
       dryRun: true,
     });
-    assert.equal(source.body.count, 4);
-    assert.match(source.body.explain, /仅课表导入/);
+    assert.equal(timetable.body.count, 2);
+    assert.match(timetable.body.explain, /仅课表导入/);
+    const lms = await call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'delete', target: 'schedule', filters: { scope: 'source', source: 'lms' } },
+      dryRun: true,
+    });
+    assert.equal(lms.body.count, 2);
+    assert.match(lms.body.explain, /仅学堂同步/);
     // 空库执行 scope:'all' 是"没东西可删"，不是 500/404
     await call('POST', '/commands/execute', {
       draft: { ok: true, action: 'delete', target: 'schedule', filters: { scope: 'ids', ids: ALL_IDS } },
@@ -641,9 +690,9 @@ test("AI auto 档：同一句话直接执行那一条草稿，回执报出 remov
 
 /* ================================================================ 7. 渲染层 */
 
-test('渲染层：日程工具栏有「批量删除」入口，弹层有四个范围 / 预览 / 回收站撤销', async () => {
+test('渲染层：日程工具栏有「批量删除」入口，弹层有五个范围 / 预览 / 回收站撤销', async () => {
   const source = await readFile(path.join(HERE, '../src/renderer/views/calendar.js'), 'utf8');
-  for (const text of ['批量删除', '全部日程', '某时间段', '仅课表导入的课程', '仅手动创建的', '预览将删除的日程', '撤销上次删除', '回收站']) {
+  for (const text of ['批量删除', '全部日程', '某时间段', '仅课表导入的课程', '仅学堂同步的', '仅手动创建的', '预览将删除的日程', '撤销上次删除', '回收站']) {
     assert.ok(source.includes(text), `calendar.js 缺少入口文案：${text}`);
   }
   assert.match(source, /\/schedules\/bulk-delete/);
@@ -689,7 +738,7 @@ test('渲染层：日程工具栏有「批量删除」入口，弹层有四个�
   assert.ok(modal, '点按钮应打开批量删除弹层');
   assert.deepEqual(
     modal.querySelectorAll('.bulk-scope-label').map((node) => node.textContent),
-    ['全部日程', '某时间段', '仅课表导入的课程', '仅手动创建的'],
+    ['全部日程', '某时间段', '仅课表导入的课程', '仅学堂同步的', '仅手动创建的'],
   );
   assert.ok(modal.querySelector('.bulk-undo'), '弹层里要有「撤销上次删除」按钮');
   assert.match(modal.querySelector('.bulk-undo').textContent, /撤销上次删除/);

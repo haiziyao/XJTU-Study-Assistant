@@ -1626,22 +1626,33 @@ function placeholderView(title, desc, bullets) {
 /**
  * 批量删除的范围选项。
  *
- * 为什么把「仅课表导入」和「仅手动创建」拆成两个 source 选项，而不是让用户填自由文本：
- * 这两类是用户真实会说的两句话（真机上模型列出来的正是"只删自己手建的 / 连课程一起清空"）。
- * 界面直接给出这两个按钮，用户不必理解 source / externalId 这些内部词。
+ * 为什么把「课表导入」「学堂同步」「手动创建」拆成三个 source 选项，而不是让用户填自由文本：
+ * 这三类是用户真实会说的几句话（真机上模型列出来的正是"只删自己手建的 / 连课程一起清空"）。
+ * 课表与学堂必须分开：两边写入的 source 都是 import，只看 source 会把学堂记录一起删掉；
+ * 界面直接给按钮，用户不必理解 source / externalId 这些内部词。
  */
 const BULK_SCOPES = [
   { value: 'all', label: '全部日程', hint: '清空日程页的所有安排（不含日历事件、待办与笔记）' },
   { value: 'range', label: '某时间段', hint: '删除开始与结束日期之间的日程（含两端）' },
-  { value: 'import', label: '仅课表导入的课程', hint: '课表导入写入的日程（source=import 或 timetable: 前缀）' },
+  {
+    value: 'timetable',
+    label: '仅课表导入的课程',
+    hint: '只删课表导入写入的日程（externalId 以 timetable: 开头，不含学堂同步）',
+  },
+  {
+    value: 'lms',
+    label: '仅学堂同步的',
+    hint: '只删思源学堂同步写入的日程（externalId 以 lms: 开头，不含课表导入）',
+  },
   { value: 'manual', label: '仅手动创建的', hint: '你自己创建或让 AI / 指令创建的日程，不含任何导入' },
 ];
 
-/** 把界面上的四个单选翻译成服务端契约（scope / from / to / source）。 */
+/** 把界面上的单选翻译成服务端契约（scope / from / to / source）。 */
 function bulkInputOf(choice, from, to) {
   if (choice === 'all') return { scope: 'all' };
   if (choice === 'range') return { scope: 'range', from: from.value, to: to.value };
-  return { scope: 'source', source: choice === 'import' ? 'import' : 'manual' };
+  // timetable / lms / manual 与服务的 source 取值一一对应，不需要再翻译
+  return { scope: 'source', source: choice };
 }
 
 /**
@@ -1671,7 +1682,7 @@ function openBulkDelete() {
   );
 
   /** 默认选「仅课表导入的课程」：它是最常见的一次性清理，也最不容易误伤用户手建的数据。 */
-  let choice = 'import';
+  let choice = 'timetable';
   let lastPreview = null;
   let undoId = null;
   let busy = false;
@@ -1818,8 +1829,11 @@ function openBulkDelete() {
       previewBox.appendChild(list);
     }
     if (result.bySource) {
-      const { manual = 0, import: imported = 0, lms = 0 } = result.bySource;
-      previewBox.appendChild(mk('div', 'bulk-mix', `手动 ${manual} 条 · 课表导入 ${imported} 条 · 学堂同步 ${lms} 条`));
+      const { manual = 0, command = 0, ai = 0, import: imported = 0, lms = 0 } = result.bySource;
+      // manual / command / ai 分开报：用户核对"删得对不对"时，混成一个数等于没信息
+      previewBox.appendChild(
+        mk('div', 'bulk-mix', `手动 ${manual} · 指令 ${command} · AI ${ai} · 课表 ${imported} · 学堂 ${lms}（条）`),
+      );
     }
     if (choice === 'all') {
       previewBox.appendChild(mk('div', 'bulk-warning', '注意：这会清空全部日程（不含日历事件、待办和笔记）。'));

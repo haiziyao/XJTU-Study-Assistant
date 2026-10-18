@@ -18,7 +18,7 @@ const TARGET_LABEL = { schedule: '日程', event: '日历事件', todo: '待办'
 const labelOf = (target) => TARGET_LABEL[target] ?? target;
 
 /** 范围文案：回执/预览里说清"删的是哪一块"，用户才敢点确认。 */
-const BULK_SOURCE_LABEL = { manual: '仅手动创建', import: '仅课表导入', lms: '仅学堂同步' };
+const BULK_SOURCE_LABEL = { manual: '仅手动创建', timetable: '仅课表导入', lms: '仅学堂同步' };
 
 /**
  * filters 里出现 `scope`（或只有 `ids`）就按"按范围批量删除"处理。

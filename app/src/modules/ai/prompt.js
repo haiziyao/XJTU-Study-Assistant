@@ -101,8 +101,12 @@ const DRAFT_PROTOCOL = `【输出格式】
   - \`all\` = 全部日程；"删除所有日程 / 清空日程 / 日程全删了"都用它。
   - \`range\` = 某时间段，必须同时给 \`from\`、\`to\`（YYYY-MM-DD，**含两端**）；
     "删掉 10 月 1 日到 10 月 7 日的日程" → \`{"scope":"range","from":"2026-10-01","to":"2026-10-07"}\`。
-  - \`source\` = 按来源，再给 \`source\`：\`import\`（课表导入的课程）/ \`manual\`（自己建的，含 AI / 指令建的）/ \`lms\`（学堂同步）。
+  - \`source\` = 按来源，再给 \`source\`：\`timetable\`（课表导入：externalId 以 timetable: 开头）/
+    \`manual\`（自己建的：manual / command / ai 都算）/ \`lms\`（学堂同步：externalId 以 lms: 开头）。
+    "只删课表导入的" → \`source: "timetable"\`（import 是它的旧别名，新草稿统一写 timetable）；
+    "只删学堂同步的" → \`source: "lms"\`。
   - \`ids\` = 已知具体记录时用 \`filters.ids\` 数组。
+- 三个 source 范围**互不重叠**：要一次清空所有来源（含历史遗留行）只能用 \`scope: "all"\`。
 - 这一条草稿只清 \`schedules\`（日程）：**不碰**日历事件、待办、笔记。说"清空日程"时不要顺带承诺删别的东西。
 - 正文里**先**说清影响范围（大约多少条、哪些日子 / 哪一类）和"删除后可在日程页的「回收站」撤销"，
   **再**给这一条草稿。dryRun 那一轮系统会回真实条数与样例，回执按那个数字说，不要自己编。

@@ -64,8 +64,16 @@ function isLegacyAnchor(item) {
  * 服务端删除另一套，用户看到 3 条、实际删了 30 条。
  */
 const BULK_SCOPES = ['all', 'range', 'source', 'ids'];
-/** `scope:'source'` 允许的来源。manual 的口径见 `isManualSchedule`。 */
-const BULK_SOURCES = ['manual', 'import', 'lms'];
+/**
+ * `scope:'source'` 允许的来源：`timetable`（课表前缀）/ `lms`（学堂前缀）/ `manual`（非导入）。
+ * 三者互不重叠，也都不等于"全部"—— 只有 `scope:'all'` 能一次清空所有来源。
+ */
+const BULK_SOURCES = ['timetable', 'lms', 'manual'];
+/**
+ * 兼容旧调用：早期接口把课表导入写成 `source:'import'`。
+ * 现在统一映射到 `timetable`（**只认前缀**），不再按 `source === 'import'` 误伤学堂记录。
+ */
+const BULK_SOURCE_ALIASES = { import: 'timetable' };
 /** 预览里最多回几条样例：够用户认出"删的是哪一批"，又不会让弹窗变成第二个列表。 */
 const PREVIEW_SAMPLES = 8;
 /** 回收站文件：与其它集合同目录（生产环境就是 app/data），不额外引入存储层。 */
@@ -78,15 +86,31 @@ const TRASH_FILE = 'schedules-trash.json';
 const TRASH_MAX_BATCHES = 50;
 const TRASH_MAX_RECORDS = 500;
 
-/** 课表导入的判据（与 timetable 模块写入的形状一致）。 */
-function isImportedSchedule(item) {
-  // 历史数据里 source 可能缺失，但 externalId 前缀是更可靠的凭证；两个条件任一成立即算导入。
-  return item?.source === 'import' || String(item?.externalId ?? '').startsWith('timetable:');
+/**
+ * 课表导入的唯一判据：`externalId` 以 `timetable:` 开头。
+ *
+ * 为什么**不看 source**：LMS 同步写入的日程 source 也是 `import`（见 lms/sync.js），
+ * 按 source 判会把学堂同步的课表 / 活动一起删掉 —— 用户点「仅课表导入的课程」时，
+ * 预期是"只动课表导入的那批"，被顺带清掉学堂记录属于误导。timetable 模块自己的删除逻辑
+ * 也只认这个前缀（见 timetable/service.js），两处口径保持一致。
+ */
+function isTimetableSchedule(item) {
+  return String(item?.externalId ?? '').startsWith('timetable:');
 }
 
-/** 思源学堂同步写入的日程：source 也是 import，靠 externalId 前缀区分（见 lms/sync.js）。 */
+/** 思源学堂同步写入的日程：`externalId` 以 `lms:` 开头（与 lms/sync.js 的幂等键一致）。 */
 function isLmsSchedule(item) {
-  return item?.source === 'lms' || String(item?.externalId ?? '').startsWith('lms:');
+  return String(item?.externalId ?? '').startsWith('lms:');
+}
+
+/**
+ * 「非导入」判定（只用于 `source:'manual'` 的过滤）。
+ *
+ * 比过滤口径更宽一点：除了两个前缀，还把 `source === 'import' | 'lms'` 的老记录也算导入
+ * （历史数据可能没有 externalId）。这样"仅手动创建的"绝不会把导入记录当成用户手建的删掉。
+ */
+function isImportLikeSchedule(item) {
+  return isTimetableSchedule(item) || isLmsSchedule(item) || item?.source === 'import' || item?.source === 'lms';
 }
 
 /**
@@ -97,18 +121,28 @@ function isLmsSchedule(item) {
  * AI 建的那批 —— 比多留几条更糟：用户会以为已经清干净了。
  */
 function isManualSchedule(item) {
-  return !isImportedSchedule(item) && !isLmsSchedule(item);
+  return !isImportLikeSchedule(item);
 }
 
-/** 回收站与回执的三分类（与 scope:'source' 的三个选项一一对应）。 */
+/**
+ * 回收站与回执的**来源分桶**：manual / command / ai 分开计数。
+ *
+ * 为什么不再把 command / ai 混进 manual：回执是用户判断"删得对不对"的唯一依据。
+ * 混在一起时"手动 5 条"可能其实是 3 条手建 + 2 条 AI 建的，用户没法核对。
+ * 注意这是**统计口径**，`scope:'source', source:'manual'` 的过滤仍然是"非导入"（三类都删）。
+ */
 function sourceBucketOf(item) {
-  if (isLmsSchedule(item)) return 'lms';
-  if (isImportedSchedule(item)) return 'import';
-  return 'manual';
+  if (isTimetableSchedule(item)) return 'import';
+  if (isLmsSchedule(item) || item?.source === 'lms') return 'lms';
+  if (item?.source === 'command') return 'command';
+  if (item?.source === 'ai') return 'ai';
+  if (item?.source === 'manual') return 'manual';
+  // 历史 source=import 但没有前缀的行：仍归 import 桶（它确实是导入来的，只是没有可识别的键）
+  return 'import';
 }
 
 function countBySource(items) {
-  const out = { manual: 0, import: 0, lms: 0 };
+  const out = { manual: 0, command: 0, ai: 0, import: 0, lms: 0 };
   for (const item of items) out[sourceBucketOf(item)] += 1;
   return out;
 }
@@ -441,9 +475,14 @@ export class ScheduleService {
       if (filters.to < filters.from) throw HttpError.badRequest('to 不能早于 from（区间含两端）', { field: 'to' });
     }
     if (scope === 'source') {
-      const source = String(input?.source ?? '').trim();
+      const raw = String(input?.source ?? '').trim();
+      // 旧别名 import → timetable：语义跟着收紧成"只认 timetable: 前缀"，
+      // 老调用方不会失效，也不会再顺带删掉 source=import 的学堂记录。
+      const source = BULK_SOURCE_ALIASES[raw] ?? raw;
       if (!BULK_SOURCES.includes(source)) {
-        throw HttpError.badRequest(`source 不合法：只能是 ${BULK_SOURCES.join(' / ')}`, { field: 'source' });
+        throw HttpError.badRequest(`source 不合法：只能是 ${BULK_SOURCES.join(' / ')}（import 是 timetable 的旧别名）`, {
+          field: 'source',
+        });
       }
       filters.source = source;
     }
@@ -465,7 +504,7 @@ export class ScheduleService {
     }
     if (scope === 'source') {
       const predicate =
-        filters.source === 'import' ? isImportedSchedule : filters.source === 'lms' ? isLmsSchedule : isManualSchedule;
+        filters.source === 'timetable' ? isTimetableSchedule : filters.source === 'lms' ? isLmsSchedule : isManualSchedule;
       return sortForPreview(all.filter(predicate));
     }
     const wanted = new Set(filters.ids);
