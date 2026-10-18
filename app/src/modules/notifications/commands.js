@@ -1,15 +1,16 @@
 /**
  * 目标 `notification` 的指令处理器。
  *
- * 四个动作，读写分明：
+ * 三个动作，读写分明：
  *   · `query` 只读 —— `dryRun: true` 执行，不写库、不联网（列表查询是本地过滤）；
  *   · `sync`  联网 + 写库 —— 必须用户确认；
- *   · `read`  写本地状态（标记已读）；
  *   · `pin`   写本地状态（固定，固定后不会被保留期清理）。
  *
- * `query` 的结果里刻意带上 `summary.retention / lastSyncAt / sources`：
+ * **没有已读/未读**：这一版只做"收到了什么、能不能固定住"。
+ *
+ * `query` 的结果里刻意带上 `summary.retention / lastSyncAt / bySite`：
  * `#compactQueryResult` 只保留 `filters / count / truncated / explain / items`（外加 `summary`），
- * 而"本地的通知是多久以前同步的、保留期多长"直接决定这个答案可信到什么程度 ——
+ * 而"本地数据是多久以前同步的、保留期多长"直接决定这个答案可信到什么程度 ——
  * 模型必须知道，否则会把"90 天前同步的旧数据"说成"最新的通知"。
  */
 
@@ -24,7 +25,6 @@ export function createNotificationCommands({ notifications }) {
       const result = notifications.list({
         siteId: filters.siteId ?? filters.site ?? filters.host,
         q: filters.q ?? filters.query ?? filters.keyword,
-        unreadOnly: Boolean(filters.unreadOnly ?? filters.unread),
         pinned: Boolean(filters.pinned),
         since: filters.since,
         until: filters.until,
@@ -34,9 +34,9 @@ export function createNotificationCommands({ notifications }) {
       const stats = notifications.stats();
 
       const explain = result.total
-        ? `本地已有 ${stats.total} 条校内通知（未读 ${stats.unread} 条、固定 ${stats.pinned} 条），`
+        ? `本地已有 ${stats.total} 条校内通知（固定 ${stats.pinned} 条），`
           + `这次按条件命中 ${result.total} 条，下面给出 ${result.count} 条。`
-          + (result.filters.unreadOnly ? '（只看未读）' : '')
+          + (result.filters.pinned ? '（只看固定的）' : '')
         : '本地还没有符合条件的通知。'
           + (stats.total ? `本地一共 ${stats.total} 条，可能被筛选条件排除了。` : '还没同步过，先用 sync 拉一次。');
 
@@ -46,12 +46,11 @@ export function createNotificationCommands({ notifications }) {
         items: result.items,
         summary: {
           total: stats.total,
-          unread: stats.unread,
           pinned: stats.pinned,
           bySite: stats.bySite,
           lastSyncAt: stats.lastSyncAt,
           retentionDays: stats.retentionDays,
-          // 这三个字段是"这份答案有多新"的凭据，必须给模型看到
+          // 这是"这份答案有多新"的凭据，必须给模型看到
           freshnessNote: stats.lastSyncAt
             ? `本地数据最后一次同步是 ${stats.lastSyncAt}；之后校方发的通知还没有进来。`
             : '本地数据还从未同步过，里面可能一条都没有。',
@@ -78,22 +77,6 @@ export function createNotificationCommands({ notifications }) {
         + `。本地共 ${result.total} 条。`
         + (failed.length ? ` 有 ${failed.length} 个站点没抓成：${failed.map((s) => `${s.label}（${s.error}）`).join('；')}。` : '');
       return { count: result.inserted, perSite: result.perSite, summary: result, explain };
-    },
-
-    /** 标记已读。 */
-    async read(draft) {
-      const fields = draft?.fields ?? {};
-      const filters = draft?.filters ?? {};
-      const result = await notifications.markRead({
-        ids: fields.ids ?? filters.ids,
-        all: Boolean(fields.all ?? filters.all),
-        siteId: fields.siteId ?? filters.site,
-      });
-      return {
-        count: result.updated,
-        summary: result,
-        explain: result.updated ? `已把 ${result.updated} 条标为已读。` : '没有需要标记的通知。',
-      };
     },
 
     /** 固定 / 取消固定。固定的条目不会被保留期清理。 */

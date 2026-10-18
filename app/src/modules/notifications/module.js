@@ -32,12 +32,12 @@ import { NOTIFICATION_TOOLS } from './tools.js';
 
 const AI_PROMPT = `【校内通知（本地已同步）】
 用户有一份**本地沉淀**的校内通知库，target 是 "notification"（教务处 / 研究生院 / 学校门户 / 新闻网，
-以及用户自己添加的站点）。它与"校内网搜索"是两套东西：后者是**临时检索**，前者有沉淀、已读状态和固定标记。
+以及用户自己添加的站点）。它与"校内网搜索"是两套东西：后者是**临时检索**，
+前者有沉淀、**固定标记**与保留期。
 
-- 查通知：{"action":"query","target":"notification","filters":{"site":"dean","unread":true,"limit":10}}
-  filters 支持 siteId（站点 id）/ q（关键词）/ unreadOnly / pinned / since / limit / offset。
+- 查通知：{"action":"query","target":"notification","filters":{"site":"dean","limit":10}}
+  filters 支持 siteId（站点 id）/ q（关键词）/ pinned（只看固定的）/ since / limit / offset。
 - 拉一次最新：{"action":"sync","target":"notification","filters":{"site":"dean"}}（**会联网、会写库**）
-- 标为已读：{"action":"read","target":"notification","fields":{"ids":["…"]}} 或 {"all":true}
 - 固定（不会被保留期清理）：{"action":"pin","target":"notification","fields":{"ids":["…"],"pinned":true}}
 
 **什么时候用本地、什么时候去搜**
@@ -88,7 +88,6 @@ export default {
       'siteLabel',
       'publishedAt',
       'firstSeenAt',
-      'read',
       'pinned',
       'snippet',
     ],

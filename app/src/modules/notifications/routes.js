@@ -2,13 +2,15 @@
  * 通知接口。
  *
  * 分工：
- *   · `GET  /notifications`          纯本地查询，不联网、不写库；
- *   · `POST /notifications/sync`     **唯一会联网的动作**，并且会在结束时按保留期清理；
- *   · `POST /notifications/read|pin` 写本地状态；
+ *   · `GET  /notifications`            纯本地查询，不联网、不写库；
+ *   · `GET  /notifications/:id/content` 抓**这一篇**的正文（给"在应用里读"用）；
+ *   · `POST /notifications/sync`       **唯一会联网并写库的动作**，结束时按保留期清理；
+ *   · `POST /notifications/pin`        写本地状态（固定 = 不被保留期清理）；
  *   · `GET  /notifications/status|sources|settings` 诊断与配置。
  *
- * 把"联网"单独放成一个 POST，是为了让"查询"这条最常用的路径永远是本地的、快的、
- * 不需要征得同意的 —— 用户在对话里问"最近有什么通知"不该触发一次抓取。
+ * 刻意**没有"已读/未读"**：这一版只做"收到了什么、能不能固定住"。
+ * 已读状态会带来一整套列表语义（全部已读、按未读筛选、未读角标），
+ * 而它跟"别漏掉重要通知"这件事关系不大 —— 固定 + 保留期才是。
  */
 
 import { HttpError } from '../../core/http/router.js';
@@ -22,7 +24,6 @@ export function registerNotificationRoutes(router, { notifications, apiPrefix })
     notifications.list({
       siteId: query?.siteId,
       q: query?.q,
-      unreadOnly: asBool(query?.unread),
       pinned: asBool(query?.pinned),
       since: query?.since,
       until: query?.until,
@@ -30,6 +31,15 @@ export function registerNotificationRoutes(router, { notifications, apiPrefix })
       offset: query?.offset,
     }),
   );
+
+  /**
+   * 读一条通知的正文。
+   *
+   * 为什么不让前端直接开浏览器：桌面端把 URL 交给系统会撞上 Windows 的权限提升比对
+   * （「Edge 未响应，因为现有实例正在以提升的权限运行」），用户点"是"浏览器就被重启。
+   * 由后端抓回来、清洗成文本，在面板里读，Web UI 与桌面端行为一致。
+   */
+  router.get(`${P}/:id/content`, ({ params }) => notifications.readBody(params.id));
 
   /**
    * 同步一次。会联网，并且**会按保留期删掉超期条目**（固定的不删）。
@@ -42,13 +52,6 @@ export function registerNotificationRoutes(router, { notifications, apiPrefix })
       dryRun: asBool(body?.dryRun),
     }),
   );
-
-  router.post(`${P}/read`, ({ body }) => {
-    if (!body?.all && !Array.isArray(body?.ids)) {
-      throw HttpError.badRequest('要么给 ids 数组，要么显式 all: true', { field: 'ids' });
-    }
-    return notifications.markRead({ ids: body?.ids, all: asBool(body?.all), siteId: body?.siteId });
-  });
 
   router.post(`${P}/pin`, ({ body }) => {
     if (!Array.isArray(body?.ids) || !body.ids.length) {

@@ -123,7 +123,6 @@ test('sync：新条目入库，带 firstSeenAt 且默认未读', async () => {
     assert.equal(list.total, 2);
     const first = list.items.find((item) => item.title.includes('转专业'));
     assert.ok(first, '应当有转专业那条');
-    assert.equal(first.read, false);
     assert.equal(first.pinned, false);
     assert.ok(first.firstSeenAt, '必须有 firstSeenAt');
     assert.equal(first.siteId, 'dean');
@@ -133,14 +132,12 @@ test('sync：新条目入库，带 firstSeenAt 且默认未读', async () => {
   }
 });
 
-test('★ sync 二次同步：不重复插入、firstSeenAt 不变、已有的已读状态不被覆盖', async () => {
+test('★ sync 二次同步：不重复插入、firstSeenAt 不变', async () => {
   const ctx = await startApp();
   try {
     const fetchImpl = fakeSiteFetch([ITEM_A, ITEM_B]);
     await ctx.notifications.sync({ siteIds: ['dean'], fetchImpl });
     const before = ctx.notifications.list({}).items.find((item) => item.title.includes('转专业'));
-
-    await ctx.notifications.markRead({ ids: [before.id] });
 
     const again = await ctx.notifications.sync({ siteIds: ['dean'], fetchImpl });
     assert.equal(again.inserted, 0, '同一批内容不该再插入');
@@ -149,7 +146,6 @@ test('★ sync 二次同步：不重复插入、firstSeenAt 不变、已有的�
 
     const after = ctx.notifications.list({}).items.find((item) => item.id === before.id);
     assert.equal(after.firstSeenAt, before.firstSeenAt, '★ firstSeenAt 只能设一次');
-    assert.equal(after.read, true, '★ 已读状态不能被同步覆盖');
   } finally {
     await ctx.close();
   }
@@ -201,8 +197,6 @@ async function seedOld(notifications, { id, daysAgo, pinned = false }) {
     publishedAt: null,
     firstSeenAt: seen,
     lastSeenAt: seen,
-    read: false,
-    readAt: null,
     pinned,
     pinnedAt: pinned ? seen : null,
     source: 'column',
@@ -289,11 +283,6 @@ test('list：站点 / 关键词 / 未读 / 固定 四种筛选，且分页正确
     assert.equal(ctx.notifications.list({ q: '不存在的词' }).total, 0);
     assert.equal(ctx.notifications.list({ siteId: 'dean' }).total, 2);
     assert.equal(ctx.notifications.list({ siteId: 'gs' }).total, 0);
-    assert.equal(ctx.notifications.list({ unreadOnly: true }).total, 2);
-
-    await ctx.notifications.markRead({ ids: [all.items[0].id] });
-    assert.equal(ctx.notifications.list({ unreadOnly: true }).total, 1);
-    assert.equal(ctx.notifications.stats().unread, 1);
 
     const page = ctx.notifications.list({ limit: 1, offset: 1 });
     assert.equal(page.total, 2);
@@ -304,17 +293,6 @@ test('list：站点 / 关键词 / 未读 / 固定 四种筛选，且分页正确
   }
 });
 
-test('markRead：all 可以按站点限定', async () => {
-  const ctx = await startApp();
-  try {
-    await ctx.notifications.sync({ siteIds: ['dean'], fetchImpl: fakeSiteFetch([ITEM_A, ITEM_B]) });
-    const result = await ctx.notifications.markRead({ all: true, siteId: 'dean' });
-    assert.equal(result.updated, 2);
-    assert.equal(ctx.notifications.stats().unread, 0);
-  } finally {
-    await ctx.close();
-  }
-});
 
 test('stats：按站点分桶，并给出未读与固定计数', async () => {
   const ctx = await startApp();
@@ -322,7 +300,6 @@ test('stats：按站点分桶，并给出未读与固定计数', async () => {
     await ctx.notifications.sync({ siteIds: ['dean'], fetchImpl: fakeSiteFetch([ITEM_A, ITEM_B]) });
     const stats = ctx.notifications.stats();
     assert.equal(stats.total, 2);
-    assert.equal(stats.unread, 2);
     assert.equal(stats.bySite.length, 1);
     assert.equal(stats.bySite[0].siteId, 'dean');
     assert.equal(stats.bySite[0].total, 2);

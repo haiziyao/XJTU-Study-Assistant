@@ -50,18 +50,7 @@ export const NOTIFICATION_TOOLS = [
     params: { siteIds: 'string[]?', limitPerSite: 'number?', dryRun: 'boolean?' },
     returns: { inserted: 'number', refreshed: 'number', pruned: 'number', perSite: 'SiteReport[]', total: 'number' },
   },
-  {
-    name: 'notification_read',
-    description:
-      '把通知标记为已读。只改本地状态、不联网、不删数据。可以给一组 id，也可以 all:true 全标（可按 siteId 限定范围）。',
-    method: 'POST',
-    path: '/notifications/read',
-    requiresAuth: false,
-    mutates: true,
-    implemented: true,
-    params: { ids: 'string[]?', all: 'boolean?', siteId: 'string?' },
-    returns: { updated: 'number', ids: 'string[]' },
-  },
+
   {
     name: 'notification_pin',
     description:

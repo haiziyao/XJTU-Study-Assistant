@@ -6,11 +6,19 @@
  *   · 「同步」是**显式动作**，会联网、会写库，并且会按保留期清理超期条目；
  *   · 每行可以**固定**——固定的条目不会被保留期清理。
  *
- * 三件在界面上必须说清、否则用户会误会的事：
- *   1. **发布日期 ≠ 我发现它的时间**。校方的 `publishedAt` 经常空或只到月份，
- *      而"新"是按 `firstSeenAt` 算的。所以两个时间都显示，并且标出各自的含义。
- *   2. **保留期会真的删数据**。面板上要写明当前保留多少天、同步时清了几条。
- *   3. **某个站点抓失败 ≠ 那个站没有通知**。同步结果里逐站显示，失败的原样亮出来。
+ * 两个曾经踩过的坑，写在这里免得再犯：
+ *
+ * 1. **不要把布局类加在 `.view-content` 上。**
+ *    外壳的 `.panel-body` 是 `overflow:hidden` 的 flex 容器，**真正滚动的是 `.view-content`**
+ *    （`flex:1; min-height:0; overflow:auto`）。把 `.notif-view` 和它塞进同一个元素，
+ *    两套 `display:flex` 打架，结果就是"内容一长就滚不动"。所以这里是两层：
+ *    外层 `.view-content` 只负责滚动，内层 `.notif-view` 只负责布局。
+ *
+ * 2. **不要用 `<a target="_blank">` 打开原文。**
+ *    Electron 的主进程装了 `setWindowOpenHandler → shell.openExternal`，把 URL 交给系统；
+ *    而 Windows 会比对两边的权限等级，于是弹出「Edge 未响应，因为现有实例正在以提升的权限运行」，
+ *    用户点"是"浏览器就被重启。所以正文由**后端**抓回来（`GET /notifications/:id/content`），
+ *    在面板里读；链接只作为"复制/备用"展示。
  */
 
 (() => {
@@ -22,15 +30,17 @@
     stats: null,
     sources: [],
     settings: null,
-    /** 筛选：站点 / 只看未读 / 只看固定。改这些**只重画面板**，不重新请求。 */
-    filters: { siteId: '', unreadOnly: false, pinned: false },
+    /** 筛选：站点 / 只看固定。改这些**只重画面板**，不重新请求。 */
+    filters: { siteId: '', pinned: false },
     loading: false,
     syncing: false,
     error: null,
     /** 上一次同步的逐站结果（含失败原因），同步后显示。 */
     lastSync: null,
-    /** 正在忙碌的条目 id（标记已读 / 固定时禁用按钮，避免连点）。 */
+    /** 正在忙碌的条目 id（固定时禁用按钮，避免连点）。 */
     busy: new Set(),
+    /** 正在阅读的正文：`{ id, title, url, text, busy, error }`。 */
+    reader: null,
   };
 
   function mk(tag, className, text) {
@@ -47,14 +57,12 @@
     const match = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/);
     if (match) {
       const [, y, m, d, hh, mm] = match;
-      // 只有年月（校方常见）时如实说"某月"，不补日子
-      if (!d) return `${y}-${m}`;
       return hh ? `${y}-${m}-${d} ${hh}:${mm}` : `${y}-${m}-${d}`;
     }
     return text;
   }
 
-  /** 校方的发布日期可能只到月（`2026-09`），此时不能当完整日期展示。 */
+  /** 校方的发布日期可能只到月（`2026-09`），此时要说明，而不是当成完整日期。 */
   function fmtPublished(value) {
     const text = String(value ?? '').trim();
     if (!text) return '';
@@ -70,7 +78,7 @@
     paint();
     try {
       const [list, status, sources] = await Promise.all([
-        PC.api('/notifications?limit=50'),
+        PC.api('/notifications?limit=100'),
         PC.api('/notifications/status'),
         PC.api('/notifications/sources'),
       ]);
@@ -95,8 +103,7 @@
       const result = await PC.api('/notifications/sync', { method: 'POST', body: {} });
       ui.lastSync = result;
       PC.toast?.(
-        `同步完成：新增 ${result.inserted} 条`
-          + (result.pruned ? `，按保留期清理 ${result.pruned} 条` : ''),
+        `同步完成：新增 ${result.inserted} 条` + (result.pruned ? `，按保留期清理 ${result.pruned} 条` : ''),
       );
       await load();
     } catch (error) {
@@ -107,42 +114,47 @@
     }
   }
 
-  async function patchItem(id, action) {
-    if (ui.busy.has(id)) return;
-    ui.busy.add(id);
+  async function togglePin(item) {
+    if (ui.busy.has(item.id)) return;
+    ui.busy.add(item.id);
     paint();
     try {
-      if (action === 'read') await PC.api('/notifications/read', { method: 'POST', body: { ids: [id] } });
-      if (action === 'pin') await PC.api('/notifications/pin', { method: 'POST', body: { ids: [id], pinned: true } });
-      if (action === 'unpin') {
-        await PC.api('/notifications/pin', { method: 'POST', body: { ids: [id], pinned: false } });
-      }
+      await PC.api('/notifications/pin', {
+        method: 'POST',
+        body: { ids: [item.id], pinned: !item.pinned },
+      });
       await load();
     } catch (error) {
       ui.error = error?.message ?? String(error);
     } finally {
-      ui.busy.delete(id);
+      ui.busy.delete(item.id);
       paint();
     }
   }
 
-  async function markAllRead() {
-    try {
-      await PC.api('/notifications/read', { method: 'POST', body: { all: true } });
-      await load();
-    } catch (error) {
-      ui.error = error?.message ?? String(error);
+  /** 在面板里读正文（走后端抓取，不开浏览器 —— 见文件头第 2 条）。 */
+  async function readBody(item) {
+    if (ui.reader?.id === item.id && !ui.reader.busy) {
+      ui.reader = null;
       paint();
+      return;
     }
+    ui.reader = { id: item.id, title: item.title, url: item.url, text: '', busy: true, error: null };
+    paint();
+    try {
+      const data = await PC.api(`/notifications/${encodeURIComponent(item.id)}/content`);
+      ui.reader = { ...ui.reader, text: data.text ?? '', title: data.title || item.title, busy: false };
+    } catch (error) {
+      ui.reader = { ...ui.reader, busy: false, error: error?.message ?? String(error) };
+    }
+    paint();
   }
 
   /* ---------------------------------------------------------------- 渲染 */
 
-  /** 按当前筛选条件过滤（纯本地，不发请求）。 */
   function visible() {
     return ui.items.filter((item) => {
       if (ui.filters.siteId && item.siteId !== ui.filters.siteId) return false;
-      if (ui.filters.unreadOnly && item.read) return false;
       if (ui.filters.pinned && !item.pinned) return false;
       return true;
     });
@@ -158,7 +170,6 @@
     all.value = '';
     select.appendChild(all);
     for (const source of ui.sources) {
-      // 只列启用的 + 已有关注数据的，不把 19 个站全铺出来
       if (!source.enabled && !ui.items.some((item) => item.siteId === source.id)) continue;
       const option = mk('option', null, source.label);
       option.value = source.id;
@@ -170,16 +181,6 @@
       paint();
     });
     siteWrap.appendChild(select);
-
-    const unread = mk('label', 'check-field');
-    const unreadBox = mk('input', 'notif-unread');
-    unreadBox.type = 'checkbox';
-    unreadBox.checked = ui.filters.unreadOnly;
-    unreadBox.addEventListener('change', () => {
-      ui.filters.unreadOnly = unreadBox.checked;
-      paint();
-    });
-    unread.append(unreadBox, mk('span', null, '只看未读'));
 
     const pinned = mk('label', 'check-field');
     const pinnedBox = mk('input', 'notif-pinned');
@@ -197,12 +198,7 @@
     syncBtn.title = '去校方站点抓一遍最新通知；会按保留期清理超期条目（固定的不删）';
     syncBtn.addEventListener('click', () => void sync());
 
-    const readAll = mk('button', 'ghost-btn notif-read-all', '全部已读');
-    readAll.type = 'button';
-    readAll.disabled = !(ui.stats?.unread > 0);
-    readAll.addEventListener('click', () => void markAllRead());
-
-    bar.append(siteWrap, unread, pinned, mk('span', 'spacer'), readAll, syncBtn);
+    bar.append(siteWrap, pinned, mk('span', 'spacer'), syncBtn);
     return bar;
   }
 
@@ -212,34 +208,61 @@
     const row = mk('div', 'notif-summary');
     const parts = [
       `共 ${stats.total} 条`,
-      `未读 ${stats.unread}`,
       `固定 ${stats.pinned}`,
       stats.lastSyncAt ? `上次同步 ${fmt(stats.lastSyncAt)}` : '还没同步过',
-      stats.retentionDays > 0
-        ? `保留最近 ${stats.retentionDays} 天（固定的不限）`
-        : '保留期：永久',
+      stats.retentionDays > 0 ? `保留最近 ${stats.retentionDays} 天（固定的不限）` : '保留期：永久',
     ];
     for (const text of parts) row.appendChild(mk('span', 'notif-chip', text));
     return row;
   }
 
+  /** 正文面板：在应用里读，不开浏览器。 */
+  function readerPanel() {
+    const reader = ui.reader;
+    if (!reader) return null;
+    const box = mk('div', 'notif-reader');
+    const head = mk('div', 'notif-reader-head');
+    head.append(mk('span', 'notif-reader-title', reader.title || '正文'));
+    head.append(mk('span', 'spacer'));
+    const close = mk('button', 'ghost-btn', '关闭');
+    close.type = 'button';
+    close.addEventListener('click', () => {
+      ui.reader = null;
+      paint();
+    });
+    head.appendChild(close);
+    box.appendChild(head);
+
+    if (reader.busy) box.appendChild(mk('div', 'notif-hint', '正在抓取正文…'));
+    else if (reader.error) box.appendChild(mk('div', 'error-banner', `读不到正文：${reader.error}`));
+    else box.appendChild(mk('div', 'notif-reader-text', reader.text || '（这一篇没有可提取的正文）'));
+
+    // 原链接作为备用展示（只展示，不自动打开）
+    const foot = mk('div', 'notif-reader-foot');
+    foot.appendChild(mk('span', 'notif-hint', '原链接（可复制）：'));
+    const code = mk('span', 'notif-link', reader.url);
+    foot.appendChild(code);
+    box.appendChild(foot);
+    return box;
+  }
+
   function row(item) {
     const line = mk('div', 'notif-row');
-    if (!item.read) line.classList.add('is-unread');
     if (item.pinned) line.classList.add('is-pinned');
 
-    // 标题：点开原文。用 <a target=_blank rel=noopener>，不在页面里内嵌外来页面。
     const main = mk('div', 'notif-main');
     const link = mk('a', 'notif-title', item.title || '(无标题)');
     link.href = item.url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
+    // 点了在面板里读，而不是把地址交给系统（见文件头第 2 条）
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      void readBody(item);
+    });
     main.appendChild(link);
 
     const meta = mk('div', 'notif-meta');
     meta.appendChild(mk('span', 'notif-site', item.siteLabel ?? item.siteId ?? ''));
     if (item.publishedAt) {
-      // ★ 两个时间含义不同，标清楚：发布日期是校方给的，发现时间是本地第一次看到
       meta.appendChild(mk('span', 'notif-date', `发布 ${fmtPublished(item.publishedAt)}`));
     } else {
       meta.appendChild(mk('span', 'notif-date notif-date-missing', '校方未给发布日期'));
@@ -249,20 +272,12 @@
     main.appendChild(meta);
 
     const actions = mk('div', 'notif-actions');
-    const togglePin = mk('button', 'ghost-btn notif-pin', item.pinned ? '取消固定' : '📌 固定');
-    togglePin.type = 'button';
-    togglePin.disabled = ui.busy.has(item.id);
-    togglePin.title = item.pinned ? '取消固定后，它会重新纳入保留期清理' : '固定后不会因保留期被清理';
-    togglePin.addEventListener('click', () => void patchItem(item.id, item.pinned ? 'unpin' : 'pin'));
-    actions.appendChild(togglePin);
-
-    if (!item.read) {
-      const readBtn = mk('button', 'ghost-btn notif-mark-read', '标记已读');
-      readBtn.type = 'button';
-      readBtn.disabled = ui.busy.has(item.id);
-      readBtn.addEventListener('click', () => void patchItem(item.id, 'read'));
-      actions.appendChild(readBtn);
-    }
+    const pinBtn = mk('button', 'ghost-btn notif-pin', item.pinned ? '取消固定' : '📌 固定');
+    pinBtn.type = 'button';
+    pinBtn.disabled = ui.busy.has(item.id);
+    pinBtn.title = item.pinned ? '取消固定后，它会重新纳入保留期清理' : '固定后不会因保留期被清理';
+    pinBtn.addEventListener('click', () => void togglePin(item));
+    actions.appendChild(pinBtn);
 
     line.append(main, actions);
     return line;
@@ -292,7 +307,7 @@
       box.appendChild(mk('div', 'notif-hint', '点右上角「同步最新」去校方站点抓一次（会联网）。'));
     } else {
       box.appendChild(mk('div', null, '当前筛选条件下没有通知。'));
-      box.appendChild(mk('div', 'notif-hint', '试试取消「只看未读 / 只看固定」，或换一个站点。'));
+      box.appendChild(mk('div', 'notif-hint', '试试取消「只看固定」，或换一个站点。'));
     }
     return box;
   }
@@ -302,7 +317,11 @@
     if (!mount) return;
     mount.replaceChildren();
 
-    const wrap = mk('div', 'view-content notif-view');
+    // 外层只管滚动（`.view-content` 自带 flex:1 / min-height:0 / overflow:auto），
+    // 内层只管布局 —— 两者绝不能挤在同一个元素上，见文件头第 1 条。
+    const content = mk('div', 'view-content');
+    const wrap = mk('div', 'notif-view');
+
     wrap.appendChild(toolbar());
 
     const head = mk('div', 'notif-head');
@@ -318,6 +337,9 @@
     if (ui.error) wrap.appendChild(mk('div', 'error-banner', `出错了：${ui.error}`));
     if (ui.syncing) wrap.appendChild(mk('div', 'notif-hint', '正在抓取校方站点…（首次会慢几秒）'));
 
+    const panel = readerPanel();
+    if (panel) wrap.appendChild(panel);
+
     const list = mk('div', 'notif-list');
     const rows = visible();
     if (!rows.length) list.appendChild(emptyState());
@@ -327,7 +349,8 @@
     const report = syncReport();
     if (report) wrap.appendChild(report);
 
-    mount.appendChild(wrap);
+    content.appendChild(wrap);
+    mount.appendChild(content);
   }
 
   /* ---------------------------------------------------------------- 注册 */
@@ -352,5 +375,5 @@
   });
 
   // 测试缝：只暴露既有函数，不加任何"测试专用逻辑"
-  window.__PC_NOTIF_TEST__ = { ui, paint, visible, load, sync, fmt, fmtPublished };
+  window.__PC_NOTIF_TEST__ = { ui, paint, visible, load, sync, readBody, fmt, fmtPublished };
 })();

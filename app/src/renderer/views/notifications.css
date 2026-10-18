@@ -1,8 +1,10 @@
 /*
  * 通知视图样式。
  *
- * 原则：**未读要一眼看出来，已读要退到背景里**，固定要有明确标记但不抢标题。
- * 两个时间（发布 / 发现）必须能区分，所以给它们不同的弱化层级。
+ * 原则：固定要有明确标记但不抢标题；两个时间（发布 / 发现）必须能区分。
+ *
+ * ⚠️ 滚动归属：真正滚动的是外层 `.view-content`（外壳给 `flex:1; min-height:0; overflow:auto`）。
+ * `.notif-view` 绝不能和它出现在同一个元素上 —— 两套 display:flex 打架，内容一长就滚不动。
  */
 
 .notif-view {
@@ -67,15 +69,6 @@
   border-bottom: none;
 }
 
-/* 未读：左侧一道亮条 + 标题加粗。比"用背景色整行染色"克制，列表看着不花 */
-.notif-row.is-unread {
-  border-left: 3px solid var(--blue);
-  padding-left: 9px;
-}
-
-.notif-row.is-unread .notif-title {
-  font-weight: 600;
-}
 
 .notif-main {
   flex: 1;
@@ -98,10 +91,6 @@
   text-decoration: underline;
 }
 
-/* 已读的标题退一档，让未读自然跳出来 */
-.notif-row:not(.is-unread) .notif-title {
-  color: var(--fg-2);
-}
 
 .notif-meta {
   display: flex;
@@ -203,4 +192,54 @@
   .notif-actions {
     align-self: flex-end;
   }
+}
+
+/* 内嵌正文面板：在应用里读，不把地址交给系统浏览器 */
+.notif-reader {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.notif-reader-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.notif-reader-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+/* 正文可能很长：给它自己的滚动区，避免把整个页面拉成一条 */
+.notif-reader-text {
+  max-height: 46vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--fg-2);
+}
+
+.notif-reader-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
+.notif-link {
+  font-size: 11px;
+  color: var(--fg-3);
+  word-break: break-all;
+  user-select: all;
 }

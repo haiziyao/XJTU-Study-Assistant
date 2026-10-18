@@ -28,7 +28,7 @@
  */
 
 import { HttpError } from '../../core/http/router.js';
-import { CAMPUS_SITE_SEARCH, readSiteNews } from '../ai/web-search.js';
+import { CAMPUS_SITE_SEARCH, readPages, readSiteNews } from '../ai/web-search.js';
 
 /** 没有配置时默认关注的站点：教务 / 研究生院 / 学校门户 / 新闻网。 */
 export const DEFAULT_ENABLED_SITES = Object.freeze(['dean', 'gs', 'www', 'news']);
@@ -326,8 +326,6 @@ export class NotificationService {
             publishedAt: entry.publishedAt ?? null,
             firstSeenAt: now,
             lastSeenAt: now,
-            read: false,
-            readAt: null,
             pinned: false,
             pinnedAt: null,
             source: 'column',
@@ -400,7 +398,7 @@ export class NotificationService {
    * @param {string} [filters.since]    只留 `firstSeenAt >= since`
    * @param {string} [filters.until]    只留 `firstSeenAt <= until`
    */
-  list({ siteId, q, unreadOnly = false, pinned = false, since, until, limit = 20, offset = 0 } = {}) {
+  list({ siteId, q, pinned = false, since, until, limit = 20, offset = 0 } = {}) {
     const keyword = String(q ?? '').trim().toLowerCase();
     const from = toIsoOrNull(since);
     const to = toIsoOrNull(until);
@@ -408,7 +406,6 @@ export class NotificationService {
 
     let rows = this.store.notifications.all().filter((row) => {
       if (site && row.siteId !== site) return false;
-      if (unreadOnly && row.read) return false;
       if (pinned && !row.pinned) return false;
       const seen = row.firstSeenAt ?? '';
       if (from && seen < from) return false;
@@ -438,23 +435,20 @@ export class NotificationService {
       limit: size,
       offset: start,
       items: rows.slice(start, start + size),
-      filters: { siteId: site || null, q: keyword || null, unreadOnly, pinned, since: from, until: to },
+      filters: { siteId: site || null, q: keyword || null, pinned, since: from, until: to },
     };
   }
 
   stats() {
     const rows = this.store.notifications.all();
     const bySite = new Map();
-    let unread = 0;
     let pinned = 0;
     let newestAt = null;
     for (const row of rows) {
-      if (!row.read) unread += 1;
       if (row.pinned) pinned += 1;
       const key = row.siteId ?? 'unknown';
-      const bucket = bySite.get(key) ?? { siteId: key, siteLabel: row.siteLabel ?? key, total: 0, unread: 0 };
+      const bucket = bySite.get(key) ?? { siteId: key, siteLabel: row.siteLabel ?? key, total: 0 };
       bucket.total += 1;
-      if (!row.read) bucket.unread += 1;
       bySite.set(key, bucket);
       const seen = row.firstSeenAt ?? '';
       if (seen && (!newestAt || seen > newestAt)) newestAt = seen;
@@ -462,7 +456,6 @@ export class NotificationService {
     const settings = this.settings();
     return {
       total: rows.length,
-      unread,
       pinned,
       bySite: [...bySite.values()].sort((a, b) => b.total - a.total),
       newestAt,
@@ -473,26 +466,34 @@ export class NotificationService {
 
   /* ------------------------------------------------------------ 写操作 */
 
-  async markRead({ ids, all = false, siteId } = {}) {
-    const now = new Date().toISOString();
-    const updated = [];
-    if (all) {
-      for (const row of this.store.notifications.all()) {
-        if (siteId && row.siteId !== siteId) continue;
-        if (row.read) continue;
-        await this.store.notifications.update(row.id, { ...row, read: true, readAt: now });
-        updated.push(row.id);
-      }
-    } else {
-      for (const id of Array.isArray(ids) ? ids : []) {
-        const row = this.store.notifications.get(String(id));
-        if (!row) continue;
-        await this.store.notifications.update(row.id, { ...row, read: true, readAt: now });
-        updated.push(row.id);
-      }
+  /**
+   * 抓一条通知的**正文**，给"在应用里读"用。
+   *
+   * 为什么不用"打开浏览器"：桌面端把 URL 交给系统会撞上 Windows 的权限提升比对
+   * （截图里那个「Edge 未响应，因为现有实例正在以提升的权限运行」），用户点"是"就把
+   * 浏览器重启掉。所以正文由**后端**抓回来、清洗成文本，在面板里读 ——
+   * 顺带还能在离线/校内网环境下同一套逻辑。
+   *
+   * 复用 `readPages()`（联网检索读正文用的是同一套提取与清洗），
+   * 所以正文质量与 AI 看到的一致，不会出现"我看得到、AI 看不到"。
+   */
+  async readBody(id) {
+    const row = this.store.notifications.get(String(id ?? ''));
+    if (!row) throw HttpError.notFound(`没有这条通知：${id}`);
+    const pages = await readPages([{ title: row.title, url: row.url }], { limit: 1 });
+    const page = pages?.[0] ?? null;
+    if (!page || page.error) {
+      throw HttpError.upstream(
+        `抓不到这一篇的正文${page?.error ? `：${page.error}` : ''}。可以直接复制链接用浏览器打开：${row.url}`,
+      );
     }
-    this.broadcast({ type: 'data_changed', payload: { target: 'notification', action: 'read' } });
-    return { updated: updated.length, ids: updated };
+    return {
+      id: row.id,
+      title: page.title || row.title,
+      url: row.url,
+      text: page.text ?? '',
+      fetchedAt: new Date().toISOString(),
+    };
   }
 
   /** 固定 / 取消固定。固定的条目不会被保留期清理。 */
