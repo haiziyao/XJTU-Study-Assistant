@@ -16,14 +16,20 @@
  */
 
 import { ACTIVITY_TYPE_LABEL, DEFAULT_SYNC_TYPES } from './config.js';
+import { activityExternalId, homeworkTodoPayload, resolveCourseName } from './todos-bridge.js';
 import { daysBetween, parseLmsTime } from './time.js';
 
 const SYNC_TAG = '思源学堂';
 const MAX_TITLE = 120;
 
-/** 生成外部唯一键。 */
+/**
+ * 生成外部唯一键。
+ *
+ * 实现放在 `todos-bridge.js`（那里才是"作业待办"的拥有者），这里转出同名函数保持旧调用方可用：
+ * 同步计划与自动待办桥接必须用**同一个**键，否则同一份作业会被建出两条待办。
+ */
 export function externalIdFor(activityId) {
-  return `lms:activity:${activityId}`;
+  return activityExternalId(activityId);
 }
 
 export const COURSE_EVENT_EXTERNAL_ID = 'lms:course-range';
@@ -150,6 +156,27 @@ export function activityToItem(activity, { course, today, options }) {
     if (base.submitted && options.skipSubmitted && !existing) {
       return { ...base, kind, action: 'skip', reason: '已提交，未导入' };
     }
+    if (!timed) {
+      /*
+       * 待办：标题 / 描述 / 标签 / externalId 全部走 `todos-bridge.js` 的**同一份构造器**。
+       *
+       * 为什么必须共用：自动待办桥接会在活动同步后独立 upsert 同一批待办（同一个 externalId）。
+       * 两边字段格式若不一致，每次同步就会互相把标题改来改去（写库、广播、界面闪烁），
+       * 用户看到的标题还会取决于"最后一次是谁写的"。共用构造器让两条路径产出完全相同的字段，
+       * 谁先谁后都不产生差异。
+       */
+      const todoBase = homeworkTodoPayload(activity, { courseName: resolveCourseName(activity, null) ?? course?.name ?? null });
+      if (!todoBase) return { ...base, kind, action: 'skip', reason: '作业没有截止日期，无法建待办' };
+      // 待办契约：只有 deadline / priority / completed，没有 category、地点、提醒
+      const todoPayload = {
+        ...todoBase,
+        priority: priorityForDeadline(today, deadline.date),
+      };
+      if (base.submitted && options.markSubmittedDone) todoPayload.completed = true;
+      else if (existing?.completed) todoPayload.completed = existing.completed; // 保留学生自己勾过的状态
+      return finalizeItem({ ...base, kind, isTimed: false }, todoPayload, existing);
+    }
+
     const refinedHomework = refineActivityTitle(activity.title, course?.name ?? null);
     const common = {
       title: clip(composeTitle(refinedHomework.title, course?.name ?? null)),
@@ -158,18 +185,6 @@ export function activityToItem(activity, { course, today, options }) {
       source: 'import',
       externalId: base.key,
     };
-
-    if (!timed) {
-      // 待办契约：只有 deadline / priority / completed，没有 category、地点、提醒
-      const todoPayload = {
-        ...common,
-        deadline: deadline.date,
-        priority: priorityForDeadline(today, deadline.date),
-      };
-      if (base.submitted && options.markSubmittedDone) todoPayload.completed = true;
-      else if (existing?.completed) todoPayload.completed = existing.completed; // 保留学生自己勾过的状态
-      return finalizeItem({ ...base, kind, isTimed: false }, todoPayload, existing);
-    }
 
     const payload = {
       ...common,

@@ -282,9 +282,11 @@ test('思源学堂：同步预览的映射规则', async () => {
     assert.equal(first.payload.reminders, undefined, '待办没有提醒');
     assert.equal(first.payload.completed, undefined, '未提交的作业不该被标成完成');
     assert.equal(first.payload.externalId, 'lms:activity:5001');
-    assert.equal(first.payload.title, '[数据结构] 第一次作业：链表');
-    assert.deepEqual(first.payload.tags.slice(0, 2), ['思源学堂', '作业']);
-    assert.match(first.payload.description, /课程：数据结构/);
+    // 作业待办的字段由 todos-bridge.js 统一构造（自动待办桥接用的是同一份），
+    // 标题是「课程名：作业标题」，标签只有「学堂」，描述标明来源。
+    assert.equal(first.payload.title, '数据结构：第一次作业：链表');
+    assert.deepEqual(first.payload.tags, ['学堂']);
+    assert.match(first.payload.description, /来自思源学堂/);
 
     // 直播 -> 有起止时刻，仍然是时段日程
     const live = byKey.get('lms:activity:5004');
@@ -366,13 +368,29 @@ test('思源学堂：应用同步是幂等的，可重复执行', async () => {
     assert.ok(createdSchedules.every((item) => item.source === 'import'));
     assert.equal(createdSchedules[0].reminders.length, 1);
 
-    // 待办：两条作业，截止日就是作业的截止日
+    /*
+     * 待办：**四条作业**，截止日就是作业的截止日。
+     *
+     * 前两条（5001/5006）是日历同步按计划建的；后两条（5002 已提交 / 5003 已过期）
+     * 是应用完计划后自动跑的「作业 → 待办」桥接补的 —— 它不按「是否已提交 / 是否过期」筛，
+     * 因为待办页要能回答"哪天要交什么"，已提交的也应当留一条已完成记录给用户回看。
+     */
     const todos = await call('GET', '/todos');
     const createdTodos = todos.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:'));
-    assert.equal(createdTodos.length, 2);
-    assert.deepEqual(createdTodos.map((item) => item.externalId).sort(), ['lms:activity:5001', 'lms:activity:5006']);
+    assert.equal(createdTodos.length, 4);
+    assert.deepEqual(createdTodos.map((item) => item.externalId).sort(), [
+      'lms:activity:5001',
+      'lms:activity:5002',
+      'lms:activity:5003',
+      'lms:activity:5006',
+    ]);
     assert.equal(createdTodos.find((item) => item.externalId === 'lms:activity:5001').deadline, HOMEWORK_DEADLINE_DATE);
-    assert.ok(createdTodos.every((item) => item.source === 'import' && item.completed === false));
+    assert.ok(createdTodos.every((item) => item.source === 'import'));
+    // 已提交的作业（5002/5003）自动标完成；未提交的保持在待办里
+    assert.deepEqual(
+      createdTodos.filter((item) => item.completed).map((item) => item.externalId).sort(),
+      ['lms:activity:5002', 'lms:activity:5003'],
+    );
 
     // 再同步一次：全部跳过，不产生重复记录
     const second = await call('POST', '/lms/sync/apply', { today: TODAY });
@@ -382,7 +400,7 @@ test('思源学堂：应用同步是幂等的，可重复执行', async () => {
     const afterSchedules = await call('GET', '/schedules');
     assert.equal(afterSchedules.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 1);
     const afterTodos = await call('GET', '/todos');
-    assert.equal(afterTodos.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 2);
+    assert.equal(afterTodos.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 4);
     // 幂等：重跑不会把作业重复建进待办
     assert.equal(second.body.created, 0);
     assert.equal(second.body.updated, 0);
@@ -418,7 +436,7 @@ test('思源学堂：作业改期 -> 更新；作业消失 -> stale', async () =
     const todos = await call('GET', '/todos');
     const updated = todos.body.items.find((item) => item.externalId === 'lms:activity:5001');
     assert.equal(updated.deadline, activityDate(HOMEWORK_POSTPONE_DAYS));
-    assert.equal(updated.title, '[数据结构] 第一次作业：链表（改）');
+    assert.equal(updated.title, '数据结构：第一次作业：链表（改）');
 
     // 学校删掉了直播活动 -> 已同步的记录变成 stale，可选清理
     mock.mutate((dataset) => {
@@ -435,7 +453,7 @@ test('思源学堂：作业改期 -> 更新；作业消失 -> stale', async () =
     const finalSchedules = await call('GET', '/schedules');
     assert.equal(finalSchedules.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 0);
     const finalTodos = await call('GET', '/todos');
-    assert.equal(finalTodos.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 2);
+    assert.equal(finalTodos.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:')).length, 4);
   } finally {
     await app.close();
     await mock.close();
@@ -454,8 +472,15 @@ test('思源学堂：只同步选中的 keys', async () => {
     assert.equal((await call('GET', '/schedules')).body.items.length, 0);
     const todos = await call('GET', '/todos');
     const items = todos.body.items.filter((item) => String(item.externalId ?? '').startsWith('lms:'));
-    assert.equal(items.length, 1);
-    assert.equal(items[0].externalId, 'lms:activity:5001');
+    // 勾选只影响**日历同步**；应用完同步后仍会跑一次作业待办桥接，
+    // 所以四条带截止日的作业都会出现在待办里（这正是"待办页不登录也能看哪天交什么"）。
+    assert.equal(items.length, 4);
+    assert.ok(items.some((item) => item.externalId === 'lms:activity:5001'));
+    // 已提交的两条被标完成（桥接从作业详情里读到的提交状态）
+    assert.deepEqual(items.filter((item) => item.completed).map((item) => item.externalId).sort(), [
+      'lms:activity:5002',
+      'lms:activity:5003',
+    ]);
   } finally {
     await app.close();
     await mock.close();

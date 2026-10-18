@@ -389,3 +389,32 @@ test('直播没有对应录像时不给按钮，只说明去处', async () => {
     await ctx.app.close();
   }
 });
+
+test('学堂首页：作业自动变成待办开关默认开启，改动会保存到 /lms/todos/config', async () => {
+  const ctx = await bootView();
+  try {
+    // 回到首页，塞一份"已登录 + 待办开关默认开"的状态
+    ctx.seam.ui.status = {
+      status: 'ready',
+      autoSync: { enabled: false, intervalHours: 6 },
+      todos: { enabled: true },
+    };
+    ctx.seam.ui.page = 'home';
+    ctx.seam.paint();
+
+    const row = ctx.dom.document.querySelector('.lms-todos-row');
+    assert.ok(row, '★ 首页应有「作业自动变成待办」开关（待办页不登录也能看到截止日靠它）');
+    const toggle = row.querySelector('.lms-autosync-toggle');
+    assert.ok(toggle, '开关应是一个 checkbox');
+    assert.equal(toggle.checked, true, '默认开启');
+
+    // 关掉 → 要走接口保存（不是只改前端状态）
+    toggle.checked = false;
+    toggle.dispatch('change');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(ctx.calls.includes('/lms/todos/config'), '★ 改开关必须调接口保存');
+    assert.equal(ctx.seam.ui.todosBusy, false, '保存结束后忙碌态要复位');
+  } finally {
+    await ctx.app.close();
+  }
+});
