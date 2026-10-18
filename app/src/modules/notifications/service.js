@@ -1,0 +1,590 @@
+/**
+ * 通知服务：把校内各站点的通知聚合到本地，并负责「保留期清理」与「固定」。
+ *
+ * 为什么要本地聚合，而不是每次现搜
+ * --------------------------------
+ * 现搜（campus 档的栏目直读）只能回答"这一刻页面上有什么"，回答不了：
+ *   · 这条我是不是已经看过了？
+ *   · 这两条里哪条是**新的**（校方的发布日期经常缺、或者只到月份）？
+ *   · 我上周看到的、现在被挤到第 3 页的那条还在吗？
+ * 所以落库，并用 **`firstSeenAt`（我们第一次见到它的时间）** 作为"新"的唯一判据 ——
+ * 那是本地可靠的事实，而 `publishedAt` 不是。
+ *
+ * 三条设计红线
+ * ------------
+ * 1. **只增不删，除了保留期清理。** 没有"这条消失了所以删掉"的逻辑：
+ *    通知被校方撤下是常态，但用户可能已经固定了它、或者正要照着它办事。
+ * 2. **清理按 `firstSeenAt`，且固定的条目永不清理。** 按 `publishedAt` 清理会误删
+ *    "刚发现的老通知"（校方补发了去年的通知，你昨天才看到，第二天就被清掉）。
+ * 3. **失败要如实报。** `readSiteNews` 会给逐页的失败原因，原样透出到 `perSite`，
+ *    页面和模型都能说清"教务处抓到了、数学学院那页 403 了"。
+ *
+ * 与 ai 模块的关系
+ * ----------------
+ * 这里 `import { readSiteNews, CAMPUS_SITE_SEARCH } from '../ai/web-search.js'`，
+ * 是**纯函数/常量导入**（esm 静态导入，与装配顺序无关），不是跨模块读写数据：
+ * 本模块只写自己的两个集合。复用而不是重写，是因为那张站点表里的栏目路径是
+ * **逐站实测校准过的**（每条都带 `evidence`），另起一份爬虫只会更难维护。
+ */
+
+import { HttpError } from '../../core/http/router.js';
+import { CAMPUS_SITE_SEARCH, readSiteNews } from '../ai/web-search.js';
+
+/** 没有配置时默认关注的站点：教务 / 研究生院 / 学校门户 / 新闻网。 */
+export const DEFAULT_ENABLED_SITES = Object.freeze(['dean', 'gs', 'www', 'news']);
+
+/** 保留期可选项（天）。`0` = 永久保留，不清理。 */
+export const RETENTION_OPTIONS = Object.freeze([7, 30, 90, 180, 365, 0]);
+
+/** 默认保留 90 天。 */
+export const DEFAULT_RETENTION_DAYS = 90;
+
+/** 每个站点每次同步最多取几条（栏目页一页通常 15~20 条）。 */
+const LIMIT_PER_SITE = 20;
+
+/** 自定义站点数量上限：再多就说明该做成配置而不是界面表单了。 */
+export const MAX_CUSTOM_SOURCES = 20;
+
+const SETTINGS_ID = 'settings';
+
+/** 单次同步最多同时抓几个站（对校方站点友好一点，别并发打满）。 */
+const SYNC_CONCURRENCY = 3;
+
+/**
+ * 把 URL 规范化成去重键。
+ *
+ * 去掉 `#fragment` 与 `utm_*` / `from` 这类跟踪参数 —— 同一条通知在校内不同入口
+ * 会带上不同的跟踪串，不规范化就是重复条目。**保留**其余 query：
+ * 不少校方站点用 `?id=123` 区分文章，删了就全并成一条了。
+ */
+export function canonicalUrl(raw, base) {
+  const text = String(raw ?? '').trim();
+  if (!text) return '';
+  let url;
+  try {
+    url = new URL(text, base ?? undefined);
+  } catch {
+    return text;
+  }
+  url.hash = '';
+  for (const key of [...url.searchParams.keys()]) {
+    if (/^utm_/i.test(key) || key === 'from' || key === 'spm') url.searchParams.delete(key);
+  }
+  // 末尾斜杠归一：`/a/b/` 与 `/a/b` 是同一篇
+  const pathname = url.pathname.replace(/\/+$/, '') || '/';
+  return `${url.protocol}//${url.host}${pathname}${url.search}`;
+}
+
+/** 从 host 生成一个稳定的 id（自定义站点用）。 */
+function idFromHost(rawUrl) {
+  try {
+    const host = new URL(rawUrl).hostname.replace(/^www\./, '');
+    return host.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 48);
+  } catch {
+    return '';
+  }
+}
+
+/** 内网 / 回环 / 链路本地地址判定 —— 自定义站点必须过这一关。 */
+function isPrivateHost(hostname) {
+  const host = String(hostname ?? '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return true;
+  if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) return true;
+  if (host === '::1' || host === '0.0.0.0') return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!v4) return false;
+  const [a, b] = [Number(v4[1]), Number(v4[2])];
+  if (a === 127 || a === 10 || a === 0) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 169 && b === 254) return true;
+  return false;
+}
+
+/**
+ * 校验并规范化一个**自定义站点**。
+ *
+ * 只允许 http(s)，并且拒绝内网地址：这是一个用户可填 URL、服务端会去抓的入口，
+ * 不挡内网就是一个 SSRF（`http://127.0.0.1:3210/api/v1/...` 能读到自己的接口）。
+ */
+export function normalizeCustomSource(input) {
+  const label = String(input?.label ?? '').trim();
+  if (!label) throw HttpError.badRequest('站点名称不能为空', { field: 'label' });
+  if (label.length > 40) throw HttpError.badRequest('站点名称太长（最多 40 字）', { field: 'label' });
+
+  const rawUrl = String(input?.url ?? '').trim();
+  if (!rawUrl) throw HttpError.badRequest('入口页 URL 不能为空', { field: 'url' });
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw HttpError.badRequest('入口页 URL 不合法（要带 http:// 或 https://）', { field: 'url' });
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw HttpError.badRequest('只支持 http / https 地址', { field: 'url' });
+  }
+  if (isPrivateHost(url.hostname)) {
+    throw HttpError.badRequest('不能填内网或本机地址（这是安全限制）', { field: 'url' });
+  }
+
+  const id = String(input?.id ?? '').trim() || idFromHost(url.href);
+  if (!id) throw HttpError.badRequest('无法从 URL 生成站点 id，请手动指定', { field: 'id' });
+  if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(id)) {
+    throw HttpError.badRequest('站点 id 只能用小写字母、数字和连字符（最多 48 位）', { field: 'id' });
+  }
+  // 与内置站点撞 id 会让 `enabledSiteIds` 的语义变得说不清，直接拒绝
+  if (CAMPUS_SITE_SEARCH.some((site) => site.id === id)) {
+    throw HttpError.badRequest(`站点 id「${id}」与内置站点重名，请换一个`, { field: 'id' });
+  }
+
+  return { id, label, url: url.href, columns: [], custom: true, enabled: input?.enabled !== false };
+}
+
+export class NotificationService {
+  constructor({ store, broadcast = () => {}, log = () => {} }) {
+    this.store = store;
+    this.broadcast = broadcast;
+    this.log = log;
+  }
+
+  /* ------------------------------------------------------------ 设置 */
+
+  /** 读设置（永远返回一份完整的、带默认值的对象）。 */
+  settings() {
+    const row = this.store.notificationSettings.get(SETTINGS_ID) ?? {};
+    const retention = Number(row.retentionDays);
+    return {
+      retentionDays: RETENTION_OPTIONS.includes(retention) ? retention : DEFAULT_RETENTION_DAYS,
+      enabledSiteIds: Array.isArray(row.enabledSiteIds) ? row.enabledSiteIds.map(String) : [...DEFAULT_ENABLED_SITES],
+      customSources: Array.isArray(row.customSources) ? row.customSources : [],
+      useSearch: Boolean(row.useSearch),
+      lastSyncAt: row.lastSyncAt ?? null,
+    };
+  }
+
+  async #writeSettings(patch) {
+    const next = { ...this.settings(), ...patch, id: SETTINGS_ID };
+    /*
+     * ⚠️ 不能用 `update().catch(insert)`：`JsonStore.update()` 在**行不存在时返回 undefined**，
+     * 它不抛错。于是那个 catch 永远不触发，设置行从来没被建出来 —— 表现是
+     * "改了保留期/自定义站点，读回来还是默认值"，而且没有任何报错。
+     * 先看存不存在，再决定 insert 还是 update。
+     */
+    const existing = this.store.notificationSettings.get(SETTINGS_ID);
+    if (existing) await this.store.notificationSettings.update(SETTINGS_ID, next);
+    else await this.store.notificationSettings.insert(next);
+    this.broadcast({ type: 'data_changed', payload: { target: 'notification', action: 'settings' } });
+    return next;
+  }
+
+  /**
+   * 可关注的站点清单：内置（实测过）+ 用户自加。
+   *
+   * `working: false` 的内置站点照样列出来，但**不发请求** —— 站点表里写着原因
+   * （改版 / 403 / 没有栏目列表），让用户知道"它在这儿，只是抓不到"，
+   * 比悄悄不显示更好：用户找不到它时会以为是 bug。
+   */
+  sources() {
+    const settings = this.settings();
+    const enabled = new Set(settings.enabledSiteIds);
+    const builtin = CAMPUS_SITE_SEARCH.map((site) => ({
+      id: site.id,
+      label: site.label,
+      host: site.host,
+      custom: false,
+      working: site.working !== false,
+      reason: site.reason ?? null,
+      enabled: enabled.has(site.id),
+    }));
+    const custom = settings.customSources.map((site) => ({
+      id: site.id,
+      label: site.label,
+      host: (() => {
+        try {
+          return new URL(site.url).hostname;
+        } catch {
+          return '';
+        }
+      })(),
+      url: site.url,
+      custom: true,
+      working: true,
+      reason: null,
+      enabled: enabled.has(site.id),
+    }));
+    return [...builtin, ...custom];
+  }
+
+  /** 按 id 取一个可同步的源（内置或自定义）；找不到就 404。 */
+  #sourceById(id) {
+    const key = String(id ?? '').trim();
+    const settings = this.settings();
+    const custom = settings.customSources.find((site) => site.id === key);
+    if (custom) return { id: custom.id, label: custom.label, url: custom.url, custom: true, working: true };
+    const builtin = CAMPUS_SITE_SEARCH.find((site) => site.id === key);
+    if (!builtin) throw HttpError.notFound(`没有这个通知站点：${key}`);
+    return { ...builtin, custom: false, working: builtin.working !== false };
+  }
+
+  /* ------------------------------------------------------------ 同步 */
+
+  /**
+   * 拉一次通知。
+   *
+   * @param {object} [options]
+   * @param {string[]} [options.siteIds]       只同步这些站（默认=设置里启用的）
+   * @param {number} [options.limitPerSite]    每站最多几条
+   * @param {boolean} [options.dryRun]         只抓不写（预览用）
+   * @param {Function} [options.fetchImpl]     注入的 fetch（测试用假站点）
+   */
+  async sync({ siteIds, limitPerSite, dryRun = false, fetchImpl } = {}) {
+    const settings = this.settings();
+    const wanted = (Array.isArray(siteIds) && siteIds.length ? siteIds : settings.enabledSiteIds).map(String);
+    const limit = clampLimit(limitPerSite);
+
+    const targets = [];
+    const perSite = [];
+    for (const id of wanted) {
+      const source = (() => {
+        try {
+          return this.#sourceById(id);
+        } catch {
+          perSite.push({ siteId: id, label: id, count: 0, newest: null, error: '这个站点不在清单里', notes: [] });
+          return null;
+        }
+      })();
+      if (!source) continue;
+      if (!source.working) {
+        perSite.push({
+          siteId: source.id,
+          label: source.label,
+          count: 0,
+          newest: null,
+          error: source.reason ?? '该站点已知不可用，已跳过',
+          notes: [],
+        });
+        continue;
+      }
+      targets.push(source);
+    }
+
+    const results = await mapWithConcurrency(targets, SYNC_CONCURRENCY, async (source) => {
+      try {
+        const read = source.custom
+          ? await readSiteNews({ url: source.url, limit, fetchImpl })
+          : await readSiteNews({ site: source.id, limit, fetchImpl });
+        return { source, read };
+      } catch (error) {
+        return { source, error: error?.message ?? String(error) };
+      }
+    });
+
+    const now = new Date().toISOString();
+    let inserted = 0;
+    let refreshed = 0;
+
+    for (const item of results) {
+      const { source } = item;
+      if (item.error || !item.read) {
+        perSite.push({
+          siteId: source.id,
+          label: source.label,
+          count: 0,
+          newest: null,
+          error: item.error ?? '抓取失败',
+          notes: item.read?.notes ?? [],
+        });
+        continue;
+      }
+      const read = item.read;
+      const rows = read.items ?? [];
+      let siteInserted = 0;
+      for (const entry of rows) {
+        const id = canonicalUrl(entry.url, read.url);
+        if (!id) continue;
+        const existing = this.store.notifications.get(id);
+        if (existing) {
+          // 已存在：只刷新"最近一次看到"与可能变了的标题/日期，**不碰 read / pinned / firstSeenAt**
+          if (!dryRun) {
+            await this.store.notifications.update(id, {
+              ...existing,
+              lastSeenAt: now,
+              title: entry.title || existing.title,
+              publishedAt: entry.publishedAt || existing.publishedAt,
+            });
+          }
+          refreshed += 1;
+          continue;
+        }
+        if (!dryRun) {
+          await this.store.notifications.insert({
+            id,
+            title: entry.title || '(无标题)',
+            url: entry.url,
+            siteId: source.id,
+            siteLabel: source.label,
+            publishedAt: entry.publishedAt ?? null,
+            firstSeenAt: now,
+            lastSeenAt: now,
+            read: false,
+            readAt: null,
+            pinned: false,
+            pinnedAt: null,
+            source: 'column',
+            snippet: null,
+            authority: null,
+          });
+        }
+        inserted += 1;
+        siteInserted += 1;
+      }
+      perSite.push({
+        siteId: source.id,
+        label: source.label,
+        count: siteInserted,
+        total: rows.length,
+        newest: read.newest ?? null,
+        error: read.error ?? null,
+        notes: read.notes ?? [],
+      });
+    }
+
+    const pruned = dryRun ? 0 : await this.#prune(this.settings().retentionDays, now);
+    if (!dryRun) await this.#writeSettings({ lastSyncAt: now });
+
+    this.broadcast({ type: 'data_changed', payload: { target: 'notification', action: 'sync' } });
+    return {
+      inserted,
+      refreshed,
+      pruned,
+      total: this.store.notifications.all().length,
+      perSite,
+      retentionDays: this.settings().retentionDays,
+      lastSyncAt: dryRun ? this.settings().lastSyncAt : now,
+      dryRun,
+    };
+  }
+
+  /**
+   * 按保留期清理。**固定的条目永远不删。**
+   *
+   * `retentionDays <= 0` 表示永久保留，直接返回 0。
+   * 判据是 `firstSeenAt`，见文件头第 2 条红线。
+   */
+  async #prune(retentionDays, nowIso = new Date().toISOString()) {
+    const days = Number(retentionDays);
+    if (!Number.isFinite(days) || days <= 0) return 0;
+    const cutoff = new Date(new Date(nowIso).getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+    let pruned = 0;
+    for (const row of this.store.notifications.all()) {
+      if (row.pinned) continue;
+      const seen = row.firstSeenAt ?? row.lastSeenAt ?? '';
+      if (seen && seen < cutoff) {
+        await this.store.notifications.remove(row.id);
+        pruned += 1;
+      }
+    }
+    return pruned;
+  }
+
+  /* ------------------------------------------------------------ 查询 */
+
+  /**
+   * 本地查询。
+   *
+   * @param {object} [filters]
+   * @param {string} [filters.siteId] 站点 id
+   * @param {string} [filters.q]      标题/摘要里的关键词（大小写不敏感）
+   * @param {boolean} [filters.unreadOnly]
+   * @param {boolean} [filters.pinned]  只看固定的
+   * @param {string} [filters.since]    只留 `firstSeenAt >= since`
+   * @param {string} [filters.until]    只留 `firstSeenAt <= until`
+   */
+  list({ siteId, q, unreadOnly = false, pinned = false, since, until, limit = 20, offset = 0 } = {}) {
+    const keyword = String(q ?? '').trim().toLowerCase();
+    const from = toIsoOrNull(since);
+    const to = toIsoOrNull(until);
+    const site = String(siteId ?? '').trim();
+
+    let rows = this.store.notifications.all().filter((row) => {
+      if (site && row.siteId !== site) return false;
+      if (unreadOnly && row.read) return false;
+      if (pinned && !row.pinned) return false;
+      const seen = row.firstSeenAt ?? '';
+      if (from && seen < from) return false;
+      if (to && seen > to) return false;
+      if (keyword) {
+        const haystack = `${row.title ?? ''} ${row.snippet ?? ''} ${row.siteLabel ?? ''}`.toLowerCase();
+        if (!haystack.includes(keyword)) return false;
+      }
+      return true;
+    });
+
+    // 排序：有发布日用发布日，没有就退回"我们第一次见到它的时间"。
+    // 混着排才不会让"校方没给日期"的条目全部沉底或全部置顶。
+    rows = rows.sort((a, b) => {
+      const left = a.publishedAt || a.firstSeenAt || '';
+      const right = b.publishedAt || b.firstSeenAt || '';
+      if (left === right) return String(b.firstSeenAt ?? '').localeCompare(String(a.firstSeenAt ?? ''));
+      return String(right).localeCompare(String(left));
+    });
+
+    const total = rows.length;
+    const start = Math.max(0, Number(offset) || 0);
+    const size = clampLimit(limit);
+    return {
+      total,
+      count: Math.min(size, Math.max(0, total - start)),
+      limit: size,
+      offset: start,
+      items: rows.slice(start, start + size),
+      filters: { siteId: site || null, q: keyword || null, unreadOnly, pinned, since: from, until: to },
+    };
+  }
+
+  stats() {
+    const rows = this.store.notifications.all();
+    const bySite = new Map();
+    let unread = 0;
+    let pinned = 0;
+    let newestAt = null;
+    for (const row of rows) {
+      if (!row.read) unread += 1;
+      if (row.pinned) pinned += 1;
+      const key = row.siteId ?? 'unknown';
+      const bucket = bySite.get(key) ?? { siteId: key, siteLabel: row.siteLabel ?? key, total: 0, unread: 0 };
+      bucket.total += 1;
+      if (!row.read) bucket.unread += 1;
+      bySite.set(key, bucket);
+      const seen = row.firstSeenAt ?? '';
+      if (seen && (!newestAt || seen > newestAt)) newestAt = seen;
+    }
+    const settings = this.settings();
+    return {
+      total: rows.length,
+      unread,
+      pinned,
+      bySite: [...bySite.values()].sort((a, b) => b.total - a.total),
+      newestAt,
+      lastSyncAt: settings.lastSyncAt,
+      retentionDays: settings.retentionDays,
+    };
+  }
+
+  /* ------------------------------------------------------------ 写操作 */
+
+  async markRead({ ids, all = false, siteId } = {}) {
+    const now = new Date().toISOString();
+    const updated = [];
+    if (all) {
+      for (const row of this.store.notifications.all()) {
+        if (siteId && row.siteId !== siteId) continue;
+        if (row.read) continue;
+        await this.store.notifications.update(row.id, { ...row, read: true, readAt: now });
+        updated.push(row.id);
+      }
+    } else {
+      for (const id of Array.isArray(ids) ? ids : []) {
+        const row = this.store.notifications.get(String(id));
+        if (!row) continue;
+        await this.store.notifications.update(row.id, { ...row, read: true, readAt: now });
+        updated.push(row.id);
+      }
+    }
+    this.broadcast({ type: 'data_changed', payload: { target: 'notification', action: 'read' } });
+    return { updated: updated.length, ids: updated };
+  }
+
+  /** 固定 / 取消固定。固定的条目不会被保留期清理。 */
+  async pin({ ids, pinned = true } = {}) {
+    const now = new Date().toISOString();
+    const updated = [];
+    for (const id of Array.isArray(ids) ? ids : []) {
+      const row = this.store.notifications.get(String(id));
+      if (!row) continue;
+      await this.store.notifications.update(row.id, {
+        ...row,
+        pinned: Boolean(pinned),
+        pinnedAt: pinned ? now : null,
+      });
+      updated.push(row.id);
+    }
+    this.broadcast({ type: 'data_changed', payload: { target: 'notification', action: 'pin' } });
+    return { updated: updated.length, pinned: Boolean(pinned), ids: updated };
+  }
+
+  async updateSettings(patch = {}) {
+    const next = {};
+
+    if (patch.retentionDays !== undefined) {
+      const days = Number(patch.retentionDays);
+      if (!RETENTION_OPTIONS.includes(days)) {
+        throw HttpError.badRequest(`保留期只能是 ${RETENTION_OPTIONS.join(' / ')} 天（0 = 永久保留）`, {
+          field: 'retentionDays',
+        });
+      }
+      next.retentionDays = days;
+    }
+
+    if (patch.enabledSiteIds !== undefined) {
+      if (!Array.isArray(patch.enabledSiteIds)) {
+        throw HttpError.badRequest('enabledSiteIds 必须是数组', { field: 'enabledSiteIds' });
+      }
+      next.enabledSiteIds = patch.enabledSiteIds.map(String);
+    }
+
+    if (patch.useSearch !== undefined) next.useSearch = Boolean(patch.useSearch);
+
+    if (patch.customSources !== undefined) {
+      if (!Array.isArray(patch.customSources)) {
+        throw HttpError.badRequest('customSources 必须是数组', { field: 'customSources' });
+      }
+      if (patch.customSources.length > MAX_CUSTOM_SOURCES) {
+        throw HttpError.badRequest(`自定义站点最多 ${MAX_CUSTOM_SOURCES} 个`, { field: 'customSources' });
+      }
+      const normalized = patch.customSources.map((item) => normalizeCustomSource(item));
+      const seen = new Set();
+      for (const source of normalized) {
+        if (seen.has(source.id)) throw HttpError.badRequest(`自定义站点 id 重复：${source.id}`, { field: 'customSources' });
+        seen.add(source.id);
+      }
+      next.customSources = normalized;
+      // 删掉的自定义站点要从启用列表里一并摘掉，否则同步时会报"站点不在清单里"
+      const alive = new Set(normalized.map((item) => item.id));
+      next.enabledSiteIds = (patch.enabledSiteIds !== undefined ? next.enabledSiteIds : this.settings().enabledSiteIds)
+        .filter((id) => !CAMPUS_SITE_SEARCH.every((site) => site.id !== id) ? true : alive.has(id));
+    }
+
+    await this.#writeSettings(next);
+    return this.settings();
+  }
+}
+
+/* ---------------------------------------------------------------- 工具 */
+
+function clampLimit(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return LIMIT_PER_SITE;
+  return Math.min(200, Math.max(1, Math.trunc(n)));
+}
+
+function toIsoOrNull(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+/** 限并发地跑一遍（对校方站点友好：一次只打 3 个）。 */
+async function mapWithConcurrency(list, limit, worker) {
+  const results = new Array(list.length);
+  let index = 0;
+  const runners = Array.from({ length: Math.min(limit, list.length) }, async () => {
+    while (index < list.length) {
+      const at = index;
+      index += 1;
+      results[at] = await worker(list[at]);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
