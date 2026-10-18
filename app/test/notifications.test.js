@@ -50,10 +50,11 @@ const ITEM_B = { title: '关于调整本学期教学安排的通知', url: 'http
 
 async function startApp() {
   const app = await createServer({ dataDir: await mkdtemp(path.join(tmpdir(), 'potato-notify-')) });
-  await app.listen({ port: 0 });
+  const info = await app.listen({ port: 0 });
   const { notifications } = app.services;
   return {
     app,
+    baseUrl: info.baseUrl,
     notifications,
     close: () => app.close(),
   };
@@ -364,6 +365,33 @@ test('内置站点里已知不可用的（working:false）被跳过并说明原�
     const result = await ctx.notifications.sync({ siteIds: [broken.id], fetchImpl: fakeSiteFetch([ITEM_A]) });
     assert.equal(result.inserted, 0);
     assert.ok(result.perSite[0].error, '应当给出原因');
+  } finally {
+    await ctx.close();
+  }
+});
+
+/* -------------------------------------------------- 正文路由（防回归） */
+
+test('★ 正文接口用 query 传 id —— 条目的 id 就是 URL，塞进路径段会被 / 切碎', async () => {
+  const ctx = await startApp();
+  try {
+    const get = async (route) => {
+      const res = await fetch(`${ctx.baseUrl}${route}`);
+      return { status: res.status, body: await res.json().catch(() => null) };
+    };
+
+    // ① 缺 id → 400（说明路由在，只是参数不对）
+    assert.equal((await get('/notifications/content')).status, 400);
+
+    // ② 不存在的 id → 404，且**错误信息里不该出现"未找到接口"** ——
+    //    那说明路由根本没匹配上（曾经就是这样：路径按 / 切分，:id 永远匹配不到 URL）
+    const missing = await get(`/notifications/content?id=${encodeURIComponent('https://x.xjtu.edu.cn/nope.htm')}`);
+    assert.equal(missing.status, 404);
+    assert.doesNotMatch(String(missing.body?.error?.message ?? ''), /未找到接口/, '★ 路由本身必须匹配上');
+
+    // ③ 旧写法（URL 当路径段）现在应当匹配不上路由，而不是报 500
+    const legacy = await get(`/notifications/${encodeURIComponent('https://dean.xjtu.edu.cn/info/1.htm')}/content`);
+    assert.equal(legacy.status, 404);
   } finally {
     await ctx.close();
   }

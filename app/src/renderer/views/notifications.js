@@ -142,7 +142,7 @@
     ui.reader = { id: item.id, title: item.title, url: item.url, text: '', busy: true, error: null };
     paint();
     try {
-      const data = await PC.api(`/notifications/${encodeURIComponent(item.id)}/content`);
+      const data = await PC.api(`/notifications/content?id=${encodeURIComponent(item.id)}`);
       ui.reader = { ...ui.reader, text: data.text ?? '', title: data.title || item.title, busy: false };
     } catch (error) {
       ui.reader = { ...ui.reader, busy: false, error: error?.message ?? String(error) };
