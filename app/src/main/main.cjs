@@ -14,6 +14,8 @@
  */
 
 const path = require('node:path');
+// `spawn` 只用于 Windows 上经 explorer.exe 打开链接（见 openExternal 的说明）
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const { app, BrowserWindow, Notification, dialog, ipcMain, shell } = require('electron');
 
@@ -206,16 +208,31 @@ function createWindow() {
  * 但那条路上我们**拿不到返回值、也没法先校验协议**。这里显式校验后直接调，
  * 至少能保证只放行 http/https（别的协议交给系统是另一类风险）。
  *
- * 注意：如果本程序以管理员身份运行、而浏览器不是，Windows 会弹
- * 「Edge 未响应，因为现有实例正在以提升的权限运行」—— 那是系统层面的权限比对，
- * 我们无法绕过。用户点"是"会把浏览器重启。所以界面上「在浏览器打开」是个**显式按钮**，
- * 而正文默认在应用内读（不去打扰系统）。
+ * ★ Windows 上**故意不用 `shell.openExternal`，改用 `explorer.exe`**。
+ *
+ * `shell.openExternal` 走 `ShellExecute`，会在**当前进程的权限上下文**里把 URL 交给
+ * 默认浏览器；本程序若以管理员身份运行、而浏览器不是，Windows 就会弹
+ * 「Edge 未响应，因为现有实例正在以提升的权限运行。是否要用普通权限重启现有实例？」
+ * ——用户点"是"，浏览器被重启（看起来就是"浏览器被关掉了"）；点"否"则什么都不发生。
+ *
+ * `explorer.exe` 是**以登录用户身份常驻的非提升进程**，把 URL 交给它就等于
+ * "让桌面去打开"，落到与手动双击快捷方式同一条路径上，不会触发那个权限比对。
+ * 它的退出码即使成功也常常非 0，所以**只 spawn、不等结果**，也不看 code。
  */
 ipcMain.handle('potato:openExternal', async (_event, url) => {
   const raw = String(url ?? '').trim();
   if (!/^https?:\/\//i.test(raw)) throw new Error('只支持 http / https 地址');
+
+  if (process.platform === 'win32') {
+    // detached + unref：不让子进程拖住应用退出；失败只可能抛在 spawn 这一下
+    const child = spawn('explorer.exe', [raw], { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', () => {});
+    child.unref();
+    return { ok: true, url: raw, via: 'explorer' };
+  }
+
   await shell.openExternal(raw);
-  return { ok: true, url: raw };
+  return { ok: true, url: raw, via: 'shell' };
 });
 ipcMain.handle('potato:pickDirectory', async (_event, options = {}) => {
   const result = await dialog.showOpenDialog(mainWindow ?? undefined, {

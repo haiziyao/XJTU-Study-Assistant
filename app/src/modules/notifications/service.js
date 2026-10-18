@@ -488,7 +488,7 @@ export class NotificationService {
   async readBody(id) {
     const row = this.store.notifications.get(String(id ?? ''));
     if (!row) throw HttpError.notFound(`没有这条通知：${id}`);
-    const pages = await readPages([{ title: row.title, url: row.url }], { limit: 1, readable: true });
+    const pages = await readPages([{ title: row.title, url: row.url }], { limit: 1 });
     const page = pages?.[0] ?? null;
     if (!page || page.error) {
       throw HttpError.upstream(
