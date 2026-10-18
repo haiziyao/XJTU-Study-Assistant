@@ -100,6 +100,41 @@ export function activityIso(offsetDays, time) {
 /** 活动 5001（未提交作业）的截止日；改期用例要基于它往后挪，不能另写字面量。 */
 export const HOMEWORK_DEADLINE_DATE = activityDate(ACTIVITY_DAY_OFFSETS.homework);
 
+/**
+ * 夹具里的"当前学期"：与生产口径一致（9 月~次年 1 月第一学期，2~8 月第二学期），
+ * 但**在测试 helper 里自己算**，不从被测模块 import —— 否则被测函数写错时夹具会
+ * 跟着一起错，端到端用例反而绿得没有意义。边界由 lms-term-filter.test.js 单独的
+ * 固定日期用例钉住。
+ *
+ * 为什么课程学期也必须跟着今天走：作业待办默认只同步本学期，如果夹具把课程写死成
+ * 2026 年秋季，那么到了 2027 年（或更晚）跑测试时，所有作业都会被判成历史学期，
+ * 一整批与学期过滤无关的用例会莫名其妙变红。
+ */
+function mockAcademicTerm(now = new Date()) {
+  const key = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+  const [year, month] = key.split('-').map(Number);
+  const startYear = month >= 9 ? year : year - 1;
+  const index = month >= 9 || month === 1 ? 1 : 2;
+  const endYear = startYear + 1;
+  return {
+    startYear,
+    index,
+    academicYear: `${startYear}-${endYear}`,
+    startDate: index === 1 ? `${startYear}-09-01` : `${endYear}-02-01`,
+    endDate: index === 1 ? `${endYear}-01-31` : `${endYear}-08-31`,
+    semesterName: index === 1 ? '秋季学期' : '春季学期',
+    semesterRealName: `${startYear}-${endYear}学年${index === 1 ? '秋' : '春'}季学期`,
+  };
+}
+
+/** 夹具学期（导出给断言用：课程列表里的 `semester` / 课程起止日应当与它一致）。 */
+export const MOCK_TERM = mockAcademicTerm();
+
 /** 默认数据集：覆盖「未提交作业 / 已提交作业 / 过期作业 / 直播 / 回放 / 资料」。 */
 export function defaultDataset() {
   const home = ACTIVITY_DAY_OFFSETS.homework;
@@ -117,12 +152,17 @@ export function defaultDataset() {
         course_type: 'compulsory',
         credit: '3.0',
         compulsory: true,
-        start_date: '2026-09-01',
-        end_date: '2027-01-15',
+        start_date: MOCK_TERM.startDate,
+        end_date: MOCK_TERM.endDate,
         klass: '计算机2101',
         instructors: [{ id: 9, name: '李老师' }],
-        academic_year: { id: 1, code: '2026-2027', name: '2026-2027学年' },
-        semester: { id: 1, code: 'autumn', name: '秋季学期', real_name: '2026-2027学年秋季学期' },
+        academic_year: { id: 1, code: MOCK_TERM.academicYear, name: `${MOCK_TERM.academicYear}学年` },
+        semester: {
+          id: 1,
+          code: MOCK_TERM.index === 1 ? 'autumn' : 'spring',
+          name: MOCK_TERM.semesterName,
+          real_name: MOCK_TERM.semesterRealName,
+        },
         department: { id: 12, name: '电子与信息学部', code: 'DX' },
         course_attributes: { published: true, student_count: 88, teaching_class_name: '数据结构-01班' },
       },
@@ -132,11 +172,16 @@ export function defaultDataset() {
         course_code: 'ENG1001',
         course_type: 'compulsory',
         credit: '2.0',
-        start_date: '2026-09-01',
-        end_date: '2027-01-15',
+        start_date: MOCK_TERM.startDate,
+        end_date: MOCK_TERM.endDate,
         instructors: [{ id: 11, name: '王老师' }],
-        academic_year: { id: 1, code: '2026-2027', name: '2026-2027学年' },
-        semester: { id: 1, code: 'autumn', name: '秋季学期', real_name: '2026-2027学年秋季学期' },
+        academic_year: { id: 1, code: MOCK_TERM.academicYear, name: `${MOCK_TERM.academicYear}学年` },
+        semester: {
+          id: 1,
+          code: MOCK_TERM.index === 1 ? 'autumn' : 'spring',
+          name: MOCK_TERM.semesterName,
+          real_name: MOCK_TERM.semesterRealName,
+        },
         department: { id: 12, name: '电子与信息学部', code: 'DX' },
         course_attributes: { published: true, student_count: 40, teaching_class_name: '英语-05班' },
       },
