@@ -691,3 +691,59 @@ function addDays(key, n) {
   const date = new Date(y, m - 1, d + n);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
+
+
+// ---------------------------------------------------------------------------
+// 重复日程的查询要展开（真机 bug：课表导入后 AI 说"你没有日程"）
+// ---------------------------------------------------------------------------
+
+/**
+ * 真机事故：课表导入的 24 条日程 `date` 都是**首次发生日**（2026-09-14 起每周重复），
+ * 而 AI 的 schedule 查询走的是 `list({from,to})` —— 只按 `date` 过滤，不展开 repeat。
+ * 于是问"这周有什么课"时一条都命中不了，AI 只能回答"你没有日程"，用户界面上却看得到。
+ * 这条用例锁住：区间查询必须走 `range()`，返回"每一次发生"并带 occurrenceDate。
+ */
+test('日程查询：按区间查重复日程会展开成每一次发生（带 occurrenceDate 与原日程 id）', async () => {
+  const ctx = await startApp();
+  try {
+    const created = await ctx.call('POST', '/schedules', {
+      title: '材料力学',
+      date: '2026-09-14',
+      startTime: '08:00',
+      endTime: '09:40',
+      repeat: { type: 'weekly', interval: 1, weekdays: [1], until: { mode: 'date', date: '2027-01-11' } },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body)?.slice(0, 200));
+    const scheduleId = created.body.item.id;
+
+    // 9 月 14 日是周一，10 月 19 日也是周一 → 区间查询应命中这一次
+    const queried = await ctx.call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { from: '2026-10-19', to: '2026-10-25' } },
+      dryRun: true,
+    });
+    assert.equal(queried.status, 200, JSON.stringify(queried.body)?.slice(0, 240));
+    assert.ok(queried.body.count >= 1, `重复日程必须展开出来，实际 count=${queried.body.count}`);
+    const hit = queried.body.items.find((item) => item.title === '材料力学');
+    assert.ok(hit, '应当命中材料力学这一次');
+    assert.equal(hit.occurrenceDate, '2026-10-19', '展开出的日期应是这一次发生的日期');
+    assert.equal(hit.id, scheduleId, 'id 仍是原日程 id，方便模型后续改/删');
+    assert.equal(hit.isRepeatInstance, true);
+
+    // 单日查询同样要展开
+    const oneDay = await ctx.call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { date: '2026-10-19' } },
+      dryRun: true,
+    });
+    assert.ok((oneDay.body.items ?? []).some((item) => item.title === '材料力学' && item.occurrenceDate === '2026-10-19'));
+
+    // 不重复的日程在区间内照旧能查到
+    await ctx.call('POST', '/schedules', { title: '一次性会议', date: '2026-10-20', startTime: '15:00', endTime: '16:00' });
+    const mixed = await ctx.call('POST', '/commands/execute', {
+      draft: { ok: true, action: 'query', target: 'schedule', filters: { from: '2026-10-19', to: '2026-10-25' } },
+      dryRun: true,
+    });
+    assert.ok((mixed.body.items ?? []).some((item) => item.title === '一次性会议'));
+  } finally {
+    await ctx.close();
+  }
+});

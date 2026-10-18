@@ -80,6 +80,25 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
     }
     if (draft.target === 'schedule') {
       if (filters.id) return [schedules.get(filters.id)];
+      /**
+       * **按日期/区间查日程时，必须展开重复规则**。
+       *
+       * 真机 bug：从课表导入的 24 条日程全是"9 月 14 日起每周重复"，`date` 存的是**首次发生日**；
+       * 而 `list({from,to})` 只拿 `date` 做过滤 —— 于是问"这周有什么课"时一条都命中不了，
+       * AI 只能说"你没有日程"，用户在界面上明明看得到。
+       *
+       * `range()` 才是把 repeat 展开成"每一次发生"的那条路径（日历日/周视图用的也是它）。
+       * 返回的 id 仍取**原日程 id**（不是带日期后缀的 occurrence id），这样模型后续
+       * 「改/删这条」还能直接用；另外带上 `occurrenceDate` 说明这次是哪一天。
+       */
+      const day = filters.date;
+      const from = day ?? filters.from;
+      const to = day ?? filters.to;
+      if (from && to) {
+        return schedules
+          .range({ from, to, category: filters.category, keyword: filters.keyword })
+          .map((occurrence) => ({ ...occurrence, id: occurrence.scheduleId }));
+      }
       return schedules.list({
         from: filters.from,
         to: filters.to,
