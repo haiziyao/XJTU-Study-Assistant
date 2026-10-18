@@ -217,9 +217,12 @@ export class NoteService {
    *   注入点是为测试留的：CI 上没有 swiftc，用假引擎就能验证"识别 → 写回 → 广播"整条链路。
    * @param {string} [deps.dataDir] 数据目录：编译好的 OCR 小工具放在 `<dataDir>/.ocr`。
    */
-  constructor({ store, broadcast, recognize, dataDir }) {
+  constructor({ store, broadcast, recognize, dataDir, services = null, audit = null }) {
     this.collection = store.notes; this.versionsCollection = store.noteVersions; this.templatesCollection = store.noteTemplates;
     this.viewsCollection = store.noteViews; this.canvasesCollection = store.noteCanvases; this.broadcast = broadcast;
+    // 用户经界面/HTTP 写笔记时记一条 actor:'user'；AI 执行草稿期间（services.__actor === 'ai'）
+    // 跳过，因为 chat-service 会为同一次写入记 actor:'ai'（避免一条改动两条日志）。
+    this.services = services; this.audit = audit;
     // 属性名**不能**叫 `recognize`：那是下面同步重识别方法的原型方法名，
     // 同名实例属性会把它整个盖掉（那个 bug 会让 POST /notes/:id/ocr 连不存在的笔记都返回 200）。
     this.ocrEngine = typeof recognize === 'function' ? recognize : recognizeImageDataUrl;
@@ -269,6 +272,7 @@ export class NoteService {
     });
     const summary = noteSummary(item);
     this.broadcast?.({ type: 'notes_changed', payload: { action: 'created', summary } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'note', action: 'create', targetId: item.id, title: item.title, after: item });
     // 后台异步跑，**不阻塞 HTTP**：随手拍 3.8MB 的 dataUrl 走一次 Vision 要几百毫秒到几秒，
     // 卡在响应里会让"按下快门 → 等保存"变得明显。
     this.#scheduleOcr(item.id, fingerprint);
@@ -315,6 +319,7 @@ export class NoteService {
     const item = await this.collection.update(String(id), patch);
     if (rename) await this.updateRenamedLinks(current.title, patch.title, id);
     const summary = noteSummary(item); this.broadcast?.({ type: 'notes_changed', payload: { action: 'updated', summary } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'note', action: 'update', targetId: String(id), title: summary.title, before: current, after: item });
     return summary;
   }
 
@@ -402,11 +407,13 @@ export class NoteService {
       await this.collection.remove(String(id));
       for (const version of this.versionsCollection.all().filter((item) => item.noteId === String(id))) await this.versionsCollection.remove(version.id);
       this.broadcast?.({ type: 'notes_changed', payload: { action: 'deleted', id: String(id) } });
+      if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'note', action: 'delete', targetId: String(id), title: current.title, before: current, summary: '永久删除笔记' });
       return { deleted: true, permanent: true, id: String(id) };
     }
     await this.snapshot(current, 'delete', true);
     const deletedAt = new Date().toISOString(); await this.collection.update(String(id), { deletedAt, revision: current.revision + 1 });
     this.broadcast?.({ type: 'notes_changed', payload: { action: 'deleted', id: String(id) } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'note', action: 'delete', targetId: String(id), title: current.title, before: current });
     return { deleted: true, permanent: false, id: String(id), deletedAt };
   }
 

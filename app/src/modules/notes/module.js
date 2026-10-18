@@ -44,7 +44,8 @@ export default {
 
   createServices({ store, broadcast, services, dataDir, options }) {
     // `options.notes.ocr`：测试注入假识别引擎用（真实运行不传，走本机 Vision，见 ocr.js）
-    const notes = new NoteService({ store, broadcast, dataDir, recognize: options?.ocr });
+    // services/audit：写笔记时记一条 actor:'user' 的更改日志（AI 写由 chat-service 记）。
+    const notes = new NoteService({ store, broadcast, dataDir, recognize: options?.ocr, services, audit: services.audit });
     services.commands.registerHandler('note', createNoteCommands({ notes }));
     return { notes };
   },

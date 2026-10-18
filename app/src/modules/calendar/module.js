@@ -111,9 +111,12 @@ export default {
   createServices({ store, broadcast, services }) {
     // 分类注册表要先建：日程/事件服务写库时用它把 category 归一化
     const categories = new CategoryService({ store, broadcast });
-    const events = new EventService({ store, broadcast, categories });
-    const schedules = new ScheduleService({ store, broadcast, categories });
-    const todos = new TodoService({ store, broadcast });
+    // audit 是 order 6 的全局服务：注入给三个写服务后，用户经界面/HTTP 的写操作才会被记录
+    // （AI 写由 chat-service 统一记 actor:'ai'，服务端在 __actor 标记期间跳过，避免重复）。
+    const audit = services.audit;
+    const events = new EventService({ store, broadcast, categories, services, audit });
+    const schedules = new ScheduleService({ store, broadcast, categories, services, audit });
+    const todos = new TodoService({ store, broadcast, services, audit });
     const reminders = new ReminderService({ store, scheduleService: schedules, broadcast });
 
     // 向框架的指令系统登记本模块的能力：

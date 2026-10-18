@@ -512,9 +512,13 @@ function decorate(item, today, children = NO_CHILDREN, spentSec = 0) {
 }
 
 export class TodoService {
-  constructor({ store, broadcast = () => {} }) {
+  constructor({ store, broadcast = () => {}, services = null, audit = null }) {
     this.store = store;
     this.broadcast = broadcast;
+    // 与 ScheduleService 同一口径：AI 执行草稿期间（services.__actor === 'ai'）不记 user 日志，
+    // 由 chat-service 记一条 actor:'ai'（见 chat-service 的 #autoExecuteWrites）。
+    this.services = services;
+    this.audit = audit;
   }
 
   get collection() {
@@ -869,6 +873,7 @@ export class TodoService {
     if (data.completed && !data.completedAt) data.completedAt = new Date().toISOString();
     const created = await this.collection.insert(data);
     this.broadcast({ type: 'data_changed', payload: { target: 'todo', action: 'create', id: created.id } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'todo', action: 'create', targetId: created.id, title: created.title, after: created });
     return this.#decorate(created);
   }
 
@@ -924,6 +929,7 @@ export class TodoService {
    * 被悄悄重新勾上 —— 那是改动用户的数据。
    */
   async update(id, patch = {}) {
+    const before = this.collection.get(id);
     const incoming = normalizeInput(patch);
     const data = this.#rebuild(id, patch);
     const updated = await this.collection.update(id, data);
@@ -935,6 +941,7 @@ export class TodoService {
     }
 
     this.broadcast({ type: 'data_changed', payload: { target: 'todo', action: 'update', id } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'todo', action: 'update', targetId: id, title: updated?.title, before, after: updated });
     const item = this.#decorate(updated);
     // 级联影响清单只挂在这条写响应上（GET 不会带它，它描述的是"这次操作做了什么"）
     item.cascaded = cascaded;
@@ -1000,12 +1007,13 @@ export class TodoService {
    * 能继续被勾选 / 编辑 / 筛选，前端也不必为"父已删除"发明第四种渲染状态。
    */
   async remove(id) {
-    this.get(id);
+    const current = this.get(id);
     const detachedChildren = this.#childrenOf(id).map((item) => item.id);
     // 先断开再删：任何时刻都不存在"指向不存在记录"的中间状态
     for (const childId of detachedChildren) await this.collection.update(childId, { parentId: null });
     await this.collection.remove(id);
     this.broadcast({ type: 'data_changed', payload: { target: 'todo', action: 'delete', id } });
+    if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'todo', action: 'delete', targetId: id, title: current.title, before: current });
     return { id, deleted: true, detachedChildren };
   }
 
@@ -1021,6 +1029,7 @@ export class TodoService {
       const result = await this.remove(id);
       detachedChildren.push(...result.detachedChildren);
     }
+    if (list.length && this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'todo', action: 'bulk', summary: `批量删除 ${list.length} 条待办`, before: { ids: list, count: list.length } });
     return { ids: list, deleted: list.length, detachedChildren };
   }
 

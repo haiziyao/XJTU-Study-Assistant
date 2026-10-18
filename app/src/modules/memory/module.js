@@ -79,7 +79,8 @@ export default {
 
   createServices({ store, broadcast, services, options }) {
     // `options.now` 可注入时钟（测试复核/衰减语义时不必改系统时间）
-    const memory = new MemoryService({ store, broadcast, now: options?.now });
+    // services/audit：用户写记忆时记一条 actor:'user'；AI 写由 chat-service 统一记。
+    const memory = new MemoryService({ store, broadcast, now: options?.now, services, audit: services.audit });
 
     // ① 指令处理器：查询只读（会被 AI 自动执行），写入只在用户确认后发生
     services.commands.registerHandler('memory', createMemoryCommands({ memory }));

@@ -105,7 +105,7 @@ function draftProtocol(context = {}) {
 - action 取 create / query / update / delete / complete / include / exclude（include / exclude 由对应模块声明）。
 - target **只能取下面「领域说明」里真的出现过的那些**，一个都不许自创。当前已声明的有：
   - 写入类：\`todo\` / \`schedule\` / \`event\`（日历三件套）、\`memory\`（只能提议，等用户确认）；
-  - 只读查询类：\`note\`（笔记）、\`grade\`（成绩）、\`knowledge\`（教务处政策语料）、\`search\`（**三源统一检索**：
+  - 只读查询类：\`note\`（笔记）、\`grade\`（成绩）、\`knowledge\`（教务处政策语料）、\`log\`（更改日志：谁在何时改了什么）、\`search\`（**三源统一检索**：
     一次查校规 + 我的笔记 + 我的长期记忆，问"我之前记过/提过什么"这类跨来源的问题就用它，
     比分别查三次省轮次）、\`weekly\`（学习周报）、\`pomodoro\`（番茄钟统计，只读；没有开始/暂停的写入口）；
   - 联网检索：\`web\`（见下面的联网检索一节）。

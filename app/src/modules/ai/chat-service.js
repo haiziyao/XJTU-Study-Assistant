@@ -2623,16 +2623,71 @@ export class AiChatService {
       if (signal?.aborted) break;
       if (entry.error || entry.draft?.action === 'query' || entry.draft?.ok === false) continue;
       plan?.start(entry);
+      /**
+       * ★ 短生命周期的 actor 标记。
+       *
+       * 各业务服务（calendar / notes / memory）在自己的写方法里只记**用户**的日志；
+       * AI 自动执行草稿时它们必须知道“这次不是我点的确认”，否则同一笔写入会出现
+       * 一条 actor:'user'（服务端）+ 一条 actor:'ai'（这里），把用户自己的操作记录淹掉。
+       * 标记只在 `commands.execute` 期间存在，try/finally 恢复原值（支持嵌套调用）。
+       *
+       * 为什么不用 AsyncLocalStorage：这里是单机单用户、写操作彼此串行的本地服务；
+       * 一个短标记足够，且不把 Node 私有上下文引入业务服务。极端并发（AI 执行期间
+       * 用户恰好点保存）下服务端会少记一条 user 日志，但**不会把 AI 的写入错记成用户的**
+       * —— 这个方向上的误差比“记错人”安全。
+       */
+      const previousActor = this.services?.__actor;
+      if (this.services) this.services.__actor = 'ai';
       try {
         const result = await this.commands.execute(entry.draft);
         out.push({ entry, draft: entry.draft, result });
         plan?.finish(entry, null);
+        // 审计是旁路：记录失败（理论上 record 永不抛）不能把已经落库的写入标成失败
+        try {
+          this.#recordAiWrite(entry, result);
+        } catch (error) {
+          this.#log('warn', `AI 更改日志记录失败（已忽略）：${error?.message ?? error}`);
+        }
       } catch (error) {
         out.push({ entry, draft: entry.draft, error: { code: error.code ?? 'INTERNAL', message: error.message } });
         plan?.finish(entry, error);
+      } finally {
+        if (this.services) {
+          if (previousActor === undefined) delete this.services.__actor;
+          else this.services.__actor = previousActor;
+        }
       }
     }
     return out;
+  }
+
+  /**
+   * 把一次成功执行的 AI 写操作记进更改日志（actor:'ai'）。
+   *
+   * 为什么由 chat-service 记、而不是让各业务服务自己判断：只有这里同时知道
+   * “这是模型触发的”“执行的哪条草稿”“结果里的真实 id/标题”。服务端只负责用户路径，
+   * 两边各记各的，actor 才不会互相污染（见 #autoExecuteWrites 的标记说明）。
+   */
+  #recordAiWrite(entry, result) {
+    const draft = entry?.draft ?? {};
+    const item = result?.item ?? (Array.isArray(result?.items) ? result.items[0] : null);
+    const affected = Array.isArray(result?.affected) ? result.affected : [];
+    const targetId = item?.id ?? affected[0]?.id ?? draft.filters?.id ?? draft.id;
+    const title = item?.title ?? affected[0]?.title ?? draftName(draft);
+    const action = draft.action ?? 'update';
+    const target = draft.target ?? 'unknown';
+    const after = item ?? affected[0];
+    this.services?.audit?.record({
+      actor: 'ai',
+      source: 'chat',
+      module: target,
+      action,
+      target,
+      ...(targetId === undefined || targetId === null || targetId === '' ? {} : { targetId: String(targetId) }),
+      ...(title ? { title } : {}),
+      summary: result?.explain ?? `AI 自动${PLAN_WRITE_LABELS[action] ?? action}${title ? `「${title}」` : ''}`,
+      ...(after ? { after } : {}),
+    });
   }
 
   /** 只留模型回答需要的字段：整库塞进下一轮提示词既贵又容易跑偏。 */
