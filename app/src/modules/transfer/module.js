@@ -4,7 +4,7 @@
  * 一句话职责：把本机勾选的数据打包，配对之后直接 POST 给另一台设备；反过来也接得住。
  *
  * 为什么 `order = 75`：
- *   - 必须**晚于**所有数据模块（calendar 10 / notes 40 / memory 45 / cards 46 / goals 47），
+ *   - 必须**晚于**所有数据模块（calendar 10 / notes 40 / memory 45 / weekly 48），
  *     因为接收侧要调它们的服务写入（`services.notes.create` …），createServices 时才拿得到；
  *   - 排在 `ai`(90) 之前无所谓，本模块不参与 aiPrompt 聚合 —— 它没有任何"给模型看"的语义。
  *

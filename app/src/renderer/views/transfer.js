@@ -19,7 +19,7 @@
 
 (function () {
   /** 默认勾选：所有"接收侧写得进去"的集合（对话/消息收不下，见目录里的原因）。 */
-  const DEFAULT_SELECTED = ['memories', 'notes', 'todos', 'schedules', 'events', 'cards', 'goals'];
+  const DEFAULT_SELECTED = ['memories', 'notes', 'todos', 'schedules', 'events'];
 
   const PLATFORM_LABEL = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' };
 

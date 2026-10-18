@@ -146,7 +146,7 @@ test('左栏按注册表顺序渲染，默认没有「更多」，高亮与面�
     const ids = ctx.buttons().map((node) => node.dataset.view);
     assert.deepEqual(
       Array.from(ids),
-      ['chat', 'calendar', 'todo', 'lms', 'academic', 'notes', 'review', 'transfer', 'message'],
+      ['chat', 'calendar', 'todo', 'lms', 'academic', 'notes', 'transfer', 'message'],
       '默认顺序应等于注册表顺序',
     );
     assert.equal(ctx.refs.navMore.hidden, true, '★ 默认不该出现「更多」（首次运行零变化）');
@@ -213,10 +213,10 @@ test('收起 → 展开 → 收起：反复切换不残留高亮', async () => {
   const ctx = await bootNav();
   try {
     for (let i = 0; i < 3; i += 1) {
-      ctx.buttonFor('review').click();
+      ctx.buttonFor('transfer').click();
       assert.equal(ctx.collapsed(), false);
-      assert.deepEqual(Array.from(ctx.activeIds()), ['review'], `第 ${i + 1} 轮展开`);
-      ctx.buttonFor('review').click();
+      assert.deepEqual(Array.from(ctx.activeIds()), ['transfer'], `第 ${i + 1} 轮展开`);
+      ctx.buttonFor('transfer').click();
       assert.equal(ctx.collapsed(), true);
       assert.deepEqual(Array.from(ctx.activeIds()), [], `第 ${i + 1} 轮收起`);
     }
@@ -292,7 +292,7 @@ test('「更多」区空掉后按钮消失；「恢复默认」回到初始排�
     assert.equal(ctx.refs.navMore.hidden, true);
     assert.deepEqual(
       Array.from(ctx.buttons().map((n) => n.dataset.view)),
-      ['chat', 'calendar', 'todo', 'lms', 'academic', 'notes', 'review', 'transfer', 'message'],
+      ['chat', 'calendar', 'todo', 'lms', 'academic', 'notes', 'transfer', 'message'],
     );
   } finally {
     await ctx.app.close();
