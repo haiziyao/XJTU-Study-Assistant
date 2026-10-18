@@ -6,13 +6,15 @@
  * 而模型没有别的途径知道这件事 —— 它只能从提示词里知道。
  *
  * 两个入口：
- * - `buildChatMessages()` 聊天：允许自然语言 + 若干段 ```command 草稿（写入最多 3 条，一件事一条）；
+ * - `buildChatMessages()` 聊天：允许自然语言 + 若干段 ```command 草稿（写入条数由设置项
+ *   `maxActionsPerTurn` 决定，一件事一条）；
  * - `buildCommandMessages()` 单指令：只准吐一个 JSON 对象，供 `/ai/nl2command` 用。
  *
  * 提示词里所有相对日期都由代码算成绝对日期再写进去（「明天」这类词留给模型自己推会出错）。
  */
 
 import { WEEKDAY_NAMES, todayKey } from '../../shared/time.js';
+import { MAX_ACTIONS_UNLIMITED, normalizeMaxActionsPerTurn } from './config.js';
 import { WEB_SEARCH_PROMPT } from './web-search.js';
 
 /** 三件事的判定表 + 字段 + 最容易写错的七处（与接口文档 / aiTools 清单保持一致）。 */
@@ -54,10 +56,46 @@ const DOMAIN_RULES = `【三个集合，先选对 —— 选错用户就看不�
    给已有待办加子任务时**先 query 拿到它的 id，再 create 子任务**（新父的 id 由系统生成，你拿不到）；
    parentId 不能指向自己或自己的子任务（成环会被 400）。这两个字段名写错同样会被 400 拦下。`;
 
-/** 草稿输出协议：回复里额外给 ```command 代码块（写入最多 3 段，一件事一段）。 */
-const DRAFT_PROTOCOL = `【输出格式】
+/**
+ * 草稿输出协议：回复里额外给 ```command 代码块（写入条数由设置项 `maxActionsPerTurn` 决定）。
+ *
+ * 为什么写成函数而不是常量：那句"一轮最多 N 条写入草稿"以前**写死 3**，
+ * 用户在设置里改成别的数时提示词不会跟着变 —— 提示说 3、服务端却按 7 执行，
+ * 模型与用户都会被误导。现在 N 从这里读，且与 chat-service 真正执行用的是**同一个**配置值。
+ */
+function draftProtocol(context = {}) {
+  const limit = normalizeMaxActionsPerTurn(context.maxActionsPerTurn);
+  const unlimited = limit === MAX_ACTIONS_UNLIMITED;
+  const segmentCap = unlimited ? '写入段数不限' : `写入最多 ${limit} 段`;
+  /**
+   * 写入条数那两句。0 与 N>0 是两套口径：
+   *   - 0：用户明确关掉了限制，**可以**给任意多条，但仍要求"每条都说明白"（否则回执看不清）；
+   *   - N>0：一轮最多 N 条，超出的先用自然语言交代，分成两轮办 —— 不静默少办，也不硬塞。
+   * 注意 N>0 的分支顺带把**服务端行为**说清：系统只自动执行前 N 条，其余留成确认卡。
+   * 不写这句的话，模型多给了两条会以为系统全办了，回话就会谎报成功。
+   */
+  const limitRule = unlimited
+    ? `- **一轮里可以给出任意多条写入草稿**（用户已在设置里关闭限制，0 = 不限制），但每条都要说明白。用户一句话里说了几件事
+  （"帮我加个周四晚上自习的日程，再加一条周五交实验报告的待办，下周期中考试也记上"），
+  就**分别**给草稿、一件事一条：不要合成一条，更不要只做第一件、把其余吞掉 ——
+  自动审批档下用户期望的是"我说了几件事，它就办掉几件"，只落一件等于骗人。
+- 条数不限不等于可以凑数：**每条的 explain 都要写清它对应哪件事**，字段要完整；
+  一次给太多、又说不清哪条是哪件，用户反而不知道你改了什么（确认卡是一张一条）。
+- 服务端也不再按条数截断：你给多少条，auto 档就尝试执行多少条（仍受多轮上限与去重约束，
+  同一件事只执行一次）。所以**不要重复输出同一条草稿**。`
+    : `- **一轮最多给 ${limit} 条写入草稿**（create / update / delete / complete 这类）。用户一句话里说了几件事
+  （"帮我加个周四晚上自习的日程，再加一条周五交实验报告的待办，下周期中考试也记上"），
+  就**分别**给草稿、一件事一条：不要合成一条，更不要只做第一件、把其余吞掉 ——
+  自动审批档下用户期望的是"我说了几件事，它就办掉几件"，只落一件等于骗人。
+- 为什么要有这个上限（${limit} 条）：一轮里塞太多写入草稿，任何一条被校验拦下都会把整轮回执搅乱，
+  用户也看不清到底改了哪几条（确认卡是一张一条）。**超过 ${limit} 件时先把这 ${limit} 条给全**，
+  再用自然语言说清剩下的（"另外那两件我也记下了，你说一声我接着办"），用户回一句就能继续 ——
+  宁可分成两轮，也不要悄悄少办。
+- 自动审批档下**系统只自动执行前 ${limit} 条**：多给的不会被执行，而是留成待确认卡（manual 语义）。
+  所以不要以为多给几条就会多办几条 —— 要么分成两轮，要么如实说明哪几条还在等确认。`;
+  return `【输出格式】
 先用自然语言回答用户（简短、直接、别客套）。如果用户表达了要新增 / 修改 / 删除 / 查询安排，
-再**额外**输出代码块：一段一个 JSON 对象，**每件事各占一段**（写入最多 3 段，见下面的规则）：
+再**额外**输出代码块：一段一个 JSON 对象，**每件事各占一段**（${segmentCap}，见下面的规则）：
 
 \`\`\`command
 {"ok":true,"action":"create","target":"todo","fields":{"title":"交实验报告","deadline":"2026-10-13","estimatedHours":2},"confidence":0.9,"warnings":[],"explain":"明天交实验报告，预计 2 小时"}
@@ -78,11 +116,9 @@ const DRAFT_PROTOCOL = `【输出格式】
   （\`preferred_study_window\` ✅）；**别写中文 key** —— 中文 / 空格 / 大写会被服务端降级
   （丢中文、转小写、截断，全丢掉就等于没有 key），响应里的 \`keyAdjusted\` 会如实报出来，那不是你要指定的键。
 - 字段名必须与上面的清单完全一致，**不要自造字段**，不要带 id（除非 update / delete 且用户给了 id）。
-- **一轮最多给 3 条写入草稿**（create / update / delete / complete 这类）。用户一句话里说了几件事
-  （"帮我加个周四晚上自习的日程，再加一条周五交实验报告的待办，下周期中考试也记上"），
-  就**分别**给草稿、一件事一条：不要合成一条，更不要只做第一件、把其余吞掉 ——
-  自动审批档下用户期望的是"我说了几件事，它就办掉几件"，只落一件等于骗人。
-  按范围删除是**一个动作、一条草稿**（见下面的【按范围删除日程】），不占这 3 条的名额。
+${limitRule}
+
+【按范围删除日程】），不占这 3 条的名额。
 - 为什么是 3 条而不是不限：一轮里塞太多写入草稿，任何一条被校验拦下都会把整轮回执搅乱，
   用户也看不清到底改了哪几条（确认卡是一张一条）。**超过 3 件时先把这 3 条给全**，
   再用自然语言说清剩下的（"另外那两件我也记下了，你说一声我接着办"），用户回一句就能继续 ——
@@ -157,6 +193,7 @@ const DRAFT_PROTOCOL = `【输出格式】
 - **查询是只读的，auto / manual 档下系统会自动执行并把结果回灌给你**（strict 档要用户点确认，见下面的权限一节），你再据此用自然语言回答用户。
 - 所以（auto / manual 档）：**不要说**"需要你确认才能查""我拿不到数据"——那是在推卸一个本来就能做的动作。
   直接给答案；答不上来（比如结果为空）就直说"这天没有安排"。`;
+}
 
 function memoryBlock(context = {}) {
   const injected = context.memory?.injected ?? [];
@@ -220,10 +257,17 @@ const DRAW_NOTE = `【绘图能力】
  * 反过来，strict 档连只读查询都不自动执行，模型不能假装自己已经查到了数据。
  */
 const PERMISSION_NOTES = {
-  manual: `【写入权限：先提议、后确认（默认档）】
+  /**
+   * manual 是**函数**：它要说清"多件事给多张草稿"的条数口径，而那个数字来自设置项。
+   * 这一档**不执行**、也不截断草稿列表 —— 用户自己逐张点确认，所以就算模型给超了，
+   * 草稿也是全的（与 auto 档"只执行前 N 条"是两件事，别混）。
+   */
+  manual: (limit) => `【写入权限：先提议、后确认（默认档）】
 - 你给的写入草稿只是**提议**：系统会把它渲染成确认卡，用户点确认后才真正落库。
-- 一句话里有多件事就给多张草稿（最多 3 条），系统**一张一条**地显示、用户逐张确认；
+- 一句话里有多件事就给多张草稿（${limit === MAX_ACTIONS_UNLIMITED ? '条数不限' : `最多 ${limit} 条`}），系统**一张一条**地显示、用户逐张确认；
   不要为了"看起来干净"把三件事合成一条 —— 合成出来的记录落库就是错的。
+- 这一档**不受执行条数上限约束**：系统不会因为"一轮最多执行几个操作"把草稿丢掉，
+  给多几张大不了用户多点几张；你只管把每件事说清楚。
 - 删除（包括按范围清空）也只是**提议**：系统会出**一张**确认卡，用户点确认后才真的删；
   所以**绝不**要说"已经帮你加好了 / 已记录 / 已删除"，要说"我准备这样加，你确认一下"。`,
   auto: `【写入权限：自动审批（用户已允许系统直接落库）】
@@ -278,7 +322,9 @@ const SEARCH_MODES = ['off', 'web', 'campus'];
 /** 权限段落：三档都注入（缺省按 manual），因为"哪种说法"每轮都不一样。 */
 function permissionNote(context = {}) {
   const mode = PERMISSION_MODES.includes(context.permission) ? context.permission : 'manual';
-  return PERMISSION_NOTES[mode];
+  const note = PERMISSION_NOTES[mode];
+  // manual 的文案要把「一轮几条草稿」写准（数字来自设置项）；auto / strict 用固定文案
+  return typeof note === 'function' ? note(normalizeMaxActionsPerTurn(context.maxActionsPerTurn)) : note;
 }
 
 /** 检索段落：三档都注入（缺省按 off），重点是"没接入就照实说"。 */
@@ -349,7 +395,7 @@ function summaryBlock(context = {}) {
  *
  * 分类口径（写死在这里，别在别处再解释一次）：
  *   - `tools`  = 机器要照着填的**契约**：三个集合的字段表（DOMAIN_RULES）、
- *                模型输出的草稿协议（DRAFT_PROTOCOL）、各模块自己声明的 target 说明
+ *                模型输出的草稿协议（draftProtocol()）、各模块自己声明的 target 说明
  *                （`aiPrompt` 注入的 domainBlocks，内容就是"这个 target 有哪些字段"）、
  *                以及开着联网时的检索协议；
  *   - `system` = 其余全部：角色、当前时间、近期数据、记忆、摘要、权限/联网口径、
@@ -369,7 +415,7 @@ function chatPromptParts(context = {}) {
     { kind: 'tools', text: DOMAIN_RULES },
     { kind: 'tools', text: domainBlocks(context) },
     { kind: 'system', text: '' },
-    { kind: 'tools', text: DRAFT_PROTOCOL },
+    { kind: 'tools', text: draftProtocol(context) },
     { kind: 'system', text: '' },
     // 写入权限 / 联网检索：都是"这一轮"的选择，必须跟着提示词走，
     // 否则模型会谎报（auto 档还在说"你确认一下"、开关开了就假装"我搜到了"）

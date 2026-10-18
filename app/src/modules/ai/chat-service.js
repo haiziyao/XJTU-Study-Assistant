@@ -11,9 +11,11 @@
  *   3. **先插一条 assistant 占位消息**（`status: "streaming"`）拿到稳定的 messageId，
  *      流式的 delta 才能带着它广播出去；
  *   4. **循环**调上游（最多 `MAX_ROUNDS` 轮，一轮 = 一次 `provider.chat`，**每轮都流式**）：
- *      抽草稿（一轮可含多条写入草稿）→ dryRun 预校验 → 只读查询自动执行（`auto` 档连写操作一起执行）→
+ *      抽草稿（一轮可含多条写入草稿）→ dryRun 预校验 → 只读查询自动执行（`auto` 档连写操作一起执行，
+ *      但受设置项 `maxActionsPerTurn` 约束：只执行前 N 条，0 = 不限制）→
  *      把这一轮的结果（查询结果 **和** 已自动执行的写操作结果）回灌进上下文再进下一轮；
- *      某一轮既没有**新**查询、也没有真执行写操作，就说明它在作答，循环结束；
+ *      某一轮既没有**新**查询、也没有真执行写操作、也没有"因上限被截下来待确认"的草稿，
+ *      就说明它在作答，循环结束；
  *   5. 用**最后一轮**的正文把占位消息更新成 `done`（`rounds` / `roundLimit` / `usageRounds` 一起记下）；
  *   6. 失败：第一轮就失败 → 整条标 `failed` 并带上错误（不删，用户能看到"刚才那次没成"）；
  *      第二轮及以后的"总结失败" → 只记 `PARTIAL`，已经查到的数据照常返回。
@@ -26,7 +28,14 @@ import { ERROR_CODES } from '../../shared/constants.js';
 import { HttpError } from '../../core/http/router.js';
 import { todayKey } from '../../shared/time.js';
 
-import { maskAiConfig, AI_DEFAULTS, SEARCH_RETRY_MIN, SEARCH_RETRY_MAX } from './config.js';
+import {
+  AI_DEFAULTS,
+  MAX_ACTIONS_UNLIMITED,
+  SEARCH_RETRY_MIN,
+  SEARCH_RETRY_MAX,
+  maskAiConfig,
+  normalizeMaxActionsPerTurn,
+} from './config.js';
 import { extractDrafts, previewDrafts } from './drafts.js';
 import { buildChatSystemPrompt, buildCommandSystemPrompt, describeChatPrompt, estimateTokens } from './prompt.js';
 import {
@@ -1191,6 +1200,12 @@ export class AiChatService {
     const summary = await this.#ensureSummary(conversation, signal);
     // 作图：设置里开着就给（默认开），关着但用户用了「画…」这类指令词也临时给
     const draw = this.config.get().drawMode !== false || DRAW_KEYWORDS.test(trimmed);
+    /**
+     * 本轮最多自动执行几个写操作（设置项 `maxActionsPerTurn`，0 = 不限制）。
+     * 每回合只读一次：一次提问过程中用户改设置是极端情况，中途换数只会让"前面已执行几条"
+     * 的账算不清；这里取的是回合开始时的值，并在下面作为**整个回合**的累计预算使用。
+     */
+    const maxActions = normalizeMaxActionsPerTurn(this.config.get().maxActionsPerTurn);
     const history = this.#history(conversation.id);
     // #history 里最后一条就是刚存的用户正文，这里换成"正文 + 附件"的多模态版本
     const messages = [
@@ -1206,6 +1221,9 @@ export class AiChatService {
           // 放在展开之后，免得请求体里的 context 把这轮的选择覆盖掉。
           permission: mode,
           search: searchMode,
+          // 提示词里"一轮最多 N 条写入草稿"的 N 与下面真正执行用的是**同一个配置值**
+          // （0 = 不限制），不做任何字符串替换 —— prompt.js 是纯函数拼装。
+          maxActionsPerTurn: maxActions,
           // 摘要由上面 #ensureSummary 产出/复用；没有就是空串，提示词里不会多一段
           summary,
         }),
@@ -1246,6 +1264,12 @@ export class AiChatService {
     const queried = [];          // 只读查询结果：跨轮累积
     const executed = [];         // 自动执行的写操作：跨轮累积
     let drafts = [];             // 留给用户确认的草稿（没执行的，含校验不过的）
+    /**
+     * 因**超出本轮执行上限**而没有自动执行的写草稿：跨轮累积。
+     * 它们同时已经进了 `drafts`（走人工确认卡），这里单独留一份是为了给模型/调用方
+     * 说清"还有几条没执行" —— 只靠 drafts 区分不出"校验不过"与"上限截断"。
+     */
+    const deferredByLimit = [];
     let content = '';            // 被采纳的那一轮正文（每轮都会被下一轮覆盖）
     /**
      * 「停止时该落的正文」= 用户此刻在屏幕上看到的那一份。
@@ -1441,7 +1465,16 @@ export class AiChatService {
         // 被抽掉了），只看到"我准备加一条待办"的正文，所以它在后面某一轮把同一件事再说一遍很常见。
         // 注意：写结果现在会**回灌**（见下面的 #withExecutionResults），模型更容易"把刚做完的事
         // 再说一遍"（它想确认），所以这道指纹去重是必需的，不是可选的优化。
-        const doneKeys = new Set(executed.map((item) => this.#draftKey(item.entry)));
+        /**
+         * 已经处理过的写入 = 执行过的 + **因上限留成确认卡**的。
+         *
+         * 后者也要算进来：模型下一轮很可能把刚被截断的那几条再说一遍（它只看到自己说过
+         * "我加上这几条"，不知道哪几条没执行）。若不算，它们会被当成新草稿再次进入执行队列，
+         * 既可能重复出卡，也会让"回灌 → 再答"多绕好几轮。同一件事只处理一次。
+         */
+        const doneKeys = new Set(
+          [...executed, ...deferredByLimit].map((item) => this.#draftKey(item.entry ?? item)),
+        );
         /**
          * 真正要执行的写草稿 = 跨轮去重（`doneKeys`）+ **轮内去重**。
          *
@@ -1458,7 +1491,46 @@ export class AiChatService {
           freshKeys.add(key);
           freshWrites.push(entry);
         }
-        const executedNow = mode === 'auto' ? await this.#autoExecuteWrites(freshWrites, { signal, plan }) : [];
+        /**
+         * 「一轮最多执行几个操作」：**服务端真正执行限制**，不能只靠提示词。
+         *
+         * 提示词已经把 N 告诉模型了，但模型完全可能一口气给 5 条 —— 提示词是"请求"，这里才是"事实"。
+         * 只把前 N 条交给 `#autoExecuteWrites`，其余**不丢**：留在 `drafts` 里走人工确认卡
+         * （manual 语义，用户自己决定点不点）。这条"不静默丢弃"是硬要求：用户看到的应该是
+         * "办了 3 件、还有 2 件等你确认"，而不是"说了 5 件只办了 3 件、另外 2 件凭空消失"。
+         *
+         * 口径：
+         *   - 预算按**整个回合**累计（`executed` 跨轮），不是每轮各给 N 条 —— 用户设"一轮最多 3 个操作"，
+         *     期望的是"这次提问最多自动改 3 处"，而不是"模型每多说一轮就再多改 3 处"；
+         *   - 只统计**可执行**的写草稿：校验不过的本来就不会执行，不该白占名额；
+         *   - `0` = 不限制：全部交给执行器（仍受 `MAX_ROUNDS` 与去重约束）；
+         *   - manual / strict 档一条都不走这里，因此**不受这个上限影响**：确认卡列表不截断。
+         */
+        const writableWrites = freshWrites.filter(
+          (entry) => !entry.error && entry.draft?.action !== 'query' && entry.draft?.ok !== false,
+        );
+        const remainingSlots = maxActions === MAX_ACTIONS_UNLIMITED
+          ? writableWrites.length
+          : Math.max(maxActions - executed.length, 0);
+        const allowedWrites = writableWrites.slice(0, remainingSlots);
+        const deferredWrites = mode === 'auto' ? writableWrites.slice(remainingSlots) : [];
+        const executedNow = mode === 'auto' ? await this.#autoExecuteWrites(allowedWrites, { signal, plan }) : [];
+        if (deferredWrites.length) {
+          /**
+           * 给每张被截断的确认卡补一句"为什么没自动执行"。
+           *
+           * 写进 `draft.warnings` 而不是另造字段：确认卡本来就会渲染 warnings（见 shell 的 draftCard），
+           * 不需要改渲染层；用户点开卡片就能看到"超出上限、需要确认"，而不是以为自己点错了什么。
+           */
+          const notice = maxActions === MAX_ACTIONS_UNLIMITED
+            ? '本轮没有执行条数限制，这条没有自动执行（原因见回灌说明）。'
+            : `本轮最多自动执行 ${maxActions} 个操作（设置项「一轮最多执行几个操作」），这条超出了上限，`
+              + '**没有自动执行**：点「确认执行」后才会落库。';
+          for (const entry of deferredWrites) {
+            entry.draft = { ...entry.draft, warnings: [...(entry.draft?.warnings ?? []), notice] };
+          }
+          deferredByLimit.push(...deferredWrites);
+        }
         if (executedNow.length) {
           roundDrafts = freshWrites.filter((entry) => !executedNow.some((item) => item.entry === entry));
           executed.push(...executedNow);
@@ -1544,15 +1616,29 @@ export class AiChatService {
           ];
           continue;
         }
-        if (!fresh.length && !executedNow.length) break;
-        // 还有新查询（或刚写完还没回灌）、但轮数已经用光：记下来，调用方据此知道
+        /**
+         * 终止条件加了一项 `deferredWrites.length`：**被上限截断的这一轮也要回灌**。
+         *
+         * 不这么做的话，auto 档第二轮才冒出来的写草稿被截断时，循环直接收尾，模型永远不知道
+         * 它们没执行 —— 它下一句很可能照旧说"都加好了"，而用户看到的却是几张待确认卡。
+         * 回灌一轮让它知道"还有 M 条没执行"，它才有机会改口（也算"超出上限要说明"的兜底）。
+         * 不会因此死循环：被截断的草稿指纹已经进了 `doneKeys`，模型原样重发时不会再次触发。
+         */
+        if (!fresh.length && !executedNow.length && !deferredWrites.length) break;
+        // 还有新查询（或刚写完 / 刚被截断还没回灌）、但轮数已经用光：记下来，调用方据此知道
         // "答案是被上限截断的"，而不是以为模型就答了这么点。
         if (round >= MAX_ROUNDS) {
           hitRoundLimit = true;
           break;
         }
         // 把这一轮的结果回灌进上下文，进入下一轮 —— 这才是真正的工具循环
-        turnMessages = this.#withExecutionResults(turnMessages, extracted.text, { queried: fresh, executed: executedNow });
+        turnMessages = this.#withExecutionResults(turnMessages, extracted.text, {
+          queried: fresh,
+          executed: executedNow,
+          // 因上限没执行的也要说：模型据此改口，不谎报"都办好了"
+          deferred: deferredWrites,
+          maxActions,
+        });
       }
 
       // 循环因停止而跳出：按"已停止"收尾（正文保留停止前的内容），绝不落成 done
@@ -1567,10 +1653,29 @@ export class AiChatService {
       const saved = await this.store.aiMessages.update(assistant.id, {
         // 正文 = **最后一轮**抽掉草稿后的话；它为空时按"这一刻的事实"兜底：
         // 查过数据就说查到了、自动执行过写操作就说处理好了（细节另有数据卡片/回执卡）。
-        content: content || (queried.length ? '已经查到数据。' : executed.length ? '已经照你说的处理好了。' : ''),
+        // 有草稿被上限截断时优先说这一句：只报"处理好了"会让用户以为全部办完了。
+        content: content || (
+          deferredByLimit.length
+            ? executed.length
+              ? `已经自动执行 ${executed.length} 个操作，另有 ${deferredByLimit.length} 条超出本轮上限、等你确认。`
+              : `另有 ${deferredByLimit.length} 条写入草稿超出本轮上限、等你确认。`
+            : queried.length
+              ? '已经查到数据。'
+              : executed.length
+                ? '已经照你说的处理好了。'
+                : ''
+        ),
         // 草稿 / 已执行 / 查询都是**跨轮累积**：用户看到的应该是整次交互的全貌
         drafts,
         executed,
+        // 执行上限的**机读回执**：前端/排查都能看出"这一轮设了 3、执行了 3、截下 2 条"。
+        // 人话提示同时在 drafts[].draft.warnings 里（确认卡上可见）。
+        actionLimit: {
+          max: maxActions,
+          unlimited: maxActions === MAX_ACTIONS_UNLIMITED,
+          executed: executed.length,
+          deferred: deferredByLimit.length,
+        },
         thinking,
         permission: mode,
         search: searchMode,
@@ -1616,6 +1721,8 @@ export class AiChatService {
         drafts,
         queried,
         executed,
+        /** 执行上限回执：`{ max, unlimited, executed, deferred }`（0 = 不限制）。 */
+        actionLimit: saved.actionLimit,
         // 把这一轮的选择回显给调用方：前端据此在气泡上标注"自动执行/思考强度/联网"
         thinking,
         permission: mode,
@@ -1899,6 +2006,8 @@ export class AiChatService {
       draw: config.drawMode !== false,
       permission: 'manual',
       search: 'off',
+      // 提示词里的"N 条写入草稿"随配置变，估 token 时也要用同一个 N（差几个字符，但口径要一致）
+      maxActionsPerTurn: config.maxActionsPerTurn,
       domainBlocks: this.domainBlocks,
       summary,
       recent: this.#recentSummary(todayKey()),
@@ -2577,24 +2686,34 @@ export class AiChatService {
   /**
    * 把这一轮"系统真的做了的事"回灌进对话（**每轮**都回灌，不是固定的"第二次调用"）。
    *
-   * 两类结果共用一条注入消息（而不是两条）：
+   * 三类结果共用一条注入消息（而不是拆成几条）：
    *   - `queried`：只读查询的结果（模型据此作答）；
-   *   - `executed`：auto 档**已经落库**的写操作结果（模型据此说清"系统做了什么"，尤其是冲突）。
+   *   - `executed`：auto 档**已经落库**的写操作结果（模型据此说清"系统做了什么"，尤其是冲突）；
+   *   - `deferred`：因**超出本轮执行上限**而没执行的写草稿（模型据此改口，不谎报全办好了）。
    *
-   * 为什么合成一条：两者常常同一轮发生（"先查一下有没有撞，再帮我加一条"），拆成两条会变成
-   * 连续两条 user 消息 —— 上游兼容端点对消息角色交替的校验并不一致，能少踩一个坑就少踩一个。
+   * 为什么合成一条：它们常常同一轮发生（"先查一下有没有撞，再帮我加一条"），拆成几条会变成
+   * 连续几条 user 消息 —— 上游兼容端点对消息角色交替的校验并不一致，能少踩一个坑就少踩一个。
    *
    * 用一条 `role: "user"` 的显式标注消息而不是 `role: "tool"`：我们没走函数调用协议，
    * 各家 OpenAI 兼容端点对 `tool` 消息的校验不一致，而带标注的 user 消息到处都能跑。
    */
-  #withExecutionResults(messages, replyText, { queried = [], executed = [] } = {}) {
-    const sections = [this.#queryInjectionText(queried), this.#writeInjectionText(executed)].filter(Boolean);
+  #withExecutionResults(messages, replyText, { queried = [], executed = [], deferred = [], maxActions = 0 } = {}) {
+    const sections = [
+      this.#queryInjectionText(queried),
+      this.#writeInjectionText(executed, { deferred, maxActions }),
+    ].filter(Boolean);
     if (!sections.length) return messages;
     return [
       ...messages,
       {
         role: 'assistant',
-        content: replyText || (queried.length ? '（我发起了一次只读查询）' : '（我执行了一次写入操作）'),
+        content:
+          replyText ||
+          (queried.length
+            ? '（我发起了一次只读查询）'
+            : executed.length
+              ? '（我执行了一次写入操作）'
+              : '（我有几条写入草稿没有执行）'),
       },
       { role: 'user', content: sections.join('\n\n') },
     ];
@@ -2694,20 +2813,49 @@ export class AiChatService {
    *   1. 只能说系统**回报过**的东西（返回的 id / 标题 / 时间），不许编"已经提醒你了"；
    *   2. `conflicts` 非空时必须**主动**点名冲突条目（标题 + 时刻），不要等用户问；
    *   3. 不许把同一件事再输出一遍草稿 —— 靠 #draftKey 去重兜底，但提示词先说清能少一轮废调用。
+   *
+   * 第二段 `deferred` 是「超出本轮执行上限、没有执行」的那几条：**必须单独说**，
+   * 否则模型会按"我给了草稿 = 系统全办了"的语气收尾，而用户屏幕上明明还有几张待确认卡。
    */
-  #writeInjectionText(executed) {
-    if (!executed?.length) return '';
-    const records = executed.map((entry) => this.#compactWriteResult(entry));
-    const failed = records.filter((item) => item.ok === false);
-    return (
-      '[系统注入] 上面的**写操作已由系统自动执行完毕**（用户选了"自动审批"档，不需要他再点确认）。' +
-      '执行结果（JSON）：\n' +
-      JSON.stringify(records) +
-      '\n请据此用自然语言告诉用户系统**真的做了什么**（用返回的标题与时间，不要编造 id 或没回报过的细节）：' +
-      (failed.length ? '执行失败的条目要如实说没成、并说明原因，绝不能报成成功；' : '') +
-      '如果某条结果里的 conflicts 非空，必须**主动提醒**"这条和已有的哪条日程时间重叠"（点名冲突条目的标题与时刻），不要等用户来问。' +
-      '不要再说"我准备…你确认一下"，也不要重复输出同一条写入草稿。'
-    );
+  #writeInjectionText(executed, { deferred = [], maxActions = 0 } = {}) {
+    const sections = [];
+    if (executed?.length) {
+      const records = executed.map((entry) => this.#compactWriteResult(entry));
+      const failed = records.filter((item) => item.ok === false);
+      sections.push(
+        '[系统注入] 上面的**写操作已由系统自动执行完毕**（用户选了"自动审批"档，不需要他再点确认）。' +
+          '执行结果（JSON）：\n' +
+          JSON.stringify(records) +
+          '\n请据此用自然语言告诉用户系统**真的做了什么**（用返回的标题与时间，不要编造 id 或没回报过的细节）：' +
+          (failed.length ? '执行失败的条目要如实说没成、并说明原因，绝不能报成成功；' : '') +
+          '如果某条结果里的 conflicts 非空，必须**主动提醒**"这条和已有的哪条日程时间重叠"（点名冲突条目的标题与时刻），不要等用户来问。' +
+          '不要再说"我准备…你确认一下"，也不要重复输出同一条写入草稿。',
+      );
+    }
+    if (deferred?.length) {
+      /**
+       * 被截断的草稿只给"哪条没执行"，**不给 id** —— 它们还没落库，没有 id 可给。
+       * 标题来自 `draftName`（与过程清单同一口径），模型据此能点名说清是哪几条。
+       */
+      const brief = deferred.map((entry) => ({
+        action: entry.draft?.action ?? null,
+        target: entry.draft?.target ?? null,
+        title: draftName(entry.draft) || null,
+        explain: entry.draft?.explain ?? null,
+      }));
+      const limitText = maxActions === MAX_ACTIONS_UNLIMITED
+        ? ''
+        : `本轮最多自动执行 ${maxActions} 个操作（设置项「一轮最多执行几个操作」），`;
+      sections.push(
+        `[系统注入] 本轮还有 ${deferred.length} 条写入草稿**没有执行**：${limitText}` +
+          '超出的部分已留成**待确认草稿**，等用户点确认后才会落库。' +
+          '没有执行的是（JSON）：\n' +
+          JSON.stringify(brief) +
+          `\n请**明确告诉用户**"还有 ${deferred.length} 条因为超出本轮上限没有自动执行，需要你确认"，` +
+          '并说清分别是哪几条；**不要**谎称已经全部办好，也不要把它们再输出一遍草稿（确认卡已经在界面上）。',
+      );
+    }
+    return sections.join('\n\n');
   }
 
   /**

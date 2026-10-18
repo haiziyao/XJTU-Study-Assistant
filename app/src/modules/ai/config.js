@@ -29,6 +29,19 @@
  *   - 默认 1_000_000（1M），合法区间 8000–2_000_000，越界同 `searchMaxPages` 的两段式处理；
  *   - 分母由用户填是因为不同模型/端点的窗口差别很大（128K / 1M / 自建代理），
  *     写死一个数只会让百分比长期对不上；`GET /ai/status` 会把它带出去，前端据此算百分比。
+ *
+ * 一轮最多执行几个操作（`maxActionsPerTurn`）：
+ *   - **默认 3**，合法取值是 **1–50** 的整数，另有 **0 = 不限制**；
+ *   - 为什么默认 3：这就是本项设置出现之前提示词里写死的那个数 —— 用户没动过设置时，
+ *     行为必须与旧版完全一致；3 也确实是"一句话三件事"的常见规模，再多就该分两轮说。
+ *   - 为什么 0 表示不限制、而不是 1：1 是一个**真实可选的严格档**（一轮只自动办一件事），
+ *     若拿 1 当"不限制"，用户把它从 3 调到 1 时限制会**静默消失**，正好调反；
+ *     0 则是"没有上限"的天然哨兵，与 `historyTurns: 0`（不带历史）的口径一致。
+ *   - 它只管 **auto（自动审批）档**真正执行的写操作条数：超出的草稿留在 `drafts` 里走
+ *     人工确认卡（manual 语义）。manual / strict 档本来就一条都不自动执行，因此不受它约束 ——
+ *     草稿列表也不截断，用户自己决定点哪几张。
+ *   - 提示词里那一句也由它生成（见 prompt.js），所以"提示"与"真正执行"是同一个数，
+ *     不会出现"提示词说最多 3 条，服务端却执行了 5 条"的割裂。
  */
 
 import path from 'node:path';
@@ -99,6 +112,14 @@ export const AI_DEFAULTS = Object.freeze({
    * 便宜 N 倍；关掉只在"只要链接和摘要、不想要正文"时才有意义。
    */
   searchNeedContent: true,
+
+  // ---------------------------------------------------------------- 写入执行
+  /**
+   * 「一轮最多执行几个操作」（auto 档真正落库的写操作条数）。
+   * **默认 3 / 合法 1–50 / 0 = 不限制**；超出的草稿留成待确认卡，不静默丢弃。
+   * 提示词里那句"一轮最多给 N 条写入草稿"与这里**同源**（见 prompt.js）。
+   */
+  maxActionsPerTurn: 3,
 });
 
 /** 允许被持久化的字段白名单：接口不能往里塞任意键。 */
@@ -120,6 +141,7 @@ export const AI_CONFIG_FIELDS = Object.freeze([
   'searchApiKeys',
   'searchApiBase',
   'searchNeedContent',
+  'maxActionsPerTurn',
 ]);
 
 /** 「网络搜索最大条数」的合法区间（与 web-search.js 的 SEARCH_LIMIT_MIN/MAX 一致）。 */
@@ -141,6 +163,17 @@ export const SEARCH_RETRY_MAX = 6;
  */
 export const CONTEXT_WINDOW_MIN = 8_000;
 export const CONTEXT_WINDOW_MAX = 2_000_000;
+
+/**
+ * 「一轮最多执行几个操作」的合法取值。
+ *
+ * `0` 单独表示**不限制**（不是"一次也不执行"）：见文件头对"为什么不是用 1 表示不限制"的说明。
+ * 上限 50：再往上用户已经分不清一轮里到底写了什么，确认卡也会刷屏；
+ * 它挡的是"手滑多敲一个 0"，而不是限制正常使用（默认才 3）。
+ */
+export const MAX_ACTIONS_UNLIMITED = 0;
+export const MAX_ACTIONS_MIN = 1;
+export const MAX_ACTIONS_MAX = 50;
 
 /** `searchProvider` 的合法取值：auto + DeepSeek 官方 + 四家 API + 强制只解析结果页。 */
 export const SEARCH_PROVIDER_VALUES = Object.freeze(['auto', 'scrape', 'deepseek', ...SEARCH_PROVIDERS]);
@@ -230,6 +263,25 @@ function normContextWindow(value, fallback = AI_DEFAULTS.contextWindow) {
   const base = num(fallback, { fallback: AI_DEFAULTS.contextWindow, min: CONTEXT_WINDOW_MIN, max: CONTEXT_WINDOW_MAX });
   const parsed = num(value, { fallback: base, min: CONTEXT_WINDOW_MIN, max: CONTEXT_WINDOW_MAX });
   return Math.min(CONTEXT_WINDOW_MAX, Math.max(CONTEXT_WINDOW_MIN, Math.trunc(parsed)));
+}
+
+/**
+ * 「一轮最多执行几个操作」的宽松归一化：取整，只接受 **0 或 1–50**。
+ *
+ * 0 是合法值（不限制），不能像 `normSearchRetryMax` 那样把下界写成 1 —— 那会把
+ * "用户明确关掉了限制"悄悄变成"一轮只办一件"，正好是相反的意思。
+ * 磁盘/环境变量里的脏值（负数、51、非数字）静默回落默认 3，服务照常起来；
+ * 用户在设置页填的越界值则由 `assertAiConfigInput` 抛 400。
+ *
+ * 导出给 prompt.js 用：提示词必须和真正执行用同一个数，不能让"默认值"有两份。
+ */
+export function normalizeMaxActionsPerTurn(value, fallback = AI_DEFAULTS.maxActionsPerTurn) {
+  const parse = (input) => {
+    // min 用 0 同时接住 0 与 1–50；小数先通过区间判断，再统一取整
+    const parsed = num(input, { fallback: null, min: MAX_ACTIONS_UNLIMITED, max: MAX_ACTIONS_MAX });
+    return parsed === null ? null : Math.trunc(parsed);
+  };
+  return parse(value) ?? parse(fallback) ?? AI_DEFAULTS.maxActionsPerTurn;
 }
 
 /**
@@ -329,6 +381,29 @@ export function assertAiConfigInput(input = {}) {
     }
   }
 
+  // 「一轮最多执行几个操作」：0 合法（不限制），1–50 合法；负数 / 51 / 小数 / 非数字一律 400。
+  // 它是 auto 档真正落库的条数上限，填错会让"以为只办 3 件、结果办了 30 件"，所以必须当场拦住。
+  const actions = input.maxActionsPerTurn;
+  if (actions !== undefined && actions !== null && actions !== '') {
+    // 布尔值不能当数字收：`Number(false) === 0` 会把它悄悄解释成"不限制"，
+    // 而 `pickAiConfig` 存的是 "false"（归一化时又回落 3）—— 两边不一致必须当场拦住。
+    const value = typeof actions === 'boolean' ? Number.NaN : Number(actions);
+    if (!Number.isFinite(value)) {
+      throw HttpError.badRequest(`一轮最多执行几个操作必须是数字，收到 ${JSON.stringify(actions)}`, {
+        field: 'maxActionsPerTurn',
+      });
+    }
+    if (!Number.isInteger(value)) {
+      throw HttpError.badRequest(`一轮最多执行几个操作必须是整数，收到 ${value}`, { field: 'maxActionsPerTurn' });
+    }
+    if (value !== MAX_ACTIONS_UNLIMITED && (value < MAX_ACTIONS_MIN || value > MAX_ACTIONS_MAX)) {
+      throw HttpError.badRequest(
+        `一轮最多执行几个操作只能是 0（不限制）或 ${MAX_ACTIONS_MIN}–${MAX_ACTIONS_MAX} 之间的整数，收到 ${value}`,
+        { field: 'maxActionsPerTurn' },
+      );
+    }
+  }
+
   const provider = input.searchProvider;
   if (provider !== undefined && provider !== null && provider !== '') {
     const value = String(provider).trim().toLowerCase();
@@ -413,6 +488,9 @@ export function normalizeAiConfig(input = {}, base = AI_DEFAULTS) {
   out.historyTurns = num(raw.historyTurns, { fallback: base.historyTurns, min: 0, max: 100 });
   // 上下文上限只影响「用量指示」的分母，不影响任何截断行为（截断仍看 historyTurns + 摘要）
   out.contextWindow = normContextWindow(raw.contextWindow, base.contextWindow);
+  // 一轮最多执行几个操作：宽松归一（0 = 不限制；磁盘/环境变量脏值静默回落默认 3）。
+  // 真正用它的是 chat-service 的 auto 档执行循环，提示词里那句也由同一个值生成。
+  out.maxActionsPerTurn = normalizeMaxActionsPerTurn(raw.maxActionsPerTurn, base.maxActionsPerTurn);
   // 布尔字段：pickAiConfig 已把它转成字符串，这里再解释一次
   out.drawMode = bool(raw.drawMode === undefined ? base.drawMode : raw.drawMode, base.drawMode);
 
@@ -472,6 +550,11 @@ export function maskAiConfig(config = {}) {
     historyTurns: config.historyTurns,
     /** 上下文窗口上限：前端拿它当「已用 / 上限」的分母（见 shell/app.js 的圆环）。 */
     contextWindow: config.contextWindow,
+    /**
+     * 一轮最多执行几个操作：0 = 不限制，1–50 = 上限（默认 3）。
+     * 设置页据此回显，前端不必自己猜默认值。
+     */
+    maxActionsPerTurn: normalizeMaxActionsPerTurn(config.maxActionsPerTurn),
     drawMode: config.drawMode !== false,
     configured: Boolean(key),
     hasKey: Boolean(key),
@@ -515,7 +598,7 @@ export function redactSecret(text, secret) {
 
 /**
  * 从环境变量取配置
- * （`PC_AI_API_KEY` / `PC_AI_BASE_URL` / `PC_AI_MODEL` / … / `PC_AI_SEARCH_*`）。
+ * （`PC_AI_API_KEY` / `PC_AI_BASE_URL` / `PC_AI_MODEL` / … / `PC_AI_MAX_ACTIONS_PER_TURN` / `PC_AI_SEARCH_*`）。
  * 搜索密钥可以按服务给：`PC_AI_TAVILY_API_KEY` / `PC_AI_BRAVE_API_KEY` /
  * `PC_AI_SERPER_API_KEY` / `PC_AI_BING_API_KEY`，或用一个通用的 `PC_AI_SEARCH_API_KEY`。
  */
@@ -529,6 +612,7 @@ export function aiConfigFromEnv(env = process.env) {
     temperature: env.PC_AI_TEMPERATURE,
     historyTurns: env.PC_AI_HISTORY_TURNS,
     contextWindow: env.PC_AI_CONTEXT_WINDOW,
+    maxActionsPerTurn: env.PC_AI_MAX_ACTIONS_PER_TURN,
     drawMode: env.PC_AI_DRAW_MODE,
     searchEnabled: env.PC_AI_SEARCH_ENABLED,
     searchMaxPages: env.PC_AI_SEARCH_MAX_PAGES,

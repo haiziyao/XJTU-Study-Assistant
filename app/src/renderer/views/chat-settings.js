@@ -109,6 +109,47 @@
     }
     const config = ui.config;
 
+    // ---------------------------------------------------------- 写入
+    /**
+     * 「一轮最多执行几个操作」= auto（自动审批）档**真正落库**的写操作条数上限。
+     *
+     * 为什么放在这里、还要单独一组：它管的是"AI 一次能替用户改几处数据"，
+     * 与上下文/联网都不是一回事。用户调小它是为了"别一口气动太多条"，调大/不限制
+     * 则是嫌确认卡太碎 —— 两种诉求都真实存在，所以既要 1–50 的有限档，也要 0 = 不限制。
+     *
+     * 为什么用数字框 + 「不限制」复选框而不是只写“0”：0 这个值本身不直观
+     * （看起来像“一个都不执行”），勾选框把语义写死；两者同步，填 0 也等效。
+     */
+    mount.appendChild(mk('div', 'cs-group-title', '写入'));
+    const configuredMax = Number(config.maxActionsPerTurn ?? 3);
+    const maxActions = mk('input', 'cs-input cs-number cs-max-actions');
+    maxActions.type = 'number';
+    maxActions.min = '1';
+    maxActions.max = '50';
+    maxActions.step = '1';
+    maxActions.value = String(configuredMax === 0 ? 3 : configuredMax);
+    maxActions.disabled = configuredMax === 0;
+    mount.appendChild(
+      field(
+        '一轮最多执行几个操作',
+        maxActions,
+        '1–50（默认 3）。它只管「自动审批」档**真正执行**的写入条数：'
+          + '超出的草稿不会丢，会留成待确认卡等你逐张点；手动/全部确认档本来就不自动执行，不受它限制。'
+          + '实际还受多轮上限（每轮最多 8 次模型调用）与去重约束：同一件事只执行一次。',
+      ),
+    );
+    const unlimitedActions = mk('input');
+    unlimitedActions.type = 'checkbox';
+    unlimitedActions.id = 'cs-max-actions-unlimited';
+    unlimitedActions.checked = configuredMax === 0;
+    unlimitedActions.addEventListener('change', () => {
+      maxActions.disabled = unlimitedActions.checked;
+      // 取消勾选时给一个合法默认值，免得输入框停在被禁用的 0 上
+      if (unlimitedActions.checked) maxActions.value = '0';
+      else if (!(Number(maxActions.value) >= 1)) maxActions.value = '3';
+    });
+    mount.appendChild(field('不限制（0）', unlimitedActions, '勾选后不再按条数截断：模型给多少条，自动审批就尝试执行多少条（仍受多轮上限与去重约束）。'));
+
     // ---------------------------------------------------------- 上下文
     mount.appendChild(mk('div', 'cs-group-title', '上下文'));
 
@@ -245,6 +286,15 @@
         searchMaxPages: value,
         searchNeedContent: needContent.checked,
       };
+      // 「一轮最多执行几个操作」：勾了「不限制」就是 0，否则必须是 1–50 的整数。
+      // 范围与 config.js 的 MAX_ACTIONS_MIN/MAX（1–50）+ 0 = 不限制一致，改一边记得改另一边。
+      const actionsValue = unlimitedActions.checked ? 0 : Number(maxActions.value);
+      if (!unlimitedActions.checked && (!Number.isInteger(actionsValue) || actionsValue < 1 || actionsValue > 50)) {
+        ui.error = new Error('一轮最多执行几个操作必须是 1–50 之间的整数，或勾选「不限制」');
+        paint();
+        return;
+      }
+      body.maxActionsPerTurn = actionsValue;
       // 同上：范围与 config.js 的 SEARCH_RETRY_MIN/MAX（1–6）一致，改一边记得改另一边
       const retryValue = Number(retry.value);
       if (!Number.isInteger(retryValue) || retryValue < 1 || retryValue > 6) {
