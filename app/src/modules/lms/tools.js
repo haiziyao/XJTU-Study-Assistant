@@ -53,12 +53,21 @@ export const LMS_TOOL_SPECS = [
   },
   {
     name: 'lms_activities',
-    description: '列出课程活动（作业 / 资料 / 回放 / 直播）',
+    description: '列出课程活动（作业 / 资料 / 回放 / 直播）；作业的截止日（deadline）与是否已提交都在这条契约里',
     method: 'GET',
     path: '/lms/activities',
     requiresAuth: true,
     mutates: false,
     params: { courseId: 'number?', type: 'homework|material|lesson|lecture_live?', refresh: 'boolean?' },
+    returns: {
+      items:
+        '[{ id, courseId, courseName, type, typeLabel, title, startTime, endTime, deadline, submitted, userSubmitCount }]',
+    },
+    /**
+     * `deadline` 是给 AI 用的**归一化字段**：学堂原始数据只有 `endTime`，
+     * 而"哪天要交"只需要日期。有没有截止日直接决定作业会不会进待办（见 todos-bridge.js）。
+     */
+    hint: '作业的 deadline 是 YYYY-MM-DD（北京时间）；没有 deadline 的作业不会进待办，也不会被编一个日期。',
   },
   {
     name: 'lms_sync_preview',
