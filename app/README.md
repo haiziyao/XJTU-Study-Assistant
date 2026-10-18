@@ -339,8 +339,21 @@ node scripts/seed-demo.js --clear  # 只删除演示记录，不影响手动添�
     已完成的 `complete`、未完成且未勾选的 `uncomplete` 进 `skipped`（`reason: "already"`）；
   - `category` 复用 ≤24 字 / 空串 = 未分类的规则，已在目标分类里的进 `skipped`（`reason: "unchanged"`）；
   - 单次最多 **200** 个 id，超出返回 400（`details.code: "TOO_MANY_IDS"`）；重复 id 只算一次。
+- **AI 按范围处理待办（2026-10）**：`/commands/execute` 的 `todo` 支持 `delete` / `complete` /
+  `uncomplete` + `filters.scope`，一句话只出一条草稿，不逐条确认。六个范围：
+  `all`（全部）、`completed`（已完成）、`incomplete`（未完成）、`lms`（`externalId` 以 `lms:` 开头）、
+  `manual`（非 `lms:`，自己建 / 指令建 / AI 建）、`ids`（显式 id 数组）。
+  - 目标集合先走与 `locate()` 相同的 `todos.list()` 过滤，再按 scope 收窄；执行只调用服务层
+    `todos.bulk({ action, ids })`，因此"确认 `remove()` 解绑子级 / 完成 `update()` 级联"的口径只有一份。
+  - `dryRun` 返回 `{ planned: "bulk", action, scope, count, samples, warnings }`，样例带截止日；
+    不会写任何字段。`scope:"all"` 的警告写明"会删除全部 N 条待办（含你自己建的）"。
+  - 单批仍是 200；超过时指令层按 200 一组**顺序分批**执行，`explain` 会写"分 N 批执行"。
+    `batchCount / batchSize` 只在超过一批时出现。
+  - **`scope:"lms"` 不是永久清除**：学堂同步按 `externalId` 重建，删掉后下次同步会重新生成。
+    草稿的 `warnings` 与 `explain` 都会主动提醒；本次没有做"删除墓碑"或同步排除名单。
 - **取舍**：干跑预览只回 `matched + 样例`（不回预演后的字段），因为批量修改的影响面（级联 / 解绑）
   由服务端语义决定，前端不去猜；真实写入后才用 `changed / cascaded / detachedChildren` 汇报影响面。
+  AI 范围操作的维护入口是 `test/ai-todo-bulk.test.js`（六个 scope、级联、dryRun、201 条分批、auto/manual 链路、提示词）。
 
 ### 思源学堂接入（LMS）
 
