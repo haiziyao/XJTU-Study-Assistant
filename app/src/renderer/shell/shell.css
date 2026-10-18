@@ -155,9 +155,94 @@ textarea:disabled {
 /* ------------------------------------------------------------------ 骨架 */
 
 .app {
+  /* 分界线是绝对定位的覆盖层（见下方 .col-splitter），需要这里当定位上下文。
+     它**不占网格列**，所以 1500px 宽下的默认 128 / 592 / 780 一点没变。 */
+  position: relative;
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(300px, 1fr) var(--panel-w);
   height: 100vh;
+}
+
+/* ------------------------------------------------------- 中/右栏分界线（可拖动） */
+
+/*
+ * 为什么是绝对定位的覆盖层，而不是第 4 个网格子项：
+ *   把 6px 的线塞进 grid，就会从三栏的总宽里硬切走 6px —— 1500px 下默认的
+ *   `128 / 592 / 780` 立刻变成 `128 / 589 / 777`（要求首次运行逐像素不变）。
+ *   定位到 `right: var(--panel-w)` 则只覆盖边界，不参与布局；拖动时改 `--panel-w`，
+ *   轨道和线一起动，视觉上就是那条线在推着两栏走。
+ *
+ * 命中区 6px、细线 1px：
+ *   线本身要"极细"才不抢内容，但 1px 的拖拽目标太难点中。所以元素实体 6px
+ *   （跨在边界两侧各 3px），中间用 ::before 画 1px 的线。
+ */
+.col-splitter {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: calc(var(--panel-w) - 3px);
+  width: 6px;
+  z-index: 30;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  /* 触屏/触控板拖动时不要触发页面滚动或文本选择 */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.col-splitter::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* 6px 元素的右边缘在边界 +3px；right:3px 让 1px 线正好压在中栏既有的
+     border-right 上（不是旁边再加一条），静止时因此**不改变任何像素**。 */
+  right: 3px;
+  width: 1px;
+  /* 静止时透明：中栏 `.chat` 本来就有一条 1px 的 border-right，这条细线就是分界线；
+     再叠一层 8% 白会让默认外观变亮。只有在 hover / 聚焦 / 拖动时才染成蓝色。 */
+  background: transparent;
+  transition: background var(--t), box-shadow var(--t);
+}
+
+/* hover / 键盘聚焦 / 正在拖动：三种时候都高亮，告诉用户"这条线是能动的" */
+.col-splitter:hover::before,
+.col-splitter:focus-visible::before,
+body.resizing .col-splitter::before {
+  background: var(--blue);
+  box-shadow: 0 0 0 1px rgba(108, 140, 255, 0.35), 0 0 8px rgba(108, 140, 255, 0.45);
+}
+
+/* 焦点已经由上面那条变蓝的线表达；再套一层全局 2px outline 会变成两条竖线 */
+.col-splitter:focus-visible {
+  outline: none;
+}
+
+/* 拖动期间统一光标并禁止选中文字：否则指针滑过中栏时会把聊天记录刷成蓝色 */
+body.resizing,
+body.resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+/* 收起右栏 / 笔记专注模式：第三栏不存在，分界线也必须跟着消失。
+   展开后 `--panel-w`（若用户拖过）仍留在 .app 上，所以自然回到上次的宽度。 */
+body.panel-collapsed .col-splitter,
+body.notes-focus .col-splitter {
+  display: none;
+}
+
+/* ≤900px：三栏放不下「中栏 360 + 右栏 380」这两条下限，分界线没有可用区间；
+   手机布局本身在 760px 以下切换成两栏。这里隐藏而不是留一条拖不动的线，
+   同时让 tab 键不会聚焦到一个不可见的分隔条上。 */
+@media (max-width: 900px) {
+  .col-splitter {
+    display: none;
+  }
 }
 
 body.panel-collapsed .app {
