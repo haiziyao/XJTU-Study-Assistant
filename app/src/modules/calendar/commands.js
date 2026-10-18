@@ -17,6 +17,45 @@ import { HttpError } from '../../core/http/router.js';
 const TARGET_LABEL = { schedule: '日程', event: '日历事件', todo: '待办' };
 const labelOf = (target) => TARGET_LABEL[target] ?? target;
 
+/** 范围文案：回执/预览里说清"删的是哪一块"，用户才敢点确认。 */
+const BULK_SOURCE_LABEL = { manual: '仅手动创建', import: '仅课表导入', lms: '仅学堂同步' };
+
+/**
+ * filters 里出现 `scope`（或只有 `ids`）就按"按范围批量删除"处理。
+ *
+ * 为什么用"出现 scope"而不是"条数超过 N"：口径必须由调用方**明说**。按条数自动切换，
+ * 会让"删掉这一条"和"清空全部"共用一条路径 —— 哪天匹配范围算错，删的就不是一条。
+ * 老的逐条删除（关键词 / 日期区间）保持原行为，不受这次改动影响。
+ */
+function bulkScopeOf(filters = {}) {
+  const scope = String(filters.scope ?? '').trim();
+  if (scope) return scope;
+  if (Array.isArray(filters.ids) && filters.ids.length) return 'ids';
+  return null;
+}
+
+function bulkRangeLabel(scope, filters = {}) {
+  if (scope === 'all') return '全部';
+  // 「时间段」三个字要留着：确认卡上只有日期时，用户还得自己判断这是"某个范围"还是"某一天"
+  if (scope === 'range') return `时间段 ${filters.from ?? '?'} 至 ${filters.to ?? '?'}`;
+  if (scope === 'source') return BULK_SOURCE_LABEL[filters.source] ?? `来源 ${filters.source ?? '?'}`;
+  if (scope === 'ids') return `指定 ${Array.isArray(filters.ids) ? filters.ids.length : 0} 条`;
+  return scope;
+}
+
+/**
+ * 「这会清空全部日程」只加一次。
+ *
+ * 为什么要去重：确认卡回传草稿时会把 warnings 一起带回来（前端把整个 draft 再 POST 一次），
+ * 再加一遍就变成同一句提示出现两遍。用关键词判断而不是全等 —— 条数会变（预览 10 条、
+ * 执行时可能只剩 9 条），全等会让去重失效。
+ */
+function clearAllWarnings(draft, text) {
+  const warnings = Array.isArray(draft.warnings) ? [...draft.warnings] : [];
+  if (text && !warnings.some((item) => String(item).includes('这会清空全部日程'))) warnings.push(text);
+  return warnings;
+}
+
 export function createCalendarCommands({ events, schedules, todos, store }) {
   /** 三个 target 各自的集合服务：写库与「只校验」都从这里取，避免出现两套校验。 */
   const targetService = (target) =>
@@ -50,6 +89,77 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
     }
     if (filters.id) return [events.get(filters.id)];
     return events.list({ from: filters.from, to: filters.to, keyword: filters.keyword });
+  }
+
+  /**
+   * 按范围删除日程：**一个动作、一个草稿**。
+   *
+   * 为什么必须走服务层的 `bulkDelete` 而不是自己循环 `remove`：
+   *   - 回收站、confirm/confirmText、范围口径都只该有一份实现；
+   *   - 循环删既没有预览数字，也没法撤销 —— 正是真机上模型说"只能逐条删"的根因。
+   *
+   * dryRun 返回 `planned: 'bulk'`（不是 `planned.action` 对象）：批量删除的"计划"就是
+   * "一次删一批"，条数与样例另有顶层字段，前端/回灌都不需要再理解一层结构。
+   */
+  async function deleteScheduleBulk(draft, options, scope) {
+    const filters = draft.filters ?? {};
+    const input = { scope, from: filters.from, to: filters.to, source: filters.source, ids: filters.ids };
+    const label = bulkRangeLabel(scope, filters);
+    const draftWarnings = Array.isArray(draft.warnings) ? draft.warnings : [];
+
+    if (options.dryRun) {
+      const preview = await schedules.bulkDelete({ ...input, dryRun: true });
+      // 「清空全部」必须在确认之前就说清楚：这是唯一一个会动到整个日程库的范围
+      const warnings =
+        scope === 'all'
+          ? clearAllWarnings(draft, `这会清空全部日程（${preview.count} 条），删除后可在日程页的「回收站」撤销`)
+          : draftWarnings;
+      /**
+       * 写回草稿本身：确认卡（shell/app.js 的 draftCard）只渲染 `draft.warnings`，
+       * 不读 `preview.warnings`。只把提示放在响应里，用户在卡上就看不到 —— 这一步不是缓存，
+       * 而是让"点确认之前"真的看得见警告。
+       */
+      if (warnings.length) draft.warnings = warnings;
+      return {
+        dryRun: true,
+        planned: 'bulk',
+        scope,
+        count: preview.count,
+        samples: preview.samples,
+        bySource: preview.bySource,
+        explain: `将删除 ${preview.count} 条日程（范围：${label}）`,
+        warnings,
+      };
+    }
+
+    /**
+     * 用户在对话里已经明确说过"删除所有日程"，所以指令层可以替他把 confirm 补成 true；
+     * 但 `scope:'all'` 的 confirmText 仍然照补 —— 它防的是"程序顺手清了整个库"，
+     * 而不是"用户没确认"。这条路径与 UI 走的是同一个服务方法、同一套安全阀。
+     */
+    const result = await schedules.bulkDelete({
+      ...input,
+      dryRun: false,
+      confirm: true,
+      ...(scope === 'all' ? { confirmText: '删除' } : {}),
+    });
+    // removed 为 0 时不要硬补"已放进回收站"（没有批次可撤）；预览阶段的警告照旧保留
+    const warnings =
+      scope === 'all' && result.removed > 0
+        ? clearAllWarnings(draft, `这会清空全部日程（${result.removed} 条），已放进日程页的「回收站」，可撤销`)
+        : draftWarnings;
+    return {
+      planned: 'bulk',
+      scope,
+      removed: result.removed,
+      trashId: result.trashId,
+      bySource: result.bySource,
+      count: result.removed,
+      warnings,
+      explain: result.removed
+        ? `已删除 ${result.removed} 条日程（范围：${label}），可在日程页的「回收站」撤销`
+        : `没有符合条件的日程（范围：${label}）`,
+    };
   }
 
   return {
@@ -175,6 +285,15 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
     },
 
     async delete(draft, options) {
+      /**
+       * 日程支持"按范围删除"：`filters.scope` 出现时整件事是一个批量动作，
+       * 不再走下面"先 locate 再逐条"的老路径。待办/日历事件目前没有这个能力，
+       * 不能顺手给它们也开一个 —— 那需要各自想清楚范围与回收站语义。
+       */
+      if (draft.target === 'schedule') {
+        const scope = bulkScopeOf(draft.filters);
+        if (scope) return deleteScheduleBulk(draft, options, scope);
+      }
       const matches = locate(draft);
       if (!matches.length) throw HttpError.notFound(`没有找到符合条件的${labelOf(draft.target)}`);
       if (options.dryRun) {

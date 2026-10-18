@@ -248,13 +248,18 @@ function calendarToolbar() {
   } else title.textContent = PCUtil.fmtCN(state.calendar.anchor);
 
   const spacer = mk('div', 'spacer');
+  // 批量删除放在工具栏：它是"清理日程"的入口，和「+ 新建」同层，用户不用先进某一天的详情
+  const bulk = mk('button', 'ghost-btn calendar-bulk-btn', '批量删除');
+  bulk.type = 'button';
+  bulk.title = '按范围清空日程（先预览、可撤销）';
+  bulk.addEventListener('click', () => openBulkDelete());
   const add = mk('button', 'primary-btn', '+ 新建');
   add.type = 'button';
   add.addEventListener('click', () =>
     openEditor({ target: 'schedule', defaults: { date: state.calendar.anchor } }),
   );
 
-  bar.append(seg, nav, title, spacer, add);
+  bar.append(seg, nav, title, spacer, bulk, add);
   return bar;
 }
 
@@ -1614,6 +1619,307 @@ function placeholderView(title, desc, bullets) {
       ctx.mount.appendChild(box);
     },
   };
+}
+
+/* ================================================================ 批量删除 / 回收站 */
+
+/**
+ * 批量删除的范围选项。
+ *
+ * 为什么把「仅课表导入」和「仅手动创建」拆成两个 source 选项，而不是让用户填自由文本：
+ * 这两类是用户真实会说的两句话（真机上模型列出来的正是"只删自己手建的 / 连课程一起清空"）。
+ * 界面直接给出这两个按钮，用户不必理解 source / externalId 这些内部词。
+ */
+const BULK_SCOPES = [
+  { value: 'all', label: '全部日程', hint: '清空日程页的所有安排（不含日历事件、待办与笔记）' },
+  { value: 'range', label: '某时间段', hint: '删除开始与结束日期之间的日程（含两端）' },
+  { value: 'import', label: '仅课表导入的课程', hint: '课表导入写入的日程（source=import 或 timetable: 前缀）' },
+  { value: 'manual', label: '仅手动创建的', hint: '你自己创建或让 AI / 指令创建的日程，不含任何导入' },
+];
+
+/** 把界面上的四个单选翻译成服务端契约（scope / from / to / source）。 */
+function bulkInputOf(choice, from, to) {
+  if (choice === 'all') return { scope: 'all' };
+  if (choice === 'range') return { scope: 'range', from: from.value, to: to.value };
+  return { scope: 'source', source: choice === 'import' ? 'import' : 'manual' };
+}
+
+/**
+ * 「批量删除」弹层：先选范围 → 预览条数与样例 → 二次确认 → 可撤销。
+ *
+ * 三个交互约束都是故意的：
+ *   1. **必须先预览**才能点红按钮：直接给一个"删除全部"按钮，误点一次就没了几百条；
+ *   2. **全部范围要勾选**「我知道这会清空全部日程」：这是唯一会动到整个日程库的选项；
+ *   3. **撤销按钮就在同一个弹层**：删除完不用去别处找回收站，手滑了当场能撤回。
+ *
+ * 样式全部走类名（CSP 禁内联 style），窄屏单列在 calendar.css 的 @media 里。
+ */
+function openBulkDelete() {
+  const state = PC.state;
+  const anchor = state.calendar?.anchor ?? PCUtil.todayKey();
+  const mask = mk('div', 'modal-mask');
+  const modal = mk('div', 'modal bulk-modal');
+
+  const head = mk('div', 'modal-head');
+  head.appendChild(mk('div', 'toolbar-title', '批量删除日程'));
+  const closeBtn = iconBtn('关闭', '✕', () => close());
+  head.appendChild(closeBtn);
+
+  const body = mk('div', 'modal-body');
+  body.appendChild(
+    mk('div', 'bulk-note', '先选范围并预览，确认后才会删除；删除的日程会留在「回收站」，可以撤销。'),
+  );
+
+  /** 默认选「仅课表导入的课程」：它是最常见的一次性清理，也最不容易误伤用户手建的数据。 */
+  let choice = 'import';
+  let lastPreview = null;
+  let undoId = null;
+  let busy = false;
+
+  const scopeBox = mk('div', 'bulk-scopes');
+  const radios = [];
+  for (const scope of BULK_SCOPES) {
+    const row = mk('label', 'bulk-scope');
+    const radio = mk('input', 'bulk-radio');
+    radio.type = 'radio';
+    radio.name = 'bulk-scope';
+    radio.value = scope.value;
+    radio.checked = scope.value === choice;
+    const text = mk('span', 'bulk-scope-text');
+    text.append(mk('span', 'bulk-scope-label', scope.label));
+    if (scope.hint) text.append(mk('span', 'bulk-scope-hint', scope.hint));
+    row.append(radio, text);
+    radio.addEventListener('change', () => {
+      choice = scope.value;
+      paintScope();
+      invalidatePreview('范围已改变，请重新点「预览」。');
+    });
+    radios.push(radio);
+    scopeBox.appendChild(row);
+  }
+  body.appendChild(scopeBox);
+
+  const rangeRow = mk('div', 'bulk-range hidden');
+  const fromInput = mk('input', 'bulk-from');
+  fromInput.type = 'date';
+  fromInput.value = PCUtil.startOfMonth(anchor);
+  const toInput = mk('input', 'bulk-to');
+  toInput.type = 'date';
+  // 默认区间 = 当前视图这个月（下个月 1 号往回退一天）
+  toInput.value = PCUtil.addDays(PCUtil.addMonths(anchor, 1), -1);
+  rangeRow.append(field('开始日期', fromInput), field('结束日期', toInput));
+  for (const input of [fromInput, toInput]) {
+    input.addEventListener('change', () => invalidatePreview('日期已改变，请重新点「预览」。'));
+  }
+  body.appendChild(rangeRow);
+
+  const allWarn = mk('label', 'bulk-all-warn hidden');
+  const allCheck = mk('input', 'bulk-all-check');
+  allCheck.type = 'checkbox';
+  allWarn.append(allCheck, mk('span', null, '我知道这会清空全部日程'));
+  allCheck.addEventListener('change', () => paintConfirm());
+  body.appendChild(allWarn);
+
+  const previewBox = mk('div', 'bulk-preview');
+  previewBox.appendChild(mk('div', 'bulk-preview-empty', '点「预览」查看将删除哪些日程。'));
+  body.appendChild(previewBox);
+
+  const actions = mk('div', 'bulk-actions');
+  const previewBtn = mk('button', 'ghost-btn bulk-preview-btn', '预览将删除的日程');
+  previewBtn.type = 'button';
+  const undoBtn = mk('button', 'ghost-btn bulk-undo', '撤销上次删除');
+  undoBtn.type = 'button';
+  undoBtn.disabled = true;
+  actions.append(previewBtn, undoBtn);
+  body.appendChild(actions);
+
+  const error = mk('div', 'modal-error');
+  const foot = mk('div', 'modal-foot');
+  foot.appendChild(mk('div', 'spacer'));
+  const cancel = mk('button', 'ghost-btn', '取消');
+  cancel.type = 'button';
+  const confirm = mk('button', 'danger-btn bulk-confirm', '确认删除');
+  confirm.type = 'button';
+  foot.append(cancel, confirm);
+
+  modal.append(head, body, error, foot);
+  mask.appendChild(modal);
+  document.body.appendChild(mask);
+
+  mask.addEventListener('click', (event) => {
+    if (event.target === mask) close();
+  });
+  const onKey = (event) => {
+    if (event.key === 'Escape') close();
+  };
+  document.addEventListener('keydown', onKey);
+
+  function close() {
+    document.removeEventListener('keydown', onKey);
+    mask.remove();
+  }
+
+  /** 范围显隐 + 全部范围的强提示。 */
+  function paintScope() {
+    rangeRow.classList.toggle('hidden', choice !== 'range');
+    allWarn.classList.toggle('hidden', choice !== 'all');
+    for (const radio of radios) radio.checked = radio.value === choice;
+    paintConfirm();
+  }
+
+  function setBusy(next) {
+    busy = next;
+    previewBtn.disabled = next;
+    previewBtn.textContent = next ? '处理中…' : '预览将删除的日程';
+    paintConfirm();
+  }
+
+  /**
+   * 红按钮的启用条件：**已经预览过、有记录可删、且（全部范围已勾选确认）**。
+   * 不满足时保持禁用 —— 光靠文案提醒挡不住误点。
+   */
+  function paintConfirm() {
+    const ready = Boolean(lastPreview) && lastPreview.count > 0 && (choice !== 'all' || allCheck.checked);
+    confirm.disabled = busy || !ready;
+    undoBtn.disabled = busy || !undoId;
+    confirm.textContent = lastPreview?.count > 0 ? `确认删除 ${lastPreview.count} 条` : '确认删除';
+  }
+
+  function invalidatePreview(message) {
+    lastPreview = null;
+    previewBox.replaceChildren(mk('div', 'bulk-preview-empty', message ?? '请先预览。'));
+    paintConfirm();
+  }
+
+  /** 预览结果：条数 + 前几条样例（标题 + 日期），用户据此判断删的是不是这一批。 */
+  function paintPreview(result) {
+    previewBox.replaceChildren();
+    if (!result.count) {
+      previewBox.appendChild(mk('div', 'bulk-preview-empty', '没有符合条件的日程，不需要删除。'));
+      return;
+    }
+    const count = mk('div', 'bulk-count');
+    count.append(mk('span', null, '将删除 '), mk('strong', null, String(result.count)), mk('span', null, ' 条日程'));
+    previewBox.appendChild(count);
+    const samples = result.samples ?? [];
+    if (samples.length) {
+      const list = mk('div', 'bulk-samples');
+      for (const item of samples) {
+        const row = mk('div', 'bulk-sample');
+        row.append(
+          mk('span', 'bulk-sample-title', item.title ?? item.id ?? '未命名'),
+          mk('span', 'bulk-sample-date', `${item.date ?? ''} ${item.startTime ?? ''}`.trim()),
+        );
+        list.appendChild(row);
+      }
+      if (result.count > samples.length) {
+        list.appendChild(mk('div', 'bulk-more', `…另有 ${result.count - samples.length} 条未列出`));
+      }
+      previewBox.appendChild(list);
+    }
+    if (result.bySource) {
+      const { manual = 0, import: imported = 0, lms = 0 } = result.bySource;
+      previewBox.appendChild(mk('div', 'bulk-mix', `手动 ${manual} 条 · 课表导入 ${imported} 条 · 学堂同步 ${lms} 条`));
+    }
+    if (choice === 'all') {
+      previewBox.appendChild(mk('div', 'bulk-warning', '注意：这会清空全部日程（不含日历事件、待办和笔记）。'));
+    }
+  }
+
+  async function runPreview() {
+    if (busy) return;
+    error.textContent = '';
+    const input = bulkInputOf(choice, fromInput, toInput);
+    if (input.scope === 'range') {
+      if (!input.from || !input.to) {
+        error.textContent = '请填写开始和结束日期';
+        return;
+      }
+      if (input.to < input.from) {
+        error.textContent = '结束日期不能早于开始日期';
+        return;
+      }
+    }
+    setBusy(true);
+    try {
+      const result = await PC.api('/schedules/bulk-delete', { method: 'POST', body: { ...input, dryRun: true } });
+      lastPreview = result;
+      paintPreview(result);
+    } catch (err) {
+      lastPreview = null;
+      error.textContent = err.message;
+      previewBox.replaceChildren(mk('div', 'bulk-preview-empty', '预览失败，请重试。'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runDelete() {
+    if (busy || !lastPreview || lastPreview.count === 0) return;
+    if (choice === 'all' && !allCheck.checked) return;
+    error.textContent = '';
+    const input = bulkInputOf(choice, fromInput, toInput);
+    setBusy(true);
+    try {
+      // 全部范围必须带中文确认词：服务端用它挡住"程序顺手清了整个库"
+      const body = {
+        ...input,
+        dryRun: false,
+        confirm: true,
+        ...(input.scope === 'all' ? { confirmText: '删除' } : {}),
+      };
+      const result = await PC.api('/schedules/bulk-delete', { method: 'POST', body });
+      PC.toast(`已删除 ${result.removed} 条，可在「回收站」撤销`);
+      lastPreview = null;
+      previewBox.replaceChildren(mk('div', 'bulk-preview-empty', `已删除 ${result.removed} 条日程。`));
+      PC.refresh();
+      await refreshUndo();
+    } catch (err) {
+      error.textContent = err.message;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 回收站里有批次时「撤销上次删除」才可用（没有记录就没有可撤的）。 */
+  async function refreshUndo() {
+    try {
+      const trash = await PC.api('/schedules/trash');
+      const latest = trash.items?.[0] ?? null;
+      undoId = latest?.id ?? null;
+      undoBtn.textContent = latest ? `撤销上次删除（${latest.count} 条）` : '撤销上次删除';
+    } catch {
+      undoId = null;
+    }
+    paintConfirm();
+  }
+
+  async function runUndo() {
+    if (busy || !undoId) return;
+    error.textContent = '';
+    setBusy(true);
+    try {
+      const result = await PC.api('/schedules/trash/restore', { method: 'POST', body: { trashId: undoId } });
+      const skipped = result.skipped ? `，跳过 ${result.skipped} 条已存在的记录` : '';
+      PC.toast(`已恢复 ${result.restored} 条${skipped}`);
+      lastPreview = null;
+      previewBox.replaceChildren(mk('div', 'bulk-preview-empty', `已恢复 ${result.restored} 条日程。`));
+      PC.refresh();
+      await refreshUndo();
+    } catch (err) {
+      error.textContent = err.message;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  previewBtn.addEventListener('click', runPreview);
+  confirm.addEventListener('click', runDelete);
+  undoBtn.addEventListener('click', runUndo);
+  cancel.addEventListener('click', close);
+
+  paintScope();
+  refreshUndo();
 }
 
 /* ================================================================ 新建 / 编辑弹层 */
