@@ -942,7 +942,8 @@ function todoToolbar() {
   title.placeholder = '添加待办，回车即可…';
   const date = mk('input', 'qa-date');
   date.type = 'date';
-  date.value = PCUtil.todayKey();
+  // 默认留空 = 没有截止日：以前预填今天，用户不注意就会给每条待办编一个假期限
+  date.value = '';
   const hours = mk('input', 'qa-hours');
   hours.type = 'number';
   hours.min = '0';

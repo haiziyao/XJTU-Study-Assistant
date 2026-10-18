@@ -138,6 +138,7 @@ export function registerCalendarRoutes(router, { services, apiPrefix = '/api/v1'
       completed: query.completed,
       priority: query.priority,
       overdue: query.overdue,
+      noDeadline: query.noDeadline,
       keyword: query.keyword,
       category: query.category,
       parentId: query.parentId,

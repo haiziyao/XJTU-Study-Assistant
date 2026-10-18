@@ -717,8 +717,13 @@ test('待办：不传 deadline 也能创建，派生字段是"不逾期/不是�
     const explicit = await ctx.call('POST', '/todos', { title: '显式 null', deadline: null });
     assert.equal(explicit.status, 201);
     assert.equal(explicit.body.item.deadline, null);
+
+    // 空串与 null 等价：表单留空提交时就是 ''
+    const blank = await ctx.call('POST', '/todos', { title: '空串', deadline: '' });
+    assert.equal(blank.status, 201, JSON.stringify(blank.body)?.slice(0, 200));
+    assert.equal(blank.body.item.deadline, null);
   } finally {
-    await ctx.close();
+    await ctx.app.close();
   }
 });
 
@@ -738,8 +743,15 @@ test('待办：PATCH 传 deadline:null/空串能把已有截止日清掉；不�
     assert.equal(cleared.status, 200, JSON.stringify(cleared.body)?.slice(0, 200));
     assert.equal(cleared.body.item.deadline, null);
     assert.equal(cleared.body.item.isOverdue, false);
+
+    // 再填回去，然后用空串清空：表单把日期输入框清掉时发的是 ''
+    const refilled = await ctx.call('PATCH', `/todos/${id}`, { deadline: '2026-12-01' });
+    assert.equal(refilled.body.item.deadline, '2026-12-01');
+    const blanked = await ctx.call('PATCH', `/todos/${id}`, { deadline: '' });
+    assert.equal(blanked.status, 200, JSON.stringify(blanked.body)?.slice(0, 200));
+    assert.equal(blanked.body.item.deadline, null);
   } finally {
-    await ctx.close();
+    await ctx.app.close();
   }
 });
 
@@ -760,7 +772,7 @@ test('待办：无截止日的不算逾期、能单独筛出、排序排在有�
     const titles = all.body.items.map((item) => item.title);
     assert.equal(titles[titles.length - 1], 'A 无期限', `无截止日应排最后：${titles.join(' | ')}`);
   } finally {
-    await ctx.close();
+    await ctx.app.close();
   }
 });
 
@@ -769,10 +781,10 @@ test('待办：日历聚合跳过无截止日的待办（不会塞进 key 为 nu
   try {
     await ctx.call('POST', '/todos', { title: '无期限', deadline: null });
     await ctx.call('POST', '/todos', { title: '有期限', deadline: '2026-11-02' });
-    const grouped = ctx.services.todos.groupByDeadline({});
+    const grouped = ctx.app.services.todos.groupByDeadline({});
     assert.equal(grouped.has(null), false, '不该出现 null 这个桶');
     assert.equal(grouped.get('2026-11-02')?.length, 1);
   } finally {
-    await ctx.close();
+    await ctx.app.close();
   }
 });
