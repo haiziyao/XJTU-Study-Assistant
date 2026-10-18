@@ -109,7 +109,7 @@ export const CALENDAR_TOOL_SPECS = [
     mutates: true,
     params: {
       title: 'string（≤120，必填）',
-      deadline: 'YYYY-MM-DD（必填，截止日）',
+      deadline: 'YYYY-MM-DD?（可选，截止日；用户没说期限就别填，不传 / null = 没有截止日）',
       estimatedHours: 'number?（预估工时，默认 1；≤1 简单 / ≤3 一般 / ≤10 复杂 / >10 繁琐）',
       priority: '0|1|2?（默认 0 低）',
       description: 'string?',

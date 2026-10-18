@@ -21,6 +21,17 @@ import { KIND_LABEL } from './service.js';
 /** 显式记忆措辞：出现在句首（允许"帮我/请/麻烦"这类前缀）。 */
 const TRIGGER_RE = /^\s*(?:帮我|请|麻烦|给我)?\s*(?:记住|记一下|记下|记录一下|帮我记|以后都|以后|从此|今后|别再|不要再)\s*[，,、:：]?\s*/;
 
+/**
+ * 「记一下 + 动作」多半是在记一件待办，而不是长期记忆。
+ *
+ * 例：「记一下交实验报告」「提醒我写报告」—— 这些没有日期时要落成**无截止日的待办**，
+ * 不能被记忆解析器用 0.95 的置信度抢走（否则待办页永远看不到它）。
+ * 只认句首的动作词，且句中带"在 / 是 / 有 / 喜欢…"这类事实描述时仍按记忆处理：
+ * 「记一下打印店在二餐旁边」是一条事实，不是"去打印"的任务。
+ */
+const TASK_START_RE = /^(?:交|提交|写|做|完成|复习|预习|准备|报名|参加|买|打印|看|读|背|练|整理|填|发|联系|预约|缴|还|取|送|打|查|学|听|拍|修|改|投|申请|办理|下载|上传|装|带|寄)/;
+const FACT_HINT_RE = /(在|是|有|位于|叫|喜欢|讨厌|习惯|不方便|没空|不能|不想|最好|宁愿|效率)/;
+
 /** `kind` 的规则推断（§10.2 的语义边界：选错会让注入顺序和界面分组一起错）。 */
 function kindOf(text) {
   if (/(别再|不要再|不能|不可以|不方便|没空|没时间|避免|禁止)/.test(text)) return 'constraint';
@@ -39,6 +50,15 @@ export class MemoryParser {
 
     const payload = raw.slice(match[0].length).trim().replace(/^[「"'“]|[」"'”]$/g, '').trim();
     if (!payload) return { ok: false, raw, warnings: ['要记住什么？请把内容说完整'] };
+
+    // 「记一下交实验报告」是待办，不是长期记忆：交给日历解析器（没有日期时落成无截止日待办）
+    if (TASK_START_RE.test(payload) && !FACT_HINT_RE.test(payload)) {
+      return {
+        ok: false,
+        raw,
+        warnings: ['像是要记一件待办/任务，交给日历待办处理'],
+      };
+    }
 
     // 有确切时间位置 → 交给日历三域（事件/日程/待办）
     if (parseDateExpr(payload) || hasExplicitTime(payload)) {

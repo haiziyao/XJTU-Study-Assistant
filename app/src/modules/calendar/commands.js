@@ -21,6 +21,39 @@ const labelOf = (target) => TARGET_LABEL[target] ?? target;
 const BULK_SOURCE_LABEL = { manual: '仅手动创建', timetable: '仅课表导入', lms: '仅学堂同步' };
 
 /**
+ * 待办按范围批量处理：六个范围与 `filters.scope` 一一对应。
+ *
+ * 为什么不复用日程的 scope 词汇：日程的范围是「时间段 / 来源」，待办的日常说法是
+ * 「已完成 / 未完成 / 学堂同步 / 自己建的」。硬套 source+range 会让模型把
+ * "删掉所有已完成的待办" 写成 `completed: true` 的逐条钻取，又在超过条数上限时卡住。
+ */
+const TODO_BULK_SCOPES = ['all', 'completed', 'incomplete', 'lms', 'manual', 'ids'];
+const TODO_BULK_SCOPE_LABEL = {
+  all: '全部',
+  completed: '已完成的',
+  incomplete: '未完成的',
+  lms: '仅学堂同步的',
+  manual: '仅手动创建的',
+};
+const TODO_BULK_ACTION_LABEL = { delete: '删除', complete: '完成', uncomplete: '取消完成' };
+
+/**
+ * 服务层一次最多 200 个 id（`todo-service.js` 的 MAX_BULK_IDS）。
+ *
+ * 指令层在**这里**分批，而不是把限制改大：200 是防误删的安全阀，不是业务上限。
+ * 用户说"删掉所有已完成的待办"时范围已经明确，不能因为恰好有 201 条就让他自己缩小范围。
+ * 分批仍然只调用 `todos.bulk()`，不绕过任何单条语义（级联完成、解除子级、跳过 already 都在服务层）。
+ */
+const TODO_BULK_BATCH = 200;
+/** 预览样例条数：与 `todos.bulk()` 的 dryRun 保持一致（8 条足够确认选对了范围）。 */
+const TODO_BULK_SAMPLE_LIMIT = 8;
+
+/** 学堂同步的待办判据与 lms 模块一致：externalId 以 `lms:` 开头。 */
+function isLmsTodo(item) {
+  return String(item?.externalId ?? '').startsWith('lms:');
+}
+
+/**
  * filters 里出现 `scope`（或只有 `ids`）就按"按范围批量删除"处理。
  *
  * 为什么用"出现 scope"而不是"条数超过 N"：口径必须由调用方**明说**。按条数自动切换，
@@ -34,6 +67,20 @@ function bulkScopeOf(filters = {}) {
   return null;
 }
 
+/**
+ * 待办的范围识别：**空 `filters.ids` 也必须进批量路径**。
+ *
+ * 为什么不复用 bulkScopeOf 末尾那个 `.length` 判断：`ids: []` 若被当成"没有范围"，
+ * 就会掉进老 locate 路径；而 locate 不看 `filters.ids`，一个条件都没加时等于「全部待办」。
+ * 模型给空数组时用户的本意是"这 0 条"，绝不能因此改成"那全部吧"。
+ * 批量路径会明确 400（ids 不能为空），这是安全方向上的失败。
+ */
+function todoBulkScopeOf(filters = {}) {
+  const scope = bulkScopeOf(filters);
+  if (scope) return scope;
+  return Array.isArray(filters.ids) ? 'ids' : null;
+}
+
 function bulkRangeLabel(scope, filters = {}) {
   if (scope === 'all') return '全部';
   // 「时间段」三个字要留着：确认卡上只有日期时，用户还得自己判断这是"某个范围"还是"某一天"
@@ -41,6 +88,71 @@ function bulkRangeLabel(scope, filters = {}) {
   if (scope === 'source') return BULK_SOURCE_LABEL[filters.source] ?? `来源 ${filters.source ?? '?'}`;
   if (scope === 'ids') return `指定 ${Array.isArray(filters.ids) ? filters.ids.length : 0} 条`;
   return scope;
+}
+
+/** 待办范围文案；`ids` 的数字用**实际命中条数**，不是模型数组长度。 */
+function todoBulkScopeLabel(scope, count) {
+  if (scope === 'ids') return `指定 ${count} 条`;
+  return TODO_BULK_SCOPE_LABEL[scope] ?? scope;
+}
+
+/**
+ * 范围安全提示。
+ *
+ * 为什么提示要写到草稿里而不是只放响应：确认卡（`shell/app.js`）只渲染
+ * `draft.warnings`。只把 `scope:'all'` / `lms` 的影响写在 `preview.warnings`，
+ * 用户在点确认之前根本看不到，等于没有警告。
+ *
+ * 返回 `{ marker, text }`：marker 用来在"预览 → 回传草稿 → 真正执行"之间去重，
+ * 同时允许用执行后的真实条数**替换**预览时的数字（全等去重会留下过期的 N）。
+ */
+function todoBulkWarnings(action, scope, count) {
+  if (count <= 0) return [];
+  if (scope === 'all') {
+    if (action === 'delete') {
+      return [{ marker: '会删除全部', text: `这会删除全部 ${count} 条待办（含你自己建的），删除后无法恢复` }];
+    }
+    if (action === 'complete') {
+      return [{ marker: '会完成全部', text: `这会完成全部 ${count} 条待办（含你自己建的），已完成的会自动跳过` }];
+    }
+    return [{ marker: '会取消完成全部', text: `这会取消完成全部 ${count} 条待办（含你自己建的），未完成的会自动跳过` }];
+  }
+  if (scope === 'lms') {
+    // 「删了还会回来」是用户最容易误解的一点：学堂同步按 externalId 重建，本地删除不是永久清除。
+    if (action === 'delete') {
+      return [{
+        marker: '下次同步会重新生成',
+        text: '这些是学堂同步的，下次同步会重新生成（externalId 以 lms: 开头）',
+      }];
+    }
+    return [{
+      marker: '这些是学堂同步的',
+      text: '这些是学堂同步的（externalId 以 lms: 开头）：本操作只改本地状态，不会提交或撤销学堂里的作业',
+    }];
+  }
+  return [];
+}
+
+/** 把范围提示合并进草稿（同 marker 替换旧文案，避免预览/执行的条数不一致）。 */
+function applyDraftWarnings(draft, entries) {
+  if (!entries.length) return Array.isArray(draft.warnings) ? [...draft.warnings] : [];
+  const warnings = Array.isArray(draft.warnings) ? [...draft.warnings] : [];
+  for (const { marker, text } of entries) {
+    const index = warnings.findIndex((item) => String(item).includes(marker));
+    if (index >= 0) warnings[index] = text;
+    else warnings.push(text);
+  }
+  draft.warnings = warnings;
+  return warnings;
+}
+
+/** 预览样例：批量动作只回答"选中的是哪些"，带截止日让用户能认出是哪一批。 */
+function todoBulkSamples(items) {
+  return items.slice(0, TODO_BULK_SAMPLE_LIMIT).map((item) => ({
+    id: item.id,
+    title: item.title,
+    ...(item.deadline ? { deadline: item.deadline } : {}),
+  }));
 }
 
 /**
@@ -407,22 +519,37 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
     });
   }
 
+  /**
+   * 待办查询的「非完成态」条件：批量范围与 locate 共用这一份。
+   *
+   * 为什么不复制两份 filter 表：`scope:'completed'` 与老路径 `filters.completed` 如果各写一套，
+   * 迟早出现"预览说 2 条、执行删 3 条"的漂移。完成态由调用方单独决定（见 todoListFilters / todoBulkTargets）。
+   */
+  function todoBaseFilters(draft) {
+    const filters = draft.filters ?? {};
+    return {
+      from: filters.from,
+      to: filters.to,
+      priority: filters.priority,
+      keyword: filters.keyword,
+      category: filters.category,
+      parentId: filters.parentId,
+    };
+  }
+
+  /** 老路径（关键词/日期/单 id）的完成态默认值：完成默认找未完成，取消完成默认找已完成。 */
+  function todoListFilters(draft) {
+    const filters = draft.filters ?? {};
+    const completed = draft.action === 'complete' ? false : draft.action === 'uncomplete' ? true : undefined;
+    return { ...todoBaseFilters(draft), completed: filters.completed ?? completed };
+  }
+
   /** 按 filters 定位待操作记录；id 优先。三个集合的过滤条件形状一致，但各自独立查询。 */
   function locate(draft) {
     const filters = draft.filters ?? {};
     if (draft.target === 'todo') {
       if (filters.id) return [todos.get(filters.id)];
-      return todos.list({
-        from: filters.from,
-        to: filters.to,
-        // 「完成」默认只找未完成的；删除/修改要能命中任意状态
-        completed: filters.completed ?? (draft.action === 'complete' ? false : undefined),
-        priority: filters.priority,
-        keyword: filters.keyword,
-        // 分类与父待办也可以作为定位条件（"完成期末复习下面的第一章"这类说法）
-        category: filters.category,
-        parentId: filters.parentId,
-      });
+      return todos.list(todoListFilters(draft));
     }
     if (draft.target === 'schedule') {
       if (filters.id) return [schedules.get(filters.id)];
@@ -442,6 +569,215 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
     }
     if (filters.id) return [events.get(filters.id)];
     return events.list({ from: filters.from, to: filters.to, keyword: filters.keyword });
+  }
+
+  /**
+   * 按 scope 算待办目标集合。
+   *
+   * 核心口径：**先走与 locate 相同的 `todos.list()` 过滤，再按 scope 收窄**。
+   * 不直接拿整库 id 去批量服务里筛，是因为服务层的 bulk 只认显式 id，不懂"已完成 / 学堂同步"
+   * 这些业务范围；而如果这里自己再实现一套"completed 怎么算、lms 怎么认"，
+   * 又和 locate 的筛选漂移。两个问题合起来只有一个解法：目标集合由这里算一次，服务层只负责执行。
+   */
+  function todoBulkTargets(draft, scope) {
+    const filters = draft.filters ?? {};
+
+    if (scope === 'ids') {
+      if (!Array.isArray(filters.ids) || !filters.ids.length) {
+        throw HttpError.badRequest('filters.scope 为 ids 时必须同时给 filters.ids（待办 id 数组）', {
+          field: 'filters.ids',
+        });
+      }
+      const unique = [];
+      for (const raw of filters.ids) {
+        if (typeof raw !== 'string' || !raw.trim()) {
+          throw HttpError.badRequest('filters.ids 不合法：每一项都必须是待办 id（字符串）', {
+            field: 'filters.ids',
+            code: 'INVALID_IDS',
+          });
+        }
+        const id = raw.trim();
+        if (!unique.includes(id)) unique.push(id);
+      }
+      const byId = new Map(todos.list().map((item) => [item.id, item]));
+      const records = [];
+      const skipped = [];
+      for (const id of unique) {
+        const item = byId.get(id);
+        if (item) records.push(item);
+        else skipped.push({ id, reason: 'not_found' });
+      }
+      return { records, ids: records.map((item) => item.id), skipped };
+    }
+
+    const listFilters = todoBaseFilters(draft);
+    if (scope === 'completed') listFilters.completed = true;
+    else if (scope === 'incomplete') listFilters.completed = false;
+    // all / lms / manual 允许再带一个显式 completed 条件（例如"学堂同步里还没做的"），
+    // 但**不套用 complete 动作的"默认只看未完成"**：scope 已经是调用方明说的范围，不能再被动作偷偷收窄。
+    else if (filters.completed !== undefined) listFilters.completed = filters.completed;
+
+    let records = todos.list(listFilters);
+    if (scope === 'lms') records = records.filter(isLmsTodo);
+    else if (scope === 'manual') records = records.filter((item) => !isLmsTodo(item));
+    return { records, ids: records.map((item) => item.id), skipped: [] };
+  }
+
+  /**
+   * 按范围删除 / 完成 / 取消完成待办：**一个动作、一条草稿**。
+   *
+   * 为什么必须走服务层的 `todos.bulk()` 而不是在指令层循环 `setCompleted/remove`：
+   *   - 删父不级联删子、父完成级联完成子并写 `autoCompletedBy`、取消完成只回滚被级联项，
+   *     这些语义都只维护在服务层；循环单条调用等于把同一套规则再实现一遍，迟早漂移；
+   *   - 逐条执行还会把"一个动作"拆成 N 次写库与 N 次广播，用户看到的回执条数也不对。
+   *
+   * 超过 200 条时分批**顺序**执行，每批仍然是一次 `todos.bulk()`（见 TODO_BULK_BATCH 的注释）。
+   * 某一批失败会抛错并中止后续批次：已提交的批次无法回滚，但绝不静默吞掉失败、假装全部完成。
+   */
+  async function todoBulk(draft, options, scope) {
+    if (!TODO_BULK_SCOPES.includes(scope)) {
+      throw HttpError.badRequest(`filters.scope 不合法：可选 ${TODO_BULK_SCOPES.join(' / ')}`, {
+        field: 'filters.scope',
+        allowed: [...TODO_BULK_SCOPES],
+      });
+    }
+    const action = draft.action;
+    if (!['delete', 'complete', 'uncomplete'].includes(action)) {
+      throw HttpError.badRequest(`待办范围操作不支持 action: ${action}`, { field: 'action' });
+    }
+
+    const { records, ids, skipped: missing } = todoBulkTargets(draft, scope);
+    const count = records.length;
+    const label = todoBulkScopeLabel(scope, count);
+    const batches = ids.length ? Math.ceil(ids.length / TODO_BULK_BATCH) : 0;
+    const batchNote = batches > 1
+      ? `；服务层单批最多 ${TODO_BULK_BATCH} 条，将分 ${batches} 批顺序执行`
+      : '';
+    const verb = TODO_BULK_ACTION_LABEL[action];
+
+    if (options.dryRun) {
+      /**
+       * 写回草稿本身，理由与日程批量删除相同：确认卡只渲染 `draft.warnings`。
+       * 预览**不调用**服务层 bulk：这里已经拿到真实目标集合，再跑一次 dryRun 既多一次全量查询，
+       * 也拿不到 deadline（服务层 sample 只有 id/title），而用户正是靠截止日确认"选对了吗"。
+       */
+      const warnings = applyDraftWarnings(draft, todoBulkWarnings(action, scope, count));
+      return {
+        dryRun: true,
+        planned: 'bulk',
+        action,
+        scope,
+        count,
+        samples: todoBulkSamples(records),
+        warnings,
+        ...(batches > 1 ? { batchCount: batches, batchSize: TODO_BULK_BATCH } : {}),
+        explain: count
+          ? `将${verb} ${count} 条待办（范围：${label}）${batchNote}`
+          : `没有符合条件的待办（范围：${label}）`,
+      };
+    }
+
+    if (!ids.length) {
+      const warnings = applyDraftWarnings(draft, []);
+      const skippedText = missing.length ? `，跳过 ${missing.length} 条不存在的` : '';
+      return {
+        planned: 'bulk',
+        action,
+        scope,
+        count: 0,
+        matched: 0,
+        ...(action === 'delete' ? { deleted: 0 } : {}),
+        changed: 0,
+        skipped: missing,
+        ...(action === 'delete' ? { detachedChildren: [] } : { cascaded: { completed: [], reverted: [] } }),
+        warnings,
+        explain: `没有符合条件的待办（范围：${label}）${skippedText}`,
+      };
+    }
+
+    const totals = {
+      matched: 0,
+      changed: 0,
+      skipped: [...missing],
+      cascaded: { completed: [], reverted: [] },
+      detachedChildren: [],
+    };
+    for (let start = 0; start < ids.length; start += TODO_BULK_BATCH) {
+      const result = await todos.bulk({
+        action,
+        ids: ids.slice(start, start + TODO_BULK_BATCH),
+      });
+      totals.matched += result.matched ?? 0;
+      totals.changed += result.changed ?? 0;
+      if (Array.isArray(result.skipped)) totals.skipped.push(...result.skipped);
+      if (Array.isArray(result.detachedChildren)) totals.detachedChildren.push(...result.detachedChildren);
+      if (Array.isArray(result.cascaded?.completed)) totals.cascaded.completed.push(...result.cascaded.completed);
+      if (Array.isArray(result.cascaded?.reverted)) totals.cascaded.reverted.push(...result.cascaded.reverted);
+    }
+    totals.detachedChildren = [...new Set(totals.detachedChildren)];
+    /**
+     * 只报**最终真的独立**的子任务。
+     *
+     * 删父不级联删子，服务层会先解除直接子级的 parentId；但如果子任务自己也在这批目标里，
+     * 它随后（同批或下一批）就被删掉了，回执还说"N 个子任务改为独立待办"就是在报一个
+     * 用户永远看不到的中间状态。分批执行时父/子被切到两批尤其容易触发。
+     */
+    const targetIds = new Set(ids);
+    totals.detachedChildren = totals.detachedChildren.filter((id) => !targetIds.has(id));
+    totals.cascaded.completed = [...new Set(totals.cascaded.completed)];
+    totals.cascaded.reverted = [...new Set(totals.cascaded.reverted)];
+
+    const actual = totals.changed;
+    // 用**实际执行后的条数**替换预览阶段的警告（全等去重会把预览数字留成过期值）。
+    // 完成 / 取消完成用目标条数：`全部 N 条` 说的是范围，实际变更条数由 explain 单独报，
+    // 否则"全部 4 条里完成了 2 条"会被写成自相矛盾的"全部 2 条"。
+    const warningCount = action === 'delete' ? actual : count;
+    const warnings = applyDraftWarnings(draft, todoBulkWarnings(action, scope, warningCount));
+    const doneLabel = action === 'delete' ? '已删除' : action === 'complete' ? '已完成' : '已取消完成';
+    const tail = [];
+    if (batches > 1) tail.push(`分 ${batches} 批执行`);
+    if (action === 'delete' && totals.detachedChildren.length) {
+      tail.push(`${totals.detachedChildren.length} 个子任务改为独立待办`);
+    }
+    if (action === 'complete' && totals.cascaded.completed.length) {
+      tail.push(`并连带完成 ${totals.cascaded.completed.length} 个子任务`);
+    }
+    if (action === 'uncomplete' && totals.cascaded.reverted.length) {
+      tail.push(`并恢复 ${totals.cascaded.reverted.length} 个被连带完成的子任务`);
+    }
+    /**
+     * 把最关键的范围提醒也写进 explain。
+     *
+     * 为什么不止放 `warnings`：auto 档回灌给模型的「紧凑执行结果」只保留
+     * `explain/deleted/affected…`，不包含 warnings 数组（见 chat-service 的 #compactWriteResult）。
+     * 学堂范围如果只写 warnings，模型下一轮就只看到"已删除 N 条"，很可能漏掉
+     * "下次同步会回来"这句用户最需要知道的话。explain 是模型一定会读到的字段。
+     */
+    if (scope === 'all' && action === 'delete' && actual) tail.push('含你自己建的');
+    if (scope === 'lms' && actual) {
+      tail.push(action === 'delete'
+        ? '这些是学堂同步的，下次同步会重新生成'
+        : '这些是学堂同步的，只改本地状态');
+    }
+    if (totals.skipped.length) tail.push(`跳过 ${totals.skipped.length} 条（不存在或状态已符合）`);
+    const explain = actual
+      ? `${doneLabel} ${actual} 条待办（范围：${label}）${tail.length ? `，${tail.join('，')}` : ''}`
+      : `没有需要${verb}的待办（范围：${label}）${tail.length ? `，${tail.join('，')}` : ''}`;
+
+    return {
+      planned: 'bulk',
+      action,
+      scope,
+      count: actual,
+      matched: totals.matched,
+      ...(action === 'delete' ? { deleted: actual } : {}),
+      changed: actual,
+      skipped: totals.skipped,
+      ...(action === 'delete' ? { detachedChildren: totals.detachedChildren } : { cascaded: totals.cascaded }),
+      ...(batches > 1 ? { batchCount: batches, batchSize: TODO_BULK_BATCH } : {}),
+      warnings,
+      explain,
+    };
   }
 
   /**
@@ -646,13 +982,18 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
 
     async delete(draft, options) {
       /**
-       * 日程支持"按范围删除"：`filters.scope` 出现时整件事是一个批量动作，
-       * 不再走下面"先 locate 再逐条"的老路径。待办/日历事件目前没有这个能力，
-       * 不能顺手给它们也开一个 —— 那需要各自想清楚范围与回收站语义。
+       * 按范围删除：日程与待办各有一套明确的范围词汇（日程看时间/来源，待办看完成态/来源）。
+       * `filters.scope`（或只有 `filters.ids`）出现时整件事是**一个批量动作**，
+       * 不再走下面"先 locate 再逐条"的老路径；没有 scope 的关键词/日期删除保持原行为。
+       * 日历事件不在这条路径上：批量删事件需要先想清楚范围语义，不能顺手开。
        */
       if (draft.target === 'schedule') {
         const scope = bulkScopeOf(draft.filters);
         if (scope) return deleteScheduleBulk(draft, options, scope);
+      }
+      if (draft.target === 'todo') {
+        const scope = todoBulkScopeOf(draft.filters);
+        if (scope) return todoBulk(draft, options, scope);
       }
       const matches = locate(draft);
       if (!matches.length) throw HttpError.notFound(`没有找到符合条件的${labelOf(draft.target)}`);
@@ -693,6 +1034,12 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
           { field: 'target' },
         );
       }
+      /**
+       * 批量完成（"把未完成的待办全部完成"）：与删除共用同一套 scope / 回执 / 警告。
+       * 服务层 bulk 的 complete 走 `update()`，所以父完成级联子、`autoCompletedBy` 标记一个都不会少。
+       */
+      const scope = todoBulkScopeOf(draft.filters);
+      if (scope) return todoBulk(draft, options, scope);
       const matches = locate(draft);
       if (!matches.length) {
         // 用户/AI 说的「完成 X」如果其实是一条日程或日历事件，必须明确回答「没有完成态」，
@@ -731,6 +1078,45 @@ export function createCalendarCommands({ events, schedules, todos, store }) {
         cascaded,
         ambiguous: matches.length > 1,
         explain: `已完成 ${updated.length} 条待办${extra}`,
+      };
+    },
+
+    /**
+     * 取消完成：同样只对待办成立。
+     *
+     * 单条路径与服务层 `setCompleted(false)` 一致：只回滚 `autoCompletedBy === 父` 的后代，
+     * 用户亲手勾过的子任务保持完成。按范围的路径复用 todoBulk，避免两套撤销语义。
+     */
+    async uncomplete(draft, options) {
+      if (draft.target !== 'todo') {
+        const label = labelOf(draft.target);
+        throw HttpError.badRequest(
+          `${label}没有完成态，取消完成只属于待办：日程与日历事件都没有可撤销的完成状态`,
+          { field: 'target' },
+        );
+      }
+      const scope = todoBulkScopeOf(draft.filters);
+      if (scope) return todoBulk(draft, options, scope);
+      const matches = locate(draft);
+      if (!matches.length) throw HttpError.notFound('没有找到符合条件的待办');
+      if (options.dryRun) {
+        return { dryRun: true, planned: { action: 'uncomplete', target: 'todo', ids: matches.map((m) => m.id) } };
+      }
+      const updated = [];
+      const cascaded = { completed: [], reverted: [] };
+      for (const match of matches) {
+        const item = await todos.setCompleted(match.id, false);
+        updated.push(item);
+        cascaded.reverted.push(...(item.cascaded?.reverted ?? []));
+      }
+      const extra = cascaded.reverted.length ? `，并恢复 ${cascaded.reverted.length} 个被连带完成的子任务` : '';
+      return {
+        items: updated,
+        affected: updated.map((item) => ({ id: item.id, title: item.title, date: item.deadline })),
+        changed: updated.length,
+        cascaded,
+        ambiguous: matches.length > 1,
+        explain: `已取消完成 ${updated.length} 条待办${extra}`,
       };
     },
 

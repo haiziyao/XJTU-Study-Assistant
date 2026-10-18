@@ -144,6 +144,9 @@ test('计划：已提交的作业新建即完成；无截止日跳过；已有�
     activities,
     courses: [{ id: 10, name: '材料力学' }],
     existingTodos,
+    // 这条用例钉的是字段映射与幂等（固定日期写成 2026-10），不是学期过滤：
+    // 显式关掉过滤，免得用例随着日历日漂移而变红；学期判定见 lms-term-filter.test.js。
+    currentTermOnly: false,
   });
 
   const byKey = new Map(items.map((item) => [item.key, item]));

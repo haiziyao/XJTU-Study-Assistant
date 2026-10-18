@@ -17,7 +17,7 @@ import { normalizeCourse } from '../src/modules/lms/api.js';
 import { ACTIVITY_TYPE_LABEL, activityTypesOf } from '../src/modules/lms/config.js';
 import { buildSyncPlan, refineActivityTitle } from '../src/modules/lms/sync.js';
 import { parseLmsTime } from '../src/modules/lms/time.js';
-import { ACTIVITY_DAY_OFFSETS, HOMEWORK_DEADLINE_DATE, activityDate, activityIso, startMockLms } from './helpers/lms-mock.js';
+import { ACTIVITY_DAY_OFFSETS, HOMEWORK_DEADLINE_DATE, MOCK_TERM, activityDate, activityIso, startMockLms } from './helpers/lms-mock.js';
 
 const TODAY = '2026-10-11';
 
@@ -218,7 +218,7 @@ test('思源学堂：课程与活动拉取并落地缓存', async () => {
     assert.equal(data.name, '数据结构');
     assert.equal(data.credit, '3.0');
     assert.equal(data.instructors[0].name, '李老师');
-    assert.equal(data.semester.realName, '2026-2027学年秋季学期');
+    assert.equal(data.semester.realName, MOCK_TERM.semesterRealName);
     assert.equal(data.teachingClassName, '数据结构-01班');
 
     const activities = await call('GET', '/lms/activities');
@@ -339,7 +339,7 @@ test('思源学堂：同步预览的映射规则', async () => {
     const withRange = await call('POST', '/lms/sync/preview', { today: TODAY, includeCourseRange: true });
     const range = withRange.body.items.find((item) => item.key === 'lms:course-range:1001');
     assert.equal(range.kind, 'event');
-    assert.equal(range.payload.startDate, '2026-09-01');
+    assert.equal(range.payload.startDate, MOCK_TERM.startDate);
   } finally {
     await app.close();
     await mock.close();

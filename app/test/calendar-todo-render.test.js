@@ -188,6 +188,39 @@ test('分类筛选条：全部 / 未分类 / 各分类，带条数；点一下�
   assert.equal(PC.state.todo.category, '');
 });
 
+test('默认隐藏已完成：请求带 completed=false，顶部开关默认关，打开后才带已完成', async () => {
+  const ctx = boot();
+  const first = await ctx.render('todo', { wait: 30 });
+  const toggle = first.querySelector('.todo-done-check');
+  assert.ok(toggle, '顶部筛选条要有「显示已完成」开关');
+  assert.equal(toggle.checked, false, '开关默认关：待办页默认只显示未完成');
+
+  const todoQuery = (calls) => calls.filter((url) => url.startsWith('/todos?')).at(-1);
+  assert.match(todoQuery(ctx.api.calls), /completed=false/, '默认请求要明确只要未完成（后端过滤）');
+
+  // 分类条的计数仍来自 /todos/categories 的 total/open，不因隐藏已完成而变成当前列表条数
+  const chips = first.querySelectorAll('.cat-chip');
+  assert.equal(chips[0].textContent, '全部 4', '分类条计数仍用后端 total');
+  assert.match(chips[1].title, /未完成 1 条/, '后端 open 也要保留（title 里可见）');
+
+  // 打开开关 → 状态落库，下一次请求不再限制完成态
+  toggle.checked = true;
+  toggle.listeners.change[0]();
+  assert.equal(ctx.PC.state.todo.showCompleted, true);
+  const second = await ctx.render('todo', { wait: 30 });
+  assert.equal(todoQuery(ctx.api.calls).includes('completed=false'), false, '打开开关后不再带 completed=false');
+  assert.equal(second.querySelector('.todo-done-check').checked, true);
+
+  // 「已完成」分段仍然只看已完成，且此时开关固定勾上、禁用（避免开关关着却显示已完成）
+  const doneBtn = second.querySelectorAll('.seg-btn').find((button) => button.textContent === '已完成');
+  doneBtn.listeners.click[0]();
+  const third = await ctx.render('todo', { wait: 30 });
+  assert.match(todoQuery(ctx.api.calls), /completed=true/, '「已完成」分组仍显式请求 completed=true');
+  const doneToggle = third.querySelector('.todo-done-check');
+  assert.equal(doneToggle.checked, true);
+  assert.equal(doneToggle.disabled, true);
+});
+
 test('列表按「分类 → 顶层 → 子（缩进）」渲染，最多 3 层且每层有独立 class', async () => {
   const { render } = boot();
   const mount = await render('todo', { wait: 30 });

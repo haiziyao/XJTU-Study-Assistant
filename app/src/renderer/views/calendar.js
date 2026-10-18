@@ -948,6 +948,28 @@ function todoToolbar() {
     seg.appendChild(button);
   }
 
+  // 「显示已完成」开关：默认关 —— 待办页默认只列未完成，打开后才在混合列表
+  // （全部 / 今天 / 本周 / 逾期）里带上已完成的待办。完成态筛选本身仍然走
+  // `completed` 查询参数，不在前端过滤：分类条的 open/total 也继续来自后端。
+  const showDone = mk('label', 'check-field todo-done-toggle');
+  const showDoneBox = mk('input', 'todo-done-check');
+  showDoneBox.type = 'checkbox';
+  // 「已完成」分段本身就是在看已完成，此时开关没有意义：固定勾上并禁用，
+  // 避免出现"开关关着却显示已完成"的矛盾状态。
+  const doneSegment = state.todo.filter === 'done';
+  showDoneBox.checked = doneSegment || todoState().showCompleted;
+  showDoneBox.disabled = doneSegment;
+  showDoneBox.title = doneSegment
+    ? '当前正在查看「已完成」分组'
+    : '默认只显示未完成；打开后「全部 / 今天 / 本周 / 逾期」里也会列出已完成';
+  showDone.append(showDoneBox, mk('span', null, '显示已完成'));
+  showDoneBox.addEventListener('change', () => {
+    // 筛选一变，已勾选的行可能已经不在列表里：清空勾选（与分类/分段筛选同一口径）
+    clearTodoSelection();
+    todoState().showCompleted = showDoneBox.checked;
+    PC.refresh();
+  });
+
   const quick = mk('div', 'quick-add');
   const title = mk('input', 'qa-title');
   title.type = 'text';
@@ -1037,7 +1059,7 @@ function todoToolbar() {
 
   const row2 = mk('div', 'toolbar-row');
   row2.append(quick, create, rollover, weeklyBtn, selectMode);
-  bar.append(seg, row2);
+  bar.append(seg, showDone, row2);
   return bar;
 }
 
@@ -1051,6 +1073,9 @@ function todoState() {
   const state = PC.state.todo;
   if (state.category === undefined) state.category = null; // null = 全部分类，'' = 未分类
   if (!state.collapsed || typeof state.collapsed !== 'object') state.collapsed = {}; // 默认全部展开
+  // 默认隐藏已完成：用户明确要求待办页先看"还没做的"，已完成要点开关才出现。
+  // 放在视图里补默认值（而不是改外壳 state），理由同 category：外壳不需要懂这个领域细节。
+  if (state.showCompleted === undefined) state.showCompleted = false;
   return state;
 }
 
@@ -1325,6 +1350,9 @@ async function renderTodoList(host, batchHost) {
     params.set('completed', 'true');
     params.set('limit', '100');
   }
+  // 默认只请求未完成（后端过滤，不在前端藏数据）：分类条仍用 /todos/categories
+  // 的 open/total，AI 的待办查询走自己的工具，都不受这个界面开关影响。
+  if (todo.filter !== 'done' && !todoState().showCompleted) params.set('completed', 'false');
   // `category=''` 是"未分类"这个具体的桶，必须原样带上（不能被 URLSearchParams 吞掉）
   if (todo.category !== null && todo.category !== undefined) params.set('category', todo.category);
   const query = `/todos?${params.toString()}`;

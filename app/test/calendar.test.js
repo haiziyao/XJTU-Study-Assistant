@@ -122,6 +122,32 @@ test('顺延指令解析为 rollover/todo', () => {
   assert.equal(draft.filters.weekStart, '2025-10-13');
 });
 
+test('待办没识别到日期时不默认今天：解析 / 落库的 deadline 都是 null', async () => {
+  // 解析层：没有日期的待办草稿必须是"不设截止日"，不能再填 todayKey()
+  const draft = parser.parse('记一下交实验报告');
+  assert.equal(draft.target, 'todo');
+  assert.equal(draft.fields.deadline, null, '没识别到日期时不要编一个今天');
+  assert.equal(draft.warnings.some((text) => text.includes('默认今天')), false);
+
+  const { app, call } = await startApp();
+  try {
+    // 接口层：POST /commands/parse 返回的草稿同样没有截止日
+    const parsed = await call('POST', '/commands/parse', { text: '记一下交实验报告' });
+    assert.equal(parsed.status, 200);
+    assert.equal(parsed.body.draft.target, 'todo');
+    assert.equal(parsed.body.draft.fields.deadline, null);
+
+    // 真落库后也是 null，并且能按「没有截止日」查出来
+    const created = await call('POST', '/commands/run', { text: '记一下交实验报告' });
+    assert.equal(created.status, 200);
+    assert.equal(created.body.item.deadline, null);
+    const listed = await call('GET', '/todos?noDeadline=1');
+    assert.equal(listed.body.items.some((item) => item.id === created.body.item.id), true);
+  } finally {
+    await app.close();
+  }
+});
+
 // ---------------------------------------------------------------- 端到端
 
 test('一句话加待办：落进 todos，待办视图的查询能查到', async () => {

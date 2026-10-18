@@ -135,7 +135,10 @@ export function registerLmsRoutes(router, { lms, apiPrefix }) {
    */
   router.get(`${P}/todos/config`, () => lms.todosConfig());
 
-  router.post(`${P}/todos/config`, ({ body }) => lms.updateTodoSettings({ enabled: body?.enabled }));
+  // 两个开关可以单独改：只传 enabled 时 currentTermOnly 保持原值（反之亦然）
+  router.post(`${P}/todos/config`, ({ body }) =>
+    lms.updateTodoSettings({ enabled: body?.enabled, currentTermOnly: body?.currentTermOnly }),
+  );
 
   router.post(`${P}/todos/sync`, ({ body }) => lms.syncTodos({ refresh: asBool(body?.refresh), refreshDetails: true }));
 
