@@ -56,6 +56,312 @@ function clearAllWarnings(draft, text) {
   return warnings;
 }
 
+/**
+ * 分类 target 的对外字段（AI 草稿与查询回灌都用这一套名字）：
+ *
+ *   name  ← 分类名（服务层叫 label，但 `name` 是用户/模型最自然的说法）
+ *   sort  ← 排序（服务层叫 order）
+ *   usage ← 有多少条日程/事件在用（服务层只读字段 inUse）
+ *
+ * 为什么要做这层映射而不是让模型直接写 label/order：
+ * 用户说的是「分类名叫考试、排序放前面、有多少条在用」，提示词里教模型 `name/color/sort`
+ * 比教它数据库字段名更不容易编错；而服务层保持原有 REST 契约（label/order）不动。
+ * 两个名字都接受，但同一个字段给两个不同值会 400 —— 静默取一个等于把用户的话丢掉。
+ */
+const CATEGORY_KIND_LABEL = { schedule: '日程分类', event: '日历事件分类' };
+const CATEGORY_FILTER_KEYS = ['id', 'name', 'label', 'kind', 'keyword'];
+
+/** AI 形状 → 服务层形状；`name` 优先，`label` 作为兼容别名。 */
+function categoryNameOf(fields = {}) {
+  const { name, label } = fields;
+  if (name !== undefined && label !== undefined && String(name).trim() !== String(label).trim()) {
+    throw HttpError.badRequest('分类名不要同时用 name 和 label 两个字段给出不同的值，保留一个即可', {
+      fields: ['name', 'label'],
+    });
+  }
+  const value = name ?? label;
+  return value === undefined ? undefined : String(value).trim();
+}
+
+/** `sort` 优先，`order` 作为兼容别名（与服务层 REST 字段一致）。 */
+function categoryOrderOf(fields = {}) {
+  const { sort, order } = fields;
+  if (sort !== undefined && order !== undefined && String(sort) !== String(order)) {
+    throw HttpError.badRequest('分类排序不要同时用 sort 和 order 两个字段给出不同的值，保留一个即可', {
+      fields: ['sort', 'order'],
+    });
+  }
+  return sort ?? order;
+}
+
+/** 服务层分类 → AI 可读形状（查询回灌、写回执共用）。 */
+function categoryView(item) {
+  return {
+    id: item.id,
+    name: item.label,
+    kind: item.kind,
+    color: item.color,
+    sort: item.order,
+    usage: item.inUse,
+    locked: Boolean(item.locked),
+    builtin: Boolean(item.builtin),
+  };
+}
+
+function categoryKindLabel(kind) {
+  return CATEGORY_KIND_LABEL[kind] ?? kind;
+}
+
+/**
+ * 分类名唯一性：**只在同一个 kind 内**判重。
+ *
+ * 为什么 AI 层要加这一条（CategoryService 本身没有）：
+ * REST 的更新/删除走 id，重名只是显示上不好看；而 AI 的 filters 是「按名字定位」，
+ * 同名分类会让“把考试改成红色”无法确定改哪一个。与其猜，不如拒绝并让模型改用 id。
+ * 这条不写进 CategoryService：那会改变既有 REST 语义（现有测试与用户数据都按 id 操作）。
+ */
+function assertCategoryNameFree(categories, kind, name, excludeId = null) {
+  const duplicate = categories
+    .list({ kind })
+    .find((item) => item.label === name && item.id !== excludeId);
+  if (duplicate) {
+    throw HttpError.badRequest(
+      `${categoryKindLabel(kind)}里已经有「${name}」了（颜色 ${duplicate.color}）：` +
+        '要改颜色/名字请用 action: "update"，不要重复新建',
+      { field: 'name', id: duplicate.id },
+    );
+  }
+}
+
+/**
+ * 按 filters 定位一个分类。id 优先；否则按 name 精确匹配（keyword 子串兜底）。
+ *
+ * kind 不传时会在两个集合里找：日程与事件共用 study/exam/other 这些名字，
+ * 命中多个时必须让调用方指定 kind，而不是随手挑一个改掉。
+ */
+function locateCategory(categories, filters = {}) {
+  const kind = filters.kind;
+  if (filters.id) return categoryView(categories.get(filters.id, kind));
+
+  const name = filters.name ?? filters.label;
+  const keyword = filters.keyword;
+  if (name === undefined && keyword === undefined) {
+    throw HttpError.badRequest('更新/删除分类必须提供 filters.name（分类名）或 filters.id', {
+      field: 'filters.name',
+    });
+  }
+  const wanted = name === undefined ? null : String(name).trim();
+  const matches = categories
+    .list({ kind })
+    .map(categoryView)
+    .filter((item) => (wanted === null ? true : item.name === wanted))
+    .filter((item) => (keyword === undefined ? true : String(item.name).includes(String(keyword))));
+
+  if (!matches.length) {
+    throw HttpError.notFound(`没有找到分类${wanted ? `「${wanted}」` : ''}`);
+  }
+  if (matches.length > 1) {
+    const list = matches.map((item) => `${item.kind}:${item.id}「${item.name}」`).join('、');
+    throw HttpError.badRequest(
+      `找到 ${matches.length} 个同名分类（${list}）：日程和日历事件的分类可以同名，请用 filters.kind 指定 schedule 或 event`,
+      { field: 'filters.kind', candidates: matches.map((item) => ({ id: item.id, kind: item.kind, name: item.name })) },
+    );
+  }
+  return matches[0];
+}
+
+/** 更新后的预览值（不写库）：让确认卡直接显示“改完会变成什么”。 */
+function previewCategoryUpdate(found, name, color, order) {
+  return {
+    ...found,
+    name: name ?? found.name,
+    color: color ?? found.color,
+    sort: order ?? found.sort,
+  };
+}
+
+/** 分类写操作的 explain：说清实际改了什么，而不是重复模型的措辞。 */
+function categoryUpdateExplain(found, next) {
+  const parts = [];
+  if (next.name !== found.name) parts.push(`改名为「${next.name}」`);
+  if (next.color !== found.color) parts.push(`颜色改为 ${next.color}`);
+  if (next.sort !== found.sort) parts.push(`排序改为 ${next.sort}`);
+  return parts.length
+    ? `已修改${categoryKindLabel(found.kind)}「${found.name}」：${parts.join('，')}`
+    : `没有改动${categoryKindLabel(found.kind)}「${found.name}」`;
+}
+
+/**
+ * 分类 target 的处理器（注册为 `services.commands.registerHandler('category', ...)`）。
+ *
+ * 权限闸不在这里：`manual` / `strict` 档由 chat-service 留在确认卡里，只有 `auto`
+ * 才会调用本对象真正执行 —— 与其它 target 完全同一条路，命令层不该再复制一份权限判断。
+ */
+export function createCategoryCommands({ categories }) {
+  return {
+    async create(draft, options) {
+      const fields = draft.fields ?? {};
+      const unknown = Object.keys(fields).filter((key) => !['name', 'label', 'color', 'sort', 'order', 'kind'].includes(key));
+      if (unknown.length) {
+        throw HttpError.badRequest(`分类不认识的字段：${unknown.join('、')}（可用：name / color / kind / sort）`, {
+          fields: unknown,
+        });
+      }
+      const kind = fields.kind ?? 'schedule';
+      const name = categoryNameOf(fields);
+      const order = categoryOrderOf(fields);
+      const prepared = categories.prepareCreate({ kind, label: name, color: fields.color, order });
+      assertCategoryNameFree(categories, prepared.kind, prepared.data.label);
+
+      if (options.dryRun) {
+        return {
+          dryRun: true,
+          planned: {
+            action: 'create',
+            target: 'category',
+            fields: {
+              name: prepared.data.label,
+              color: prepared.data.color,
+              kind: prepared.kind,
+              sort: prepared.data.order,
+            },
+          },
+          validated: categoryView({
+            ...prepared.data,
+            kind: prepared.kind,
+            id: null,
+            inUse: 0,
+          }),
+        };
+      }
+
+      const created = await categories.create({
+        kind: prepared.kind,
+        label: prepared.data.label,
+        color: prepared.data.color,
+        order: prepared.data.order,
+      });
+      return {
+        item: categoryView(created),
+        affected: [{ id: created.id, name: created.label, color: created.color, kind: created.kind }],
+        explain: `已新建${categoryKindLabel(created.kind)}「${created.label}」，颜色 ${created.color}`,
+      };
+    },
+
+    query(draft) {
+      const filters = draft.filters ?? {};
+      const unknown = Object.keys(filters).filter((key) => !CATEGORY_FILTER_KEYS.includes(key));
+      if (unknown.length) {
+        throw HttpError.badRequest(`分类查询不认识的筛选条件：${unknown.join('、')}（可用：id / name / kind / keyword）`, {
+          fields: unknown,
+        });
+      }
+      const kind = filters.kind;
+      let items = categories.list({ kind });
+      if (filters.id) {
+        items = items.filter((item) => item.id === filters.id);
+      } else {
+        const name = filters.name ?? filters.label;
+        if (name !== undefined) items = items.filter((item) => item.label === String(name).trim());
+        if (filters.keyword !== undefined) {
+          items = items.filter((item) => String(item.label).includes(String(filters.keyword)));
+        }
+      }
+      return {
+        filters,
+        items: items.map(categoryView),
+        count: items.length,
+        explain: draft.explain ?? `共 ${items.length} 个${kind ? categoryKindLabel(kind) : '分类'}`,
+      };
+    },
+
+    async update(draft, options) {
+      const found = locateCategory(categories, draft.filters ?? {});
+      const fields = draft.fields ?? {};
+      const unknown = Object.keys(fields).filter((key) => !['name', 'label', 'color', 'sort', 'order', 'kind'].includes(key));
+      if (unknown.length) {
+        throw HttpError.badRequest(`分类不认识的字段：${unknown.join('、')}（可用：name / color / kind / sort）`, {
+          fields: unknown,
+        });
+      }
+      const name = categoryNameOf(fields);
+      const order = categoryOrderOf(fields);
+      const patch = {};
+      if (name !== undefined) patch.label = name;
+      if (fields.color !== undefined) patch.color = fields.color;
+      if (order !== undefined) patch.order = order;
+      if (fields.kind !== undefined) patch.kind = fields.kind;
+      if (!Object.keys(patch).length) {
+        throw HttpError.badRequest('分类更新至少要提供 name / color / sort 之一', { fields: ['name', 'color', 'sort'] });
+      }
+
+      const prepared = categories.prepareUpdate(found.id, patch, { kind: found.kind });
+      if (prepared.data.label !== undefined) {
+        assertCategoryNameFree(categories, prepared.kind, prepared.data.label, found.id);
+      }
+      const next = previewCategoryUpdate(found, prepared.data.label, prepared.data.color, prepared.data.order);
+
+      if (options.dryRun) {
+        return {
+          dryRun: true,
+          planned: {
+            action: 'update',
+            target: 'category',
+            ids: [found.id],
+            fields: {
+              ...(prepared.data.label !== undefined ? { name: prepared.data.label } : {}),
+              ...(prepared.data.color !== undefined ? { color: prepared.data.color } : {}),
+              ...(prepared.data.order !== undefined ? { sort: prepared.data.order } : {}),
+            },
+          },
+          validated: next,
+        };
+      }
+
+      const updated = await categories.update(found.id, prepared.data, { kind: found.kind });
+      return {
+        item: categoryView(updated),
+        affected: [{ id: updated.id, name: updated.label, color: updated.color, kind: updated.kind }],
+        explain: categoryUpdateExplain(found, categoryView(updated)),
+      };
+    },
+
+    async delete(draft, options) {
+      const found = locateCategory(categories, draft.filters ?? {});
+
+      /**
+       * AI 删除分类：**被引用时直接拒绝**，不沿用 REST 的“改派到 other”后备。
+       *
+       * REST 那条语义（删分类不丢数据、记录改成 other）对界面单条操作是合理的，
+       * 但 AI 是一句话批量执行：用户说“删掉考试分类”时，看不到「有 12 条日程会被静默改成其它」。
+       * 确认卡也没有空间逐条列出受影响的记录。让用户先去改派、再删，是更可解释的行为。
+       */
+      if (found.usage > 0) {
+        throw HttpError.badRequest(
+          `${categoryKindLabel(found.kind)}「${found.name}」还有 ${found.usage} 条记录在用，不能删除：` +
+            '请先把这些记录改到别的分类（或只改名/改色保留它）',
+          { field: 'filters.name', usage: found.usage },
+        );
+      }
+
+      if (options.dryRun) {
+        return {
+          dryRun: true,
+          planned: { action: 'delete', target: 'category', ids: [found.id], name: found.name },
+        };
+      }
+
+      const result = await categories.remove(found.id, { kind: found.kind });
+      return {
+        affected: [{ id: found.id, name: found.name, color: found.color, kind: found.kind }],
+        deleted: result.deleted,
+        reassigned: result.reassigned,
+        explain: `已删除${categoryKindLabel(found.kind)}「${found.name}」`,
+      };
+    },
+  };
+}
+
 export function createCalendarCommands({ events, schedules, todos, store }) {
   /** 三个 target 各自的集合服务：写库与「只校验」都从这里取，避免出现两套校验。 */
   const targetService = (target) =>
