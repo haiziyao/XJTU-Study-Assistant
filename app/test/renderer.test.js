@@ -126,7 +126,7 @@ test('视图注册表：顺序、插槽与跨模块服务符合外壳约定', as
     // 「课表导入」（order 23）在待办(20)之后、学堂(30)之前，是本次新增的独立页面。
     // 学习周报不再占左栏入口：它是「待办」页里的一个面板（views/weekly-panel.js），
     // 因此这里**不该**再出现周报入口（学习周报是待办页里的面板）。
-    assert.deepEqual(main, ['chat', 'calendar', 'todo', 'pomodoro', 'timetable', 'lms', 'academic', 'notes', 'transfer', 'message']);
+    assert.deepEqual(main, ['chat', 'calendar', 'todo', 'pomodoro', 'timetable', 'lms', 'notifications', 'academic', 'notes', 'transfer', 'message']);
     // id 保持 `message` 是为了不破坏用户已存盘的左栏布局；展示名已改为「日志」。
     assert.equal(modules.get('message').label, '日志');
     assert.equal(modules.get('message').icon, 'clock');

@@ -68,7 +68,7 @@ export const SCHEDULE_FIELDS = Object.freeze([
  * 后台悄悄联网不符合这个程序一贯的显式风格；要"每天帮我搜最新通知"的任务
  * 就显式选 `web` / `campus`，用户知道自己在授权什么。
  */
-export const SCHEDULE_SEARCH_MODES = Object.freeze(['off', 'web', 'campus']);
+export const SCHEDULE_SEARCH_MODES = Object.freeze(['off', 'web', 'campus', 'info']);
 
 const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 const pad2 = (n) => String(n).padStart(2, '0');
