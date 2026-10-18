@@ -211,6 +211,7 @@
   }
 
   async function api(path, options = {}) {
+
     const response = await fetch(`${state.apiBase}${path}`, {
       headers: { 'Content-Type': 'application/json' },
       ...options,
@@ -537,13 +538,16 @@
       getMovable: () => [...navLayout.main, ...navLayout.more],
       /** 存一份新布局并立刻重排左栏。 */
       apply: (next) => {
+        // 本地先写一份：下次打开**首帧**就能按用户顺序画，不必等接口回来
         writeStored(SidebarLayout.STORAGE_KEY, SidebarLayout.stringify(next));
         buildNav();
+        void persistSidebarLayout(SidebarLayout.stringify(next));
       },
       /** 清掉偏好，回到默认布局。 */
       reset: () => {
         writeStored(SidebarLayout.STORAGE_KEY, '');
         buildNav();
+        void persistSidebarLayout(null);
       },
       /** 视图的 label/icon：自定义面板要按 id 画出与左栏一致的一行。 */
       describe: (id) => {
@@ -551,6 +555,50 @@
         return view ? { id, label: view.label, icon: view.icon } : null;
       },
     });
+  }
+
+  /**
+   * 把左栏布局同步到**后端**（`PUT /ui/prefs/sidebar`）。
+   *
+   * 为什么不能只靠 `localStorage`：Web UI 的页面由后端在 `http://127.0.0.1:PORT` 提供，
+   * 而 Electron 主进程用 `loadFile()` 加载 —— 来源变成 `file://`，两份存储互不相干，
+   * 换端口也会换一份。结果就是「在浏览器里记得住、桌面端下次打开就没了」。
+   * 后端那份是**唯一真相**，`localStorage` 只当首帧缓存。
+   *
+   * `raw === null` 表示删除（回到默认）。
+   */
+  async function persistSidebarLayout(raw) {
+    let value = null;
+    if (raw !== null) {
+      try {
+        value = JSON.parse(raw);
+      } catch {
+        return;
+      }
+    }
+    try {
+      await api('/ui/prefs/sidebar', { method: 'PUT', body: { value } });
+    } catch (error) {
+      // 存不上不该打断用户改布局：本地那份已经生效，只是跨重启不保证
+      console.warn('[sidebar] 布局没能存到后端：', error?.message ?? error);
+    }
+  }
+
+  /**
+   * 启动时从后端读回左栏布局。
+   *
+   * 后端是唯一真相，读到就覆盖本地缓存并重排；读不到（离线 / 老后端）就沿用本地那份。
+   */
+  async function hydrateSidebarLayout() {
+    try {
+      const data = await api('/ui/prefs/sidebar');
+      const value = data?.value ?? null;
+      if (!value || !Array.isArray(value.main)) return;
+      writeStored(SidebarLayout.STORAGE_KEY, JSON.stringify(value));
+      buildNav();
+    } catch {
+      // 读不到就用本地缓存（首次运行本来也没有）
+    }
   }
 
   /**
@@ -3518,6 +3566,10 @@
     buildNav();
     dom.mobileMoreMask?.addEventListener('click', closeMobileMore);
     dom.mobileMoreClose?.addEventListener('click', closeMobileMore);
+    // ⚠️ 这里**不能**调 hydrateSidebarLayout()：此刻 `state.apiBase` 还是 null
+    //    （要等下面 `resolveInfo()`），`api()` 会拼出 `null/ui/prefs/...` 直接抛错。
+    //    之前就写在这里，错误又被 catch 吞掉 —— 表现为"存了但下次打开不生效"。
+    //    真正的调用点在 `state.apiBase` 赋值之后。
     wireChat();
     // 窄屏布局要在**画面板之前**定好"这一屏给谁"：先挂上 body.mobile-* 类，
     // 后面 selectView() 才知道该走"回聊天"还是"切功能页"（否则会先白画一次没人看得见的面板）。
@@ -3559,9 +3611,13 @@
 
     if (!state.apiBase) {
       setStatus('后端未启动', 'error');
-      systemNote('无法连接后端：请先用 npm run start:server 或 npm run dev:app:macos 启动。', 'fail');
+      systemNote('无法连接后端：请先用 npm run start:server 或 npm run dev:app-macos 启动。', 'fail');
       return;
     }
+
+    // ★ 现在 `state.apiBase` 有了，才能向后端核对左栏布局。
+    //   首帧已经用 localStorage 里那份画好了（不闪），这一步是"以服务端为准"的纠偏。
+    void hydrateSidebarLayout();
 
     // 桌面端自动聚焦输入框（打开就能打字）；手机上**不要**：
     // iOS Safari 的自动聚焦会立刻弹出软键盘，把首屏顶掉一半，用户还没看清页面就先看到键盘。

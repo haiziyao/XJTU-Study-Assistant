@@ -162,24 +162,102 @@ export function normalizeActivity(raw) {
   };
 }
 
+/**
+ * 附件类型 → 前端选图标用的粗分类。
+ *
+ * 学堂的 `uploads[].type` 是一串 MIME 化的字符串（`application/pdf`、
+ * `video/mp4`、`application/vnd.openxmlformats-…` …），直接拿去判断分支既脆又难读。
+ * 这里映射成四档；认不出的一律 `file`（**不能**当成"没有附件"丢掉）。
+ */
+export function uploadKind(type, name = '') {
+  const text = String(type ?? '').toLowerCase();
+  const ext = String(name ?? '').toLowerCase().split('.').pop() ?? '';
+  if (text.startsWith('video/') || ['mp4', 'mkv', 'flv', 'mov', 'avi', 'm3u8'].includes(ext)) return 'video';
+  if (text.startsWith('audio/') || ['mp3', 'm4a', 'wav', 'aac'].includes(ext)) return 'audio';
+  if (text.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(ext)) return 'image';
+  if (
+    text.includes('pdf') ||
+    text.includes('word') ||
+    text.includes('document') ||
+    text.includes('presentation') ||
+    text.includes('sheet') ||
+    text.includes('officedocument') ||
+    ['doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'txt', 'md', 'zip', 'rar', '7z'].includes(ext)
+  ) {
+    return 'document';
+  }
+  return 'file';
+}
+
+/**
+ * 一个附件上传（`uploads[]` 的一项）。
+ *
+ * **下载地址给的是我们自己的代理，不是学校地址** —— 学校那个 `/api/uploads/{id}/blob`
+ * 必须带 CAS 会话 cookie，浏览器直连会 401；文件也跨域拿不到。
+ * 所以这里只给出"点一下该请求哪条后端路由"，真正取字节由 `GET /lms/attachments/:id` 做。
+ *
+ * `allow_download === false` 的附件**不给下载入口**，只给预览 —— 那是老师的显式设置，
+ * 我们不能凭空给个按钮然后让用户点出 403。
+ */
+export function normalizeUpload(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = toIntOrNull(raw.id);
+  const name = str(raw.name) ?? (id === null ? null : `附件 ${id}`);
+  if (!name) return null;
+  const size = toIntOrNull(raw.size);
+  const allowDownload = raw.allow_download === undefined ? true : bool(raw.allow_download);
+  const referenceId = toIntOrNull(raw.reference_id ?? raw.referenceId);
+  const type = str(raw.type) ?? '';
+  return {
+    id,
+    name,
+    type,
+    kind: uploadKind(type, name),
+    size,
+    allowDownload,
+    referenceId,
+    // 下载与预览都指向本机代理；没有 id 就没法代理，两个都不给
+    downloadUrl: id !== null && allowDownload ? `/lms/attachments/${id}` : null,
+    previewUrl: id !== null ? `/lms/attachments/${id}?inline=1` : null,
+  };
+}
+
+/** 从活动详情里抠 `replay_code`：参考实现的三级兜底，缺了就拿不到回放视频。 */
+function pickReplayCode(raw, data) {
+  const direct = str(raw.replay_code ?? raw.replayCode);
+  if (direct) return direct;
+  // 2) 挂在 lesson_resource.properties 上
+  const properties = raw.lesson_resource?.properties ?? raw.lessonResource?.properties;
+  const nested = str(properties?.replay_code ?? properties?.replayCode);
+  if (nested) return nested;
+  // 3) 直播详情里的 replay_id
+  const external = data?.external_live_detail ?? data?.externalLiveDetail;
+  return str(external?.replay_id ?? external?.replayId);
+}
+
 export function normalizeActivityDetail(raw) {
   const brief = normalizeActivity(raw);
   if (!brief) return null;
+  // 学堂把很多字段塞在 `data` 里（描述、直播详情），顶层是拿不到的 ——
+  // 只读顶层会让"描述"永远是空字符串，板块看起来像没有内容。
+  const data = raw.data && typeof raw.data === 'object' ? raw.data : {};
+  const uploads = Array.isArray(raw.uploads) ? raw.uploads.map(normalizeUpload).filter(Boolean) : [];
   return {
     ...brief,
-    description: str(raw.description) ?? '',
+    description: str(data.description ?? raw.description) ?? '',
     groupId: toIntOrNull(raw.group_id ?? raw.groupId),
+    groupSetId: toIntOrNull(raw.group_set_id ?? raw.groupSetId),
+    groupSetName: str(raw.group_set_name ?? raw.groupSetName),
     userSubmitCount: toIntOrNull(raw.user_submit_count ?? raw.userSubmitCount),
     averageScore: raw.average_score ?? raw.averageScore ?? null,
     highestScore: raw.highest_score ?? raw.highestScore ?? null,
     lowestScore: raw.lowest_score ?? raw.lowestScore ?? null,
+    hasScoreCount: toIntOrNull(raw.has_score_count ?? raw.hasScoreCount),
     lessonStart: str(raw.lesson_start ?? raw.lessonStart),
     lessonEnd: str(raw.lesson_end ?? raw.lessonEnd),
-    replayCode: str(raw.replay_code ?? raw.replayCode),
+    replayCode: pickReplayCode(raw, data),
     replayVideoCount: toIntOrNull(raw.replay_video_count ?? raw.replayVideoCount),
-    uploads: Array.isArray(raw.uploads)
-      ? raw.uploads.map((item) => ({ id: toIntOrNull(item?.id), name: str(item?.name), size: toIntOrNull(item?.size) }))
-      : [],
+    uploads,
   };
 }
 
@@ -192,9 +270,7 @@ export function normalizeSubmission(raw) {
     submittedAt: str(raw.submitted_at ?? raw.submittedAt),
     comment: str(raw.comment) ?? '',
     instructorComment: str(raw.instructor_comment ?? raw.instructorComment) ?? '',
-    uploads: Array.isArray(raw.uploads)
-      ? raw.uploads.map((item) => ({ id: toIntOrNull(item?.id), name: str(item?.name), size: toIntOrNull(item?.size) }))
-      : [],
+    uploads: Array.isArray(raw.uploads) ? raw.uploads.map(normalizeUpload).filter(Boolean) : [],
   };
 }
 
@@ -317,8 +393,16 @@ export class LmsApi {
    * **课程回放的视频不在 lms 上**，要跨到录播站（RMS），三步：
    *   1. `GET {lms}/api/lessons/{id}/player-url?from_page=course` → 一个带 `token` 的播放地址；
    *   2. `GET {rms}/api/v1/auth/embed-token?token=…` → 录播站的 Bearer 票据；
-   *   3. `GET {rms}/api/embed/lesson-activities/captures/{replay_code}` → `lesson_videos[]`
-   *      （里面有 `download_url` 直链）。
+   *   3. `GET {rms}/api/embed/lesson-activities/captures/{replay_code}?lesson_activity_id=…`
+   *      → `lesson_videos[]`（里面有 `download_url` 直链）。
+   *
+   * 三处细节是**照着 XJTUToolBox 的 lms.py 逐行对**才发现的，错一个就全盘失败：
+   *   · 第 2 步返回的是 `{ data: "<票据字符串>" }` —— **票据本身就在 `data` 上**，
+   *     不是 `data.token`。按对象去取会永远拿到 undefined，于是每一路回放都报"取不到票据"
+   *     （这就是"全部都获取回放地址失败"的直接原因）。
+   *   · 第 3 步必须带 `lesson_activity_id` 查询参数，否则录播站判为非法请求。
+   *   · `replay_code` 常常只在**活动详情**里（真实数据 850 条回放只有 10 条缓存上带它），
+   *     所以缺了要先去拉详情，再按三级兜底找。
    *
    * 注意：控制台日志里**不要**打这三个地址 —— 它们都带票据，等于把登录态写进日志。
    *
@@ -332,7 +416,18 @@ export class LmsApi {
       throw new HttpError('这个活动没有 id，拿不到回放地址', { field: 'id' });
     }
 
-    // 第一步：lms 给播放地址
+    // 第 0 步：replay_code 常常只在详情里，缓存上没有就去拉一次详情
+    let replayCode = str(activity?.replayCode);
+    if (!replayCode) {
+      try {
+        const detail = normalizeActivityDetail(await this.activityDetail(id));
+        replayCode = str(detail?.replayCode);
+      } catch {
+        // 详情拉不到就继续走 player-url 里那条线索，不在这里就失败
+      }
+    }
+
+    // 第 1 步：lms 给播放地址（参考项目取的是 `url` 字段）
     const player = await this.#apiJson('GET', `/lessons/${encodeURIComponent(id)}/player-url?from_page=course`);
     const body = player?.data && typeof player.data === 'object' ? player.data : player ?? {};
     const playerUrl = str(body.player_url ?? body.playerUrl ?? body.url);
@@ -340,34 +435,96 @@ export class LmsApi {
       throw new HttpError('学堂没有返回播放地址（这门课的回放可能还没生成或未开放）', { lessonId: id });
     }
 
-    // 第二步：拿地址里的 token 去录播站换票据
+    // 第 2 步：拿地址里的 token 去录播站换票据
     const token = queryParam(playerUrl, 'token');
     if (!token) {
       throw new HttpError('播放地址里没有 token，无法换取录播站票据', { lessonId: id });
     }
+    replayCode = replayCode ?? queryParam(playerUrl, 'replay_code') ?? str(body.replay_code ?? body.replayCode);
+
     const rms = this.config.rmsBaseUrl;
     const headers = { Referer: `${rms}/`, Accept: 'application/json, text/plain, */*' };
     const embed = await this.http.json(`${rms}/api/v1/auth/embed-token?token=${encodeURIComponent(token)}`, { headers });
-    const bearer = str(embed?.token ?? embed?.data?.token ?? embed?.embed_token);
+    // ★ 票据就是顶层 `data`（字符串）。同时保留对象形状的兜底，
+    //   是因为录播站不同版本两种形状都出现过 —— 但**字符串那条必须先判**。
+    const bearer =
+      str(embed?.data) ??
+      str(embed?.token) ??
+      str(embed?.data?.token) ??
+      str(embed?.embed_token);
     if (!bearer) {
-      throw new HttpError('录播站没有返回票据（token 可能已过期）', { rms });
+      const code = embed?.error?.code;
+      const message = embed?.error?.message;
+      throw new HttpError(
+        code ? `录播站拒绝换票（code=${code}${message ? `，${message}` : ''}）` : '录播站没有返回票据（token 可能已过期）',
+        { rms },
+      );
     }
 
-    // 第三步：拿 replay_code 要视频列表
-    const replayCode =
-      str(activity?.replayCode) ??
-      queryParam(playerUrl, 'replay_code') ??
-      str(body.replay_code ?? body.replayCode);
+    // 第 3 步：拿 replay_code 要视频列表（必须带 lesson_activity_id）
     if (!replayCode) {
       throw new HttpError('没有 replay_code，拿不到回放视频列表', { lessonId: id });
     }
-    const captures = await this.http.json(
-      `${rms}/api/embed/lesson-activities/captures/${encodeURIComponent(replayCode)}`,
-      { headers: { ...headers, Authorization: `Bearer ${bearer}` } },
-    );
+    const capturesUrl =
+      `${rms}/api/embed/lesson-activities/captures/${encodeURIComponent(replayCode)}` +
+      `?lesson_activity_id=${encodeURIComponent(id)}`;
+    const captures = await this.http.json(capturesUrl, {
+      headers: { ...headers, Authorization: `Bearer ${bearer}` },
+    });
     const raw = captures?.lesson_videos ?? captures?.data?.lesson_videos ?? [];
     const videos = (Array.isArray(raw) ? raw : []).map(normalizeReplayVideo).filter(Boolean);
     return { lessonId: id, replayCode, videos };
+  }
+
+  /**
+   * 打开任意媒体地址的**上游字节流**（不读进内存）。
+   *
+   * 回放录像动辄几百 MB，`request()` 会先 `arrayBuffer()` 全读一遍把内存打爆，
+   * 所以走 `http.stream()`，交给路由 `pipeline` 到响应里。
+   *
+   * @returns {Promise<{status:number, headers:Headers, body:ReadableStream|null}>}
+   */
+  async streamMedia(url, { headers = {} } = {}) {
+    const target = String(url ?? '').trim();
+    if (!/^https?:\/\//i.test(target)) {
+      throw new HttpError('播放地址不是 http(s)，无法转发', { status: 400, url: target });
+    }
+    return this.http.stream(target, { headers, follow: true });
+  }
+  /**
+   * 取一个附件的原始字节（学校侧 `GET /api/uploads/{id}/blob`）。
+   *
+   * 为什么必须由后端代取，而不是把学校地址交给浏览器：
+   *   1. 那个地址要 CAS 会话 cookie，浏览器直连必然 401；
+   *   2. 即使带上 cookie，跨域也读不到响应体。
+   * 所以前端只认我们自己的 `GET /lms/attachments/:id`，字节由这里取、由路由转发。
+   *
+   * 说明：这里走 `request()`（正文读进内存）。附件是课件/文档，几 MB 量级；
+   * 回放视频那种几百 MB 的走 `replay-download.js` 的流式下载，不经过这里。
+   * 路由层仍会挡一个上限，避免有人拿超大文件把内存打爆。
+   */
+  async attachmentBlob(uploadId) {
+    const id = Number(uploadId);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new HttpError('附件 id 非法', { status: 400, field: 'id' });
+    }
+    // ⚠️ `apiBase` 本身已经以 `/api` 结尾（见构造函数），这里**不能再写一遍**
+    // ——写成 `${apiBase}/api/uploads/…` 会变成 `/api/api/…`，学校直接 404。
+    const url = `${this.apiBase}/uploads/${id}/blob`;
+    const response = await this.http.request(url, {
+      headers: { Referer: `${this.config.baseUrl}/user/index` },
+      follow: true,
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw new HttpError('登录态已失效，请重新登录思源学堂', { status: response.status, url });
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new HttpError(`取附件失败：HTTP ${response.status}`, { status: response.status, url });
+    }
+    return {
+      bytes: response.bytes ?? new Uint8Array(0),
+      contentType: response.headers?.get?.('content-type') ?? '',
+    };
   }
 
   /**
