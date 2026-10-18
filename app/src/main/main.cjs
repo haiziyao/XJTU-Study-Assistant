@@ -198,6 +198,25 @@ function createWindow() {
  *
  * 返回 `{ canceled, path }`：`canceled` 为真时调用方不该改动现有设置。
  */
+/**
+ * 用系统默认浏览器打开一个 http(s) 地址。
+ *
+ * 为什么要走主进程而不是渲染层 `window.open`：主进程装了
+ * `setWindowOpenHandler → shell.openExternal`，渲染层开新窗口最终也到这儿，
+ * 但那条路上我们**拿不到返回值、也没法先校验协议**。这里显式校验后直接调，
+ * 至少能保证只放行 http/https（别的协议交给系统是另一类风险）。
+ *
+ * 注意：如果本程序以管理员身份运行、而浏览器不是，Windows 会弹
+ * 「Edge 未响应，因为现有实例正在以提升的权限运行」—— 那是系统层面的权限比对，
+ * 我们无法绕过。用户点"是"会把浏览器重启。所以界面上「在浏览器打开」是个**显式按钮**，
+ * 而正文默认在应用内读（不去打扰系统）。
+ */
+ipcMain.handle('potato:openExternal', async (_event, url) => {
+  const raw = String(url ?? '').trim();
+  if (!/^https?:\/\//i.test(raw)) throw new Error('只支持 http / https 地址');
+  await shell.openExternal(raw);
+  return { ok: true, url: raw };
+});
 ipcMain.handle('potato:pickDirectory', async (_event, options = {}) => {
   const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
     title: typeof options?.title === 'string' && options.title ? options.title : '选择文件夹',

@@ -31,7 +31,15 @@ import { HttpError } from '../../core/http/router.js';
 import { CAMPUS_SITE_SEARCH, readPages, readSiteNews } from '../ai/web-search.js';
 
 /** 没有配置时默认关注的站点：教务 / 研究生院 / 学校门户 / 新闻网。 */
-export const DEFAULT_ENABLED_SITES = Object.freeze(['dean', 'gs', 'www', 'news']);
+/**
+ * 默认关注的站点：教务 / 研究生院 / 新闻网。
+ *
+ * 学校门户（`www`）**不在默认里**：实测它没有稳定的通知栏目页
+ * （`tzgg.htm` 与 `xwdt.htm` 都 404，首页发现的栏目抽不出带日期的条目），
+ * 每次同步都只会报一次失败。它在站点表里标了 `working: false` 并写了原因，
+ * 用户仍能在设置里看到它、知道为什么不用它。门户的用途是 campus 档的站内搜索。
+ */
+export const DEFAULT_ENABLED_SITES = Object.freeze(['dean', 'gs', 'news']);
 
 /** 保留期可选项（天）。`0` = 永久保留，不清理。 */
 export const RETENTION_OPTIONS = Object.freeze([7, 30, 90, 180, 365, 0]);
@@ -480,7 +488,7 @@ export class NotificationService {
   async readBody(id) {
     const row = this.store.notifications.get(String(id ?? ''));
     if (!row) throw HttpError.notFound(`没有这条通知：${id}`);
-    const pages = await readPages([{ title: row.title, url: row.url }], { limit: 1 });
+    const pages = await readPages([{ title: row.title, url: row.url }], { limit: 1, readable: true });
     const page = pages?.[0] ?? null;
     if (!page || page.error) {
       throw HttpError.upstream(

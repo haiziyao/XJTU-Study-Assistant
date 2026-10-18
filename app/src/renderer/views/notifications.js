@@ -50,6 +50,34 @@
     return node;
   }
 
+  /**
+   * 用浏览器打开一条通知的原文。
+   *
+   * 两端各走各的路：
+   *   · **桌面端** → `potatoCalendar.openExternal`（主进程 `shell.openExternal`，
+   *     拉起系统默认浏览器）。不能只靠 `window.open`：那样最终虽然也到 `shell.openExternal`，
+   *     但渲染层拿不到结果、也没法先校验协议。
+   *   · **浏览器端** → `window.open(url, '_blank', 'noreferrer')`。
+   *
+   * ⚠️ 桌面端如果本程序以管理员运行而浏览器不是，Windows 会弹权限提升的确认框 ——
+   * 那是系统行为，绕不过。所以正文默认**在应用内读**，这个按钮是用户显式要"去浏览器看"时才点。
+   */
+  function openInBrowser(url) {
+    const raw = String(url ?? '').trim();
+    if (!/^https?:\/\//i.test(raw)) {
+      PC.toast?.('这个地址不是网页地址，打不开');
+      return;
+    }
+    const bridge = window.potatoCalendar?.openExternal;
+    if (typeof bridge === 'function') {
+      // 桌面端：失败要说出来，而不是静默什么都不发生
+      Promise.resolve(bridge(raw)).catch((error) => {
+        PC.toast?.(`没能拉起浏览器：${error?.message ?? error}`);
+      });
+      return;
+    }
+    window.open(raw, '_blank', 'noreferrer');
+  }
   /** 时间展示：只到分钟，`T` 换空格。日期串按字面量切，避免时区把它串到前一天。 */
   function fmt(value) {
     const text = String(value ?? '').trim();
@@ -240,6 +268,10 @@
 
     // 原链接作为备用展示（只展示，不自动打开）
     const foot = mk('div', 'notif-reader-foot');
+    const openLink = mk('button', 'ghost-btn notif-reader-open', '在浏览器打开');
+    openLink.type = 'button';
+    openLink.addEventListener('click', () => openInBrowser(reader.url));
+    foot.appendChild(openLink);
     foot.appendChild(mk('span', 'notif-hint', '原链接（可复制）：'));
     const code = mk('span', 'notif-link', reader.url);
     foot.appendChild(code);
@@ -279,6 +311,13 @@
     pinBtn.title = item.pinned ? '取消固定后，它会重新纳入保留期清理' : '固定后不会因保留期被清理';
     pinBtn.addEventListener('click', () => void togglePin(item));
     actions.appendChild(pinBtn);
+
+    // 想在浏览器里看原文时的显式出口（正文默认在应用内读）
+    const openBtn = mk('button', 'ghost-btn notif-open', '在浏览器打开');
+    openBtn.type = 'button';
+    openBtn.title = '用系统默认浏览器打开原文（桌面端会拉起浏览器）';
+    openBtn.addEventListener('click', () => openInBrowser(item.url));
+    actions.appendChild(openBtn);
 
     line.append(main, actions);
 

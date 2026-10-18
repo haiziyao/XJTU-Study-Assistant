@@ -140,6 +140,11 @@ export const CAMPUS_SITE_SEARCH = Object.freeze([
   },
   {
     id: 'www', label: '学校门户（覆盖整个 *.xjtu.edu.cn）', host: 'www.xjtu.edu.cn',
+    // 2026-10-18 实测：门户**没有稳定的通知栏目** —— tzgg.htm 与 xwdt.htm 都 404，
+    // 首页发现到的 kxyj/xsqk.htm 抽不出带发布日期的条目。它的价值在站内搜索（campus 档），
+    // 所以标 working:false 让通知同步跳过它并说明原因，而不是每次同步都报一次失败。
+    working: false,
+    reason: '门户没有固定的通知栏目页（tzgg/xwdt 均 404，首页发现的栏目不含发布日期条目）；通知请关注教务处 / 研究生院 / 新闻网，本站的用途是站内搜索',
     aliases: ['学校门户', '交大主页', '学校主页'],
     path: '/soso_2.jsp?wbtreeid=1001', keyField: 'lucenenewssearchkey',
     allowHosts: ['xjtu.edu.cn'], working: true,
@@ -2895,15 +2900,34 @@ export const META_DESCRIPTION_NOTE =
  * 顺序很重要：先丢整块标签（连带内容），再把块级标签变成换行，最后才剥剩下的标签 ——
  * 反过来的话 `<script>` 里的代码会被当成正文留下来。
  */
-export function htmlToText(html) {
+/**
+ * @param {string} html
+ * @param {{ readable?: boolean }} [options]
+ *   `readable: true` 用于**在面板里读正文**（通知阅读器）：
+ *     · 表格按「一行一条记录」展开（单元格用制表符、行尾换行）；
+ *     · 剩余标签**直接删掉而不是换成空格** —— 校方页面常把数字包在 `<span>`/`<font>` 里，
+ *       换空格会把「2026 年 11 月 14 日」拆成「2 026 年 1 1 月 1 4 日」。
+ *   默认 `false`：保持搜索链路原有的切分口径不变（改它会影响相关度打分，实测会把
+ *   一组既有用例打红，所以这里只做**增量**，不动默认行为）。
+ */
+export function htmlToText(html, options = {}) {
+  const readable = options?.readable === true;
   let text = String(html ?? '');
   text = text.replace(/<!--[\s\S]*?-->/g, ' ');
   text = text.replace(new RegExp(`<(${DROP_TAGS})\\b[^>]*>[\\s\\S]*?<\\/\\1>`, 'gi'), ' ');
   // 被截断的页面常常有**没闭合**的 <script>：上面那条配对失败，这里再兜一刀
   text = text.replace(new RegExp(`<(${DROP_TAGS})\\b[^>]*>[\\s\\S]*$`, 'gi'), ' ');
   text = text.replace(/<br\s*\/?>/gi, '\n');
-  text = text.replace(/<\/(p|div|li|tr|td|th|h[1-6]|section|article|blockquote|dd|dt|pre|figure)\s*>/gi, '\n');
-  text = text.replace(/<[^>]*>/g, ' ');
+  if (readable) {
+    // 表格：单元格之间用制表符、行尾换行，读起来才是"一行一条记录"
+    text = text.replace(/<\/t[dh]\s*>/gi, '\t');
+    text = text.replace(/<\/(p|div|li|tr|h[1-6]|section|article|blockquote|dd|dt|pre|figure)\s*>/gi, '\n');
+    // 剩余标签直接删掉（不补空格），避免把被 <span> 包住的数字拆开
+    text = text.replace(/<[^>]*>/g, '');
+  } else {
+    text = text.replace(/<\/(p|div|li|tr|td|th|h[1-6]|section|article|blockquote|dd|dt|pre|figure)\s*>/gi, '\n');
+    text = text.replace(/<[^>]*>/g, ' ');
+  }
   return collapseWhitespace(decodeEntities(text));
 }
 
@@ -3155,7 +3179,8 @@ async function readOnePage(result, { fetchImpl, maxChars, timeoutMs }) {
  *   `meta-description` meta 摘要兜底（此时 `note` 会给模型一句"这是摘要不是全文"的口径）。
  */
 export async function readPages(results, options = {}) {
-  const { fetchImpl, concurrency, maxChars = READ_MAX_CHARS, timeoutMs = READ_TIMEOUT_MS, log } = options;
+  // `readable`：给"在面板里读正文"用的提取口径（见 htmlToText 的说明），默认关闭
+  const { fetchImpl, concurrency, maxChars = READ_MAX_CHARS, timeoutMs = READ_TIMEOUT_MS, log, readable = false } = options;
   const warn = makeLogger(log);
   const list = (Array.isArray(results) ? results : []).filter((item) => item && typeof item.url === 'string' && item.url);
   const limit = clamp(options.limit, 1, SEARCH_LIMIT_MAX, SEARCH_LIMIT_MAX);
