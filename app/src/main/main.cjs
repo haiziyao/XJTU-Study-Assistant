@@ -226,10 +226,13 @@ ipcMain.handle('potato:openExternal', async (_event, url) => {
   /*
    * 次序：**先官方做法 `shell.openExternal`，失败才降级到 explorer.exe**。
    *
-   * 上一版反过来（explorer 优先），实测"explorer 起来了但什么也没发生"：
-   * 提升权限的进程 spawn 出的 explorer.exe 会立刻退出（Explorer 是单例），
-   * 请求并没有交到**已经在运行的那个非提升 Explorer** 手里 —— 所以静默无声。
-   * `shell.openExternal` 至少是官方路径，系统会给出明确反馈（哪怕是那个权限提示框）。
+   * 两条实测结论（2026-10-18，Windows 11 + Edge）：
+   *   1. `explorer.exe <url>` 在本机**静默无效** —— spawn 成功、进程立刻退出
+   *      （Explorer 是单例），请求没有交到已在运行的那个 Explorer 手里；
+   *   2. `shell.openExternal` 在**以管理员身份运行本程序时反而能通**；
+   *      普通权限下则常被 Edge 那个"提升权限实例"的弹窗拦住。
+   * 所以主路径走官方 API，explorer 只作为抛错后的兜底。
+   * 界面提示也不再谎称"管理员运行会被拦截"（那是反的）。
    */
   try {
     await shell.openExternal(raw);
