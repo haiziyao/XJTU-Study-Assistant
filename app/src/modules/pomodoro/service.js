@@ -583,6 +583,67 @@ export class PomodoroService {
     return this.status();
   }
 
+  /* ---------------------------------------------------------------- 指令层预览（dryRun） */
+
+  /**
+   * 预览「开始 / 重开」：只校验、只算，不落盘、不广播、不记账。
+   *
+   * 为什么需要它（而不是让指令层自己拼一个 endsAt）：
+   * - 待办是否存在、分钟数是否在 0.05~240 之间，必须和真写是**同一份**校验。
+   *   预览放过、真写 400，用户就会点一张"看起来没问题"的确认卡然后失败；
+   * - 重开会先 `stop()` 当前阶段。若参数不合法却先把用户正在跑的番茄停掉，损失不可逆 ——
+   *   所以指令层必须先预览，通过后才允许停止。
+   *
+   * 用 idle 副本跑真写的 `startState`：状态机的校验、overrides、endsAt 都复用，
+   * 这里一条判断都不复制。
+   */
+  previewStart(input = {}) {
+    const hasTask = Object.prototype.hasOwnProperty.call(input, 'taskId');
+    const taskId = hasTask ? input.taskId : this.state.taskId;
+    this.#requireTask(taskId);
+    const now = this.#now();
+    const next = startState(createIdleState(this.state.config), {
+      now,
+      taskId: taskId ?? null,
+      studyMin: input.studyMin,
+      breakMin: input.breakMin,
+    });
+    return { ...coreStatus(next, now), taskTitle: this.#taskTitle(next.taskId) };
+  }
+
+  /**
+   * 预览「控制」：pause / resume / skip / stop / setTask。
+   *
+   * 同样直接调用真写用的纯状态函数 —— 未开始时暂停、运行中继续这些 400 在预览阶段
+   * 就是同一条错误，不会出现"确认卡说能做、点下去 400"。
+   */
+  previewControl({ op, taskId } = {}) {
+    const now = this.#now();
+    switch (op) {
+      case 'pause':
+        return { ...coreStatus(pauseState(this.state, { now }), now), taskTitle: this.#taskTitle(this.state.taskId) };
+      case 'resume':
+        return { ...coreStatus(resumeState(this.state, { now }), now), taskTitle: this.#taskTitle(this.state.taskId) };
+      case 'skip': {
+        // finishPhase 会返回"下一阶段"的状态；预览只要状态本身，不 append 账本
+        const result = finishPhase(this.state, { now, completed: false });
+        return { ...coreStatus(result.state, now), taskTitle: this.#taskTitle(result.state.taskId) };
+      }
+      case 'stop': {
+        const result = stopState(this.state, { now });
+        return { ...coreStatus(result.state, now), taskTitle: this.#taskTitle(result.state.taskId) };
+      }
+      case 'setTask': {
+        this.#requireTask(taskId);
+        const next = setTaskState(this.state, { taskId: taskId ?? null });
+        return { ...coreStatus(next, now), taskTitle: this.#taskTitle(next.taskId) };
+      }
+      default:
+        // 指令层已经校验过 op；走到这里说明调用方绕过了指令层
+        throw HttpError.badRequest(`不支持的番茄钟操作：${String(op)}`, { field: 'op' });
+    }
+  }
+
   /* ---------------------------------------------------------------- 给 AI 的只读查询 */
 
   /**
