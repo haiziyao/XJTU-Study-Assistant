@@ -564,7 +564,7 @@
   function sourcesCard() {
     const { card, body } = settingsCard(
       '通知来源',
-      '勾上就会在「同步最新」时去抓。标记「已知不可用」的站点仍可勾选，但同步时会跳过并说明原因。',
+      '勾上就会在「同步最新」时去抓。默认只开 4 个校级部门（教务 / 学生处 / 研究生院 / 网络信息中心）；学院与书院按需勾选 —— 全开一次要抓 78 个栏目页，会比较慢。',
     );
     const enabled = new Set(settingsUi.settings?.enabledSiteIds ?? []);
     const list = mk('div', 'notif-source-list');
@@ -584,6 +584,12 @@
       const text = mk('span', 'notif-source-text');
       text.appendChild(mk('span', 'notif-source-name', source.label));
       text.appendChild(mk('span', 'notif-source-host', source.host || ''));
+      // 分类与栏目数：60 个源里区分"校级部门 / 学院 / 书院"，也让用户理解
+      // "为什么这个站要抓 6 页"（研究生院确实有 6 个栏目）
+      if (source.category) text.appendChild(mk('span', 'notif-badge', source.category));
+      if (!source.custom && source.channels?.length > 1) {
+        text.appendChild(mk('span', 'notif-badge', `${source.channels.length} 个栏目`));
+      }
       if (source.custom) text.appendChild(mk('span', 'notif-badge', '自定义'));
       if (!source.working) {
         const badge = mk('span', 'notif-badge notif-badge-warn', '已知不可用');

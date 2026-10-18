@@ -21,14 +21,33 @@
  *
  * 与 ai 模块的关系
  * ----------------
- * 这里 `import { readSiteNews, CAMPUS_SITE_SEARCH } from '../ai/web-search.js'`，
- * 是**纯函数/常量导入**（esm 静态导入，与装配顺序无关），不是跨模块读写数据：
- * 本模块只写自己的两个集合。复用而不是重写，是因为那张站点表里的栏目路径是
- * **逐站实测校准过的**（每条都带 `evidence`），另起一份爬虫只会更难维护。
+ * 站点表有**两份**，各有各的用途，不要混：
+ *   · `sources.json`（本模块，来自参考项目 XJTUToolBox）—— **通知源**，
+ *     60 个源 / 78 个栏目，每条是真实的列表页 URL；
+ *   · `ai/web-search.js` 的 `CAMPUS_SITE_SEARCH` —— 给**站内搜索**用（`path` + `keyField`），
+ *     多数站点没有栏目路径，拿来抓通知基本抓不到。
+ * 抓取本身复用 `readSiteNews()`（纯函数导入，与装配顺序无关），不重复造爬虫。
  */
 
 import { HttpError } from '../../core/http/router.js';
-import { CAMPUS_SITE_SEARCH, readPages, readSiteNews } from '../ai/web-search.js';
+import { readFileSync } from 'node:fs';
+
+import { readPages, readSiteNews } from '../ai/web-search.js';
+
+/**
+ * 内置通知源：**从参考项目 XJTUToolBox 导入的那一份**（`scripts/import-notification-sources.mjs`），
+ * 目前 60 个源 / 78 个栏目，每条栏目都是一个真实的列表页 URL。
+ *
+ * 为什么不再用 `ai/web-search.js` 的 `CAMPUS_SITE_SEARCH`：那张表是给**站内搜索**用的
+ * （字段是 `path` + `keyField`），只有少数站点带了栏目路径；而通知要的是**栏目直读**，
+ * 参考项目里每个频道的 `url` 正好就是我们要的东西。
+ *
+ * 同步读文件而不是 `import ... with { type: 'json' }`：后者要 Node 的 import attributes，
+ * 而这个仓库对运行时版本卡得比较保守。模块加载时读一次、之后是常量，开销可忽略。
+ */
+const BUILTIN_SOURCES = JSON.parse(
+  readFileSync(new URL('./sources.json', import.meta.url), 'utf8'),
+);
 
 /** 没有配置时默认关注的站点：教务 / 研究生院 / 学校门户 / 新闻网。 */
 /**
@@ -39,7 +58,7 @@ import { CAMPUS_SITE_SEARCH, readPages, readSiteNews } from '../ai/web-search.js
  * 每次同步都只会报一次失败。它在站点表里标了 `working: false` 并写了原因，
  * 用户仍能在设置里看到它、知道为什么不用它。门户的用途是 campus 档的站内搜索。
  */
-export const DEFAULT_ENABLED_SITES = Object.freeze(['dean', 'gs', 'news']);
+export const DEFAULT_ENABLED_SITES = Object.freeze(['dean', 'xsc', 'gs', 'nic']);
 
 /** 保留期可选项（天）。`0` = 永久保留，不清理。 */
 export const RETENTION_OPTIONS = Object.freeze([7, 30, 90, 180, 365, 0]);
@@ -141,7 +160,7 @@ export function normalizeCustomSource(input) {
     throw HttpError.badRequest('站点 id 只能用小写字母、数字和连字符（最多 48 位）', { field: 'id' });
   }
   // 与内置站点撞 id 会让 `enabledSiteIds` 的语义变得说不清，直接拒绝
-  if (CAMPUS_SITE_SEARCH.some((site) => site.id === id)) {
+  if (BUILTIN_SOURCES.some((site) => site.id === id)) {
     throw HttpError.badRequest(`站点 id「${id}」与内置站点重名，请换一个`, { field: 'id' });
   }
 
@@ -195,13 +214,26 @@ export class NotificationService {
   sources() {
     const settings = this.settings();
     const enabled = new Set(settings.enabledSiteIds);
-    const builtin = CAMPUS_SITE_SEARCH.map((site) => ({
+    /*
+     * 内置源：来自参考项目的清单，每个源带若干**栏目 URL**。
+     * 这里把 `channels` 一并给出去 —— 设置页要能告诉用户"这个站会抓哪几页"，
+     * 而且抓不到时用户能自己去点开看看是不是改版了。
+     */
+    const builtin = BUILTIN_SOURCES.map((site) => ({
       id: site.id,
       label: site.label,
+      category: site.category ?? '',
       host: site.host,
+      home: site.home ?? null,
+      channels: (site.channels ?? []).map((channel) => ({
+        id: channel.id,
+        label: channel.label,
+        url: channel.url,
+        defaultOn: channel.defaultOn === true,
+      })),
       custom: false,
-      working: site.working !== false,
-      reason: site.reason ?? null,
+      working: true,
+      reason: null,
       enabled: enabled.has(site.id),
     }));
     const custom = settings.customSources.map((site) => ({
@@ -229,9 +261,16 @@ export class NotificationService {
     const settings = this.settings();
     const custom = settings.customSources.find((site) => site.id === key);
     if (custom) return { id: custom.id, label: custom.label, url: custom.url, custom: true, working: true };
-    const builtin = CAMPUS_SITE_SEARCH.find((site) => site.id === key);
+    const builtin = BUILTIN_SOURCES.find((site) => site.id === key);
     if (!builtin) throw HttpError.notFound(`没有这个通知站点：${key}`);
-    return { ...builtin, custom: false, working: builtin.working !== false };
+    return {
+      id: builtin.id,
+      label: builtin.label,
+      host: builtin.host,
+      channels: (builtin.channels ?? []).map((channel) => channel.url).filter(Boolean),
+      custom: false,
+      working: true,
+    };
   }
 
   /* ------------------------------------------------------------ 同步 */
@@ -277,14 +316,35 @@ export class NotificationService {
     }
 
     const results = await mapWithConcurrency(targets, SYNC_CONCURRENCY, async (source) => {
-      try {
-        const read = source.custom
-          ? await readSiteNews({ url: source.url, limit, fetchImpl })
-          : await readSiteNews({ site: source.id, limit, fetchImpl });
-        return { source, read };
-      } catch (error) {
-        return { source, error: error?.message ?? String(error) };
+      /*
+       * 一个源可能有多条栏目（研究生院 6 条、学生处 2 条）。
+       * 逐条抓、把条目合并；某一条失败**不影响其它条** —— 但要把失败原因记下来，
+       * 否则用户会以为"那个栏目没有新通知"（实际上我们根本没读到它）。
+       */
+      const urls = source.custom ? [source.url] : (source.channels ?? []);
+      if (!urls.length) return { source, items: [], notes: ['这个源没有配置栏目 URL'], error: null };
+
+      const items = [];
+      const notes = [];
+      let newest = null;
+      let failures = 0;
+      for (const url of urls) {
+        try {
+          const read = await readSiteNews({ url, limit, fetchImpl });
+          for (const item of read.items ?? []) items.push(item);
+          if (read.error) {
+            failures += 1;
+            notes.push(`${url} → ${read.error}`);
+          }
+          if (read.newest && (!newest || read.newest > newest)) newest = read.newest;
+        } catch (error) {
+          failures += 1;
+          notes.push(`${url} → ${error?.message ?? String(error)}`);
+        }
       }
+      // 全部栏目都失败才算这个源失败；部分失败只在 notes 里说明
+      const error = failures === urls.length ? `全部 ${urls.length} 个栏目都没抓成` : null;
+      return { source, items, notes, newest, error, failedChannels: failures };
     });
 
     const now = new Date().toISOString();
@@ -293,26 +353,26 @@ export class NotificationService {
 
     for (const item of results) {
       const { source } = item;
-      if (item.error || !item.read) {
+      // 只有"全部栏目都失败"才算这个源失败；部分失败在 notes 里说明，条目照常入库
+      if (item.error) {
         perSite.push({
           siteId: source.id,
           label: source.label,
           count: 0,
           newest: null,
-          error: item.error ?? '抓取失败',
-          notes: item.read?.notes ?? [],
+          error: item.error,
+          notes: item.notes ?? [],
         });
         continue;
       }
-      const read = item.read;
-      const rows = read.items ?? [];
+      const rows = item.items ?? [];
       let siteInserted = 0;
       for (const entry of rows) {
-        const id = canonicalUrl(entry.url, read.url);
+        const id = canonicalUrl(entry.url);
         if (!id) continue;
         const existing = this.store.notifications.get(id);
         if (existing) {
-          // 已存在：只刷新"最近一次看到"与可能变了的标题/日期，**不碰 read / pinned / firstSeenAt**
+          // 已存在：只刷新"最近一次看到"与可能变了的标题/日期，**不碰 pinned / firstSeenAt**
           if (!dryRun) {
             await this.store.notifications.update(id, {
               ...existing,
@@ -349,9 +409,9 @@ export class NotificationService {
         label: source.label,
         count: siteInserted,
         total: rows.length,
-        newest: read.newest ?? null,
-        error: read.error ?? null,
-        notes: read.notes ?? [],
+        newest: item.newest ?? null,
+        error: null,
+        notes: item.notes ?? [],
       });
     }
 
@@ -561,7 +621,7 @@ export class NotificationService {
       // 删掉的自定义站点要从启用列表里一并摘掉，否则同步时会报"站点不在清单里"
       const alive = new Set(normalized.map((item) => item.id));
       next.enabledSiteIds = (patch.enabledSiteIds !== undefined ? next.enabledSiteIds : this.settings().enabledSiteIds)
-        .filter((id) => !CAMPUS_SITE_SEARCH.every((site) => site.id !== id) ? true : alive.has(id));
+        .filter((id) => !BUILTIN_SOURCES.every((site) => site.id !== id) ? true : alive.has(id));
     }
 
     await this.#writeSettings(next);
