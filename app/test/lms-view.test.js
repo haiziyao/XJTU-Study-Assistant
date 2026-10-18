@@ -418,3 +418,40 @@ test('学堂首页：作业自动变成待办开关默认开启，改动会保�
     await ctx.app.close();
   }
 });
+
+test('学堂首页：「只同步本学期作业」二级开关默认开启，可单独保存，父开关关闭时禁用', async () => {
+  const ctx = await bootView();
+  try {
+    ctx.seam.ui.status = {
+      status: 'ready',
+      autoSync: { enabled: false, intervalHours: 6 },
+      // 老状态里没有 currentTermOnly：要按新默认值（开）显示，不能显示成关
+      todos: { enabled: true },
+    };
+    ctx.seam.ui.page = 'home';
+    ctx.seam.paint();
+
+    const termRow = ctx.dom.document.querySelector('.lms-todos-term');
+    assert.ok(termRow, '★ 父开关旁应有「只同步本学期作业」二级开关');
+    const termToggle = termRow.querySelector('.lms-autosync-toggle');
+    assert.ok(termToggle, '二级开关应是一个 checkbox');
+    assert.equal(termToggle.checked, true, '默认只同步本学期');
+    assert.equal(termToggle.disabled, false, '父开关开着时可用');
+
+    // 单独保存 currentTermOnly（不要求同时提交 enabled）
+    termToggle.checked = false;
+    termToggle.dispatch('change');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(ctx.calls.includes('/lms/todos/config'), '★ 改二级开关必须调接口保存');
+    assert.equal(ctx.seam.ui.todosBusy, false, '保存结束后忙碌态要复位');
+
+    // 父开关关掉时二级开关没有意义：禁用，避免用户以为它还在起作用
+    ctx.seam.ui.status = { ...ctx.seam.ui.status, todos: { enabled: false, currentTermOnly: true } };
+    ctx.seam.paint();
+    const afterRow = ctx.dom.document.querySelector('.lms-todos-term');
+    assert.ok(afterRow, '父开关关闭后二级开关仍在（只是禁用）');
+    assert.equal(afterRow.querySelector('.lms-autosync-toggle').disabled, true, '父开关关闭时二级开关应禁用');
+  } finally {
+    await ctx.app.close();
+  }
+});

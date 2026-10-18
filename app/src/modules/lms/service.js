@@ -22,7 +22,7 @@ import { JsonFile } from './secret-store.js';
 import { LmsApi } from './api.js';
 import { ReplayDownloader, humanSize } from './replay-download.js';
 import { applySyncPlan, buildSyncPlan } from './sync.js';
-import { applyHomeworkTodoPlan, planHomeworkTodos } from './todos-bridge.js';
+import { applyHomeworkTodoPlan, planHomeworkTodos, resolveCurrentTerm } from './todos-bridge.js';
 import { parseLmsDate } from './time.js';
 
 /** 活动缓存的新鲜度：预览时若超过这个时间就顺手刷新一次。 */
@@ -112,6 +112,14 @@ export class LmsService {
        * **已有待办一律保留**（删数据是用户自己的事，见 todos-bridge.js 文件头）。
        */
       todosEnabled: true,
+      /**
+       * 「只同步本学期作业」，默认**开启**。
+       *
+       * 为什么默认开：学堂会返回全部历史学期的课程/作业，全量同步会把往年作业一股脑塞进
+       * 待办页，真正要交的本学期作业反而被淹没（详见 todos-bridge.js 文件头第 6~8 条）。
+       * 关掉恢复旧的全量行为；**已有待办不会因为打开过滤而消失**。
+       */
+      currentTermOnly: true,
       lastTodosSyncAt: null,
       lastTodosResult: null,
       /** 回放下载目录（null = 用 dataDir/downloads）。改它要同步给下载器。 */
@@ -198,6 +206,7 @@ export class LmsService {
        */
       todos: {
         enabled: this.state.todosEnabled,
+        currentTermOnly: this.state.currentTermOnly,
         lastSyncAt: this.state.lastTodosSyncAt,
         lastResult: this.state.lastTodosResult,
       },
@@ -230,6 +239,8 @@ export class LmsService {
     // 默认开启：只有明确存过 false 才关。老配置里没有这个键 —— 那是"功能上线前就没关过"，
     // 按新功能的默认值（开）处理，不能让升级后的用户看不到作业待办。
     this.state.todosEnabled = meta.todosEnabled !== false;
+    // 同样是"只有明确存过 false 才关"：老配置没有这个键，升级后应按新功能的默认值（只同步本学期）处理
+    this.state.currentTermOnly = meta.currentTermOnly !== false;
     this.state.lastTodosSyncAt = meta.lastTodosSyncAt ?? null;
     this.state.lastTodosResult = meta.lastTodosResult ?? null;
     // 下载目录是用户设置过的，重启后要接着用（下载器持有自己那份路径，一并同步）
@@ -702,26 +713,36 @@ export class LmsService {
 
   // ---------------------------------------------------------------- 作业 → 待办
 
-  /** 作业待办开关与最近一次同步结果（设置页那个开关读它）。 */
+  /** 作业待办开关与最近一次同步结果（设置页那两个开关读它）。 */
   todosConfig() {
     return {
       enabled: this.state.todosEnabled,
+      currentTermOnly: this.state.currentTermOnly,
       lastSyncAt: this.state.lastTodosSyncAt,
       lastResult: this.state.lastTodosResult,
     };
   }
 
   /**
-   * 打开 / 关闭「作业自动变成待办」。
+   * 修改「作业自动变成待办」与「只同步本学期作业」。
    *
-   * 关闭**只停止后续的自动建/更新**，已经建出来的待办一条都不删：它们可能已经被用户改过、
-   * 勾过、加上自己的备注；"关掉开关"不等于"替我清空数据"（理由同 todos-bridge.js 文件头）。
+   * 两个字段都可以单独改（设置页两个开关各管各的），至少给一个；给了就必须是布尔值。
+   * 关闭任何一项都**只停止后续的自动建/更新**，已经建出来的待办一条都不删：
+   * 它们可能已经被用户改过、勾过、加上自己的备注；"关掉开关"不等于"替我清空数据"
+   * （理由同 todos-bridge.js 文件头第 2、7 条）。
    */
-  async updateTodoSettings({ enabled } = {}) {
-    if (typeof enabled !== 'boolean') {
+  async updateTodoSettings({ enabled, currentTermOnly } = {}) {
+    if (enabled === undefined && currentTermOnly === undefined) {
+      throw HttpError.badRequest('字段 enabled / currentTermOnly 至少提供一个布尔值');
+    }
+    if (enabled !== undefined && typeof enabled !== 'boolean') {
       throw HttpError.badRequest('字段 enabled 必须是布尔值（true / false）', { field: 'enabled' });
     }
-    this.state.todosEnabled = enabled;
+    if (currentTermOnly !== undefined && typeof currentTermOnly !== 'boolean') {
+      throw HttpError.badRequest('字段 currentTermOnly 必须是布尔值（true / false）', { field: 'currentTermOnly' });
+    }
+    if (enabled !== undefined) this.state.todosEnabled = enabled;
+    if (currentTermOnly !== undefined) this.state.currentTermOnly = currentTermOnly;
     await this.#persistMeta();
     return this.todosConfig();
   }
@@ -731,10 +752,12 @@ export class LmsService {
    *
    * 口径：
    * - 只处理 `type === 'homework'`；直播 / 回放 / 资料一律不进待办；
+   * - 默认只处理**本学期**（`currentTermOnly`）：历史学期跳过并在 `skippedReasons`
+   *   里给出 `term_mismatch` / `deadline_outside_term` / `term_unknown`；关掉开关即全量；
    * - 没有截止日 → 计入 `skipped`，不建（不编日期）；
    * - 同 `externalId` 已存在 → 更新（绝不新建第二条，也绝不重置 `completed`）；
    * - 学堂已提交 → 把待办标完成，但不删除（用户可能还要看要求/分数）；
-   * - 学堂那边查不到的活动**不删除**本地待办；
+   * - 学堂那边查不到的活动 / 这次被学期过滤掉的活动**都不删除**本地待办；
    * - 未登录 / 上游失败 → 返回零计数 + 明确 `reason`，**一条都不写**，也不假装"没有作业"。
    *
    * 已提交状态只在活动详情里（列表接口不返回），所以这里先补详情：
@@ -742,16 +765,21 @@ export class LmsService {
    * 自动路径复用已有详情，避免每次刷新都打 N 次详情接口。
    *
    * @param {{refresh?: boolean, refreshDetails?: boolean}} [options]
-   * @returns {Promise<{created:number, updated:number, completed:number, skipped:number, enabled:boolean, reason?:string, lastSyncAt?:string}>}
+   * @returns {Promise<{created:number, updated:number, completed:number, skipped:number, enabled:boolean, currentTermOnly:boolean, skippedReasons?:object, reason?:string, lastSyncAt?:string}>}
    */
   async syncTodos({ refresh = false, refreshDetails = false } = {}) {
     const empty = { created: 0, updated: 0, completed: 0, skipped: 0 };
     if (!this.state.todosEnabled) {
-      return { ...empty, enabled: false, reason: '「作业自动变成待办」已关闭' };
+      return {
+        ...empty,
+        enabled: false,
+        currentTermOnly: this.state.currentTermOnly,
+        reason: '「作业自动变成待办」已关闭',
+      };
     }
     if (!this.services.todos) {
       // 只装配 lms 没装配 calendar 的场景（onlyModules）：不能静默当成功。
-      return { ...empty, enabled: true, reason: '日历模块未加载，待办不可用' };
+      return { ...empty, enabled: true, currentTermOnly: this.state.currentTermOnly, reason: '日历模块未加载，待办不可用' };
     }
     try {
       // 缓存为空时即使没传 refresh 也先拉一次：否则手动同步会永远返回 0，
@@ -769,7 +797,16 @@ export class LmsService {
 
       const activities = this.store.lmsActivities.all().map(activityView);
       const courses = this.store.lmsCourses.all().map(courseView);
-      const plan = planHomeworkTodos({ activities, courses, existingTodos: this.store.todos.all() });
+      // 当前学期从 LMS 自己的课程缓存取（哪门课今天正在上，就按它挂的学期），
+      // 取不到再退回系统学年/学期推算；两边都按北京时间算，见 todos-bridge.js。
+      const currentTerm = resolveCurrentTerm({ courses });
+      const plan = planHomeworkTodos({
+        activities,
+        courses,
+        existingTodos: this.store.todos.all(),
+        currentTermOnly: this.state.currentTermOnly,
+        currentTerm,
+      });
       const result = await applyHomeworkTodoPlan({ todos: this.services.todos, plan });
       const summary = {
         created: result.created,
@@ -777,6 +814,9 @@ export class LmsService {
         completed: result.completed,
         skipped: result.skipped,
         enabled: true,
+        currentTermOnly: this.state.currentTermOnly,
+        // 为什么少了几条：term_mismatch / deadline_outside_term / term_unknown / no_deadline
+        skippedReasons: result.skippedReasons,
         ...(result.errors.length ? { errors: result.errors } : {}),
       };
       this.state.lastTodosSyncAt = new Date().toISOString();
@@ -788,8 +828,9 @@ export class LmsService {
       // 这里刻意不 throw：调用方（设置页/自动同步/AI）需要区分"没作业"和"没登录/没同步成功"，
       // 而不是收到一个 401 后自己猜。HTTP 端点因此对未登录也返回 200 + reason。
       const reason = error?.message ?? String(error);
-      this.state.lastTodosResult = { ...empty, reason };
-      return { ...empty, enabled: true, reason };
+      const currentTermOnly = this.state.currentTermOnly;
+      this.state.lastTodosResult = { ...empty, currentTermOnly, reason };
+      return { ...empty, enabled: true, currentTermOnly, reason };
     }
   }
 
@@ -810,6 +851,7 @@ export class LmsService {
         completed: 0,
         skipped: 0,
         enabled: this.state.todosEnabled,
+        currentTermOnly: this.state.currentTermOnly,
         reason: `作业待办同步失败：${error?.message ?? String(error)}`,
       };
     }
@@ -1071,6 +1113,8 @@ export class LmsService {
       lastAutoSyncAt: this.state.lastAutoSyncAt,
       /** 「作业自动变成待办」：默认开，只有明确关过才存 false（见 restore）。 */
       todosEnabled: this.state.todosEnabled,
+      /** 「只同步本学期作业」：默认开，同样只有明确关过才存 false。 */
+      currentTermOnly: this.state.currentTermOnly,
       lastTodosSyncAt: this.state.lastTodosSyncAt,
       lastTodosResult: this.state.lastTodosResult,
       /** 展示用的账号信息 —— 不是凭据，凭据在 auth-session.json（0600）。 */

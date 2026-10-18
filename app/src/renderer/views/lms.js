@@ -367,6 +367,29 @@ async function lmsSaveTodosEnabled(enabled) {
 }
 
 /**
+ * 「只同步本学期作业」开关（POST /lms/todos/config，字段 `currentTermOnly`）。
+ *
+ * 为什么放在父开关下面作为二级开关：它是"要不要同步"之下的粒度选择 —— 父开关关掉时
+ * 整个桥接都不跑，这个开关没有意义。默认开，因为学堂会返回全部历史学期，全量同步会
+ * 把往年作业堆进待办；关掉只是恢复旧的全量行为，**不会删除已有待办**。
+ */
+async function lmsSaveTodosCurrentTerm(currentTermOnly) {
+  lmsUi.todosBusy = true;
+  lmsUi.todosError = null;
+  try {
+    const config = await PC.api('/lms/todos/config', { method: 'POST', body: { currentTermOnly } });
+    lmsUi.status = { ...(lmsUi.status ?? {}), todos: { ...(lmsUi.status?.todos ?? {}), ...config } };
+    PC.toast(currentTermOnly ? '只同步本学期作业' : '已恢复全量同步：历史学期作业也会建待办');
+  } catch (error) {
+    lmsUi.todosError = error.message;
+    lmsCheckAuthLost(error);
+  } finally {
+    lmsUi.todosBusy = false;
+    lmsPaint();
+  }
+}
+
+/**
  * 未登录时的引导卡。
  *
  * 登录已收敛到「设置 → 统一身份认证」：学堂与学业用的是同一个学校账号，
@@ -501,6 +524,30 @@ function lmsAutoSyncCard() {
     void lmsSaveTodosEnabled(todoToggle.checked);
   });
   body.append(todoRow);
+
+  /*
+   * 二级开关「只同步本学期作业」：默认开。
+   *
+   * 老后端 / 老状态里没有 currentTermOnly 字段时按默认值（开）显示，不能显示成关 ——
+   * 否则界面说"全量"，后端实际只同步本学期，用户看到的结果与开关相反。
+   * 父开关关闭时把它禁用：桥接根本不会跑，留着可点会让人以为它还在起作用。
+   */
+  const termRow = mk('div', 'lms-autosync lms-todos-row lms-todos-term');
+  const termLabel = mk('label', 'check-field');
+  const termToggle = mk('input', 'lms-autosync-toggle');
+  termToggle.type = 'checkbox';
+  termToggle.checked = todos.currentTermOnly !== false;
+  termToggle.disabled = Boolean(lmsUi.todosBusy) || !todoToggle.checked;
+  termLabel.append(termToggle, mk('span', null, '只同步本学期作业'));
+  termRow.append(
+    termLabel,
+    mk('span', 'lms-hint', '默认开 · 历史学期作业不再新建；已有待办保留，关掉可恢复全量同步'),
+  );
+  termToggle.addEventListener('change', () => {
+    if (lmsUi.todosBusy) return;
+    void lmsSaveTodosCurrentTerm(termToggle.checked);
+  });
+  body.append(termRow);
   if (lmsUi.todosError) body.appendChild(mk('div', 'lms-error', `待办开关保存失败：${lmsUi.todosError}`));
 
   const apply = () => {
