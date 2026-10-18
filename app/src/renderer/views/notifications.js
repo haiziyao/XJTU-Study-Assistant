@@ -70,13 +70,49 @@
     }
     const bridge = window.potatoCalendar?.openExternal;
     if (typeof bridge === 'function') {
-      // 桌面端：失败要说出来，而不是静默什么都不发生
-      Promise.resolve(bridge(raw)).catch((error) => {
-        PC.toast?.(`没能拉起浏览器：${error?.message ?? error}`);
-      });
+      /*
+       * 桌面端：**必须把结果说出来**。
+       * 上一版只有 catch，而主进程那边把 spawn 的 error 静默吞了 ——
+       * 于是"起不来"和"起来了但系统没反应"看起来完全一样：点了没反应。
+       * 现在主进程会回 { ok, via, error }，这里据实提示。
+       */
+      Promise.resolve(bridge(raw))
+        .then((result) => {
+          if (result && result.ok === false) {
+            ui.error = `没能拉起浏览器（${result.error ?? '未知原因'}）。可以复制下面的链接手动打开。`;
+            paint();
+            return;
+          }
+          ui.error = null;
+          PC.toast?.(`已交给${result?.via === 'explorer' ? '资源管理器' : '系统'}打开`);
+        })
+        .catch((error) => {
+          ui.error = `没能拉起浏览器（${error?.message ?? error}）。可以复制下面的链接手动打开。`;
+          paint();
+        });
       return;
     }
-    window.open(raw, '_blank', 'noreferrer');
+    // 浏览器端：直接开新标签页。被弹窗拦截时给一句提示，别让人以为按钮坏了
+    const opened = window.open(raw, '_blank', 'noreferrer');
+    if (!opened) PC.toast?.('浏览器拦截了新标签页，请允许弹窗，或复制链接手动打开');
+  }
+  /**
+   * 复制链接到剪贴板。
+   *
+   * 这是「在浏览器打开」的**兜底**：桌面端能不能拉起浏览器取决于权限上下文，
+   * 而复制永远有效 —— 用户粘到浏览器地址栏就行。
+   */
+  async function copyLink(url) {
+    const raw = String(url ?? '').trim();
+    if (!raw) return;
+    try {
+      await navigator.clipboard.writeText(raw);
+      PC.toast?.('链接已复制');
+    } catch {
+      // 剪贴板不可用（少见）：把链接摊到错误条里，让用户自己选中复制
+      ui.error = `复制失败，请手动复制：${raw}`;
+      paint();
+    }
   }
   /** 时间展示：只到分钟，`T` 换空格。日期串按字面量切，避免时区把它串到前一天。 */
   function fmt(value) {
@@ -318,6 +354,11 @@
     openBtn.title = '用系统默认浏览器打开原文（桌面端会拉起浏览器）';
     openBtn.addEventListener('click', () => openInBrowser(item.url));
     actions.appendChild(openBtn);
+
+    const copyBtn = mk('button', 'ghost-btn notif-copy', '复制链接');
+    copyBtn.type = 'button';
+    copyBtn.addEventListener('click', () => void copyLink(item.url));
+    actions.appendChild(copyBtn);
 
     line.append(main, actions);
 

@@ -225,10 +225,33 @@ ipcMain.handle('potato:openExternal', async (_event, url) => {
 
   if (process.platform === 'win32') {
     // detached + unref：不让子进程拖住应用退出；失败只可能抛在 spawn 这一下
-    const child = spawn('explorer.exe', [raw], { detached: true, stdio: 'ignore', windowsHide: true });
-    child.on('error', () => {});
-    child.unref();
-    return { ok: true, url: raw, via: 'explorer' };
+    /*
+     * ★ 用**绝对路径**，且**不再静默吞掉 error**。
+     *
+     * 上一版是 `spawn('explorer.exe', …)` + `child.on('error', () => {})`：
+     * 一旦 PATH 里解析不到（Electron 的 spawn 环境与终端不同，这是常见情形），
+     * 就会走 'error' 分支被悄悄吃掉 —— 用户看到的就是"点了没反应"，没有任何提示。
+     * 现在：优先绝对路径；起不来就退回 `shell.openExternal`，并把 `via` 告诉渲染层。
+     */
+    const explorer = `${process.env.SystemRoot ?? 'C:\\Windows'}\\explorer.exe`;
+    try {
+      const child = spawn(explorer, [raw], { detached: true, stdio: 'ignore', windowsHide: true });
+      await new Promise((resolve, reject) => {
+        // 只等"进程起来了"这一下：explorer 成功时退出码也常非 0，不能等 exit
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+      child.unref();
+      return { ok: true, url: raw, via: 'explorer' };
+    } catch (error) {
+      // explorer 起不来（少见）：退回 ShellExecute。它可能触发权限提示，但至少是个动作
+      try {
+        await shell.openExternal(raw);
+        return { ok: true, url: raw, via: 'shell', fallbackReason: error?.message ?? String(error) };
+      } catch (second) {
+        return { ok: false, url: raw, error: second?.message ?? String(second) };
+      }
+    }
   }
 
   await shell.openExternal(raw);
