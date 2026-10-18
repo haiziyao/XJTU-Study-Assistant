@@ -16,6 +16,10 @@
  * 正式迁移见 module.js 的 `migrateLegacyAnchors()`（启动时把这类行转成待办）。
  */
 
+import { promises as fs } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+
 import { HttpError } from '../../core/http/router.js';
 import { clockToMinutes, todayKey } from '../../shared/time.js';
 import { expandDates } from './recurrence.js';
@@ -49,6 +53,114 @@ const EDITABLE = [
 function isLegacyAnchor(item) {
   return item?.allDay === true;
 }
+
+/* ---------------------------------------------------------------- 批量删除 */
+
+/**
+ * 批量删除的作用域。四个值对应界面上四个选项，也对应 AI 草稿里的 `filters.scope`。
+ *
+ * 为什么不让调用方直接传一条任意谓词：这条链路是「不可逆操作」，范围必须是**有限枚举**，
+ * 才能把"预览 = 真正删除"的口径钉死在同一处（`#resolveBulkMatches`）。否则前端预览一套、
+ * 服务端删除另一套，用户看到 3 条、实际删了 30 条。
+ */
+const BULK_SCOPES = ['all', 'range', 'source', 'ids'];
+/**
+ * `scope:'source'` 允许的来源：`timetable`（课表前缀）/ `lms`（学堂前缀）/ `manual`（非导入）。
+ * 三者互不重叠，也都不等于"全部"—— 只有 `scope:'all'` 能一次清空所有来源。
+ */
+const BULK_SOURCES = ['timetable', 'lms', 'manual'];
+/**
+ * 兼容旧调用：早期接口把课表导入写成 `source:'import'`。
+ * 现在统一映射到 `timetable`（**只认前缀**），不再按 `source === 'import'` 误伤学堂记录。
+ */
+const BULK_SOURCE_ALIASES = { import: 'timetable' };
+/** 预览里最多回几条样例：够用户认出"删的是哪一批"，又不会让弹窗变成第二个列表。 */
+const PREVIEW_SAMPLES = 8;
+/** 回收站文件：与其它集合同目录（生产环境就是 app/data），不额外引入存储层。 */
+const TRASH_FILE = 'schedules-trash.json';
+/**
+ * 回收站上限。为什么要有：删除是批量动作，用户连续点几次就可能把整库搬进回收站；
+ * 没有上限时一个 JSON 文件会无限涨（还要整份读进内存）。50 批 / 500 条足够覆盖
+ * "手滑了，撤一下"的真实场景，再老的记录按最旧优先丢弃。
+ */
+const TRASH_MAX_BATCHES = 50;
+const TRASH_MAX_RECORDS = 500;
+
+/**
+ * 课表导入的唯一判据：`externalId` 以 `timetable:` 开头。
+ *
+ * 为什么**不看 source**：LMS 同步写入的日程 source 也是 `import`（见 lms/sync.js），
+ * 按 source 判会把学堂同步的课表 / 活动一起删掉 —— 用户点「仅课表导入的课程」时，
+ * 预期是"只动课表导入的那批"，被顺带清掉学堂记录属于误导。timetable 模块自己的删除逻辑
+ * 也只认这个前缀（见 timetable/service.js），两处口径保持一致。
+ */
+function isTimetableSchedule(item) {
+  return String(item?.externalId ?? '').startsWith('timetable:');
+}
+
+/** 思源学堂同步写入的日程：`externalId` 以 `lms:` 开头（与 lms/sync.js 的幂等键一致）。 */
+function isLmsSchedule(item) {
+  return String(item?.externalId ?? '').startsWith('lms:');
+}
+
+/**
+ * 「非导入」判定（只用于 `source:'manual'` 的过滤）。
+ *
+ * 比过滤口径更宽一点：除了两个前缀，还把 `source === 'import' | 'lms'` 的老记录也算导入
+ * （历史数据可能没有 externalId）。这样"仅手动创建的"绝不会把导入记录当成用户手建的删掉。
+ */
+function isImportLikeSchedule(item) {
+  return isTimetableSchedule(item) || isLmsSchedule(item) || item?.source === 'import' || item?.source === 'lms';
+}
+
+/**
+ * 「仅手动创建的」口径 = **不是导入来的**（manual / command / ai）。
+ *
+ * 为什么不只认 `source === 'manual'`：用户通过指令或 AI 建的日程 source 是 command / ai，
+ * 在用户眼里同样是"我自己建的"。只认 manual 会让"清掉导入的、留下我自己的"这个动作漏掉
+ * AI 建的那批 —— 比多留几条更糟：用户会以为已经清干净了。
+ */
+function isManualSchedule(item) {
+  return !isImportLikeSchedule(item);
+}
+
+/**
+ * 回收站与回执的**来源分桶**：manual / command / ai 分开计数。
+ *
+ * 为什么不再把 command / ai 混进 manual：回执是用户判断"删得对不对"的唯一依据。
+ * 混在一起时"手动 5 条"可能其实是 3 条手建 + 2 条 AI 建的，用户没法核对。
+ * 注意这是**统计口径**，`scope:'source', source:'manual'` 的过滤仍然是"非导入"（三类都删）。
+ */
+function sourceBucketOf(item) {
+  if (isTimetableSchedule(item)) return 'import';
+  if (isLmsSchedule(item) || item?.source === 'lms') return 'lms';
+  if (item?.source === 'command') return 'command';
+  if (item?.source === 'ai') return 'ai';
+  if (item?.source === 'manual') return 'manual';
+  // 历史 source=import 但没有前缀的行：仍归 import 桶（它确实是导入来的，只是没有可识别的键）
+  return 'import';
+}
+
+function countBySource(items) {
+  const out = { manual: 0, command: 0, ai: 0, import: 0, lms: 0 };
+  for (const item of items) out[sourceBucketOf(item)] += 1;
+  return out;
+}
+
+/** 预览样例按时间排序，用户一眼能看出删的是哪几天。 */
+function sortForPreview(items) {
+  return [...items].sort((a, b) =>
+    a.date === b.date ? String(a.startTime ?? '').localeCompare(String(b.startTime ?? '')) : String(a.date).localeCompare(String(b.date)),
+  );
+}
+
+const SAMPLE_FIELDS = (item) => ({
+  id: item.id,
+  title: item.title,
+  date: item.date,
+  startTime: item.startTime ?? null,
+  source: item.source ?? 'manual',
+});
 
 function normalize(rawInput, { partial = false, categories = null } = {}) {
   // 兼容 dschat 2 风格入参（snake_case、扁平 repeat、宽松日期/时刻）
@@ -109,11 +221,26 @@ function normalize(rawInput, { partial = false, categories = null } = {}) {
 }
 
 export class ScheduleService {
-  constructor({ store, broadcast = () => {}, categories = null }) {
+  /**
+   * 回收站的内存副本（懒加载）+ 串行写队列。
+   *
+   * 为什么串行：批量删除与撤销都可能被连点，两个 `read-modify-write` 交错会把回收站文件
+   * 写成"少了一批"的状态 —— 而那一批已经真的从 schedules 删掉了，等于数据永久丢失。
+   */
+  #trash = [];
+  #trashLoaded = false;
+  #trashChain = Promise.resolve();
+
+  constructor({ store, broadcast = () => {}, categories = null, trashFile = null }) {
     this.store = store;
     this.broadcast = broadcast;
     /** 分类注册表（可编辑）；缺省时一律落到 other。 */
     this.categories = categories;
+    /**
+     * 回收站落在数据目录里（生产 = app/data/schedules-trash.json）。
+     * 不在 module.js 里声明成集合：它不是业务集合，没有 id 语义、也不该被同步模块搬走。
+     */
+    this.trashFile = trashFile ?? (store?.dataDir ? path.join(store.dataDir, TRASH_FILE) : null);
   }
 
   get collection() {
@@ -262,6 +389,286 @@ export class ScheduleService {
     await this.collection.remove(id);
     this.broadcast({ type: 'data_changed', payload: { target: 'schedule', action: 'delete', id } });
     return { id, deleted: true };
+  }
+
+  /* ================================================================ 批量删除 */
+
+  /**
+   * 按范围批量删除（先预览、再确认、可撤销）。
+   *
+   * 三个安全阀，缺一不可：
+   *   1. **默认 dryRun**：不传 `dryRun:false` 就只算数量、不落库。批量删除是不可逆动作，
+   *      默认值必须是"不删"——调用方忘了传参数时，用户最多看到一次预览，而不是丢一个日程库。
+   *   2. **dryRun:false 必须 confirm:true**：把"预览"与"执行"拆成两次显式请求，
+   *      防止一次误触发（前端循环、curl 手滑）直接清库。
+   *   3. **scope:'all' 还要 confirmText:'删除'**：`confirm:true` 是程序传的，
+   *      而中文确认词必须是"知道自己在清空"的人才会写。少一个都 400。
+   *
+   * 删除顺序是**先写回收站再删库**：写盘失败就完全不删（记录还在）；反过来先删再写，
+   * 一旦写盘失败记录就永久没了。回收站里存整条记录（不是 id），因为恢复要原样放回。
+   *
+   * 只操作 `schedules` 集合。events / todos / notes 各有自己的生命周期，
+   * 「清空日程」不该顺手清掉日历事件或待办 —— 那两件事的用户预期完全不同（见 routes.js 的领域说明）。
+   */
+  async bulkDelete(input = {}) {
+    const scope = String(input?.scope ?? '').trim();
+    if (!BULK_SCOPES.includes(scope)) {
+      throw HttpError.badRequest(`scope 不合法：只能是 ${BULK_SCOPES.join(' / ')}`, { field: 'scope' });
+    }
+    const filters = this.#bulkFilters(input, scope);
+    const matches = this.#resolveBulkMatches(scope, filters);
+    const bySource = countBySource(matches);
+    const preview = {
+      scope,
+      count: matches.length,
+      samples: matches.slice(0, PREVIEW_SAMPLES).map(SAMPLE_FIELDS),
+      bySource,
+      requiresConfirm: true,
+      ...(scope === 'range' ? { from: filters.from, to: filters.to } : {}),
+      ...(scope === 'source' ? { source: filters.source } : {}),
+    };
+
+    /**
+     * 只有显式 `dryRun: false` 才执行。字符串 `"false"` / `0` 一律当作"没说要删"：
+     * 这个默认值只能往安全方向失败。
+     */
+    const dryRun = input?.dryRun !== false;
+    if (dryRun) return { dryRun: true, ...preview };
+
+    if (input?.confirm !== true) {
+      // 回带预览数字：调用方（尤其是 AI/前端）能直接拿它去画确认卡或追问，不用再查一次
+      throw new HttpError(400, 'CONFIRM_REQUIRED', `批量删除需要 confirm: true（当前将删除 ${matches.length} 条日程）`, {
+        scope,
+        count: matches.length,
+        requiresConfirm: true,
+        samples: preview.samples,
+      });
+    }
+    if (scope === 'all' && String(input?.confirmText ?? '').trim() !== '删除') {
+      throw new HttpError(
+        400,
+        'CONFIRM_TEXT_MISMATCH',
+        '删除全部日程需要 confirmText: "删除"（中文确认词，防止误触发清空）',
+        { scope, count: matches.length, expected: '删除' },
+      );
+    }
+
+    if (!matches.length) {
+      // 空库不写空批次：回收站里留一条"删了 0 条"的记录只会让「撤销上次删除」按钮指向空气
+      return { dryRun: false, scope, removed: 0, trashId: null, bySource, count: 0 };
+    }
+
+    return this.#runTrash(async () => {
+      const batch = await this.#pushTrash({ scope, ...filters, items: matches });
+      const removed = await this.collection.removeMany(matches.map((item) => item.id));
+      this.broadcast({ type: 'data_changed', payload: { target: 'schedule', action: 'bulk-delete', scope, removed } });
+      return { dryRun: false, scope, removed, trashId: batch.id, bySource, count: matches.length };
+    });
+  }
+
+  /** 校验并归一化 scope 的附加条件（range 的 from/to、source、ids）。 */
+  #bulkFilters(input, scope) {
+    const filters = {};
+    if (scope === 'range') {
+      filters.from = requireDate(input?.from, 'from');
+      filters.to = requireDate(input?.to, 'to');
+      if (filters.to < filters.from) throw HttpError.badRequest('to 不能早于 from（区间含两端）', { field: 'to' });
+    }
+    if (scope === 'source') {
+      const raw = String(input?.source ?? '').trim();
+      // 旧别名 import → timetable：语义跟着收紧成"只认 timetable: 前缀"，
+      // 老调用方不会失效，也不会再顺带删掉 source=import 的学堂记录。
+      const source = BULK_SOURCE_ALIASES[raw] ?? raw;
+      if (!BULK_SOURCES.includes(source)) {
+        throw HttpError.badRequest(`source 不合法：只能是 ${BULK_SOURCES.join(' / ')}（import 是 timetable 的旧别名）`, {
+          field: 'source',
+        });
+      }
+      filters.source = source;
+    }
+    if (scope === 'ids') {
+      const raw = Array.isArray(input?.ids) ? input.ids : [];
+      // 去重 + 丢空值：调用方传重复 id 时不能让 removed 数虚高
+      filters.ids = [...new Set(raw.map((id) => String(id ?? '').trim()).filter(Boolean))];
+      if (!filters.ids.length) throw HttpError.badRequest('ids 不能为空', { field: 'ids' });
+    }
+    return filters;
+  }
+
+  /** 唯一的"什么算命中"实现：预览与真删都走这里，两边不可能漂移。 */
+  #resolveBulkMatches(scope, filters) {
+    const all = this.collection.all();
+    if (scope === 'all') return sortForPreview(all);
+    if (scope === 'range') {
+      return sortForPreview(all.filter((item) => item.date >= filters.from && item.date <= filters.to));
+    }
+    if (scope === 'source') {
+      const predicate =
+        filters.source === 'timetable' ? isTimetableSchedule : filters.source === 'lms' ? isLmsSchedule : isManualSchedule;
+      return sortForPreview(all.filter(predicate));
+    }
+    const wanted = new Set(filters.ids);
+    return sortForPreview(all.filter((item) => wanted.has(item.id)));
+  }
+
+  /* ================================================================ 回收站 */
+
+  /**
+   * 回收站概况。**不含记录正文**：接口只服务"有没有可撤销的批次、几条"，
+   * 把整条记录吐给前端既浪费带宽，也等于给「删除」开了一个绕过权限的读后门。
+   */
+  async trashList() {
+    await this.#runTrash(() => this.#ensureTrash());
+    const items = this.#trash.map((batch) => ({
+      id: batch.id,
+      at: batch.at,
+      count: batch.count,
+      bySource: batch.bySource,
+      scope: batch.scope,
+    }));
+    return {
+      items,
+      count: items.length,
+      total: this.#trash.reduce((sum, batch) => sum + (batch.items?.length ?? 0), 0),
+    };
+  }
+
+  /**
+   * 恢复一批。同 id 已存在时**跳过并计数**，不覆盖现有记录：
+   * 用户可能删完之后又手动建了一条同 id 的（同步回灌、导入重放），覆盖它就是拿旧数据打新数据。
+   */
+  async restoreTrash(trashId) {
+    const id = String(trashId ?? '').trim();
+    if (!id) throw HttpError.badRequest('trashId 为必填');
+    return this.#runTrash(async () => {
+      await this.#ensureTrash();
+      const index = this.#trash.findIndex((batch) => batch.id === id);
+      if (index === -1) throw HttpError.notFound(`回收站里没有这一批：${id}`);
+      const batch = this.#trash[index];
+      let restored = 0;
+      let skipped = 0;
+      const now = new Date().toISOString();
+      for (const item of batch.items) {
+        if (!item?.id || this.collection.get(item.id)) {
+          skipped += 1;
+          continue;
+        }
+        /**
+         * 不走 `collection.insert` 的原因有两个：
+         *   1. insert 会把 createdAt / updatedAt 重置成"现在"，而恢复的语义是"当它没被删过"
+         *      —— 时间戳变了，列表排序与「创建时间」都会跟着变；
+         *   2. insert 每条都全量落盘一次，恢复 500 条就是 500 次写文件。
+         * 这里整条放回内存表，循环结束后统一 persist 一次（Collection 的公开字段/方法，不改 core）。
+         */
+        this.collection.records.set(item.id, {
+          ...item,
+          createdAt: item.createdAt ?? now,
+          updatedAt: item.updatedAt ?? now,
+        });
+        restored += 1;
+      }
+      if (restored) await this.collection.persist();
+      // 恢复过的批次从回收站移除：留着的话「撤销上次删除」会反复指向同一批
+      this.#trash.splice(index, 1);
+      await this.#persistTrash();
+      if (restored) {
+        this.broadcast({ type: 'data_changed', payload: { target: 'schedule', action: 'restore', restored } });
+      }
+      return { restored, skipped, trashId: id };
+    });
+  }
+
+  /** 清空回收站（可选能力；同样要 confirm:true，理由与批量删除一致）。 */
+  async clearTrash(input = {}) {
+    return this.#runTrash(async () => {
+      await this.#ensureTrash();
+      const batches = this.#trash.length;
+      if (!batches) return { cleared: 0, records: 0 };
+      if (input?.confirm !== true) {
+        throw new HttpError(400, 'CONFIRM_REQUIRED', '清空回收站需要 confirm: true', { batches });
+      }
+      const records = this.#trash.reduce((sum, batch) => sum + (batch.items?.length ?? 0), 0);
+      this.#trash = [];
+      await this.#persistTrash();
+      return { cleared: batches, records };
+    });
+  }
+
+  /** 回收站写操作串行化（见 #trashChain 的注释）。 */
+  #runTrash(task) {
+    const run = this.#trashChain.then(task);
+    // 队列本身不能断：上一个任务失败只影响它自己的调用方，后续写入仍要能继续
+    this.#trashChain = run.catch(() => {});
+    return run;
+  }
+
+  async #ensureTrash() {
+    if (this.#trashLoaded) return;
+    if (!this.trashFile) {
+      this.#trashLoaded = true;
+      return;
+    }
+    try {
+      const raw = await fs.readFile(this.trashFile, 'utf8');
+      const parsed = JSON.parse(raw);
+      const batches = Array.isArray(parsed) ? parsed : parsed?.batches ?? [];
+      this.#trash = batches.filter((batch) => batch && typeof batch === 'object' && Array.isArray(batch.items));
+      // 手工编辑过的旧文件可能超上限：加载时先收敛，别等下一次删除才变干净
+      this.#trimTrash();
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        // 损坏文件先备份再当空回收站：绝不静默覆盖（里面可能是用户唯一能撤销的数据）
+        const backup = `${this.trashFile}.corrupt-${Date.now()}`;
+        await fs.rename(this.trashFile, backup).catch(() => {});
+        console.error(`[calendar] 回收站文件解析失败（${error.message}），已备份到 ${backup}`);
+      }
+      this.#trash = [];
+    }
+    this.#trashLoaded = true;
+  }
+
+  /** 追加一批到回收站（最新在前），裁剪到上限后落盘。调用方必须已在 #runTrash 里。 */
+  async #pushTrash({ scope, from, to, source, items }) {
+    await this.#ensureTrash();
+    const batch = {
+      // 时间戳 + 随机后缀：连点两次也可能落在同一毫秒，只靠时间戳会撞 id
+      id: `trash-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+      at: new Date().toISOString(),
+      scope,
+      ...(from ? { from } : {}),
+      ...(to ? { to } : {}),
+      ...(source ? { source } : {}),
+      count: items.length,
+      bySource: countBySource(items),
+      // 整条记录（不是 id）：恢复时要原样放回，缺字段就不是同一条日程了
+      items,
+    };
+    this.#trash.unshift(batch);
+    this.#trimTrash();
+    await this.#persistTrash();
+    return batch;
+  }
+
+  /** 上限裁剪：先裁批数，再按最旧优先裁记录数（最新一批无论如何保留）。 */
+  #trimTrash() {
+    while (this.#trash.length > TRASH_MAX_BATCHES) this.#trash.pop();
+    let total = this.#trash.reduce((sum, batch) => sum + (batch.items?.length ?? 0), 0);
+    while (total > TRASH_MAX_RECORDS && this.#trash.length > 1) {
+      const dropped = this.#trash.pop();
+      total -= dropped?.items?.length ?? 0;
+    }
+  }
+
+  /** 原子写 + 0600：回收站里是用户的完整日程（可能有地点、备注），不给同机其它账号读。 */
+  async #persistTrash() {
+    if (!this.trashFile) return;
+    await fs.mkdir(path.dirname(this.trashFile), { recursive: true });
+    const payload = `${JSON.stringify({ schemaVersion: 1, batches: this.#trash }, null, 2)}\n`;
+    const tmp = `${this.trashFile}.${process.pid}.tmp`;
+    await fs.writeFile(tmp, payload, { encoding: 'utf8', mode: 0o600 });
+    // 已有 tmp（上次崩溃残留）时 writeFile 的 mode 不生效，显式 chmod 一次
+    await fs.chmod(tmp, 0o600).catch(() => {});
+    await fs.rename(tmp, this.trashFile);
   }
 
   /** 区间统计：只统计时段日程（完成率属于待办，见 `/todos` 的 `stats`）。 */

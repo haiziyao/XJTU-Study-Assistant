@@ -1633,3 +1633,223 @@
     padding: 7px 8px;
   }
 }
+
+/* ------------------------------------------------- 批量删除 / 回收站 */
+
+/*
+  弹层样式只写类名（CSP 是 style-src 'self'，内联 style 会被拦）。
+  红按钮沿用 .danger-btn；这里只补"范围卡片 / 预览块"两类新结构。
+*/
+
+.bulk-modal {
+  width: min(520px, 100%);
+}
+
+.bulk-note {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg-3);
+  margin-bottom: 10px;
+}
+
+.bulk-scopes {
+  display: grid;
+  gap: 6px;
+}
+
+.bulk-scope {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-base);
+  cursor: pointer;
+  transition: background var(--t), border-color var(--t);
+}
+
+.bulk-scope:hover {
+  background: var(--bg-hover);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.bulk-radio {
+  margin: 2px 0 0;
+  flex: none;
+}
+
+.bulk-scope-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.bulk-scope-label {
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.bulk-scope-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-3);
+}
+
+.bulk-range {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+/* 全部范围：红色边框 + 必须勾选，和"普通范围"在视觉上就不一样 */
+.bulk-all-warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255, 107, 122, 0.45);
+  background: rgba(255, 107, 122, 0.1);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.bulk-all-check {
+  margin: 0;
+  flex: none;
+}
+
+.bulk-preview {
+  margin-top: 12px;
+  padding: 10px;
+  min-height: 44px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--bg-base);
+}
+
+.bulk-preview-empty {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg-3);
+}
+
+.bulk-count {
+  font-size: 13px;
+  color: var(--fg);
+  margin-bottom: 6px;
+}
+
+.bulk-count strong {
+  color: var(--red);
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bulk-samples {
+  display: grid;
+  gap: 4px;
+}
+
+.bulk-sample {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+
+.bulk-sample-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulk-sample-date {
+  flex: none;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.bulk-more,
+.bulk-mix {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.bulk-warning {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--red);
+}
+
+.bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+/* 窄屏：单列、按钮 44px 起（手指点得中），左右不溢出 */
+@media (max-width: 900px) {
+  .bulk-range {
+    grid-template-columns: 1fr;
+  }
+
+  .bulk-scope,
+  .bulk-all-warn {
+    padding: 10px;
+  }
+
+  .bulk-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .bulk-actions button {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .bulk-modal .modal-foot {
+    flex-wrap: wrap;
+  }
+
+  .bulk-modal .modal-foot .spacer {
+    display: none;
+  }
+
+  .bulk-modal .modal-foot button {
+    flex: 1 1 100%;
+    min-height: 44px;
+  }
+
+  .toolbar .calendar-bulk-btn {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 520px) {
+  .bulk-scope-hint {
+    font-size: 10px;
+  }
+}
+
+/* .danger-btn 原先没有 disabled 态：不给样式的话，看起来还能点，用户会一直戳 */
+.bulk-confirm:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: transparent;
+}
