@@ -669,6 +669,30 @@
 
 /* ------------------------------------------------------------- 待办视图 */
 
+/* 「显示已完成」开关：和分段控件同排，窄屏允许换行（.toolbar.wrap 负责），
+   不设固定宽度、不写行内样式。勾选框本身用系统控件，手机上由 .check-field 撑到 44px。 */
+.todo-done-toggle {
+  flex: 0 0 auto;
+  max-width: 100%;
+  cursor: pointer;
+  white-space: nowrap;
+  padding: 4px 2px;
+  user-select: none;
+}
+
+.todo-done-toggle:hover {
+  color: var(--fg);
+}
+
+.todo-done-toggle input {
+  margin: 0;
+  accent-color: var(--blue);
+}
+
+.todo-done-toggle input:disabled {
+  cursor: default;
+}
+
 .quick-add {
   display: flex;
   gap: 6px;
