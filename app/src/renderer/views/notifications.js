@@ -134,7 +134,8 @@
 
   /** 在面板里读正文（走后端抓取，不开浏览器 —— 见文件头第 2 条）。 */
   async function readBody(item) {
-    if (ui.reader?.id === item.id && !ui.reader.busy) {
+    // 再点同一条 = 收起（即使还在抓取中也收起 —— 用户点第二下就是要它别挡着）
+    if (ui.reader?.id === item.id) {
       ui.reader = null;
       paint();
       return;
@@ -280,7 +281,27 @@
     actions.appendChild(pinBtn);
 
     line.append(main, actions);
-    return line;
+
+    /*
+     * 正文**展开在这一条下面**，不是在列表顶部。
+     *
+     * 顶部展开时，用户点第 8 条、正文跑到第 1 条上面去，还得往回滚才能看 ——
+     * 而且正文一出现就把整个列表推下去，看起来像"页面跳了"。
+     * 展开在原条目下方，视线不用离开，"这条讲什么"与"哪条"是同一个动作。
+     *
+     * 所以行要包一层：`.notif-row` 是横排（标题 + 操作），
+     * 正文必须挂在**外面**竖排，否则会挤到标题右边去。
+     *
+     * 同一时刻只开一个：`ui.reader` 是单个对象，点别的条目时它被替换，
+     * 原来那条自然收起（不需要额外的"关闭其他"逻辑）。
+     */
+    const shell = mk('div', 'notif-group');
+    shell.appendChild(line);
+    if (ui.reader?.id === item.id) {
+      const panel = readerPanel();
+      if (panel) shell.appendChild(panel);
+    }
+    return shell;
   }
 
   /** 上次同步的逐站结果 —— 失败的必须亮出来，否则用户会以为"那个站没有新通知"。 */
@@ -336,9 +357,6 @@
 
     if (ui.error) wrap.appendChild(mk('div', 'error-banner', `出错了：${ui.error}`));
     if (ui.syncing) wrap.appendChild(mk('div', 'notif-hint', '正在抓取校方站点…（首次会慢几秒）'));
-
-    const panel = readerPanel();
-    if (panel) wrap.appendChild(panel);
 
     const list = mk('div', 'notif-list');
     const rows = visible();

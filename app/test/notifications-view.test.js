@@ -147,3 +147,66 @@ test('面板上没有「已读 / 未读」这套交互（按需求移除）', as
   assert.equal(/markRead|unreadOnly|全部已读|标记已读/.test(source), false, '★ 已读功能应当整块移除');
   assert.ok(registered.views.length === 1);
 });
+
+test('★ 正文展开在条目下方：点同一条收起、点别的条目只留一个', async () => {
+  const { seam } = await bootView();
+  const itemA = { id: 'a', siteId: 'dean', pinned: false, title: 'A', url: 'https://x/a.htm' };
+  const itemB = { id: 'b', siteId: 'dean', pinned: false, title: 'B', url: 'https://x/b.htm' };
+  seam.ui.items = [itemA, itemB];
+  seam.ui.filters = { siteId: '', pinned: false };
+
+  // 渲染进一个假 mount，才能看结构
+  const mount = makeNode('div');
+  seam.ui.mount = mount;
+
+  // 未展开时：两条都在，没有正文面板
+  seam.paint();
+  const html = () => JSON.stringify(mount, (key, value) => (key === 'children' ? value : value));
+  const hasReader = (node) => {
+    const stack = [node];
+    while (stack.length) {
+      const cur = stack.pop();
+      if (!cur) continue;
+      if (String(cur.className).includes('notif-reader')) return true;
+      for (const kid of cur.children ?? []) stack.push(kid);
+    }
+    return false;
+  };
+  assert.equal(hasReader(mount), false, '默认不该有正文面板');
+
+  // 展开 A（busy 状态即可，不必真的去抓）
+  seam.ui.reader = { id: 'a', title: 'A', url: 'https://x/a.htm', text: '正文', busy: false, error: null };
+  seam.paint();
+  assert.equal(hasReader(mount), true, '展开后应当出现正文面板');
+
+  // ★ 展开的正文必须挂在那一条所在的 group 里，而不是列表顶部
+  // 注意：每次 paint() 都会 replaceChildren 换掉整棵树，所以每次都要重新找，
+  // 不能把上一次的节点引用留着用（那样读到的是旧树，断言会假过/假红）。
+  const findList = () => {
+    const stack = [mount];
+    while (stack.length) {
+      const cur = stack.pop();
+      if (String(cur.className).includes('notif-list')) return cur;
+      for (const kid of cur.children ?? []) stack.push(kid);
+    }
+    return null;
+  };
+  const list = findList();
+  assert.ok(list, '应当有列表容器');
+  const firstGroup = (list.children ?? []).find((kid) => String(kid.className).includes('notif-group'));
+  assert.ok(firstGroup, '每一行外面应当有一层 group');
+  assert.ok(hasReader(firstGroup), '★ 正文应当在该条目的 group 里（展开在原条目下方）');
+
+  // 切到 B：A 收起，只剩 B 的
+  seam.ui.reader = { id: 'b', title: 'B', url: 'https://x/b.htm', text: '正文', busy: false, error: null };
+  seam.paint();
+  const groups = (findList()?.children ?? []).filter((kid) => String(kid.className).includes('notif-group'));
+  assert.equal(groups.length, 2);
+  assert.equal(hasReader(groups[0]), false, '★ 点别的条目时，原来那条要收起');
+  assert.equal(hasReader(groups[1]), true, '★ 新点的那条展开');
+
+  // 再点一次同一个 → 收起
+  seam.ui.reader = null;
+  seam.paint();
+  assert.equal(hasReader(mount), false, '★ 再点标题应当收回去');
+});

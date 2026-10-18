@@ -69,6 +69,22 @@
   border-bottom: none;
 }
 
+/* 一行 + 它下面的正文（展开时才出现）。行是横排、正文竖排，所以必须分开两层 */
+.notif-group {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--line);
+}
+
+.notif-group:last-child {
+  border-bottom: none;
+}
+
+/* 行在 group 里，底边由 group 负责，避免"行 + 正文"之间多一条线 */
+.notif-group .notif-row {
+  border-bottom: none;
+}
+
 
 .notif-main {
   flex: 1;
@@ -194,14 +210,18 @@
   }
 }
 
-/* 内嵌正文面板：在应用里读，不把地址交给系统浏览器 */
+/*
+ * 内嵌正文面板：**展开在条目下方**（在应用里读，不把地址交给系统浏览器）。
+ * 它不是浮层、也不是列表顶部的卡片 —— 所以去掉外边框，用左内缩 + 背景区分从属关系。
+ */
 .notif-reader {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin: 0 12px 10px;
   padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-left: 3px solid var(--blue);
+  border-radius: var(--radius-sm);
   background: var(--bg-raised);
 }
 
