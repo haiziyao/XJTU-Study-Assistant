@@ -54,6 +54,58 @@ const DOMAIN_RULES = `【三个集合，先选对 —— 选错用户就看不�
    给已有待办加子任务时**先 query 拿到它的 id，再 create 子任务**（新父的 id 由系统生成，你拿不到）；
    parentId 不能指向自己或自己的子任务（成环会被 400）。这两个字段名写错同样会被 400 拦下。`;
 
+/**
+ * 分类与设置的写入契约。
+ *
+ * 用户真机反馈的原话是「新建个日程分类名为考试，用橙色表示」，而旧版提示词只字未提分类，
+ * 模型只能回答「分类的创建不在我的能力范围里」。现在这两类都是**普通写入 target**：
+ * 走同一套草稿/确认/自动审批机制，命令层也不复制权限判断（见 chat-service 的 #autoExecuteWrites）。
+ *
+ * 为什么把「不能改密钥/账号」写得这么重：设置 target 的输入来自模型生成的文本，
+ * 一旦允许写凭据，用户一句“帮我配一下 API”就可能把密钥写进对话/日志。白名单与
+ * `SETTING_NOT_WRITABLE` 是硬边界，提示词必须让模型在**生成草稿前**就知道这件事，
+ * 而不是等系统 400 后再解释。
+ */
+const CATEGORY_SETTINGS_PROMPT = `【分类与软件设置（target: category / settings）—— 这两类写入你现在也能做】
+一、日程 / 日历事件的分类（target: category）
+- 可以 create / update / delete / query。字段用：name（分类名，≤12 字）、color（#RRGGBB）、
+  kind（schedule=日程分类 / event=日历事件分类，默认 schedule）、sort（排序数字，可选）。
+- 新建（用橙色就写 #f59e0b）：
+\`\`\`command
+{"ok":true,"action":"create","target":"category","fields":{"name":"考试","color":"#f59e0b"},"explain":"新建日程分类「考试」，橙色"}
+\`\`\`
+- 修改颜色（filters 用 name 或 id；同名分类在日程/事件里都存在时加 filters.kind）：
+\`\`\`command
+{"ok":true,"action":"update","target":"category","filters":{"name":"考试"},"fields":{"color":"#ef4444"}}
+\`\`\`
+- 删除（默认数据里「考试」在日程/事件两个 kind 都有，实际执行要加 filters.kind，例如 "kind":"schedule"）：
+\`\`\`command
+{"ok":true,"action":"delete","target":"category","filters":{"name":"考试"}}
+\`\`\`
+- 查询（回灌 id / name / kind / color / sort / usage / locked）：
+  {"action":"query","target":"category","filters":{"kind":"schedule"}}
+- **分类名在同一个 kind 内不能重复**：重名会被 400 拒绝。默认数据里已经有「考试」分类
+  （日程与事件各一个，id 都是 exam），所以照抄上面的新建示例会撞名 —— 先 query 看清
+  color / usage，用户说要“新建”但已存在时，应该建议改色/改名（update），而不是硬建。
+- **被日程/事件引用的分类删不掉**：usage > 0 时删除会被 400 拒绝（系统不会偷偷把记录改到
+  other）。先把那些记录改到别的分类，或者保留分类只改名/改色。
+- 日程 / 事件的 category 字段仍然填**分类 id**（不是名字）；刚建好的 id 在回执 affected[0].id。
+二、软件设置（target: settings）
+- 只能 update，且只允许这些白名单键：
+  permission（auto / manual / strict，默认写入权限）、searchProvider、searchMaxPages（5–30）、
+  searchRetryMax（1–6）、contextWindow（8000–2000000）、theme（system / light / dark）。
+- 形状：
+\`\`\`command
+{"ok":true,"action":"update","target":"settings","fields":{"permission":"auto","searchProvider":"auto"},"explain":"把默认权限改成自动审批"}
+\`\`\`
+- **不能改密钥/账号**：apiKey、searchApiKey(s)、账号、令牌、密码、登录态、同步开关都不在白名单里，
+  草稿会被 400 拒绝（SETTING_NOT_WRITABLE）。不要向用户索要、复述或回显任何密钥；用户要配密钥时，
+  让他自己去「设置」里填。
+- **改设置前先说明会改变什么行为**：例如把 permission 改成 auto 之后，AI 的新增 / 修改 / 删除
+  会直接执行、不再逐条确认（这一条必须在 explain 与 warnings 里明确说）；不要只回一句“改好了”。
+- 不要发明设置项：maxActionsPerTurn 这类代码里并不存在的键一定会被拒；不在白名单里的键一律会被拒。
+- 执行成功的回执会带 changed / ignored，explain 会说明实际改了哪些键；按回执如实转述。`;
+
 /** 草稿输出协议：回复里额外给 ```command 代码块（写入最多 3 段，一件事一段）。 */
 const DRAFT_PROTOCOL = `【输出格式】
 先用自然语言回答用户（简短、直接、别客套）。如果用户表达了要新增 / 修改 / 删除 / 查询安排，
@@ -66,7 +118,8 @@ const DRAFT_PROTOCOL = `【输出格式】
 规则：
 - action 取 create / query / update / delete / complete / include / exclude（include / exclude 由对应模块声明）。
 - target **只能取下面「领域说明」里真的出现过的那些**，一个都不许自创。当前已声明的有：
-  - 写入类：\`todo\` / \`schedule\` / \`event\`（日历三件套）、\`memory\`（只能提议，等用户确认）；
+  - 写入类：\`todo\` / \`schedule\` / \`event\`（日历三件套）、\`category\`（日程/事件分类）、
+    \`settings\`（软件设置白名单，见下）、\`memory\`（只能提议，等用户确认）；
   - 只读查询类：\`note\`（笔记）、\`grade\`（成绩）、\`knowledge\`（教务处政策语料）、\`search\`（**三源统一检索**：
     一次查校规 + 我的笔记 + 我的长期记忆，问"我之前记过/提过什么"这类跨来源的问题就用它，
     比分别查三次省轮次）、\`weekly\`（学习周报）；
@@ -203,6 +256,9 @@ const PERMISSION_NOTES = {
 - 所以可以直说"这条我给你加上了 / 改好了"，但**只能说到系统会做的事**：不许编造 id，
   也不许编造系统没有回报的细节（比如"已经提醒你了""已经同步到教务了"）。
 - 校验没过的草稿系统**不会**执行 —— 那种情况要照实说"这条没通过校验，需要你自己确认一下"，不要谎报成功。
+- 分类（category）与设置（settings）也是写入类：auto 档同样会直接执行。其中把
+  permission 改成 auto 等于让 AI 以后不再逐条确认 —— 这种**给自己升权**的改动必须把
+  "之后会直接执行、不再逐条确认"明确说给用户，不能轻描淡写。
 - 写完之后系统会把执行结果**回灌给你**（你会收到一条 \`[系统注入]\`）：新增了哪条、id 是多少、
   以及**这条和已有日程有没有时间重叠**。拿到之后要主动补一句重叠提醒
   （"这条和你周四 19:00 的英语晨读撞了"），不要等用户来问；没有冲突就不必提。`,
@@ -338,6 +394,7 @@ function chatPromptParts(context = {}) {
     { kind: 'system', text: '' },
     { kind: 'tools', text: DOMAIN_RULES },
     { kind: 'tools', text: domainBlocks(context) },
+    { kind: 'tools', text: CATEGORY_SETTINGS_PROMPT },
     { kind: 'system', text: '' },
     { kind: 'tools', text: DRAFT_PROTOCOL },
     { kind: 'system', text: '' },
@@ -451,10 +508,11 @@ export function buildCommandSystemPrompt(context = {}) {
     '',
     DOMAIN_RULES,
     domainBlocks(context),
+    CATEGORY_SETTINGS_PROMPT,
     '',
     '【输出格式（严格）】',
     '只输出一个 JSON 对象，不要 Markdown 代码块、不要解释、不要前后缀。字段：',
-    '{"ok":true,"action":"create|query|update|delete|complete","target":"todo|schedule|event","fields":{…},"filters":{…},"confidence":0~1,"warnings":[],"explain":"给用户看的一句话"}',
+    '{"ok":true,"action":"create|query|update|delete|complete","target":"todo|schedule|event|category|settings","fields":{…},"filters":{…},"confidence":0~1,"warnings":[],"explain":"给用户看的一句话"}',
     '无法确定时输出 {"ok":false,"warnings":["缺什么信息"]}，不要硬猜。',
     '注意：你只是产出草稿，系统会校验并让用户确认后才落库。',
   ].join('\n');

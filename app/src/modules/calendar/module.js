@@ -17,7 +17,7 @@ import { ScheduleService } from './schedule-service.js';
 import { TodoService } from './todo-service.js';
 import { ReminderService } from './reminder-service.js';
 import { CommandParser } from './parser.js';
-import { createCalendarCommands } from './commands.js';
+import { createCalendarCommands, createCategoryCommands } from './commands.js';
 import { registerCalendarRoutes } from './routes.js';
 import { CALENDAR_TOOL_SPECS } from './tools.js';
 
@@ -85,6 +85,11 @@ export default {
       'childDoneCount',
       'hasChildren',
     ],
+    /**
+     * 分类的 AI 投影。字段名与 `category` 草稿的 fields 保持一致（name/color/sort），
+     * `usage` 是“有多少条记录在用”（删除前的关键判断），`kind` 区分日程分类与事件分类。
+     */
+    category: ['id', 'name', 'kind', 'color', 'sort', 'usage', 'locked', 'builtin'],
   },
 
   createServices({ store, broadcast, services }) {
@@ -103,6 +108,9 @@ export default {
     services.commands.registerHandler('event', calendarCommands);
     services.commands.registerHandler('schedule', calendarCommands);
     services.commands.registerHandler('todo', calendarCommands);
+    // 分类是独立 target：它是“配置数据”，不是日程本身；走同一个 CategoryService，
+    // 所以颜色/锁定/在用数等校验与 REST 路由完全一致（AI 层只额外加“重名/在用不可删”两道护栏）。
+    services.commands.registerHandler('category', createCategoryCommands({ categories }));
 
     return { events, schedules, todos, categories, reminders };
   },

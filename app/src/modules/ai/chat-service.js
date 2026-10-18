@@ -26,7 +26,7 @@ import { ERROR_CODES } from '../../shared/constants.js';
 import { HttpError } from '../../core/http/router.js';
 import { todayKey } from '../../shared/time.js';
 
-import { maskAiConfig, AI_DEFAULTS, SEARCH_RETRY_MIN, SEARCH_RETRY_MAX } from './config.js';
+import { maskAiConfig, AI_DEFAULTS, SEARCH_RETRY_MIN, SEARCH_RETRY_MAX, assertAiConfigInput } from './config.js';
 import { extractDrafts, previewDrafts } from './drafts.js';
 import { buildChatSystemPrompt, buildCommandSystemPrompt, describeChatPrompt, estimateTokens } from './prompt.js';
 import {
@@ -215,6 +215,52 @@ const IMAGE_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image
 const PERMISSIONS = Object.freeze(['auto', 'manual', 'strict']);
 
 /**
+ * AI 可写的设置白名单（target: `settings`）。
+ *
+ * 为什么必须是**白名单**而不是黑名单：这段输入来自模型生成的草稿，用户只说了一句
+ * “把搜索服务换成 brave”，模型完全可能顺手带上 `apiKey`、`account`、`token` 之类的字段。
+ * 凭据类字段一旦可写，等于把密钥交给一段不可审计的生成文本；而黑名单只能挡住想得到的名字
+ * （`searchApiKeys`、`password`、`session`…），挡不住下一个新字段。这里只列“改了之后
+ * 用户能在设置页看见、且与身份/凭据无关”的键，其余一律 400，绝不静默忽略。
+ *
+ * 每项声明它落到哪条既有写入路径：
+ *   - `aiConfig` → `AiChatService.updateConfig()`（→ AiConfigStore.save，复用其区间/枚举校验）；
+ *   - `pref`     → `services.prefs.set()`（→ uiprefs 集合，复用其键名/大小校验与广播）。
+ *
+ * 故意**不开放**的键（README 有完整说明）：
+ *   - `apiKey` / `searchApiKey` / `searchApiKeys` / `account` / 任何令牌：凭据永远不交给 AI；
+ *   - `provider` / `baseUrl` / `model`：改错会让整个 AI 通道失联，属于“去设置页手动改”的事；
+ *   - `searchEnabled` / `drawMode`：本次任务未列入白名单，保持最小暴露面；
+ *   - `maxActionsPerTurn`：代码里并不存在这个设置（“一轮最多 3 条写入”是提示词常量），
+ *     不为了对上一个不存在的键而虚构一个设置。
+ */
+const AI_SETTING_KEYS = Object.freeze(['searchProvider', 'searchMaxPages', 'searchRetryMax', 'contextWindow']);
+const PREF_SETTING_VALUES = Object.freeze({
+  permission: PERMISSIONS,
+  theme: ['system', 'light', 'dark'],
+});
+
+const SETTING_LABELS = Object.freeze({
+  permission: '默认写入权限',
+  theme: '颜色模式',
+  searchProvider: '搜索服务',
+  searchMaxPages: '网络搜索最大条数',
+  searchRetryMax: '检索重试上限',
+  contextWindow: '上下文上限',
+});
+
+const PERMISSION_LABELS = Object.freeze({
+  auto: '完全权限（auto，自动执行）',
+  manual: '手动审批（manual，逐条确认）',
+  strict: '全部确认（strict）',
+});
+
+const THEME_LABELS = Object.freeze({ system: '跟随系统', light: '白天模式', dark: '夜间模式' });
+
+/** 设置项不可写时统一的错误码（测试与上游 Agent 都靠它区分“字段不认识”和普通 400）。 */
+const SETTING_NOT_WRITABLE = 'SETTING_NOT_WRITABLE';
+
+/**
  * 联网检索档位（UI 上的「关闭 / 校外网 / 校内网」）。
  *
  * 目前**还没有真正的检索实现**：这个值只是原样交给提示词（`context.search`），
@@ -271,6 +317,80 @@ function draftFingerprint(entry) {
     fields: draft.fields ?? null,
     id: draft.id ?? null,
   });
+}
+
+/**
+ * 把 `settings` 草稿的 fields 拆成「AI 配置补丁」与「界面偏好补丁」，并做白名单校验。
+ *
+ * 任何不在白名单里的键都抛 `SETTING_NOT_WRITABLE`（400）——**不做部分写入**：
+ * 如果 `{searchProvider:"brave", apiKey:"sk-…"}` 只写前一半、悄悄丢掉后一半，
+ * 用户会以为密钥也被改了；而如果静默丢掉的是拼错的键名，用户会以为设置生效了。
+ * 宁可整条失败并明确说“这些键不能由 AI 改”。
+ */
+function splitSettingsFields(fields) {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    throw HttpError.badRequest('settings 的 fields 必须是对象');
+  }
+  const keys = Object.keys(fields);
+  if (!keys.length) throw HttpError.badRequest('settings 更新至少要提供一个设置项');
+
+  const writablePrefs = Object.keys(PREF_SETTING_VALUES);
+  const unknown = keys.filter((key) => !AI_SETTING_KEYS.includes(key) && !writablePrefs.includes(key));
+  if (unknown.length) {
+    throw new HttpError(
+      400,
+      SETTING_NOT_WRITABLE,
+      `这些设置项不能由 AI 修改：${unknown.join('、')}（可改：${[...AI_SETTING_KEYS, ...writablePrefs].join(' / ')}）；` +
+        'API Key、搜索密钥、账号、令牌等凭据永远不在可写范围内，请用户自己在设置页填写',
+      { fields: unknown, writable: [...AI_SETTING_KEYS, ...writablePrefs] },
+    );
+  }
+
+  const aiPatch = {};
+  const prefPatch = {};
+  for (const key of keys) {
+    const value = fields[key];
+    if (value === undefined || value === null || value === '') {
+      throw HttpError.badRequest(`${SETTING_LABELS[key]}的值不能为空`, { field: key });
+    }
+    if (AI_SETTING_KEYS.includes(key)) {
+      aiPatch[key] = value;
+      continue;
+    }
+    const allowed = PREF_SETTING_VALUES[key];
+    const text = typeof value === 'string' ? value.trim().toLowerCase() : value;
+    if (!allowed.includes(text)) {
+      throw HttpError.badRequest(
+        `${SETTING_LABELS[key]}只能是 ${allowed.join(' / ')}，收到 ${JSON.stringify(value)}`,
+        { field: key, allowed: [...allowed] },
+      );
+    }
+    prefPatch[key] = text;
+  }
+
+  // AI 配置走它自己的严格校验：越界/枚举错误在这里就 400，与设置页提交 POST /ai/config 同口径。
+  if (Object.keys(aiPatch).length) assertAiConfigInput(aiPatch);
+  return { aiPatch, prefPatch };
+}
+
+/** 请求值归一成“生效后的值”，用于预览时判断 changed / ignored。 */
+function projectedSettingValue(key, value) {
+  if (key === 'searchProvider') return String(value).trim().toLowerCase();
+  if (['searchMaxPages', 'searchRetryMax', 'contextWindow'].includes(key)) return Number(value);
+  return String(value).trim().toLowerCase();
+}
+
+/** 设置值的人话展示（写进 explain，用户不必反查枚举）。 */
+function settingDisplayValue(key, value) {
+  if (key === 'permission') return PERMISSION_LABELS[value] ?? value;
+  if (key === 'theme') return THEME_LABELS[value] ?? value;
+  return String(value);
+}
+
+/** AI 配置里给前端/上游看的“当前值”；权限来自界面偏好（AI 配置本身没有这一项）。 */
+function settingCurrentValue(key, source) {
+  if (key === 'permission' || key === 'theme') return source.prefs[key] ?? null;
+  return source.ai[key];
 }
 
 /** 从草稿里挑一个"人话名字"：标题优先，其次检索词 / 关键词 / id。 */
@@ -534,6 +654,18 @@ export class AiChatService {
      * 没声明的 target 仍用 MAX_QUERY_ITEMS。
      */
     this.queryLimits = queryLimits;
+
+    /**
+     * target `settings` 的处理器注册在 AI 模块自己这里（而不是新建一个 ai/commands.js）：
+     * 它要调用 `this.updateConfig()` 与 `services.prefs.set()` 这两条**模块自己的写入路径**，
+     * 只有服务实例同时握着两者。注册放在构造期、执行时再取 `this.services.prefs`，
+     * 因为 uiprefs 模块（order 95）在 AI（order 90）之后装配，构造时它还不在 services 上。
+     */
+    if (this.commands && typeof this.commands.registerHandler === 'function' && !this.commands.handlers?.has?.('settings')) {
+      this.commands.registerHandler('settings', {
+        update: (draft, options) => this.#updateSettings(draft, options),
+      });
+    }
   }
 
   // ---------------------------------------------------------------- 状态 / 配置
@@ -544,7 +676,7 @@ export class AiChatService {
     return {
       configured: this.provider.configured(),
       provider: this.provider.configured() ? this.provider.name : null,
-      config: maskAiConfig(this.config.get()),
+      config: this.maskConfig(),
       /** 老配置里的旧模型名被自动换掉时，这里给出原名字（界面据此提示一次） */
       modelMigratedFrom: this.config.migratedFrom ?? null,
       conversations: conversations.length,
@@ -555,7 +687,31 @@ export class AiChatService {
   }
 
   maskConfig() {
-    return maskAiConfig(this.config.get());
+    /**
+     * 对外配置多带一个 `permission`（默认写入权限）。
+     *
+     * 为什么它不在 ai-config.json 里：权限档位一直是**每一轮请求**的参数
+     * （`POST /ai/chat {permission}`），渲染层存在自己的 localStorage（`potato.permission`）。
+     * AI 改“默认权限”时，把它落到 uiprefs（后端偏好表），再在这里合并进配置响应 ——
+     * 这样 `GET /ai/config` 能回显、设置页/渲染层可以读它作为下一轮的默认值。
+     * 不把它塞进 AiConfigStore：那个白名单（AI_CONFIG_FIELDS）是账号/端点/密钥的存储契约，
+     * 权限不是 AI 接入配置，混进去会让“配置 = 凭据”的边界变模糊。
+     *
+     * 渲染层目前仍优先读自己的 localStorage；后端这个值要等渲染层接入后才自动生效 ——
+     * 这是本次改动的已知边界，README 的“风险与边界”里写明了。
+     */
+    return { ...maskAiConfig(this.config.get()), permission: this.#prefValue('permission', 'manual', PERMISSIONS) };
+  }
+
+  /** 读一个界面偏好；没有/服务未装配/值不合法时回落到 fallback（绝不因偏好读失败而让配置接口 500）。 */
+  #prefValue(key, fallback, allowed = null) {
+    try {
+      const value = this.services?.prefs?.get?.(key)?.value;
+      if (value === undefined || value === null) return fallback;
+      return !allowed || allowed.includes(value) ? value : fallback;
+    } catch {
+      return fallback;
+    }
   }
 
   /**
@@ -788,6 +944,151 @@ export class AiChatService {
     // 与保存配置对称：清空也要广播，否则设置页与顶部徽标会停在旧状态
     this.broadcast?.({ type: 'data_changed', module: 'ai', payload: { target: 'ai_config' } });
     return maskAiConfig(next);
+  }
+
+  /* -------------------------------------------------------------- settings target */
+
+  /** 当前设置快照：AI 配置 + 两项界面偏好（权限/主题）。 */
+  #settingsSnapshot() {
+    return {
+      ai: this.maskConfig(),
+      prefs: {
+        permission: this.#prefValue('permission', 'manual', PERMISSIONS),
+        theme: this.#prefValue('theme', 'system', PREF_SETTING_VALUES.theme),
+      },
+    };
+  }
+
+  /**
+   * 写界面偏好（permission / theme）。
+   *
+   * 走 uiprefs 自己的 `set()`，因此复用它的键名校验、16KB 上限与 `data_changed` 广播；
+   * 不直接操作 `store.uiPrefs` —— 那样会绕过校验，也不会通知前端刷新。
+   */
+  async #setPref(key, value) {
+    const prefs = this.services?.prefs;
+    if (!prefs?.set) {
+      throw new HttpError(501, ERROR_CODES.NOT_IMPLEMENTED, '界面偏好服务未装配，无法写入权限/主题设置');
+    }
+    return prefs.set(key, value);
+  }
+
+  /** 危险项警告：permission=auto 必须让用户在确认卡和执行回执里都看见。 */
+  #settingsWarnings(requested) {
+    const warnings = [];
+    if (requested.permission === 'auto') {
+      warnings.push(
+        '把默认写入权限改成「完全权限（auto）」后，AI 之后的新增 / 修改 / 删除会直接执行，不再逐条确认；' +
+          '如果你不想要这个行为，请把 permission 改回 manual。',
+      );
+    }
+    return warnings;
+  }
+
+  /** 设置改动的人话说明：只报**实际生效**的键，不用模型的措辞。 */
+  #settingsExplain(changed, ignored, values) {
+    if (!changed.length) {
+      const already = ignored.length ? `（${ignored.map((key) => SETTING_LABELS[key] ?? key).join('、')}已经是这个值）` : '';
+      const stillAuto = values.permission === 'auto' ? ' 当前默认写入权限仍是完全权限（auto），AI 会直接执行写操作，不再逐条确认。' : '';
+      return `设置没有变化${already}。${stillAuto}`.trim();
+    }
+    const parts = changed.map((key) => `${SETTING_LABELS[key] ?? key} → ${settingDisplayValue(key, values[key])}`);
+    const reminders = [];
+    if (changed.includes('permission')) {
+      reminders.push(
+        values.permission === 'auto'
+          ? '注意：之后 AI 会直接执行写操作，不再逐条确认。'
+          : '写操作会重新逐条确认后才执行。',
+      );
+    }
+    if (ignored.length) {
+      reminders.push(`未变化的项：${ignored.map((key) => SETTING_LABELS[key] ?? key).join('、')}（已经是这个值）。`);
+    }
+    return `已修改设置：${parts.join('；')}。${reminders.join(' ')}`.trim();
+  }
+
+  /**
+   * 把实际改动写回草稿的 explain / warnings。
+   *
+   * 为什么必须改草稿：确认卡与消息记录读的是 `draft.explain` / `draft.warnings`
+   * （渲染层只画这两个字段），而命令返回的 explain 只在**已经执行**的回执里被使用。
+   * 不改的话，manual 档的用户在点确认前看不到“改成 auto 会不再逐条确认”这句警告。
+   */
+  #annotateSettingsDraft(draft, explain, warnings) {
+    draft.explain = explain;
+    const existing = Array.isArray(draft.warnings) ? draft.warnings.filter((text) => !warnings.includes(text)) : [];
+    draft.warnings = [...existing, ...warnings];
+  }
+
+  /**
+   * target `settings` 的 update 处理器。
+   *
+   * 权限闸不在这里：`manual` / `strict` 档只做 dryRun，草稿由既有机制渲染成确认卡；
+   * `auto` 档由 `#autoExecuteWrites` 再调一次（不带 dryRun）才真正落库。
+   */
+  async #updateSettings(draft, options = {}) {
+    const { aiPatch, prefPatch } = splitSettingsFields(draft.fields);
+    const requested = { ...aiPatch, ...prefPatch };
+    const before = this.#settingsSnapshot();
+
+    // 预览值：AI 配置在写入时会被归一化（数字转 number、provider 转小写），
+    // 这里先按同一口径归一，才能在确认卡上准确判断“哪些会变、哪些已经是这个值”。
+    const projected = Object.fromEntries(
+      Object.entries(requested).map(([key, value]) => [key, projectedSettingValue(key, value)]),
+    );
+    const changed = Object.keys(requested).filter((key) => settingCurrentValue(key, before) !== projected[key]);
+    const ignored = Object.keys(requested).filter((key) => !changed.includes(key));
+    const warnings = this.#settingsWarnings(requested);
+
+    if (options.dryRun) {
+      const explain = this.#settingsExplain(changed, ignored, projected);
+      this.#annotateSettingsDraft(draft, explain, warnings);
+      return {
+        dryRun: true,
+        planned: { action: 'update', target: 'settings', fields: { ...requested } },
+        changed,
+        ignored,
+        explain,
+        warnings,
+      };
+    }
+
+    // 先写 AI 配置，再写界面偏好：AI 配置的校验最严格（越界/枚举），
+    // 让它先失败就不会出现“权限已经改了、搜索配置却没写进去”的半截状态。
+    if (Object.keys(aiPatch).length) await this.updateConfig(aiPatch);
+    for (const [key, value] of Object.entries(prefPatch)) await this.#setPref(key, value);
+
+    // 写完统一广播一次：permission/theme 落在 uiprefs，而 updateConfig 的广播只覆盖 AI 配置；
+    // 放在全部写入之后发，前端重读 /ai/config 才能一次拿到完整结果。
+    this.broadcast?.({
+      type: 'data_changed',
+      module: 'ai',
+      payload: { target: 'ai_config', settings: Object.keys(requested) },
+    });
+
+    const after = this.#settingsSnapshot();
+    const actual = Object.fromEntries(
+      Object.keys(requested).map((key) => [key, settingCurrentValue(key, after)]),
+    );
+    const actualChanged = Object.keys(requested).filter(
+      (key) => settingCurrentValue(key, before) !== settingCurrentValue(key, after),
+    );
+    const actualIgnored = Object.keys(requested).filter((key) => !actualChanged.includes(key));
+    const actualWarnings = this.#settingsWarnings(requested);
+    const explain = this.#settingsExplain(actualChanged, actualIgnored, actual);
+    this.#annotateSettingsDraft(draft, explain, actualWarnings);
+
+    return {
+      affected: actualChanged.map((key) => ({
+        id: key,
+        title: SETTING_LABELS[key] ?? key,
+        value: settingDisplayValue(key, actual[key]),
+      })),
+      changed: actualChanged,
+      ignored: actualIgnored,
+      warnings: actualWarnings,
+      explain,
+    };
   }
 
   // ---------------------------------------------------------------- 会话

@@ -976,6 +976,65 @@ app/
 | **学堂首页只留两张卡** | `views/lms.js` 的 `lmsPaint()` | ✅ 顶部「账号与同步」工具条与「账号状态」卡（账号 / 上次同步 / 缓存 / 服务地址 / 退出登录）整体删除，只留「自动同步」小卡 + 「课程」；未登录时给引导卡（「去设置里登录」跳设置页），登录态快照带 1s TTL，设置页登录/退出后切回来立刻重新取状态 |
 | provider 注册位 | `src/server/index.js` 的 `services = { store, commands, aiBridge, hub, broadcast }` | ✅ 模块在自己的 `createServices({ services })` 里就能注册 provider |
 
+### AI 可写分类与设置（`target: category` / `target: settings`）
+
+2026-10 起，AI 在**写入权限档位**允许时也能创建/修改/删除日程分类、修改一小部分软件设置。
+用户原话是「新建个日程分类名为考试，用橙色表示」与「在完全权限下 AI 可以改变本软件的设置项」；
+旧版提示词没有声明这两个 target，模型只能回答「分类的创建不在我的能力范围里」。
+
+**权限闸：和其它写操作完全同一条路。**
+- `auto`（界面上的「自动审批 / 完全权限」）：系统直接执行，结果出「已自动执行」回执；
+- `manual`（默认）/ `strict`：只做真实校验的 dryRun，留成确认卡；用户点「确认执行」才落库；
+- 命令层**不复制**权限判断（见 `chat-service.js` 的 `#autoExecuteWrites`），
+  所以不会出现“分类能自动执行、设置却要确认”这类两套规则。
+
+**分类（`target: category`）**
+- 支持 create / update / delete / query；字段 `name`（≤12 字）、`color`（`#RRGGBB`）、
+  `kind`（`schedule` 日程分类 / `event` 日历事件分类，默认 schedule）、`sort`（排序，可选）。
+- 走 `CategoryService` 的真实校验（颜色格式、locked 的 `other` 不可删、kind 合法），
+  AI 层另外加了两道**更保守**的护栏（不改 REST 语义）：
+  1. **同一 kind 内分类名不能重复**。REST 更新/删除走 id，重名只是显示问题；AI 按名字定位，
+     重名会无法判断“改哪一个”，所以直接 400 并给出已有分类的颜色/id。默认数据里
+     「考试」已经存在（日程与事件各一个，id 都是 `exam`），因此照示例新建同名分类会得到
+     “已有「考试」，请用 update 改色”——这是**正确行为**，不是能力缺失。
+  2. **被记录引用的分类不能删**。REST 的既有语义是“删分类不丢数据：记录改到 other”；
+     AI 一句话删除时用户看不到“有 N 条记录会被静默改派”，所以 AI 侧在 `usage > 0` 时直接拒绝，
+     让用户先把记录改到别的分类（或只改名/改色）。REST 路由的行为保持不变。
+- 广播复用 `CategoryService` 现有的 `data_changed { target: 'category' }`，界面自动重拉。
+
+**设置（`target: settings`，只支持 update）**
+
+| 能改 | 落到哪 | 校验 |
+| --- | --- | --- |
+| `permission`（auto / manual / strict） | `uiprefs` 的 `permission` | 三档枚举 |
+| `theme`（system / light / dark） | `uiprefs` 的 `theme` | 三值枚举 |
+| `searchProvider` | `AiConfigStore.save()` | 与设置页同一个 `assertAiConfigInput`（枚举） |
+| `searchMaxPages` | 同上 | 5–30 整数 |
+| `searchRetryMax` | 同上 | 1–6 整数 |
+| `contextWindow` | 同上 | 8000–2 000 000 整数 |
+
+- 其它键一律 **400 `SETTING_NOT_WRITABLE`**，整条草稿不落库（不做“写一半、丢一半”）；
+  `apiKey` / `searchApiKey(s)` / `account` / 令牌 / 密码 / 登录态 / 同步开关**永远不在白名单**，
+  AI 也不会索要或回显密钥。
+- 故意不开放：`provider` / `baseUrl` / `model`（改错会让整个 AI 通道失联，属于用户去设置页手动改的事）、
+  `searchEnabled` / `drawMode`（本次任务未列入，保持最小暴露面）。
+  注意代码里**不存在** `maxActionsPerTurn`（“一轮最多 3 条写入”是提示词规则），没有为它虚构设置项。
+- 写成功会返回 `{ changed, ignored, explain, warnings }`；`explain` 只报**实际生效**的键。
+- 广播：AI 配置走 `updateConfig()` 已有的 `data_changed { target: 'ai_config' }`，
+  偏好走 `uiprefs.set()` 的 `data_changed { target: 'uiprefs' }`，写完再统一补一条 `ai_config`
+  让前端一次读到完整结果。
+
+**自我升权（`permission` 改成 `auto`）：允许，但必须让用户看见。**
+- 在 `auto` 档下，AI 确实可以输出 `{"target":"settings","fields":{"permission":"auto"}}` 并被执行 ——
+  这是“用户自己已经选了完全权限”的直接推论；**不额外加一道禁止**，否则用户无法用一句话把默认档位固定下来。
+- 但这条改动会在 `warnings` 与 `explain` 里明确写出“之后 AI 会直接执行写操作，不再逐条确认”；
+  `manual` / `strict` 档下它只是确认卡，用户点确认前就能看到同一句警告。
+- 边界（如实说）：`permission` 存在后端 `uiprefs`，并由 `GET /ai/config` 回显；
+  当前渲染层的权限开关仍从自己的 `localStorage`（`potato.permission`）读，每轮 `POST /ai/chat`
+  也仍由渲染层把档位传上来。所以 AI 改的是**后端默认值**，要等渲染层接入这个字段后才会自动
+  成为下一轮的默认档位；本次没有改渲染层（硬约束）。`theme` 同理：uiprefs 已存，
+  但现有外观开关用的还是 `zhixue.appearance` 本地存储。
+
 ### 联网检索（`web_search`）：校内直搜优先 + 按相关度选引擎
 
 - **校内（`mode: 'campus'`）走四条通道，顺序就是优先级**：⓪ **栏目列表直读**（`readSiteNews`，
