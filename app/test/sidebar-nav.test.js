@@ -146,7 +146,7 @@ test('左栏按注册表顺序渲染，默认没有「更多」，高亮与面�
     const ids = ctx.buttons().map((node) => node.dataset.view);
     assert.deepEqual(
       Array.from(ids),
-      ['chat', 'calendar', 'todo', 'lms', 'academic', 'notes', 'transfer', 'message'],
+      ['chat', 'calendar', 'todo', 'pomodoro', 'lms', 'academic', 'notes', 'transfer', 'message'],
       '默认顺序应等于注册表顺序',
     );
     assert.equal(ctx.refs.navMore.hidden, true, '★ 默认不该出现「更多」（首次运行零变化）');
@@ -292,7 +292,7 @@ test('「更多」区空掉后按钮消失；「恢复默认」回到初始排�
     assert.equal(ctx.refs.navMore.hidden, true);
     assert.deepEqual(
       Array.from(ctx.buttons().map((n) => n.dataset.view)),
-      ['chat', 'calendar', 'todo', 'lms', 'academic', 'notes', 'transfer', 'message'],
+      ['chat', 'calendar', 'todo', 'pomodoro', 'lms', 'academic', 'notes', 'transfer', 'message'],
     );
   } finally {
     await ctx.app.close();

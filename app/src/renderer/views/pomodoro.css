@@ -1,0 +1,399 @@
+/* 番茄钟视图样式。
+   约定与其它视图一致：内容在 `.view-content` 里（它已经给了 padding 与滚动），
+   这里只负责卡片内部的布局。CSP 是 `style-src 'self'`，所以**一个 inline style 都不能写**：
+   圆环进度用 SVG 的 stroke-dashoffset 属性，柱状图用 rect 的 x/y/height 属性。 */
+
+.pm-view {
+  gap: 12px;
+}
+
+/* ---------------------------------------------------------------- 头部 */
+
+.pm-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pm-title {
+  margin: 0;
+  font-size: 18px;
+}
+
+.pm-sub {
+  margin: 0;
+  color: var(--fg-3);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* ---------------------------------------------------------------- 主计时卡 */
+
+.pm-hero {
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 18px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.pm-ring-wrap {
+  position: relative;
+  width: min(240px, 64vw);
+  aspect-ratio: 1 / 1;
+  margin: 0 auto;
+}
+
+.pm-ring {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.pm-ring-bg {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 9;
+}
+
+.pm-ring-fg {
+  fill: none;
+  stroke: var(--blue);
+  stroke-width: 9;
+  stroke-linecap: round;
+  /* 从 12 点开始。不用 inline style：这是样式表里的静态规则。 */
+  transform: rotate(-90deg);
+  transform-origin: 110px 110px;
+  transition: stroke-dashoffset 0.45s linear;
+}
+
+.pm-phase-break .pm-ring-fg {
+  stroke: var(--green);
+}
+
+.pm-phase-idle .pm-ring-fg {
+  stroke: var(--fg-3);
+}
+
+.pm-clock {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.pm-time {
+  font-size: clamp(34px, 7vw, 46px);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.pm-phase {
+  font-size: 13px;
+  color: var(--fg-2);
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.pm-phase-study .pm-phase {
+  color: var(--blue);
+  border-color: var(--blue);
+}
+
+.pm-phase-break .pm-phase {
+  color: var(--green);
+  border-color: var(--green);
+}
+
+.pm-tomatoes {
+  font-size: 13px;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.pm-current-task {
+  font-size: 13px;
+  color: var(--fg);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.pm-ring-note {
+  font-size: 12px;
+  color: var(--fg-3);
+  line-height: 1.5;
+}
+
+/* ---------------------------------------------------------------- 操作按钮 */
+
+.pm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pm-btn {
+  min-height: 40px;
+  min-width: 84px;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background var(--t), border-color var(--t), filter var(--t);
+}
+
+.pm-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.pm-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.pm-primary {
+  flex: 1 1 140px;
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+  font-weight: 600;
+}
+
+.pm-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.pm-danger {
+  color: var(--red);
+  border-color: rgba(255, 107, 122, 0.45);
+}
+
+/* ---------------------------------------------------------------- 卡片 */
+
+.pm-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pm-card-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- 关联待办 */
+
+.pm-task-row {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pm-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 38px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--control-bg, var(--bg-elevated));
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.pm-hint {
+  font-size: 12px;
+  color: var(--fg-3);
+  line-height: 1.6;
+}
+
+/* ---------------------------------------------------------------- 今日统计 */
+
+.pm-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pm-stat {
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  min-width: 0;
+}
+
+.pm-stat-label {
+  font-size: 12px;
+  color: var(--fg-3);
+}
+
+.pm-stat-value {
+  font-size: 20px;
+  font-weight: 600;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pm-stat-hint {
+  font-size: 11px;
+  color: var(--fg-3);
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- 柱状图（纯 SVG） */
+
+.pm-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+  overflow: visible;
+}
+
+.pm-chart-axis {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.pm-chart-bar {
+  fill: var(--blue);
+}
+
+.pm-chart-value {
+  fill: var(--fg-2);
+  font-size: 9px;
+}
+
+.pm-chart-day {
+  fill: var(--fg-3);
+  font-size: 9px;
+}
+
+/* ---------------------------------------------------------------- 设置 */
+
+.pm-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.pm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-2);
+  min-width: 0;
+}
+
+.pm-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+}
+
+.pm-input {
+  width: 100%;
+  min-height: 34px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--control-bg, var(--bg-elevated));
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.pm-checkbox {
+  width: 16px;
+  height: 16px;
+}
+
+.pm-settings .pm-btn {
+  align-self: flex-start;
+  flex: 0 0 auto;
+}
+
+/* ---------------------------------------------------------------- 加载 / 错误 */
+
+.pm-loading {
+  padding: 24px 4px;
+  color: var(--fg-3);
+  font-size: 13px;
+}
+
+.pm-error {
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 107, 122, 0.45);
+  background: rgba(255, 107, 122, 0.1);
+  color: var(--red);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* ---------------------------------------------------------------- 手机 / 窄栏 */
+
+@media (max-width: 900px) {
+  /* 单列：三张统计卡并排会在 390px 屏上挤成每张 ~110px，数字一长就换行 */
+  .pm-stats,
+  .pm-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pm-actions {
+    flex-direction: column;
+  }
+
+  .pm-btn,
+  .pm-primary,
+  .pm-danger {
+    width: 100%;
+    min-height: 44px;
+    flex: 0 0 auto;
+  }
+
+  .pm-select,
+  .pm-input {
+    min-height: 44px;
+  }
+
+  .pm-hero {
+    padding: 14px 12px;
+  }
+
+  .pm-ring-wrap {
+    width: min(220px, 68vw);
+  }
+
+  .pm-card {
+    padding: 12px;
+  }
+
+  .pm-stat-value {
+    font-size: 18px;
+  }
+}

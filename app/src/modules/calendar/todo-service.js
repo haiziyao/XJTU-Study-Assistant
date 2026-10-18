@@ -50,6 +50,17 @@ const MAX_CATEGORY_LENGTH = 24;
  *   既能拆开、又能一眼看全、还能安全撤销的边界。
  */
 const MAX_DEPTH = 3;
+/**
+ * **只读字段**：由番茄钟（pomodoro 模块）在会话结算时累加，客户端一个字都不能改。
+ *
+ * 它们出现在 `KNOWN_FIELDS` 里（让乱写的人拿到"这是只读字段"的明确 400，而不是被
+ * 当成未知字段去猜拼写），但**刻意不放进 `EDITABLE`**：
+ * - `#rebuild` 用「当前记录 + patch」重建，只挑 EDITABLE —— 不在里面就不会被 patch 覆盖；
+ * - 更新时 `normalize` 也不产出它，集合层的 merge 会原样保留已累计的秒数。
+ * 如果放进 EDITABLE，普通改标题也会把它一起重建；一旦 normalize 给默认 0，
+ * 用户攒了几小时的专注时长就会在改标题时被清零。
+ */
+const READONLY_FIELDS = ['spentSelfSec'];
 /** 可写字段白名单：更新时用「当前记录 + patch」重建，避免未知字段落库。 */
 const EDITABLE = [
   'title',
@@ -78,12 +89,14 @@ const EDITABLE = [
  *   而提示词、前端、模型都容易顺手把它写进待办（真机缺陷 S3 就是这么来的）。
  * - `id` 允许出现但**被忽略**：模型给 update 草稿时常把 id 一并塞进 `fields`，
  *   拿它定位可以，写进数据不行（那是另一条记录的主键，落进文件就是脏数据）。
+ * - `spentSelfSec` 出现在这里只为给"只读"的明确报错（见 READONLY_FIELDS 的注释），
+ *   它不在 EDITABLE 里，因此不是可写字段。
  */
-const KNOWN_FIELDS = new Set([...EDITABLE, 'estimatedMinutes', 'id']);
+const KNOWN_FIELDS = new Set([...EDITABLE, ...READONLY_FIELDS, 'estimatedMinutes', 'id']);
 
 /** 报错时摆在最前面的字段清单（人/模型照着改一次就能对）。 */
 const KNOWN_FIELD_LIST =
-  'title / deadline / estimatedHours（小时，可小数；也收 estimatedMinutes，整数分钟） / priority / completed / description / tags / category / parentId';
+  'title / deadline / estimatedHours（小时，可小数；也收 estimatedMinutes，整数分钟） / priority / completed / description / tags / category / parentId（spentSelfSec 只读，由番茄钟维护）';
 
 /**
  * 单个别名的归一化（不认识的键原样返回）。
@@ -272,6 +285,22 @@ function normalize(rawInput, { partial = false } = {}) {
   const input = normalizeInput(rawInput);
   const data = {};
 
+  /**
+   * 只读字段就算"认识"也不能写：明确 400，而不是静默丢掉。
+   *
+   * 为什么不是默默忽略：客户端传 `spentSelfSec` 只可能有两个意图 —— 补录/迁移，或
+   * 试图把统计改成好看的数。两种都不该由这条接口决定；告诉它"这是番茄钟自动累计的"
+   * 比假装写成功更诚实，也不会让用户以为自己的补录生效了。
+   */
+  for (const field of READONLY_FIELDS) {
+    if (input[field] !== undefined) {
+      throw HttpError.badRequest(`字段 ${field} 是只读的：由番茄钟在会话结算时自动累计，不能直接修改`, {
+        field,
+        code: 'READONLY_FIELD',
+      });
+    }
+  }
+
   if (input.title !== undefined) data.title = requireTitle(input.title);
   else if (!partial) data.title = requireTitle(undefined);
 
@@ -412,8 +441,37 @@ function subtreeHeight(id, byId) {
   return height;
 }
 
+/**
+ * `id -> 自己 + 全部后代` 的专注秒数（`spentSec`）。
+ *
+ * 为什么现算而不是把秒数写进祖先：
+ * - 番茄钟只把 N 秒写进**当前待办**的 `spentSelfSec`。如果同时给每一层祖先的
+ *   `spentSec` 也加 N，那么"父任务自己专注 100 秒、子任务专注 50 秒"时，父的
+ *   存储值会是 100 + 50，而它再被汇总到祖父时又会被加一次 —— 多层就是重复累计；
+ * - 父子关系可以移动、子任务可以删除。写死的聚合值在移动/删除后必然过期，
+ *   而派生值每次都按当前树重算，天然不会留下"祖父多了 30 分钟"这种脏数字。
+ *
+ * 算法：每条记录的 `spentSelfSec` 沿 parentId 往上加，最多 3 层；用 `seen` 防历史
+ * 脏数据成环时死循环。O(n × 深度)，在待办量级下可忽略。
+ */
+function spentStatsIndex(records) {
+  const byId = new Map(records.map((item) => [item.id, item]));
+  const index = new Map();
+  for (const record of records) {
+    const own = Math.max(0, Math.round(Number(record.spentSelfSec) || 0));
+    let cursor = record;
+    const seen = new Set();
+    while (cursor && !seen.has(cursor.id)) {
+      seen.add(cursor.id);
+      index.set(cursor.id, (index.get(cursor.id) ?? 0) + own);
+      cursor = cursor.parentId ? byId.get(cursor.parentId) : null;
+    }
+  }
+  return index;
+}
+
 /** 只出现在响应里的派生字段。 */
-function decorate(item, today, children = NO_CHILDREN) {
+function decorate(item, today, children = NO_CHILDREN, spentSec = 0) {
   const hours = item.estimatedHours ?? 1;
   const complexity = complexityOfHours(hours);
   return {
@@ -424,6 +482,10 @@ function decorate(item, today, children = NO_CHILDREN) {
     category: item.category ?? '',
     parentId: item.parentId ?? null,
     autoCompletedBy: item.autoCompletedBy ?? null,
+    // 番茄钟累计的**自己的**专注秒数（落库；只读，见 READONLY_FIELDS）
+    spentSelfSec: Math.max(0, Math.round(Number(item.spentSelfSec) || 0)),
+    // 派生：自己 + 全部后代，**实时**计算（存下来会在移动/删除子任务后过期）
+    spentSec: Math.max(0, Math.round(Number(spentSec) || 0)),
     // 派生：只算直接子级，且是**实时**算的（存下来必然过期）
     childCount: children.count,
     childDoneCount: children.done,
@@ -542,9 +604,10 @@ export class TodoService {
     return out;
   }
 
-  /** 单条记录的响应形状（含直接子级统计）。 */
+  /** 单条记录的响应形状（含直接子级统计 + 自己与后代的专注秒数）。 */
   #decorate(item) {
-    return decorate(item, todayKey(), childStatsIndex(this.#alive()).get(item.id));
+    const alive = this.#alive();
+    return decorate(item, todayKey(), childStatsIndex(alive).get(item.id), spentStatsIndex(alive).get(item.id));
   }
 
   /**
@@ -610,8 +673,11 @@ export class TodoService {
 
     // 子级统计按**全部存活记录**算，不按过滤后的集合算：
     // 父行的 `2/3` 说的是"这一步拆成了几步、勾完几步"，不该因为当前只看未完成就变样。
-    const index = childStatsIndex(this.#alive());
-    const decorated = items.map((item) => decorate(item, today, index.get(item.id)));
+    // 专注秒数同理：父行的 spentSec 是"这棵子树一共投入了多少"，不能被筛选条件改变。
+    const alive = this.#alive();
+    const index = childStatsIndex(alive);
+    const spent = spentStatsIndex(alive);
+    const decorated = items.map((item) => decorate(item, today, index.get(item.id), spent.get(item.id)));
     // 不传 limit 就不截断（与旧 /schedules 行为一致）；日历聚合拿全量自己分桶
     const capped = Number(limit);
     return limit !== undefined && limit !== '' && Number.isFinite(capped) && capped > 0
@@ -705,6 +771,48 @@ export class TodoService {
     return Number.isFinite(capped) && capped > 0 ? items.slice(0, capped) : items;
   }
 
+  /**
+   * 番茄钟结算时把「自己」的专注秒数记到待办上（**唯一**允许写 `spentSelfSec` 的入口）。
+   *
+   * 为什么是"加到当前待办、祖先自动派生"：
+   * - 只写一处，就不存在"父任务上加了两次 / 移动子树后祖父多算"的重复累计；
+   * - `decorate` 的 `spentSec` 按当前父子树现算（自己 + 全部后代），所以从子任务到
+   *   祖父每一层都能看见这笔投入，而数据里没有一份会过期的聚合值；
+   * - 参考实现只给直接父级加一次，在 3 层待办下会让祖父级少算 —— 这是有意的偏离。
+   *
+   * **已完成 / 已删除的待办不累计**：返回 `{added:0, skipped}`，不报错（番茄钟不应因为
+   * 用户中途勾掉了任务而崩），也不写库。调用方不需要重复判断完成态。
+   *
+   * 写库走集合层的 merge（不是 `update()`）：`update()` 会用「当前记录 + patch」重建
+   * 完整字段，而 `spentSelfSec` 是只读字段，不该走客户端可写的那条路径。服务内部直接
+   * 写这一个字段是安全的 —— 这里就是"拥有这个字段的模块"。
+   *
+   * @param {string} id 待办 id
+   * @param {number} seconds 要累计的秒数（正数）
+   * @param {{notify?: boolean}} [options] `notify:false` 时不广播（番茄钟每 5 秒
+   *   实时入账，若每次都广播，前台会每 5 秒整体重画一次，用户正在填的设置会被冲掉）
+   * @returns {Promise<{id:string, added:number, spentSelfSec:number, skipped?:string}|null>}
+   */
+  async addSpentSec(id, seconds, { notify = true } = {}) {
+    const current = this.collection.get(String(id ?? ''));
+    if (!current || current.deletedAt) return null;
+    const amount = Math.max(0, Math.round(Number(seconds) || 0));
+    if (!amount) return { id: current.id, added: 0, spentSelfSec: current.spentSelfSec ?? 0 };
+    if (current.completed) {
+      return { id: current.id, added: 0, skipped: 'completed', spentSelfSec: current.spentSelfSec ?? 0 };
+    }
+    const spentSelfSec = Math.max(0, Math.round(Number(current.spentSelfSec) || 0)) + amount;
+    const updated = await this.collection.update(current.id, { spentSelfSec });
+    if (!updated) return null;
+    if (notify) {
+      this.broadcast?.({
+        type: 'data_changed',
+        payload: { target: 'todo', action: 'spend', id: current.id, spentSelfSec },
+      });
+    }
+    return { id: updated.id, added: amount, spentSelfSec: updated.spentSelfSec };
+  }
+
   /** 统计：以「过滤后的集合」为准（不受 limit 影响），口径见 docs/接口文档.md。 */
   stats(items) {
     const total = items.length;
@@ -740,6 +848,9 @@ export class TodoService {
 
   async create(input) {
     const data = normalize(input);
+    // 新待办从 0 开始计专注；normalize 不产出这个字段（只读，见 READONLY_FIELDS），
+    // 所以在**落库这一步**补默认值，更新路径碰不到它
+    data.spentSelfSec = 0;
     // 父级必须在写入前验证：落库之后再发现父不存在，就只能靠启动修复去擦屁股
     this.#assertParent(data.parentId);
     if (data.completed && !data.completedAt) data.completedAt = new Date().toISOString();
@@ -751,6 +862,7 @@ export class TodoService {
   /** 只校验、不落库（与 create 同一条归一化路径），供 dryRun 预览与 AI 草稿预校验。 */
   preview(input) {
     const data = normalize(input);
+    data.spentSelfSec = 0;
     // dryRun 也要提前报"父不存在 / 超 3 层"：否则确认卡看起来没问题，点确认才 400
     this.#assertParent(data.parentId);
     if (data.completed && !data.completedAt) data.completedAt = new Date().toISOString();
