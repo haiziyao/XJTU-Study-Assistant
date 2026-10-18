@@ -17,9 +17,11 @@
  *      - `partial`：来源在，但只有一部分字段能算（例如 academic 服务不在，算不出学分绩）；
  *      - `read_failed`：集合存在但读的时候抛了（文件损坏等），如实记下原话。
  *
- * 4. **范围只覆盖仍然存在的四个来源**：AI 对话 / 笔记 / 待办 / 成绩。
+ * 4. **范围覆盖五个来源**：AI 对话 / 笔记 / 待办 / 番茄钟 / 成绩。
  *    已移除的两个学习功能不再读取、也不再统计 —— 既不保留恒为 null 的统计项，
  *    也不在 `missing` 里假装"这个来源这次没读到"。
+ *    番茄钟是**唯一的"学习时长"来源**（`pomodoro/state.js` 只记录真实计时），
+ *    它没装配或没有记录时给 0（集合在、只是空），集合根本不在时才记 `unavailable`。
  *
  * 5. **口径优先问对方模块**。academic 若装配好并提供 `stats()`，学分绩就用它自己的口径
  *    （字段语义只有对方最清楚）；集合只用来判断"这周成绩数据有没有变动"。
@@ -27,14 +29,15 @@
 
 import { addDays } from '../../shared/time.js';
 
-/** 四个来源的固定顺序：响应里 `missing` 与 stats 的键顺序都按它来（便于前端与测试对照）。 */
-export const SOURCE_KEYS = ['conversations', 'notes', 'schedule', 'grades'];
+/** 五个来源的固定顺序：响应里 `missing` 与 stats 的键顺序都按它来（便于前端与测试对照）。 */
+export const SOURCE_KEYS = ['conversations', 'notes', 'schedule', 'pomodoro', 'grades'];
 
 /** 中文名：给模型看的提示与降级小结都要用（模型读中文标签比读英文键更不容易张冠李戴）。 */
 export const SOURCE_LABEL = {
   conversations: 'AI 对话',
   notes: '笔记',
   schedule: '待办',
+  pomodoro: '番茄钟',
   grades: '成绩',
 };
 
@@ -186,6 +189,68 @@ export function readSchedule({ store, range, today }) {
 }
 
 /**
+ * 番茄钟：区间内的专注总秒数、完整番茄数、按天分布。
+ *
+ * 数据源：`store.pomodoroSessions`（pomodoro 模块的会话账本）。每条记录的 `day`
+ * 是**结算那一天的本地日期键**（`YYYY-MM-DD`），所以按它过滤与分桶，不会因为
+ * ISO 时间戳的时区差把 23:50 的番茄算到第二天。
+ *
+ * 口径：
+ * - `studySec`：所有 study 会话的 `actualSec` 之和（含跳过/停止的部分时长，因为用户
+ *   确实学了那些秒）；
+ * - `sessions`：study 会话次数（含部分时长）；`completedSessions` 只数 `completed: true`
+ *   的完整番茄 —— "我今天做了几个番茄"与"我专注了几次"是两件事，分开给。
+ * - 集合在但为空 → 0（不是 null）：番茄钟模块装好了、只是还没记录，和"模块不存在"不同。
+ */
+export function readPomodoro({ store, range }) {
+  const sessions = firstCollection(store, ['pomodoroSessions']);
+  if (!sessions) return { value: null, missing: [unavailable('pomodoro', 'pomodoro 模块未装配（没有 pomodoroSessions 集合）')] };
+  const list = allOf(sessions.collection);
+  if (!list) return { value: null, missing: [readFailed('pomodoro', 'pomodoroSessions 集合读取失败')] };
+
+  const dayOf = (item) => {
+    if (typeof item.day === 'string' && item.day) return item.day;
+    const ms = Date.parse(String(item.endedAt ?? ''));
+    return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 10) : '';
+  };
+  const inRange = list.filter((item) => {
+    const day = dayOf(item);
+    return day && day >= range.from && day <= range.to;
+  });
+  const study = inRange.filter((item) => item.kind === 'study');
+  const days = new Map();
+  for (const item of study) {
+    const day = dayOf(item);
+    const row = days.get(day) ?? { day, studySec: 0, sessions: 0 };
+    row.studySec += Number(item.actualSec) || 0;
+    row.sessions += 1;
+    days.set(day, row);
+  }
+  // 自然周零填充成 7 天，前端画柱状图/模型说"哪天没专注"都不需要自己补洞；
+  // 自定义超长区间（>62 天）只给有记录的天，避免把 400 天的空行塞进提示词
+  const daily =
+    Number(range.days) > 0 && Number(range.days) <= 62
+      ? Array.from({ length: Number(range.days) }, (_, index) => {
+          const day = addDays(range.from, index);
+          return days.get(day) ?? { day, studySec: 0, sessions: 0 };
+        })
+      : [...days.values()].sort((a, b) => a.day.localeCompare(b.day));
+
+  return {
+    value: {
+      studySec: study.reduce((sum, item) => sum + (Number(item.actualSec) || 0), 0),
+      breakSec: inRange
+        .filter((item) => item.kind === 'break')
+        .reduce((sum, item) => sum + (Number(item.actualSec) || 0), 0),
+      sessions: study.length,
+      completedSessions: study.filter((item) => item.completed === true).length,
+      daily,
+    },
+    missing: [],
+  };
+}
+
+/**
  * 成绩：区间内成绩数据有没有变化；有 academic 的统计口径就给 gpa。
  *
  * 数据源：`store.academicGrades` 的 `updatedAt` / `syncedAt`，加上 `services.academic.stats()`。
@@ -230,16 +295,17 @@ const READERS = {
   conversations: readConversations,
   notes: readNotes,
   schedule: readSchedule,
+  pomodoro: readPomodoro,
   grades: readGrades,
 };
 
 /**
- * 收齐四个来源。
+ * 收齐五个来源。
  *
  * 单个来源炸了**不影响其它来源**：每个 reader 单独 try/catch，失败降级成 `null` + `read_failed`。
  * 这就是"数据统计必须永远可用"的落点 —— 周报接口不允许因为别人模块的一次读失败而 500。
  *
- * @returns {{ conversations, notes, schedule, grades, missing: Array }}
+ * @returns {{ conversations, notes, schedule, pomodoro, grades, missing: Array }}
  */
 export function collectStats({ store, services, range, today }) {
   const out = {};

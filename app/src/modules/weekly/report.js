@@ -6,16 +6,18 @@
  * （"本周学习约 12 小时""专注度提升了 20%"）。所以提示词里有三条硬规则：
  *
  *   1. **只依据给定的 JSON 数字**，一个都不许新增；
- *   2. **明说没有"学习时长"这个数据源** —— 系统不记录专注时长/自习小时数，
- *      这是最容易被编出来的一类数字（用户也最信）；
+ *   2. **学习时长只来自「番茄钟」这一个来源** —— 系统不记录"自习小时数"，但番茄钟
+ *      的 `studySec` 是用户真实按过开始/停止的计时。只有 JSON 里番茄钟有正数时，
+ *      才允许写"本周专注 X 小时"；其它任何"学习 12 小时"仍然算编造；
  *   3. `null` 的含义是"**没有数据**"，不是 0 —— 降级小结与提示词用同一句话表达，
  *      免得同一次统计在两种路径下被读成两个意思。
  *
- * 统计来源只有 AI 对话 / 笔记 / 待办 / 成绩四项：已移除的两个学习功能不再统计，
+ * 统计来源是 AI 对话 / 笔记 / 待办 / 番茄钟 / 成绩五项：已移除的两个学习功能不再统计，
  * 提示词里也不许出现它们，否则模型会照着旧概念编出没有来源的数字。
  *
  * 降级小结（`fallbackReport`）刻意与模型简报**同结构**（一句话 + 三个小节），
  * 这样前端只有一套渲染逻辑；区别只在 `fallback: true` 与文风（规则版只陈述数字）。
+ * 番茄钟为 0 时降级小结**不写小时**（0 小时会被读成"这周没学习"，而实际只是没计时）。
  */
 
 import { SOURCE_LABEL } from './sources.js';
@@ -27,6 +29,7 @@ export const SECTION_TITLES = ['学习投入', '笔记与成绩', '需要注意�
 export const REPORT_MAX_CHARS = 2000;
 
 const rangeLabel = (stats) => `${stats.week}（${stats.from} ~ ${stats.to}，共 ${stats.days} 天）`;
+const focusHours = (sec) => Number(((Number(sec) || 0) / 3600).toFixed(1));
 
 /**
  * 把 stats 压成**给模型看的摘要**：中文键 + 只留模型真的会引用的数。
@@ -36,7 +39,7 @@ const rangeLabel = (stats) => `${stats.week}（${stats.from} ~ ${stats.to}，共
  * `缺失的数据` 单独一列，是为了让模型知道**哪些事它不许提**（提了只能是编的）。
  */
 export function buildDigest(stats) {
-  const { conversations, notes, schedule, grades } = stats;
+  const { conversations, notes, schedule, pomodoro, grades } = stats;
   return {
     时间区间: rangeLabel(stats),
     AI对话: conversations
@@ -59,6 +62,17 @@ export function buildDigest(stats) {
           需要留意: schedule.attention,
         }
       : null,
+    // 番茄钟是唯一可以用来说"专注时长"的来源；studySec 是秒，小时数由代码算好再给模型，
+    // 避免模型自己换算时四舍五入成另一个数
+    番茄钟: pomodoro
+      ? {
+          专注秒数: pomodoro.studySec,
+          专注小时: focusHours(pomodoro.studySec),
+          完整番茄: pomodoro.completedSessions,
+          专注次数: pomodoro.sessions,
+          按天分布: pomodoro.daily,
+        }
+      : null,
     成绩: grades ? { 学分绩: grades.gpa, 计入课程数: grades.includedCount, 本周有变动: grades.changed, 变动条数: grades.updated } : null,
     缺失的数据: (stats.missing ?? []).map((item) => `${SOURCE_LABEL[item.source] ?? item.source}：${item.reason} —— ${item.detail}`),
   };
@@ -76,8 +90,10 @@ export function weeklyRequest({ stats, temperature = 0.3 }) {
     '',
     '硬规则（违反即视为错误输出）：',
     '1. **只依据给定 JSON 里的数字**。一个都不许新增、不许换算、不许四舍五入成"约"，不许写"大概/大约"。',
-    '2. **系统没有"学习时长 / 专注时长 / 自习小时数"这个数据源**：任何情况下都不许写"本周学习 12 小时"',
-    '   "专注 8 小时"这类句子。要谈投入，只能用给定数字：对话与提问条数、笔记篇数、待办完成数、成绩变动条数。',
+    '2. **学习时长只来自「番茄钟」这个来源**：JSON 里的「番茄钟.专注秒数」是用户真实计时记录，',
+    '   只有它存在且大于 0 时，才可以用「番茄钟.专注小时」写"本周专注 X 小时"（X 照抄这个数）；',
+    '   番茄钟为 null / 0 时不许写任何小时数，也不许把 0 说成"没学习"。',
+    '   除此之外系统不记录自习小时数；任何情况下都不许编"本周学习 12 小时"这类数字。',
     '3. JSON 里为 **null** 的项表示"**没有数据**"，不是 0，也不代表用户没做这件事；',
     '   对应的小节要如实写"暂无数据"，并可以补一句原因（见"缺失的数据"）。**绝不估算、绝不假设**。',
     '4. 学分绩 null 表示没有可计算的成绩，不是 0 分。',
@@ -109,13 +125,17 @@ export function weeklyRequest({ stats, temperature = 0.3 }) {
  * 用户仍然拿到一份如实的周报 —— `fallback: true` 只是说"这段不是模型写的"。
  */
 export function fallbackReport(stats) {
-  const { conversations, notes, schedule, grades } = stats;
+  const { conversations, notes, schedule, pomodoro, grades } = stats;
   const lines = [];
+  /** 专注时长的人类写法：≥1 小时用小时，否则用分钟（避免 0.0 小时被读成"没学习"）。 */
+  const focusText = (sec) =>
+    sec >= 3600 ? `${focusHours(sec)} 小时` : `${Math.max(1, Math.round(sec / 60))} 分钟`;
 
   // 一句话总结：只挑存在的数字
   const headline = [];
   if (notes) headline.push(`新写 ${notes.created} 篇笔记`);
   if (schedule) headline.push(`完成 ${schedule.todosCompleted} 项待办`);
+  if (pomodoro?.completedSessions > 0) headline.push(`完成 ${pomodoro.completedSessions} 个完整番茄`);
   if (conversations) headline.push(`向我提了 ${conversations.userMessages} 个问题`);
   lines.push(
     headline.length
@@ -129,10 +149,15 @@ export function fallbackReport(stats) {
     effort.push(`${conversations.newConversations} 个新会话`, `${conversations.userMessages} 次提问（共 ${conversations.messages} 条消息）`);
   }
   if (schedule) effort.push(`待办新增 ${schedule.todosCreated} 项、完成 ${schedule.todosCompleted} 项`);
+  // 只有真实计时 >0 才写"专注"；0 不代表没学习，只代表没按番茄钟
+  if (pomodoro?.studySec > 0) {
+    effort.push(`专注 ${focusText(pomodoro.studySec)}（${pomodoro.completedSessions} 个完整番茄、共 ${pomodoro.sessions} 次）`);
+  }
   lines.push(
     section('学习投入', effort, [
       !conversations && '对话',
       !schedule && '待办',
+      !pomodoro && '番茄钟',
     ]),
   );
 

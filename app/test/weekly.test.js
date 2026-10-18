@@ -324,7 +324,7 @@ test('周报：缺 AI 对话 / 成绩时 missing 如实列出、接口仍 200、
     assert.equal(result.status, 200, '缺模块绝不能把接口打挂');
     const stats = result.body.stats;
 
-    for (const source of ['conversations', 'grades']) {
+    for (const source of ['conversations', 'grades', 'pomodoro']) {
       assert.equal(stats[source], null, `${source} 没装配时必须 null`);
       const item = missingOf(stats, source);
       assert.ok(item, `${source} 必须出现在 missing 里`);
@@ -345,7 +345,7 @@ test('周报：缺 AI 对话 / 成绩时 missing 如实列出、接口仍 200、
     assert.equal(generated.body.report.includes('缺：'), true, `降级正文要列缺失来源：${generated.body.report}`);
     assert.equal(/AI 对话/.test(generated.body.report), true);
     assert.equal(/成绩/.test(generated.body.report), true);
-    assert.equal(generated.body.stats.missing.length, 2);
+    assert.equal(generated.body.stats.missing.length, 3);
   } finally {
     await ctx.close();
   }
