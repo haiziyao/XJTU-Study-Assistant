@@ -336,7 +336,7 @@ test('账本上限：2001 条旧记录 + 1 条新会话 → 只留最近 2000 �
   }
 });
 
-test('AI 集成：只读查询 target pomodoro 可用，写 action 不可用；周报能读到本周专注秒数', async () => {
+test('AI 集成：只读查询与开始计时都可用；周报能读到本周专注秒数', async () => {
   const ctx = await startPomodoro();
   try {
     await ctx.call('POST', '/pomodoro/start', { studyMin: 1 });
@@ -351,10 +351,13 @@ test('AI 集成：只读查询 target pomodoro 可用，写 action 不可用；�
     assert.equal(query.body.summary.completedSessions, 1);
     assert.equal(query.body.summary.current.phase, 'break');
 
+    // 写入口已经打开：AI 的命令草稿能真的开始计时（manual 确认后 / auto 直接执行）
     const write = await ctx.call('POST', '/commands/execute', {
-      draft: { ok: true, action: 'create', target: 'pomodoro', fields: {} },
+      draft: { ok: true, action: 'create', target: 'pomodoro', fields: { studyMin: 1 }, explain: '开始一个 1 分钟的番茄钟' },
     });
-    assert.equal(write.status, 400, '番茄钟没有写入口，AI 不能假装启动');
+    assert.equal(write.status, 200, JSON.stringify(write.body).slice(0, 300));
+    assert.equal(write.body.phase, 'study');
+    assert.ok(write.body.endsAt);
 
     const today = todayKey(new Date(ctx.clock.now));
     const weekly = await ctx.call('GET', `/weekly/report?from=${today}&to=${today}`);
