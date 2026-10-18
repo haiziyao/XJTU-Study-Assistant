@@ -3478,6 +3478,518 @@
     return { card, body: text, text: '' };
   }
 
+  /* ------------------------------------------------ 中/右栏分界线（可拖动） */
+
+  /*
+   * 为什么需要它
+   * ------------
+   * 中栏（对话）与右栏（功能页）各有自己的**可用下限**：对话再窄放不下一句话，日程周视图 /
+   * 成绩表再窄也没法看。但不同屏幕、不同用法下，用户对"多给对话一点"还是"多给功能页一点"
+   * 的偏好完全不同 —— 固定的 `min(56%, 780px)` 只是 1500px 窗口下的一个折中。
+   * 所以在中/右之间放一条可拖的线，并把用户拖出来的比例记住。
+   *
+   * 四条不能破的约束
+   * ----------------
+   *  1) **首次运行逐像素不变**：没有存过比例时**不写任何宽度**，继续走 CSS 的
+   *     `--panel-w: min(56%, 780px)`；分界线是绝对定位覆盖层，不占网格列。
+   *  2) **夹紧**：中栏 ≥ 360px、右栏 ≥ 380px。不夹紧的话，用户可以拖到把另一栏
+   *     彻底挤没（甚至拖出负宽度）；窗口缩小时同样要再夹一次，否则固定 px 的右栏
+   *     会把中栏压到不能用的宽度。
+   *  3) **手机/窄屏不生效**：CSS 在 ≤900px 隐藏分界线，JS 侧 isSplitterActive() 也直接
+   *     返回 false —— 拖拽、键盘、双击全部短路；手机的两栏布局由既有的 760px 断点负责。
+   *  4) **持久化本地优先**：Electron 用 `file://` 加载、Web UI 用 http 加载，localStorage
+   *     是两份互不相干的存储；所以两边都写。启动时先读本地（首帧就能对上），本地没有
+   *     合法值才向后端要 —— 与侧边栏布局同一个策略（见 sidebar-layout.js / uiprefs）。
+   *
+   * 为什么可以用 element.style
+   * --------------------------
+   * CSP 的 `style-src 'self'` 限制的是**内联 `<style>` 与 `style=` 属性**；通过 CSSOM
+   * （`element.style.setProperty`）写样式不受它约束。仓库现有代码已有多处这么做：
+   * `positionMorePop()` 写 `pop.style.top`、`applyTheme()` 写 `root.style.setProperty`、
+   * `calendar.js` 写 `dot.style.background`。所以这里直接给 `.app` 写 `--panel-w`，
+   * 不另造"8 档宽度"之类的绕路方案。
+   */
+
+  /** 本地缓存的键名（任务约定；localStorage 不是唯一真相，见上面的第 4 条）。 */
+  const SPLIT_STORAGE_KEY = 'potato.split';
+  /**
+   * 后端 uiprefs 的键名**必须匹配** `/^[a-z][a-z0-9.-]{0,63}$/`（见 uiprefs/service.js），
+   * 所以不能写成任务描述里的 `colSplit`（大写 S 会 400），用连字符的 `col-split`。
+   * 接口也不是 POST 而是 `PUT /ui/prefs/:key`（见 uiprefs/routes.js）。
+   */
+  const SPLIT_PREF_KEY = 'col-split';
+  /** 右栏最小宽度：比日历月视图一格 + 工具栏再窄就点不准了。 */
+  const SPLIT_MIN_PANEL = 380;
+  /** 中栏最小宽度：输入框 + 发送按钮 + 一条气泡的最低要求。 */
+  const SPLIT_MIN_CHAT = 360;
+  /** 键盘每次移动的像素数：24px ≈ 一档字号，按 10 下能明显改变比例又不会一下跳太远。 */
+  const SPLIT_STEP = 24;
+  /** 与 CSS 的 `@media (max-width: 900px)` 保持一致：窄屏不注册拖拽也不应用比例。 */
+  const SPLIT_ACTIVE_QUERY = '(max-width: 900px)';
+
+  /** 当前挂载的分界线实例（`window.__PC_SPLITTER__` 与 hydrate 共用）。 */
+  let columnSplitter = null;
+
+  /** 窄屏判定：CSS 隐藏 + JS 短路必须用同一个断点，否则会出现"看得见但拖不动"。 */
+  function isSplitterActive() {
+    const query = window.matchMedia?.(SPLIT_ACTIVE_QUERY);
+    if (query) return !query.matches;
+    // 无 matchMedia 的环境（测试桩 / 极老内核）退回窗口宽度；0 视为不可用
+    return (Number(window.innerWidth) || 0) > 900;
+  }
+
+  /**
+   * 由视口宽度与左栏实际宽度算出这一帧的可用区间。
+   *
+   * 左栏宽度**不在 JS 里重算**：它是 `clamp(80px, 10%, 128px)`，用 `getBoundingClientRect()`
+   * 读真实值最准（也自动跟着窗口缩放走）。测试可以注入假宽度。
+   */
+  function splitMetrics(viewport, sidebar) {
+    const view = Math.max(0, Number(viewport) || 0);
+    const side = Math.max(0, Number(sidebar) || 0);
+    const available = Math.max(0, view - side);
+    const min = SPLIT_MIN_PANEL;
+    // max 至少等于 min：极端宽度下也不产生"min > max"的倒挂，夹紧函数保持单调
+    const max = Math.max(min, available - SPLIT_MIN_CHAT);
+    return { viewport: view, sidebar: side, available, min, max };
+  }
+
+  /** 把右栏像素宽度夹到合法区间（所有入口 —— 拖动 / 键盘 / 启动读值 / 缩放 —— 都走这里）。 */
+  function clampPanelWidth(px, metrics) {
+    const value = Number(px);
+    if (!Number.isFinite(value)) return metrics.min;
+    return Math.min(metrics.max, Math.max(metrics.min, value));
+  }
+
+  /**
+   * CSS 默认的右栏宽度：`min(56%, 780px)`。**只在"没有用户比例"时用于读取/对齐**，
+   * 不写回样式 —— 默认外观必须完全由 CSS 决定（首次运行逐像素一致）。
+   */
+  function defaultPanelWidth(viewport) {
+    return Math.min((Number(viewport) || 0) * 0.56, 780);
+  }
+
+  /**
+   * 归一化持久化的比例（0 < ratio）。
+   *
+   * 兼容三种写法：
+   *   · localStorage 里的字符串 `"0.5683"`；
+   *   · 后端 / JSON 里的数字 `0.5683`；
+   *   · 未来可能扩成对象 `{ ratio: 0.5683 }`（读旧数据时不会炸）。
+   * 非数字 / ≤0 / Infinity 一律视为"没有存过"，回退默认；**超范围的比例不在这里丢弃**，
+   * 交给 clampPanelWidth 按当前窗口夹紧（这才叫"非法值夹紧"）。
+   */
+  function normalizeRatio(raw) {
+    let value = raw;
+    if (typeof value === 'string') {
+      const text = value.trim();
+      if (!text) return null;
+      try {
+        value = JSON.parse(text);
+      } catch {
+        value = Number(text);
+      }
+    }
+    if (value && typeof value === 'object') value = value.ratio;
+    const ratio = Number(value);
+    if (!Number.isFinite(ratio) || ratio <= 0) return null;
+    return ratio;
+  }
+
+  /** 本地存的比例；没有或非法返回 null。 */
+  function readSplitRatio() {
+    return normalizeRatio(readStored(SPLIT_STORAGE_KEY));
+  }
+
+  /**
+   * 写后端（失败不影响本地）。
+   *
+   * 为什么失败可以吞：列宽是纯视觉偏好，后端挂了/老后端没有 uiprefs 时，
+   * 拖拽本身必须照常可用，只是跨重启不保证 —— 不能因为一个 PUT 失败把交互卡住。
+   */
+  async function persistColumnSplit(ratio) {
+    try {
+      await api(`/ui/prefs/${SPLIT_PREF_KEY}`, { method: 'PUT', body: { value: ratio } });
+    } catch (error) {
+      console.warn('[splitter] 列宽没能存到后端：', error?.message ?? error);
+    }
+  }
+
+  /**
+   * 启动时从后端补读比例。
+   *
+   * **本地优先**：localStorage 有合法值就说明首帧已经按它画好了，这里直接返回；
+   * 只有本地没有（换浏览器 / 清过缓存 / 第一次在桌面端打开）才用后端那份补位。
+   * 与侧边栏布局不同，这里方向是反的（侧边栏以服务端为准）—— 因为列宽是"这一刻窗口下"
+   * 的偏好，本地那份正是用户上次在这个窗口里拖出来的，不应该被另一端更旧的值覆盖。
+   */
+  async function hydrateColumnSplit() {
+    if (readSplitRatio() != null) return;
+    try {
+      const data = await api(`/ui/prefs/${SPLIT_PREF_KEY}`);
+      const ratio = normalizeRatio(data?.value);
+      if (ratio == null) return;
+      writeStored(SPLIT_STORAGE_KEY, String(ratio));
+      if (columnSplitter) columnSplitter.applyRatio(ratio);
+    } catch {
+      // 读不到就保持默认比例：首次运行本来也没有值
+    }
+  }
+
+  /**
+   * 建一个分界线实例（不碰全局 DOM 查找，方便用 DOM 桩直接驱动）。
+   *
+   * @param {object} options
+   * @param {object} options.app 网格根节点（写 `--panel-w` 的地方）
+   * @param {object} options.panel 右栏（读初始宽度用）
+   * @param {object} options.splitter 分界线节点
+   * @param {() => number} [options.viewportWidth] 视口宽度（测试注入）
+   * @param {() => number} [options.sidebarWidth] 左栏宽度（测试注入）
+   * @param {() => number} [options.panelWidth] 右栏当前宽度（测试注入；真实环境读 rect）
+   * @param {() => boolean} [options.isActive] 是否处于可拖拽布局（测试注入）
+   * @param {(ratio: number|null) => any} [options.persist] 后端写入（测试注入）
+   * @param {object} [options.body] body 节点（测试注入）
+   */
+  function createColumnSplitter(options = {}) {
+    const app = options.app;
+    const panel = options.panel;
+    const splitter = options.splitter;
+    if (!app || !panel || !splitter) return null;
+    const body = options.body ?? document.body;
+    const readViewportWidth =
+      options.viewportWidth ??
+      (() => Number(window.innerWidth) || Number(document.documentElement?.clientWidth) || 0);
+    const readSidebarWidth =
+      options.sidebarWidth ??
+      (() => {
+        const sidebar = dom.sidebar ?? document.querySelector?.('.sidebar');
+        const width = Number(sidebar?.getBoundingClientRect?.().width);
+        return Number.isFinite(width) && width > 0 ? width : 0;
+      });
+    const active = options.isActive ?? isSplitterActive;
+
+    /** 已应用到 `--panel-w` 的像素值；null = 仍在用 CSS 默认值。 */
+    let panelPx = null;
+    /** 用户拖出来的比例（右栏 / 可用宽度）；null = 没有偏好，走默认公式。 */
+    let ratio = normalizeRatio(options.initialRatio ?? readSplitRatio());
+    /** 一次拖拽的起点：`{ pointerId, startX, startPanel, moved }`。 */
+    let drag = null;
+
+    // 无障碍：读屏/键盘用户需要知道这是一条可调的竖分隔线，以及当前值。
+    // tabindex 让它可以被 Tab 聚焦；具体按键在 handleKeyDown 里。
+    splitter.setAttribute('role', 'separator');
+    splitter.setAttribute('tabindex', '0');
+    splitter.setAttribute('aria-orientation', 'vertical');
+    splitter.setAttribute('aria-label', '调整对话与功能页宽度');
+    splitter.setAttribute('title', '拖动调整宽度 · 双击恢复默认');
+
+    function metrics() {
+      return splitMetrics(readViewportWidth(), readSidebarWidth());
+    }
+
+    /** 读右栏的真实宽度：优先注入值，其次布局矩形，最后才退回 CSS 默认公式。 */
+    function layoutPanelWidth() {
+      if (typeof options.panelWidth === 'function') {
+        const injected = Number(options.panelWidth());
+        if (Number.isFinite(injected) && injected > 0) return injected;
+      }
+      const measured = Number(panel.getBoundingClientRect?.().width);
+      return Number.isFinite(measured) && measured > 0 ? measured : null;
+    }
+
+    function currentPanelWidth() {
+      const m = metrics();
+      if (panelPx != null) return clampPanelWidth(panelPx, m);
+      return clampPanelWidth(layoutPanelWidth() ?? defaultPanelWidth(m.viewport), m);
+    }
+
+    /** 把无障碍属性同步成当前真实宽度；夹紧后的 min/max 也一并更新（窗口会变）。 */
+    function syncAria() {
+      const m = metrics();
+      const now = Math.round(currentPanelWidth());
+      const min = Math.round(m.min);
+      const max = Math.round(m.max);
+      splitter.setAttribute('aria-valuemin', String(min));
+      splitter.setAttribute('aria-valuemax', String(max));
+      splitter.setAttribute('aria-valuenow', String(Math.min(max, Math.max(min, now))));
+      splitter.setAttribute('aria-valuetext', `右栏 ${Math.min(max, Math.max(min, now))} 像素`);
+    }
+
+    /**
+     * 应用一个右栏像素宽度（内部夹紧）。
+     *
+     * ⚠️ 只改 CSS 变量，不改 `grid-template-columns`：轨道读的就是 `--panel-w`，
+     * 改一处两栏同时让位；也避免在 JS 里复制一份 grid 定义，日后 CSS 改了这里不跟着变。
+     */
+    function applyPixels(px) {
+      const m = metrics();
+      panelPx = Math.round(clampPanelWidth(px, m));
+      app.style?.setProperty?.('--panel-w', `${panelPx}px`);
+      syncAria();
+      return panelPx;
+    }
+
+    /** 回到"没有用户宽度"的状态：删掉内联变量，CSS 默认公式重新接管。 */
+    function clearPanelWidth() {
+      panelPx = null;
+      app.style?.removeProperty?.('--panel-w');
+      syncAria();
+    }
+
+    /** 把当前位置换算成比例，写本地并异步写后端。 */
+    function commitRatio() {
+      if (panelPx == null) return;
+      const m = metrics();
+      if (m.available <= 0) return;
+      ratio = panelPx / m.available;
+      writeStored(SPLIT_STORAGE_KEY, String(ratio));
+      const save = options.persist ?? persistColumnSplit;
+      try {
+        const result = save(ratio);
+        if (result && typeof result.catch === 'function') {
+          result.catch((error) => console.warn('[splitter] 列宽没能存到后端：', error?.message ?? error));
+        }
+      } catch (error) {
+        console.warn('[splitter] 列宽没能存到后端：', error?.message ?? error);
+      }
+    }
+
+    /** 双击 / 「恢复默认」：清本地、删后端（value:null = 删除），并回到 CSS 默认宽度。 */
+    function reset() {
+      ratio = null;
+      writeStored(SPLIT_STORAGE_KEY, '');
+      clearPanelWidth();
+      const save = options.persist ?? persistColumnSplit;
+      try {
+        const result = save(null);
+        if (result && typeof result.catch === 'function') {
+          result.catch((error) => console.warn('[splitter] 恢复默认没能同步到后端：', error?.message ?? error));
+        }
+      } catch (error) {
+        console.warn('[splitter] 恢复默认没能同步到后端：', error?.message ?? error);
+      }
+    }
+
+    /** 应用一个比例（hydrate / 缩放共用）；非法值返回 false 且不改任何东西。 */
+    function applyRatio(nextRatio) {
+      const normalized = normalizeRatio(nextRatio);
+      if (normalized == null) return false;
+      ratio = normalized;
+      const m = metrics();
+      if (active() && m.available > 0) applyPixels(normalized * m.available);
+      else syncAria();
+      return true;
+    }
+
+    function addResizing() {
+      body?.classList?.add('resizing');
+    }
+
+    function removeResizing() {
+      body?.classList?.remove('resizing');
+    }
+
+    /**
+     * 按下：记住起点与起始宽度。
+     *
+     * 用 `setPointerCapture` 的原因：鼠标拖到窗口外（甚至中栏内容上）时，pointermove
+     * 仍然要发给分界线，否则拖动会中途"脱手"。拿不到 API 的环境（测试桩）静默跳过。
+     */
+    function handlePointerDown(event) {
+      if (!active()) return;
+      if (event.button != null && event.button !== 0) return;
+      const x = Number(event.clientX);
+      if (!Number.isFinite(x)) return;
+      drag = {
+        pointerId: event.pointerId,
+        startX: x,
+        startPanel: currentPanelWidth(),
+        moved: false,
+      };
+      addResizing();
+      try {
+        splitter.setPointerCapture?.(event.pointerId);
+      } catch {
+        /* 部分内核不支持指针捕获：仍可拖，只是拖出元素后可能断 */
+      }
+    }
+
+    /**
+     * 移动：分隔线在右栏左侧，所以指针往左（clientX 变小）= 右栏变宽。
+     * 这里**不做节流**：写一个 CSS 变量非常便宜，节流反而会让拖动看起来"追不上手"。
+     */
+    function handlePointerMove(event) {
+      if (!drag) return;
+      if (drag.pointerId != null && event.pointerId != null && drag.pointerId !== event.pointerId) return;
+      const x = Number(event.clientX);
+      if (!Number.isFinite(x)) return;
+      const next = applyPixels(drag.startPanel - (x - drag.startX));
+      if (Math.abs(next - drag.startPanel) >= 1) drag.moved = true;
+      event.preventDefault?.();
+    }
+
+    /** 松手 / 取消：结束拖动；只有真的移动过才写偏好（单击不改变任何东西）。 */
+    function handlePointerUp(event) {
+      if (!drag) return;
+      const { pointerId, moved } = drag;
+      drag = null;
+      removeResizing();
+      try {
+        splitter.releasePointerCapture?.(pointerId);
+      } catch {
+        /* 已经释放 / 不支持捕获：忽略 */
+      }
+      if (moved) commitRatio();
+      event?.preventDefault?.();
+    }
+
+    /**
+     * 键盘：← / → 每次 ±24px，Home / End 到右栏最小 / 最大。
+     *
+     * 方向与鼠标一致：← 把线往左推（中栏变窄、右栏变宽），→ 反之。
+     * Home/End 对应 aria-valuenow 的最小/最大，读屏念的数字和实际动作一致。
+     */
+    function handleKeyDown(event) {
+      if (!active()) return;
+      const key = event.key;
+      const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
+      if (!keys.includes(key)) return;
+      event.preventDefault?.();
+      const m = metrics();
+      if (key === 'Home') {
+        applyPixels(m.min);
+      } else if (key === 'End') {
+        applyPixels(m.max);
+      } else {
+        const delta = key === 'ArrowLeft' ? SPLIT_STEP : -SPLIT_STEP;
+        applyPixels(currentPanelWidth() + delta);
+      }
+      // 键盘调整同样要记住：用户可能只用键盘，不能只有鼠标路径能持久化
+      commitRatio();
+    }
+
+    /** 双击恢复默认比例：用户拖歪了不用去找设置，双击是最直觉的"撤销"。 */
+    function handleDoubleClick(event) {
+      if (!active()) return;
+      event?.preventDefault?.();
+      reset();
+    }
+
+    /**
+     * 窗口缩放：用**比例**重算，而不是沿用固定像素。
+     *
+     * 比例的好处：1500px 下拖到 70%，缩到 1100px 时仍占 70%，符合用户对"占比"的预期；
+     * 固定像素在缩小时会把中栏挤到 360px 以下。重算后仍要夹紧一次（两个下限是硬约束）。
+     * 窄屏（≤900）则清掉内联宽度：CSS 默认值在窄窗口下比固定 px 更安全。
+     */
+    function handleResize() {
+      if (!active()) {
+        clearPanelWidth();
+        return;
+      }
+      const m = metrics();
+      if (ratio != null && m.available > 0) {
+        applyPixels(ratio * m.available);
+        return;
+      }
+      if (panelPx != null) {
+        // 只按过、没拖动过（panelPx 被赋过值但没有比例）：回到 CSS 默认
+        clearPanelWidth();
+        return;
+      }
+      syncAria();
+    }
+
+    splitter.addEventListener('pointerdown', handlePointerDown);
+    splitter.addEventListener('pointermove', handlePointerMove);
+    splitter.addEventListener('pointerup', handlePointerUp);
+    splitter.addEventListener('pointercancel', handlePointerUp);
+    splitter.addEventListener('lostpointercapture', handlePointerUp);
+    splitter.addEventListener('keydown', handleKeyDown);
+    splitter.addEventListener('dblclick', handleDoubleClick);
+
+    // 初始：先算一遍 aria；有本地比例且当前是宽屏才应用。没有比例时**不写样式**。
+    syncAria();
+    if (ratio != null) applyRatio(ratio);
+
+    return {
+      app,
+      panel,
+      splitter,
+      isActive: active,
+      metrics,
+      currentPanelWidth,
+      applyPixels,
+      applyRatio,
+      reset,
+      syncAria,
+      handlePointerDown,
+      handlePointerMove,
+      handlePointerUp,
+      handleKeyDown,
+      handleDoubleClick,
+      handleResize,
+      get ratio() {
+        return ratio;
+      },
+      get panelWidth() {
+        return currentPanelWidth();
+      },
+      /** 是否正在拖（测试断言"松手后 body.resizing 被摘掉"）。 */
+      get dragging() {
+        return drag != null;
+      },
+    };
+  }
+
+  /**
+   * 真正挂到页面上：在 `.chat` 与 `.panel` 之间插入节点（用 JS 创建，不改 index.html）。
+   * 只建一次；面板收起/展开、窗口缩放都由 CSS 与 handleResize 处理。
+   */
+  function initColumnSplitter(options = {}) {
+    if (columnSplitter) return columnSplitter;
+    const app = document.querySelector?.('.app');
+    const panel = document.querySelector?.('.panel');
+    if (!app || !panel) return null;
+    const splitter = document.createElement('div');
+    splitter.className = 'col-splitter';
+    if (typeof app.insertBefore === 'function') {
+      app.insertBefore(splitter, panel);
+    } else {
+      // DOM 桩没有 insertBefore：按子节点顺序插到 panel 前面（只影响测试环境）
+      const index = Array.isArray(app.children) ? app.children.indexOf(panel) : -1;
+      if (index >= 0) {
+        app.children.splice(index, 0, splitter);
+        splitter.parentNode = app;
+      } else {
+        app.appendChild(splitter);
+      }
+    }
+    columnSplitter = createColumnSplitter({ ...options, app, panel, splitter });
+    window.addEventListener?.('resize', () => columnSplitter?.handleResize());
+    return columnSplitter;
+  }
+
+  /**
+   * 渲染层测试用的测试缝（与 `__PC_SCROLL__` 同一个口径：不是给视图用的 API）。
+   * 外壳是 classic script 的 IIFE，没有模块导出；不挖这条缝就只能对源码做字符串断言。
+   * 暴露的是**产品代码本身**的函数，不为测试另写一套逻辑。
+   */
+  window.__PC_SPLITTER__ = {
+    STORAGE_KEY: SPLIT_STORAGE_KEY,
+    PREF_KEY: SPLIT_PREF_KEY,
+    LIMITS: { panel: SPLIT_MIN_PANEL, chat: SPLIT_MIN_CHAT, step: SPLIT_STEP, activeMax: 900 },
+    isActive: isSplitterActive,
+    splitMetrics,
+    defaultPanelWidth,
+    clampPanelWidth: (px, viewport, sidebar) => clampPanelWidth(px, splitMetrics(viewport, sidebar)),
+    normalizeRatio,
+    create: createColumnSplitter,
+    mount: initColumnSplitter,
+    hydrate: hydrateColumnSplit,
+    current: () => columnSplitter,
+  };
+
   /* ------------------------------------------------------------ 启动 */
 
   async function resolveInfo() {
@@ -3508,6 +4020,8 @@
       panelBody: document.getElementById('panel-body'),
       panelHead: document.querySelector('.panel-head'),
       panelToggle: document.getElementById('panel-toggle'),
+      // 左栏只在「读真实宽度」时用（分界线的夹紧范围 = 视口 - 左栏 - 右栏）
+      sidebar: document.querySelector('.sidebar'),
       chatLog: document.getElementById('chat-log'),
       chatInput: document.getElementById('chat-input'),
       chatSend: document.getElementById('chat-send'),
@@ -3527,6 +4041,10 @@
       mobileMoreGrid: document.getElementById('mobile-more-grid'),
       mobileMoreClose: document.getElementById('mobile-more-close'),
     };
+
+    // 中/右栏分界线：必须在首屏布局之前建好 —— 它的 aria-valuenow 要读当时真实的右栏宽度，
+    // 晚了会先报一个 0 再跳变。DOM 节点用 JS 创建，index.html 不用动。
+    initColumnSplitter();
 
     // openEditor 由日历模块通过 PCModules.service('editor', ...) 提供；其它视图经 PC.openEditor 复用，
     // 不需要互相 import。refreshAi 供设置页在改完 AI 配置后立刻刷新徽标与状态（WS 也会推，但别赌通道）。
@@ -3636,6 +4154,12 @@
     // ★ 现在 `state.apiBase` 有了，才能向后端核对左栏布局。
     //   首帧已经用 localStorage 里那份画好了（不闪），这一步是"以服务端为准"的纠偏。
     void hydrateSidebarLayout();
+
+    // ★ 列宽同理，但**本地优先**：create 时已经读过 localStorage（首帧就是用户上次的比例），
+    //   这里只在本地没有合法值时向后端补读。方向与侧边栏相反 —— 列宽是"这一刻窗口下"的偏好，
+    //   不该被另一个环境里更旧的值覆盖。
+    //   仍要等 state.apiBase 赋值之后再调，否则 api() 会拼出 `null/ui/prefs/col-split`。
+    void hydrateColumnSplit();
 
     // 桌面端自动聚焦输入框（打开就能打字）；手机上**不要**：
     // iOS Safari 的自动聚焦会立刻弹出软键盘，把首屏顶掉一半，用户还没看清页面就先看到键盘。
