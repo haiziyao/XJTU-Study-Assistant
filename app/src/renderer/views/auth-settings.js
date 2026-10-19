@@ -144,7 +144,24 @@
     mount.appendChild(summaryRow(status));
     mount.appendChild(siteList(status));
 
-    if (!status.loggedIn) {
+    /*
+     * 什么时候给账号密码表单？
+     *
+     * 判据不能只是 `!status.loggedIn` —— 后端的 `loggedIn` 是 `readyCount > 0`，
+     * 意思是"只要**还有任一站点**就绪就算已登录"。于是出现这个死锁：
+     *   教务还就绪、思源学堂的票据过期了 → `loggedIn` 仍是 true
+     *   → 只显示「重新连接」按钮，**永远没有输入密码的地方**
+     *   → 而「重新连接」只能做静默 SSO，CAS 的 TGC 也过期时必然失败
+     *   → 用户只能"退出登录"把整体打回未登录，才看得到表单。
+     *
+     * 所以只要有**已注册但未就绪**的站点，就必须把表单给出来 ——
+     * 那正是需要用户重新输一次密码的时刻。
+     */
+    const staleSites = (status.sites ?? []).filter((site) => site.registered && !site.ready);
+    const needsRelogin = staleSites.length > 0;
+
+    if (!status.loggedIn || needsRelogin) {
+      if (needsRelogin) mount.appendChild(reloginHint(staleSites));
       if (status.mfa) mount.appendChild(mfaPanel(status));
       else mount.appendChild(loginPanel(status));
     } else {
@@ -211,6 +228,30 @@
       wrap.appendChild(item);
     }
     return wrap;
+  }
+
+  /**
+   * 「有站点掉线、但整体还算已登录」时，在表单上方说清为什么又要输密码。
+   *
+   * 不给这句提示的话，用户会觉得"我明明登录着，为什么又让我输" ——
+   * 而这恰恰是最需要解释的一步：单个站点的票据过期了，重新输一次密码即可；
+   * 不需要（也不应该）先退出登录。
+   */
+  function reloginHint(staleSites) {
+    const box = mk('div', 'auth-relogin');
+    const names = staleSites.map((site) => site.label ?? site.id).join('、');
+    box.appendChild(mk('div', 'auth-relogin-title', `${names}的登录票据已过期`));
+    box.appendChild(
+      mk(
+        'div',
+        'auth-relogin-text',
+        '在下面重新输入一次密码即可（其它站点会一起恢复），不必先退出登录。',
+      ),
+    );
+    // 掉线的具体原因（后端给的）也露出来，便于判断是"票据过期"还是"被要求两步验证"
+    const reason = staleSites.map((site) => site.reason).filter(Boolean)[0];
+    if (reason) box.appendChild(mk('div', 'auth-relogin-reason', reason));
+    return box;
   }
 
   function loginPanel(status) {

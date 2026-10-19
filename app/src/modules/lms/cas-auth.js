@@ -142,6 +142,18 @@ export class CasAuth {
 
   /** 打开业务站点，读取登录页上下文。返回 AUTH_STATUS 之一。 */
   async begin(loginUrl = this.config.baseUrl) {
+    /*
+     * ★ 每次 `begin()` 都是一次**重新判定**，先把上一次的"已登录"结论清掉。
+     *
+     * 不清的后果（实测过的 bug）：站点会话过期、CAS 又回了登录页时，
+     * `alreadyAuthenticated` 仍是上一次的 true、`hasLogin` 也还是 true，
+     * 于是 `login()` 开头 `if (this.hasLogin) return READY` 直接早退 ——
+     * 用户看到的「重新连接 / 重新登录」什么都没做，但状态说成功了。
+     * 只有「退出登录」（`logout()` 里 `casAuth.reset()`）才会把这两个字段清干净，
+     * 所以表现成"必须退出再登录才行"。
+     */
+    this.alreadyAuthenticated = false;
+
     const response = await this.http.get(loginUrl, { follow: true, headers: { Accept: 'text/html,application/xhtml+xml' } });
     this.lastUrl = response.url;
     this.execution = extractExecution(response.text);
@@ -154,6 +166,10 @@ export class CasAuth {
       this.alreadyAuthenticated = true;
       return AUTH_STATUS.READY;
     }
+    // 走到这里说明站点会话确实失效了：之前那次登录的结论不再成立，
+    // 不能让 `login()` 拿它早退。重置登录相关的瞬时状态，回到"可以重新登录"的样子。
+    this.hasLogin = false;
+    this.safety = null;
     if (isSafetyVerifyPage(response.text)) {
       this.#enterSafetyVerify(response);
       return AUTH_STATUS.NEED_MFA;
