@@ -199,7 +199,7 @@ export function rendererScripts() {
   const html = fs.readFileSync(path.join(RENDERER_DIR, 'index.html'), 'utf8');
   return [...html.matchAll(/<script src="([^"]+)"/g)].map((match) => ({
     asset: match[1],
-    text: fs.readFileSync(path.join(RENDERER_DIR, match[1]), 'utf8'),
+    text: fs.readFileSync(path.join(RENDERER_DIR, match[1].split(/[?#]/, 1)[0]), 'utf8'),
   }));
 }
 

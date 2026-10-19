@@ -168,10 +168,7 @@ test('裁剪：写 6000 条只保留最新 5000 条，且文件是裸 JSON 数�
     assert.equal(items.at(-1).title, '第 6000 条');
 
     const mode = (await fs.promises.stat(ctx.filePath)).mode & 0o777;
-    // Windows 的 stat().mode 只反映只读位：0600 与 0666 都是 0o666（README「已知限制」）
-  if (process.platform !== 'win32') {
     assert.equal(mode, 0o600, '日志文件必须是 0600');
-  }
   } finally {
     await ctx.close();
   }

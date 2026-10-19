@@ -19,13 +19,5 @@ contextBridge.exposeInMainWorld('potatoCalendar', {
   },
   /** 返回 `{ canceled, path }`；`canceled` 为真时调用方不该改动现有设置。 */
   pickDirectory: (options) => ipcRenderer.invoke('potato:pickDirectory', options),
-  /**
-   * 用系统默认浏览器打开 http(s) 地址。
-   *
-   * 桌面端为什么不能直接 `window.open`：主进程的 `setWindowOpenHandler` 虽然也走
-   * `shell.openExternal`，但那条路上渲染层拿不到结果、也没法先校验协议。
-   * 浏览器环境里没有这座桥 —— 渲染层据此退回 `window.open`。
-   */
-  openExternal: (url) => ipcRenderer.invoke('potato:openExternal', url),
   platform: process.platform,
 });

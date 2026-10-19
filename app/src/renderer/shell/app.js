@@ -246,6 +246,90 @@
     return node;
   }
 
+  /** 侧边栏与设置页共用的点击反馈：同一按压幅度、波纹尺寸和持续时间。 */
+  function playSidebarMotion(control, event) {
+    control.classList.add('sidebar-motion-surface', 'sidebar-motion-pressed');
+    setTimeout(() => control.classList?.remove?.('sidebar-motion-pressed'), 180);
+    const rect = control.getBoundingClientRect?.();
+    if (!rect || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+    const ripple = mk('span', 'sidebar-ripple'); const size = Math.hypot(rect.width || 0, rect.height || 0) * 1.2;
+    ripple.style.width = ripple.style.height = `${size}px`; ripple.style.left = `${event.clientX - rect.left - size / 2}px`; ripple.style.top = `${event.clientY - rect.top - size / 2}px`;
+    control.appendChild(ripple); setTimeout(() => ripple.remove?.(), 560);
+  }
+
+  /** 侧边栏统一点击反馈：轻微按压 + 从指针位置扩散的波纹。 */
+  function bindSidebarMotion(sidebar) {
+    if (!sidebar || sidebar.dataset.motionBound === 'true') return;
+    sidebar.dataset.motionBound = 'true';
+    sidebar.addEventListener('pointerdown', (event) => {
+      const button = event.target?.closest?.('button.nav-item, button.theme-toggle');
+      if (!button || button.disabled || !sidebar.contains?.(button)) return;
+      playSidebarMotion(button, event);
+    });
+  }
+
+  let settingsMotionBound = false;
+  function bindSettingsMotion() {
+    if (settingsMotionBound) return;
+    settingsMotionBound = true;
+    document.addEventListener('pointerdown', (event) => {
+      if (event.button != null && event.button !== 0) return;
+      const control = event.target?.closest?.('.settings button, .settings summary');
+      if (!control || control.disabled) return;
+      playSidebarMotion(control, event);
+    });
+  }
+
+  /**
+   * 页面内的“选择型控件”沿用侧边栏反馈：轻按压 + 从落点扩散的波纹。
+   *
+   * 这里只覆盖“切换当前视图/筛选条件”的按钮，不覆盖保存、删除、登录等动作按钮，
+   * 避免每个普通操作都显得过于跳跃。笔记工作区已有自己的波纹实现，因此也主动排除，
+   * 防止一次点击叠出两层动画。
+   */
+  const SELECTION_MOTION_CLASSES = new Set([
+    'seg-btn',
+    'cat-chip',
+    'tab',
+    'ch-tab',
+    'ch-chip',
+    'rv-tab',
+    'rv-grade',
+    'cp-option',
+    'mobile-tab',
+  ]);
+  let selectionMotionBound = false;
+
+  function isSelectionControl(button) {
+    const classes = String(button?.className ?? '').split(/\s+/).filter(Boolean);
+    return classes.some((name) => SELECTION_MOTION_CLASSES.has(name))
+      || button?.getAttribute?.('role') === 'tab'
+      || button?.getAttribute?.('aria-pressed') != null;
+  }
+
+  function bindSelectionMotion() {
+    if (selectionMotionBound) return;
+    selectionMotionBound = true;
+    document.addEventListener('pointerdown', (event) => {
+      if (event.button != null && event.button !== 0) return;
+      const button = event.target?.closest?.('button');
+      if (!button || button.disabled || !isSelectionControl(button)) return;
+      if (button.closest?.('.sidebar') || button.closest?.('.settings') || button.closest?.('.notes-workspace')) return;
+
+      button.classList.add('ui-motion-control', 'ui-motion-pressed');
+      setTimeout(() => button.classList?.remove?.('ui-motion-pressed'), 180);
+      const rect = button.getBoundingClientRect?.();
+      if (!rect || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+      const ripple = mk('span', 'ui-control-ripple');
+      const size = Math.hypot(rect.width || 0, rect.height || 0) * 1.25;
+      ripple.style.width = ripple.style.height = `${size}px`;
+      ripple.style.left = `${event.clientX - rect.left - size / 2}px`;
+      ripple.style.top = `${event.clientY - rect.top - size / 2}px`;
+      button.appendChild(ripple);
+      setTimeout(() => ripple.remove?.(), 560);
+    });
+  }
+
   function navButton(item) {
     const button = mk('button', `nav-item${state.view === item.id ? ' active' : ''}`);
     button.type = 'button';
@@ -4014,6 +4098,7 @@
 
   async function boot() {
     dom = {
+      sidebar: document.querySelector('.sidebar'),
       nav: document.getElementById('nav'),
       navBottom: document.getElementById('nav-bottom'),
       navMore: document.getElementById('nav-more'),
@@ -4084,6 +4169,9 @@
     // 见文件末尾的 registerSidebarService()：它在**加载时**就登记，不依赖这里。
 
     buildNav();
+    bindSidebarMotion(dom.sidebar);
+    bindSelectionMotion();
+    bindSettingsMotion();
     dom.mobileMoreMask?.addEventListener('click', closeMobileMore);
     dom.mobileMoreClose?.addEventListener('click', closeMobileMore);
     // ⚠️ 这里**不能**调 hydrateSidebarLayout()：此刻 `state.apiBase` 还是 null

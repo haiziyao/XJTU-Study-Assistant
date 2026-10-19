@@ -44,24 +44,6 @@
   function install() {
     document.getElementById('theme-toggle')?.addEventListener('click', window.PCTheme.toggle);
     document.getElementById('editor-appearance')?.addEventListener('change', (event) => setMode(event.target.value));
-    window.PCModules?.registerSettingsSection({
-      id: 'appearance', title: '外观', order: 1, position: 'top',
-      render(mount) {
-        const label = document.createElement('label');
-        label.className = 'appearance-setting';
-        const text = document.createElement('span'); text.textContent = '颜色模式';
-        const select = document.createElement('select');
-        select.id = 'appearance-mode'; select.setAttribute('aria-label', '颜色模式');
-        for (const [value, name] of [['system', '跟随系统'], ['light', '白天模式'], ['dark', '夜间模式']]) {
-          const option = document.createElement('option'); option.value = value; option.textContent = name;
-          select.appendChild(option);
-        }
-        select.value = mode; select.addEventListener('change', () => setMode(select.value));
-        label.append(text, select); mount.appendChild(label);
-        const hint = document.createElement('p'); hint.className = 'appearance-hint';
-        hint.textContent = '记住你的选择，笔记编辑页也会使用同一配色。'; mount.appendChild(hint);
-      },
-    });
     apply();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install);

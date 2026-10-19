@@ -218,10 +218,7 @@ test("scope:'all'：清空全部 schedules，bySource 五桶正确，回收站�
     assert.equal(trash.body.items[0].items, undefined, '回收站概况不能回记录正文');
 
     const fileStat = await stat(path.join(dataDir, 'schedules-trash.json'));
-    // Windows 的 stat().mode 只反映只读位：0600 与 0666 都是 0o666（README「已知限制」）
-  if (process.platform !== 'win32') {
     assert.equal(fileStat.mode & 0o777, 0o600, '回收站文件必须是 0600');
-  }
     const file = await readTrashFile(dataDir);
     assert.equal(file.batches.length, 1);
     assert.equal(file.batches[0].items.length, 10, '整条记录都要存进去，恢复才能原样放回');

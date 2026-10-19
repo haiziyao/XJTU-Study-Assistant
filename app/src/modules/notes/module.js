@@ -23,7 +23,6 @@ export default {
     { name: 'notes', file: 'notes.json' },
     { name: 'noteVersions', file: 'note-versions.json' },
     { name: 'noteTemplates', file: 'note-templates.json' },
-    { name: 'noteViews', file: 'note-views.json' },
     { name: 'noteCanvases', file: 'note-canvases.json' },
   ],
   aiPrompt: AI_PROMPT,

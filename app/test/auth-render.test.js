@@ -326,7 +326,7 @@ test('auth 设置卡：登记为 order 10 且 position=top（要排到外壳卡�
   assert.ok(!normal.includes(SECTION_ID), '置顶区块不该出现在普通档里');
 });
 
-test('★ 设置页里「统一身份认证」是第一张卡（排在外壳的运行信息/AI/主题之前）', async () => {
+test('★ 设置页将身份认证折叠置顶，普通设置可折叠，运行信息放在最后', async () => {
   const { api } = makeApi({});
   const boot = bootRenderer({ api });
   const mount = await boot.render('settings');
@@ -334,14 +334,44 @@ test('★ 设置页里「统一身份认证」是第一张卡（排在外壳的�
   const cards = findByClass(mount, 'card');
   assert.ok(cards.length >= 2, `设置页应当有多张卡片，实际 ${cards.length}`);
 
+  const cardTitle = (card) => (
+    findByClass(card, 'settings-card-name')[0]
+    ?? findByClass(card, 'card-title')[0]
+  )?.textContent.trim() ?? '';
   const titles = cards.map((card) => {
-    const title = findByClass(card, 'card-title')[0];
-    return title ? title.textContent.trim() : '';
+    return cardTitle(card);
   });
-  assert.equal(titles[0], '统一身份认证', `★ 第一张卡应当是登录，实际顺序：${titles.join(' → ')}`);
+  assert.equal(titles[0], '身份认证', `★ 第一张卡应当是身份认证，实际顺序：${titles.join(' → ')}`);
+  assert.equal(titles.at(-1), '运行信息', `★ 运行信息应当放在最后，实际顺序：${titles.join(' → ')}`);
+  assert.ok(!titles.includes('外观'), '设置页不应再显示重复的外观卡');
+
+  const identity = cards[0].textContent;
+  assert.match(identity, /学校统一身份认证/, '身份认证卡要包含学校账号');
+  assert.match(identity, /AI 智学账号/, '身份认证卡要包含 AI 智学账号');
+  assert.match(identity, /账号和密码互不混用/, '要明确两套凭据不会被混用');
+  const identityPanels = findByClass(cards[0], 'settings-advanced-section');
+  assert.equal(identityPanels.length, 2, '两类登录信息要各自保留、分开折叠');
+  assert.ok(identityPanels.every((panel) => panel.tagName === 'DETAILS' && panel.open !== true), '登录信息默认收起');
+
+  const advancedCard = cards.find((card) => cardTitle(card) === 'AI 高级设置');
+  const advanced = advancedCard?.textContent ?? '';
+  assert.match(advanced, /模型、接口与会话/);
+  assert.match(advanced, /知识库维护/);
+  assert.match(advanced, /对话与联网检索/);
+  assert.equal(findByClass(advancedCard, 'settings-advanced-section').length, 3, 'AI 高级设置应收纳为三组');
   // 外壳自己的卡片应当在它后面
   assert.ok(titles.includes('运行信息'), '外壳的运行信息卡应当还在');
   assert.ok(titles.indexOf('运行信息') > 0, '运行信息应当排在登录之后');
+  for (const title of ['主题色板', '日程', '侧边栏', '笔记接入', '通知', '多端同步', '运行信息']) {
+    const item = cards.find((card) => cardTitle(card) === title);
+    assert.equal(item?.tagName, 'SECTION', `${title} 应当是稳定的自定义功能入口卡`);
+    const toggle = findByClass(item, 'settings-card-summary')[0];
+    const panel = findByClass(item, 'settings-card-panel')[0];
+    assert.ok(findByClass(item, 'settings-card-description')[0]?.textContent, `${title} 应显示简要用途`);
+    assert.equal(panel?.hidden, true, `${title} 的详细内容应默认收起`);
+    toggle?.listeners?.click?.[0]?.({});
+    assert.equal(panel?.hidden, false, `${title} 点击后应显示详细内容`);
+  }
 });
 
 test('★ 学业视图：未登录时不再有密码表单，改为指向设置的引导', async () => {

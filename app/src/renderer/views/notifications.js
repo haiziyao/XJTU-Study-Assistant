@@ -478,6 +478,8 @@
     error: null,
     /** 新增自定义站点的输入框内容（只在保存成功前保留）。 */
     draft: { label: '', url: '' },
+    /** 重画设置内容时保留用户当前展开的二级选项。 */
+    openPanels: new Set(),
   };
 
   async function loadSettings() {
@@ -518,12 +520,29 @@
     return true;
   }
 
-  function settingsCard(title, hintText) {
-    const card = mk('div', 'card');
-    const head = mk('div', 'card-head');
-    head.appendChild(mk('div', 'card-title', title));
-    card.appendChild(head);
-    const body = mk('div', 'card-body');
+  function settingsCard(id, title, hintText) {
+    const card = mk('section', 'card settings-collapsible-card settings-disclosure notif-settings-card');
+    const toggle = mk('button', 'card-title settings-card-summary');
+    toggle.type = 'button';
+    const descriptions = {
+      retention: '设置通知在本机保留多久',
+      sources: '选择同步时需要抓取的学校站点',
+      custom: '添加需要额外关注的网站入口',
+    };
+    const copy = mk('span', 'settings-card-copy');
+    copy.append(mk('span', 'settings-card-name', title), mk('span', 'settings-card-description', descriptions[id] || hintText));
+    toggle.appendChild(copy);
+    const body = mk('div', 'card-body settings-card-panel');
+    const applyOpen = (open) => {
+      card.classList.toggle('is-open', open);
+      toggle.setAttribute('aria-expanded', String(open));
+      body.hidden = !open;
+      if (open) settingsUi.openPanels.add(id);
+      else settingsUi.openPanels.delete(id);
+    };
+    toggle.addEventListener('click', () => applyOpen(!card.classList.contains('is-open')));
+    applyOpen(settingsUi.openPanels.has(id));
+    card.appendChild(toggle);
     if (hintText) body.appendChild(mk('div', 'notif-hint', hintText));
     card.appendChild(body);
     return { card, body };
@@ -532,6 +551,7 @@
   /** 保留期选择。`0` = 永久保留。 */
   function retentionCard() {
     const { card, body } = settingsCard(
+      'retention',
       '保留期',
       '同步时会删掉超出保留期的通知，防止一直占着磁盘。📌 固定的条目永不清理。',
     );
@@ -563,6 +583,7 @@
   /** 来源勾选：内置（含"已知不可用"）+ 自定义。 */
   function sourcesCard() {
     const { card, body } = settingsCard(
+      'sources',
       '通知来源',
       '勾上就会在「同步最新」时去抓。默认只开 4 个校级部门（教务 / 学生处 / 研究生院 / 网络信息中心）；学院与书院按需勾选 —— 全开一次要抓 78 个栏目页，会比较慢。',
     );
@@ -606,6 +627,7 @@
   /** 自定义站点：列表 + 新增表单。 */
   function customSourcesCard() {
     const { card, body } = settingsCard(
+      'custom',
       '自定义站点',
       '填一个**入口页** URL 就行（比如某个学院的首页），同步时会自动从首页找通知栏目页。',
     );

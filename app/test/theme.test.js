@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 
 const script = readFileSync(new URL('../src/renderer/kit/theme.js', import.meta.url), 'utf8');
 const academicCss = readFileSync(new URL('../src/renderer/views/academic.css', import.meta.url), 'utf8');
+const authCss = readFileSync(new URL('../src/renderer/views/auth.css', import.meta.url), 'utf8');
 function setup({ saved, dark = false, blocked = false } = {}) {
   const values = new Map(saved ? [['zhixue.appearance', saved]] : []);
   const attrs = {};
@@ -58,4 +59,11 @@ test('学业卡片只使用共享主题变量，不残留写死的深色卡片',
   assert.match(academicCss, /\.ac-card\s*\{[^}]*background:\s*var\(--bg-surface\)/s);
   assert.match(academicCss, /\.ac-stat\s*\{[^}]*background:\s*var\(--bg-surface\)/s);
   assert.doesNotMatch(academicCss, /var\(--(?:card|input-bg|muted|accent),/);
+});
+
+test('统一身份认证站点状态跟随共享主题，不把夜间底色带进白天模式', () => {
+  assert.match(authCss, /\.auth-site\s*\{[^}]*background:\s*var\(--bg-elevated\)/s);
+  assert.match(authCss, /\.auth-input\s*\{[^}]*background:\s*var\(--control-bg\)/s);
+  assert.doesNotMatch(authCss, /var\(--(?:input-bg|muted),/);
+  assert.doesNotMatch(authCss, /#14171d|#2a2f3a/);
 });
