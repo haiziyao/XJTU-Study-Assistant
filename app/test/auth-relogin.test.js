@@ -125,10 +125,13 @@ const PARTIAL_STATUS = {
   ],
 };
 
-async function renderCard(status) {
+async function renderCard(status, extra = {}) {
   const calls = [];
   const api = async (url, options = {}) => {
     calls.push(`${options.method ?? 'GET'} ${url}`);
+    for (const [prefix, value] of Object.entries(extra)) {
+      if (url.startsWith(prefix)) return typeof value === 'function' ? value(url, options) : value;
+    }
     if (url.startsWith('/auth/status')) return status;
     return {};
   };
@@ -190,4 +193,57 @@ test('「重新连接」仍然带 revalidate —— 静默 SSO 能救回来的�
     calls.some((line) => line.includes('/auth/sites/lms/ensure')),
     `应当调用该站点的 ensure 接口（实际调用：${JSON.stringify(calls)}）`,
   );
+});
+
+test('★★「重新连接」失败时，提示里必须告诉用户「重新输入账号密码」', async () => {
+  /*
+   * 这是用户明确提的要求，也是这条路上最关键的一句话：
+   * 静默 SSO 失败 = 只能重输密码。只显示一句"票据已过期"，
+   * 用户刚点完「重新连接」，会以为那就是答案、然后卡住。
+   */
+  /*
+   * 模拟**真实的线上形状**：`ensure` 在站点不可用时返回 HTTP 200 + `ok:false`
+   * （业务结果，契约见 auth-routes.test.js），于是 `PC.api` 会抛错，
+   * 并把整个响应体挂在 `error.payload` 上。前端必须从那里把 reason 捞出来。
+   */
+  const { mount, calls } = await renderCard(PARTIAL_STATUS, {
+    '/auth/sites/lms/ensure': () => {
+      const error = new Error('请求失败 (200)');
+      error.payload = {
+        ok: false,
+        needsLogin: true,
+        reason: '思源学堂的登录票据已过期，请重新登录',
+      };
+      error.status = 200;
+      throw error;
+    },
+  });
+
+  const retry = walk(mount)
+    .filter((node) => node.tagName === 'BUTTON')
+    .find((node) => node.textContent.trim() === '重新连接');
+  assert.ok(retry);
+  retry.listeners.click[0]();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  assert.ok(calls.some((line) => line.includes('/auth/sites/lms/ensure')), '应当调用 ensure');
+
+  const text = walk(mount).map((node) => node.textContent).join('\n');
+  assert.match(text, /票据已过期/, '要带上后端给的具体原因');
+  assert.match(text, /重新输入账号与密码/, '★ 必须明确告诉用户下一步做什么');
+  assert.match(text, /不必先退出登录/, '★ 顺带打消"是不是得先退出"的疑问');
+});
+
+test('「重新连接」成功时不弹错误（能静默 SSO 救回来就不该打扰）', async () => {
+  const { mount } = await renderCard(PARTIAL_STATUS, {
+    '/auth/sites/lms/ensure': { ok: true, connected: true, needsLogin: false, reason: null },
+  });
+  const retry = walk(mount)
+    .filter((node) => node.tagName === 'BUTTON')
+    .find((node) => node.textContent.trim() === '重新连接');
+  retry.listeners.click[0]();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  const text = walk(mount).map((node) => node.textContent).join('\n');
+  assert.doesNotMatch(text, /重新输入账号与密码/, '成功时不该要密码');
 });

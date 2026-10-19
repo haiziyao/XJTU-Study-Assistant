@@ -103,6 +103,20 @@ export function registerAuthRoutes(router, { auth, apiPrefix }) {
     `${P}/sites/:id/ensure`,
     guard(async ({ params, body }) => {
       if (!auth.hasSite(params.id)) throw HttpError.notFound(`站点 ${params.id} 未注册`);
+      /*
+       * ★ 这里**刻意返回 `ok:false`**（"站点不可用"是业务结果，不是 HTTP 错误，
+       * 所以状态码仍是 200）。契约由 `test/auth-routes.test.js` 钉住：
+       * 「未登录时 ensure 返回 ok:false + needsLogin，而不是 401 抛错」。
+       *
+       * 但要注意它与响应信封的冲突：路由包装是 `{ ok: true, ...payload }`，
+       * 这里展开的 `ok:false` 会盖掉外层那个 `ok`，于是前端 `PC.api`
+       * 见 `ok === false` 会**抛错**，而且 message 是 `payload.error?.message`
+       * —— 本响应没有 `error` 字段，抛出来就是一句废话「请求失败 (200)」。
+       *
+       * 所以**前端必须从 `error.payload` 里读 `needsLogin` / `reason`**
+       * （见 `renderer/views/auth-settings.js` 的 `doEnsure`），
+       * 不能依赖抛出的 message。
+       */
       return auth.ensure(params.id, { revalidate: asBool(body?.revalidate) });
     }),
   );
