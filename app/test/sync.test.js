@@ -825,6 +825,32 @@ test('同步：run 的报告字段齐全（面板就照这个显示），且不�
   }
 });
 
+test('同步：单条记录超过 900KB 就本轮跳过（其余照常，报告里 oversized 有它）', async () => {
+  await withCluster(async ({ S, A, B }) => {
+    const normal = await A.app.services.notes.create({ title: '正常笔记', body: '会同步' });
+    const huge = await A.app.services.notes.create({
+      title: '内联大图的笔记',
+      body: '一条记录就超过了 900KB',
+      attachments: [{ name: 'big.png', type: 'image/png', size: 1_000_000, dataUrl: `data:image/png;base64,${'A'.repeat(1_000_000)}` }],
+    });
+
+    const reportA = await A.app.services.sync.run({});
+    assert.equal(reportA.ok, true, JSON.stringify(reportA.error));
+    assert.equal(reportA.pushed, 1, '只有那条小记录被推上去');
+    assert.equal(reportA.oversized.length, 1, '报告里必须如实列出被跳过的超大记录');
+    assert.equal(reportA.oversized[0].collection, 'notes');
+    assert.equal(reportA.oversized[0].id, huge.id);
+    assert.ok(reportA.oversized[0].bytes > 900 * 1024, `要报出实际体积，实际 ${reportA.oversized[0].bytes}`);
+    assert.ok(S.app.store.notes.get(normal.id), '正常记录照常同步');
+    assert.equal(S.app.store.notes.get(huge.id), undefined, '超大记录不该出现在服务器上');
+
+    const reportB = await B.app.services.sync.run({});
+    assert.equal(reportB.ok, true, JSON.stringify(reportB.error));
+    assert.ok(B.app.store.notes.get(normal.id), '另一台设备照常拉到正常记录');
+    assert.equal(B.app.store.notes.get(huge.id), undefined, '超大记录本来就没推上去，B 也拉不到');
+  });
+});
+
 /* ================================================================ 9) 启动自动同步 */
 
 test('同步：启动后自动同步一次（后台跑、失败静默），数据会出现在服务器上', async () => {

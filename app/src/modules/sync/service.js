@@ -75,8 +75,10 @@ export const SYNC_SCHEMA = 1;
 export const LEDGER_LIMIT = 5000;
 /** 一次 pull 每个集合最多回多少条（防"第一次同步把几万条消息一次性塞进内存"）。 */
 export const PULL_MAX_ITEMS = 2000;
-/** push 单批上限：主服务的请求体上限是 12 MB，这里按 2 MB 切（与直传同一个量级）。 */
-export const PUSH_CHUNK_BYTES = 2 * 1024 * 1024;
+/** push 单批上限：主服务的请求体上限是 12 MB，这里按 1 MB 切（与直传同一个量级）。 */
+export const PUSH_CHUNK_BYTES = 1024 * 1024;
+/** 单条记录上限：超过就不参与本次同步（网关 30s 超时，单条无法再切片） */
+export const MAX_SINGLE_RECORD_BYTES = 900 * 1024;
 /** 报告里逐条明细最多回多少条（页面只用来列"疑似重复/冲突"，不需要几万条）。 */
 export const REPORT_ITEM_LIMIT = 200;
 /** 远端请求超时。 */
@@ -926,6 +928,8 @@ export class SyncService {
       conflictsTruncated: allConflicts.length > REPORT_ITEM_LIMIT,
       skippedSecrets,
       unsupportedDeletes,
+      /** 如实标注：哪些记录因为单条超过上限没参与本轮同步（原因见 #collectLocal） */
+      oversized: payload.oversized,
       /** 如实标注：哪些集合不支持删除同步（面板与 README 都照它说） */
       deleteSync: Object.fromEntries(SYNC_COLLECTIONS.map((entry) => [entry.name, entry.deleteSync])),
       groups: mergeGroups(pushGroups, pullGroups),
@@ -954,23 +958,46 @@ export class SyncService {
   async #collectLocal(enabled) {
     const collections = {};
     const entries = [];
+    /**
+     * 单条记录超过这个体积就**不参与本次同步**。
+     *
+     * 为什么：同步是按体积切片发的（PUSH_CHUNK_BYTES），但**单条记录不能再切**。
+     * 真机上一条内联了照片的笔记就有 3.7MB，推到小服务器上要几十秒，
+     * 网关（www 的 UPSTREAM_TIMEOUT_MS = 30s）会先超时 —— 整次同步因此永远失败，
+     * 用户看到的就是"服务器响应太慢 / 一直中断"。与其让它卡死整批，不如跳过并如实报出来。
+     * 想真正同步这类大记录，需要服务器把网关超时调大（见 README）。
+     */
+    const oversized = [];
+    const pick = (name, items) => {
+      const kept = [];
+      for (const item of items) {
+        const projected = project(item);
+        const bytes = Buffer.byteLength(JSON.stringify(projected) ?? '', 'utf8');
+        if (bytes > MAX_SINGLE_RECORD_BYTES) {
+          oversized.push({ collection: name, id: projected?.id ?? null, title: projected?.title ?? '', bytes });
+          continue;
+        }
+        kept.push({ raw: item, projected });
+      }
+      return kept;
+    };
     for (const entry of SYNC_COLLECTIONS) {
       if (!enabled.has(entry.name)) continue;
       if (entry.kind === 'file') {
         const items = (await readFileEntry(this.ctx, entry)).filter((item) => !singletonIsEmpty(entry, item));
         if (!items.length) continue;
-        collections[entry.name] = items;
-        for (const item of items) entries.push({ collection: entry.name, item: project(item) });
+        const picked = pick(entry.name, items);
+        if (!picked.length) continue;
+        collections[entry.name] = picked.map((p) => p.raw);
+        for (const p of picked) entries.push({ collection: entry.name, item: p.projected });
         continue;
       }
-      const items = allOf(this.store, entry);
-      collections[entry.name] = items;
-      for (const item of items) {
-        if (!item || typeof item.id !== 'string') continue;
-        entries.push({ collection: entry.name, item: project(item) });
-      }
+      const items = allOf(this.store, entry).filter((item) => item && typeof item.id === 'string');
+      const picked = pick(entry.name, items);
+      collections[entry.name] = picked.map((p) => p.raw);
+      for (const p of picked) entries.push({ collection: entry.name, item: p.projected });
     }
-    return { collections, entries, deleted: {} };
+    return { collections, entries, deleted: {}, oversized };
   }
 
   /** 账号会话（本机后端持有令牌；这里只读，绝不外传）。 */
@@ -1049,6 +1076,7 @@ export function emptyReport({ at, runtime, durationMs = 0 } = {}) {
     conflicts: [],
     skippedSecrets: [],
     unsupportedDeletes: [],
+    oversized: [],
     errors: 0,
     groups: {},
     runtime: runtime ?? null,
