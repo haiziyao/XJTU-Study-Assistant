@@ -331,10 +331,11 @@
    * 只写窄屏这一句：桌面原文由 `applyLayoutMode()` 首次调用时从 index.html 读一次留底，
    * 免得两处文案各写一份、改了一处忘了另一处。
    *
-   * 长度按 2 行算 —— 手机输入框约 200px 宽、16px 字号，一行大约 12 个汉字，
-   * 再长就会被输入框裁掉（窄屏 min-height 只给两行，见 shell.css）。
+   * 长度按 **1 行**算 —— 手机输入框约 255px 宽、16px 字号，一行大约 15 个字符宽，
+   * 再长就会被输入框裁掉（窄屏 min-height 只给一行 44px，见 shell.css）。
+   * 原文案「说点什么，例：明天 15:00 项目周会」是两行，会把输入框撑到 68px。
    */
-  const PLACEHOLDER_MOBILE = '说点什么，例：明天 15:00 项目周会';
+  const PLACEHOLDER_MOBILE = '例：明天 15:00 项目周会';
 
   /** 桌面 placeholder 的留底，由 `applyLayoutMode()` 从 DOM 读入。 */
   let placeholderDesktop = null;

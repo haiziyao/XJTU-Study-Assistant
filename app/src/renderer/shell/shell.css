@@ -3988,41 +3988,90 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    /* 顶栏徽标别跟着控件区吃 44px 触摸高度。
+       移动端给可点击元素统一设了 `min-height: 44px`，顶栏里这个模型徽标
+       （`<span class="badge badge-btn" role="button">`）也算"可点击"，
+       于是标题只有 25px 高、整行却被撑到 61px，白占 20px 屏高。
+       顶栏是常驻信息条，不是主要点击区，收回内容高度即可。 */
+    min-height: 0;
+    padding: 3px 8px;
   }
 
-  /* ---------- 2. 控件行：单行横向滚动，不折行 ----------
-     联网 / 思考模式 / 权限 / 上下文 / 用量 / 绘图 在 390px 下总宽约 406px，
-     可用宽度只有 329px；折行会把这块从 44px 顶到 102px，白吃掉屏幕高度。
-     改成 dschat 顶栏那一套：`nowrap + overflow-x: auto`，装不下就横滑。
+  /* （原来这里还有一条 `.chat-head .compose-select > button { min-height: 0 }`，
+     是**无效的**：顶栏那一格不是 button，而是 `<span class="badge badge-btn"
+     role="button">`。真正的修法在上面那条 `.chat-head .badge` 里。教训：
+     改之前先用 `getComputedStyle` 确认到底是哪个元素在撑着高度。 */
 
-     .spacer 的 `margin-left: auto` **保留**：内容装得下时它把右侧那组推到最右，
-     装不下时 flex 的 auto 边距自动为 0、正好接着排 —— 两种情况都对。 */
+  /* ---------- 2. 控件行：单行优先，但**绝不能裁剪弹出的菜单** ----------
+     联网 / 思考模式 / 权限 / 上下文 / 用量 / 绘图 在 390px 下总宽约 358px，
+     可用宽度只有 369px —— 挤一挤能进一行，进不去就换行。
+
+     ⚠ 这里曾经写成 `nowrap + overflow-x: auto`（横滑），那是**错的**：
+     这些控件点开的是 `.compose-menu`，它 `position: absolute; bottom: 100%`，
+     是向上弹出的。父级一旦有 `overflow` 就形成裁剪上下文 —— 实测 390×844 下
+     菜单盒子在 y=431..726，而 `.chat-controls` 的裁剪区是 y=732..782，
+     **菜单整个落在裁剪区上方，一点都看不见**（点按钮像没反应）。
+
+     所以：`overflow: visible` 是硬要求，装不下就让它换行（换行不裁剪）。
+     为了通常不换行，下面同时把两处大件收窄：
+       - `.ctx-pct`（圆环旁边的百分比文字）隐藏，只留圆环，省约 17px
+       - 控件的左右内边距 9px → 7px
+     `.spacer` 的 `margin-left: auto` 保留：装得下时把右侧那组推到最右。 */
   .chat-controls {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    overflow-y: hidden;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    padding: 0 10px 6px;
-    gap: 6px;
-  }
-
-  .chat-controls::-webkit-scrollbar {
-    display: none;
+    flex-wrap: wrap;
+    overflow: visible;
+    padding: 0 6px 4px;
+    gap: 4px;
   }
 
   .chat-controls > .compose-select {
     flex: 0 0 auto;
   }
 
-  /* ---------- 3. 输入框：手机上别一上来就占三行 ----------
+  .chat-controls .compose-select > button {
+    padding: 3px 7px;
+  }
+
+  /* 「思考模式 高 ▴」右边那个小三角是装饰，不承载信息。
+     窄屏拿它的 8px 去换「上下文占用」的百分比文字。
+
+     ⚠ 百分比**必须留着**：没有会话时 `paintRing()` 故意不画 0% 的环
+     （`ringBox.innerHTML = view ? ringSvg(...) : ''`），只剩一圈淡轨道。
+     实测把 `.ctx-pct` 藏掉之后，那格就是个**空白圆圈**，比挤一点难看得多。
+     所以宁可少一个小三角，也不要把唯一的内容藏了。 */
+  .chat-controls .cs-caret {
+    display: none;
+  }
+
+  /* 更窄的机型（≤380px，如 360×780）：控件行实在挤不进一行。
+     这时让「上下文占用」这一格让步 —— 它是纯读数，而换行会把整块顶高 48px。
+     宁可少一个读数，也不要把输入区做高（这正是用户反馈的问题）。 */
+  @media (max-width: 380px) {
+    .chat-controls .context-meter {
+      display: none;
+    }
+  }
+
+  /* ---------- 3. 输入框与附件条：手机上别占屏 ----------
      桌面的 min-height 58px 是按 780px 宽的面板定的；落到约 200px 宽的输入框里，
      那句长 placeholder 会折成三行，autoGrow 于是把框撑到 108px。
-     窄屏收到 **62px = 恰好两行**（16px × 1.5 行高 × 2 + 上下内边距 14px），
-     并配合 app.js 里同步换短的窄屏 placeholder（两行以内，正好放得下）。 */
+
+     窄屏收到 **44px = 一行**（16px × 1.5 行高 + 上下内边距约 12px），
+     并配合 app.js 把窄屏 placeholder 换成一行以内、能完整显示的短句。
+     语音输入、长文粘贴都还能用 —— 超过 max-height 才滚动。 */
   .chat-compose textarea {
-    min-height: 62px;
+    /* 必须写 `height`：`min-height` 只是下限，实际高度由 HTML 上的 `rows="2"` 决定，
+       实测 2 行 × 24px 行高 + 18px 内边距 = 68px，光压 min-height 一点用都没有。
+       autoGrow 在输入时会写行内 height，清空时清掉行内值 → 回到这里的 44px。 */
+    height: 44px;
+    min-height: 44px;
     max-height: 108px;
+  }
+
+  /* 空附件条虽然带 `hidden`，但 `.chat-attachments { display: flex }` 会盖掉
+     `[hidden]` 的默认 `display: none`，实测白占 16px 高度。 */
+  .chat-attachments[hidden] {
+    display: none;
   }
 
   /* ---------- 5. 工具条：放开收缩下限，分段控件改横滑 ----------
