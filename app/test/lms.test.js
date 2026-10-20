@@ -19,7 +19,19 @@ import { buildSyncPlan, refineActivityTitle } from '../src/modules/lms/sync.js';
 import { parseLmsTime } from '../src/modules/lms/time.js';
 import { ACTIVITY_DAY_OFFSETS, HOMEWORK_DEADLINE_DATE, MOCK_TERM, activityDate, activityIso, startMockLms } from './helpers/lms-mock.js';
 
-const TODAY = '2026-10-11';
+/**
+ * 「今天」必须和 mock 生成相对日期用的是**同一个本地时钟**。
+ *
+ * 这里曾经写死成 `2026-10-11`（写用例那天的日期）。mock 的活动日期是相对今天生成的，
+ * 于是那个常量一过期，「过期作业」就落在"今天"而不是"过去"，
+ * 「同步预览的映射规则」等三条用例会在某个日历日之后**永久变红** —— 与代码是否被改坏无关。
+ * 改成当天即可让用例在任何一天成立，与下方 HOMEWORK_POSTPONE_DAYS 的注释同一个口径。
+ */
+const TODAY = (() => {
+  const date = new Date();
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+})();
 
 /**
  * mock 的活动日期是**相对今天**生成的（见 helpers/lms-mock.js 的 ACTIVITY_DAY_OFFSETS），

@@ -149,6 +149,30 @@
 .acct-probe-note.is-ok { color: var(--fg-2); }
 .acct-probe-note.is-ok::before { content: '✓ '; color: var(--green); }
 
+/* ---------------------------------------------------------------- 更改服务器 */
+
+/* 与上面的"登录时间 / 角色"隔开：地址是这一块唯一能改的东西，值得单独成段。
+   组标题是 .acct-server 的首个子元素，:first-child 会把它的 margin-top 清掉，
+   所以间距补在容器上。 */
+.acct-server { margin-top: 14px; }
+
+/* 只读地址行：沿用 .kv（96px 标签 + 1fr）。长域名在 .kv-val 上已经 break-all，
+   这里不再加宽度限制，避免把地址截断成看不到全貌的一行。 */
+.acct-server .kv-val { overflow-wrap: anywhere; }
+
+/* 行内编辑：输入框复用 .acct-input（宽 100% + box-sizing），按钮复用 .acct-actions 的换行。
+   手机（≤900px）上把地址行改成上下排，96px 标签 + 长域名也不会把卡片撑破。 */
+@media (max-width: 900px) {
+  .acct-server .kv {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .acct-server .acct-actions > button {
+    flex: 1 1 auto;
+    min-width: 120px;
+  }
+}
+
 /* ---------------------------------------------------------------- 错误 */
 
 .acct-alert {

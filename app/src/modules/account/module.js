@@ -38,14 +38,16 @@ export default {
    * @param {object} ctx
    * @param {string} ctx.dataDir `data/` 目录（`account.json` 落这里，权限 0600）
    * @param {object} ctx.options 模块配置切片：`{defaultServerUrl, origin, timeoutMs}`
+   * @param {Function} [ctx.broadcast] WebSocket 广播（更改服务器地址后通知界面）
    */
-  createServices({ dataDir, options }) {
+  createServices({ dataDir, options, broadcast }) {
     const account = new AccountService({
       dataDir,
       // 桌面端默认指向本机服务端；服务端版传 '' 表示同源
       defaultServerUrl: options?.defaultServerUrl,
       origin: options?.origin,
       timeoutMs: options?.timeoutMs,
+      broadcast,
     });
     return { account };
   },
