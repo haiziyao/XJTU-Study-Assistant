@@ -8,6 +8,8 @@
 import { ERROR_CODES } from '../../shared/constants.js';
 
 const MAX_BODY_BYTES = 12 * 1024 * 1024;
+/** 错误文案从常量算出来：不会再出现"实际 12MB、提示 1MB"这种自相矛盾的上限。 */
+const MAX_BODY_MB = Math.round(MAX_BODY_BYTES / (1024 * 1024));
 
 /** 业务异常：携带 HTTP 状态码与统一错误码。 */
 export class HttpError extends Error {
@@ -89,7 +91,12 @@ async function readBody(req) {
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) throw HttpError.badRequest('请求体过大（上限 1MB）');
+    // 边读边算，超限的这块**不 push**：不会把半个超大 body 留在内存里再报错。
+    // 413 + PAYLOAD_TOO_LARGE 而不是 400：超限是"实体太大"，与 transfer 设备服务器同一口径，
+    // 前端/反代都能按 code 识别（`{ ok:false, error:{ code, message } }` 外壳不变）。
+    if (size > MAX_BODY_BYTES) {
+      throw new HttpError(413, 'PAYLOAD_TOO_LARGE', `请求体过大（上限 ${MAX_BODY_MB}MB）`);
+    }
     chunks.push(chunk);
   }
   if (!chunks.length) return undefined;

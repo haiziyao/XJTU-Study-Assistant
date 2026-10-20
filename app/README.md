@@ -1142,7 +1142,7 @@ app/
 | **联网搜索开关** | `app.js` 的 `renderControls()` + `prompt.js` | ✅ 开关与状态位（不联网 / 从校外网搜索 / 从校内网搜索）；检索通道已接入（DeepSeek 官方 Search / Fetch + 免密钥结果页抓取 + 校内站点直搜 / 栏目直读），详见下面的「联网检索」两节 |
 | **公式与富文本** | `kit/richtext.js`（零依赖，纯字符串→HTML） | ✅ Markdown 子集 + LaTeX 子集（分数/根号/上下标/求和/希腊字母/函数/向量/文本）；识别不了的命令**原样显示**不静默吞；流式半截公式不崩。刻意**不引** MathJax/KaTeX —— CSP 是 `default-src 'self'` 且零依赖 |
 | **AI 绘图** | `prompt.js` 的 `DRAW_NOTE` + `chat-service.js` 的 `DRAW_KEYWORDS` + `richtext.js` 的 sanitize | ✅ 按 dschat2 的 ```svg 约定；比 dschat2 多两条本地约束：**禁用 `style` 属性**（CSP 会拦）与深色背景配色。设置页可开关；关掉后说「画个图」仍临时触发 |
-| **附件 / 思考强度 / 权限** | `app.js` 的 `readFile` / `composeSelect` + `chat-service.js` 的 `normalizeAttachments` / `buildUserContent` / `#autoExecuteWrites` | ✅ 附件：图片走多模态、文本内联（单文件 2 万字、合计 6 万字上限）、其它只登记文件名；**base64 不落库**。思考强度映射官方 `reasoning_effort`（none/low/high/max；默认 high = 官方默认，关闭思考必须显式传 `none`）。思维链 `reasoning_content` 收成默认折叠的「思考过程」卡。**看图只有 `deepseek-flash` 支持**，格式只认 JPEG/PNG/GIF/WebP。权限三档决定查询是否自动执行、写操作是否要确认（`auto` 会替你点确认，风险自负） |
+| **附件 / 思考强度 / 权限** | `app.js` 的 `readFile` / `ingestFiles` / `compressImageRecord` / `composeSelect` + `chat-service.js` 的 `normalizeAttachments` / `buildUserContent` / `#autoExecuteWrites` | ✅ 附件：图片走多模态、文本内联（单文件 2 万字、合计 6 万字上限）、其它只登记文件名；**base64 不落库**。**单张图片上限 12MB，发送前按合计 9MB 的 dataUrl 预算压缩**（长边 1600→1280→1024、质量 0.82→0.7→0.6，多张均分预算；压缩失败且超预算时前端直接拒发，服务端超限回 `413 PAYLOAD_TOO_LARGE`）。思考强度映射官方 `reasoning_effort`（none/low/high/max；默认 high = 官方默认，关闭思考必须显式传 `none`）。思维链 `reasoning_content` 收成默认折叠的「思考过程」卡。**看图只有 `deepseek-flash` 支持**，格式只认 JPEG/PNG/GIF/WebP。权限三档决定查询是否自动执行、写操作是否要确认（`auto` 会替你点确认，风险自负） |
 | **Files API** | `modules/ai/files.js` + `provider.js` 的 `uploadFile/listFiles/deleteFile` | ✅ 图片先上传再引用（`{type:"file", file_id}`），**按内容 sha256 去重**（同图多轮复用不重传）、本地只记元信息不存字节、上传失败退回内联 base64 并在 `warnings` 里说明；不受 48MiB 请求体 / 32MiB 单图内联限制 |
 | **用量与缓存命中率** | `GET /ai/usage` + `app.js` 的 `usageSelect()` | ✅ 对官方 `usage` 求和：总量 / 缓存命中率 / 未缓存输入 / 缓存读取 / 输出 / 思考 token；命中率按输入侧 `hit ÷ (hit + miss)` 算；**查询回灌那一次的用量也计入**（`calls` 会大于回复条数） |
 | **模型选择器** | `GET /ai/models` + `app.js` 的 `wireModelPicker()` | ✅ 顶栏显示**具体模型名**（不是 provider 名），点开选模型并即时 `POST /ai/config`；上游列不出模型时给内置候选并标明。顶栏在最上面，菜单**向下**展开（输入区那几个才向上） |
@@ -1151,6 +1151,29 @@ app/
 | **课程页 + 回放下载** | `views/lms.js` 的 `lmsCourseView()` + `modules/lms/replay-download.js` | ✅ 课程页单独一屏（返回键 + 可折叠分节）；回放走录播站三步取链（lms player-url → embed-token → captures），下载先写 `.part` 再改名、进度节流广播或轮询、可取消、同视频不重复下、超时只管到响应头 |
 | **学堂首页只留两张卡** | `views/lms.js` 的 `lmsPaint()` | ✅ 顶部「账号与同步」工具条与「账号状态」卡（账号 / 上次同步 / 缓存 / 服务地址 / 退出登录）整体删除，只留「自动同步」小卡 + 「课程」；未登录时给引导卡（「去设置里登录」跳设置页），登录态快照带 1s TTL，设置页登录/退出后切回来立刻重新取状态 |
 | provider 注册位 | `src/server/index.js` 的 `services = { store, commands, aiBridge, hub, broadcast }` | ✅ 模块在自己的 `createServices({ services })` 里就能注册 provider |
+
+### 对话附件：12MB 图片怎么进得去
+
+附件以 **base64 dataUrl** 随 `/ai/chat` 的 JSON body 提交，`base64 ≈ 原图 × 1.37`；服务端
+`core/http/router.js` 的请求体上限是 **12MB**，所以 12MB 原图直发会变成约 16.4MB body、必撞 413。
+前端因此做了两道闸（实现都在 `renderer/shell/app.js`，纯逻辑挂在 `window.PCUpload`）：
+
+1. **选图**：单张 ≤ **12MB**（`checkImageSize`；超过在 `FileReader` 之前就拦下，提示
+   「单张图片上限 12MB」）；
+2. **发送前**：所有图片 dataUrl 合计 ≤ **9MB**（给文本/JSON/均分取整留 3MB 余量），按**当前张数均分**
+   （3 张 → 各 3MB；加附件时按新张数从原图重压，删附件不必把已压好的图放大回去）。每张按
+   1600/1280/1024 × 0.82/0.7/0.6 依次尝试，`canvas.toBlob` 第一档进预算即停；
+   PNG/GIF/WebP 先试 `image/webp` 保透明，不支持 WebP 编码时重画白底转 JPEG。
+
+压缩成功时 toast 报「已压缩 N 张图片（原图 → 压缩后）」，附件 chip 显示压缩后大小；
+压缩不可用（无 canvas / 解码失败）会回退原图，**若合计仍超 9MB 就整批拒绝并提示**，
+绝不把必撞 413 的请求发出去。文本文件原路径不变，不占这 9MB 预算。
+
+服务端超限回 **413 + `code: 'PAYLOAD_TOO_LARGE'`**，文案由 `MAX_BODY_BYTES` 算出
+（「请求体过大（上限 12MB）」）；读取仍是边读边算，超限的块不会留在内存里。
+局域网网关（`modules/transfer/gateway.js`）的 `/api/**` 反代是**管道流式**的，没有更小的
+body 上限，也没有整块读入，不需要改（本仓库没有 `src/www/`，前端就是网关托管的 `src/renderer/`）。
+覆盖这些口径的测试见 `test/upload-limit.test.js`。
 
 ### DeepSeek 官方 Search / Fetch：一次请求拿全，抓取路径永远兜底
 
