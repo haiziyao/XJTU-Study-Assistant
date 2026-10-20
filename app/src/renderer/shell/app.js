@@ -45,6 +45,127 @@
   /** 官方支持的图片格式（其余一律当普通文件，别硬塞给上游）。 */
   const VISION_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'];
 
+  /* ------------------------------------------------------------ 附件体积口径 */
+
+  /**
+   * 单张图片上限 = 服务端请求体上限（`core/http/router.js` 的 `MAX_BODY_BYTES`）。
+   *
+   * 两个数必须一起改：如果前端放进来一张更大的图，用户能选、能预览、最后在发送时
+   * 吃一个 413，是这套逻辑里最难解释的失败。改这里时顺手看一眼那个常量。
+   */
+  const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+
+  /**
+   * 所有图片 dataUrl 的**合计预算**，不是原图体积。
+   *
+   * 为什么是 9MB：附件以 base64 塞进 `/ai/chat` 的 JSON body，base64 相对原图膨胀约 1/3；
+   * 服务端上限 12MB，一张 12MB 原图实际 body ≈ 16.4MB，必撞 413。留 3MB 给文本提示词、
+   * 文件名、JSON 结构与均分取整，换算成「原图」约 6.75MB —— 这才是真正能发出去的图。
+   */
+  const IMAGE_DATAURL_BUDGET = 9 * 1024 * 1024;
+  /** 单次附件上限（与服务端 `chat-service.js` 的 MAX_ATTACHMENTS 一致）。 */
+  const UPLOAD_MAX_ATTACHMENTS = 8;
+  /** 压缩档位：先降质量保清晰度，同尺寸试完再降长边（见 `compressionAttempts`）。 */
+  const COMPRESS_EDGES = [1600, 1280, 1024];
+  const COMPRESS_QUALITIES = [0.82, 0.7, 0.6];
+
+  /** 只按 MIME 判图片：扩展名可以撒谎（`.png` 的 PDF 不是图片）。 */
+  function isImageFile(file) {
+    return typeof file?.type === 'string' && file.type.startsWith('image/');
+  }
+
+  /**
+   * 每张图片分到的 dataUrl 预算：合计 9MB 按**当前张数**均分（3 张 → 各 3MB）。
+   *
+   * 均分而不是"先到先得"：否则一张 8MB 的大图会吃光预算，后面两张只能压到没法看。
+   * 张数是动态的 —— 加一张/删一张都要按新张数重算，已有图片可能得重新压。
+   */
+  function imageBudgetPer(count, total = IMAGE_DATAURL_BUDGET) {
+    const slots = Math.min(UPLOAD_MAX_ATTACHMENTS, Math.max(1, Math.floor(Number(count) || 1)));
+    return Math.floor(total / slots);
+  }
+
+  /** dataUrl 的传输体积：base64 是 ASCII，字符数就是字节数。预算按这个口径算。 */
+  function dataUrlBytes(dataUrl) {
+    return typeof dataUrl === 'string' ? dataUrl.length : 0;
+  }
+
+  /** dataUrl 解码后的字节数（给用户看的"压缩后大小"，跟原文件大小同一口径）。 */
+  function dataUrlDecodedBytes(dataUrl) {
+    const text = typeof dataUrl === 'string' ? dataUrl : '';
+    const comma = text.indexOf(',');
+    if (comma < 0) return 0;
+    const body = text.slice(comma + 1);
+    if (!body) return 0;
+    const padding = body.endsWith('==') ? 2 : body.endsWith('=') ? 1 : 0;
+    return Math.max(0, Math.floor((body.length * 3) / 4) - padding);
+  }
+
+  /** 单张图片体积检查（纯函数，提示文案也在这里，测试与真实流程同一份）。 */
+  function checkImageSize(size, max = MAX_IMAGE_BYTES) {
+    if (Number(size) <= max) return { ok: true, message: '' };
+    return {
+      ok: false,
+      message: `单张图片上限 ${Math.round(max / 1024 / 1024)}MB，这张有 ${formatSize(size)}，先不放了`,
+    };
+  }
+
+  /**
+   * 压缩尝试序列：1600@0.82 → 1600@0.7 → 1600@0.6 → 1280@0.82 … → 1024@0.6。
+   *
+   * 为什么质量在内层：同样砍一半体积，先降质量能保住分辨率（文档/截图上的字更清楚）；
+   * 质量降到 0.6 还超预算，再降尺寸。长边小于当前档位时不放大，三个尺寸档收成一个。
+   */
+  function compressionAttempts(width, height) {
+    const longest = Math.max(Number(width) || 0, Number(height) || 0);
+    const plan = [];
+    let previous = null;
+    for (const edge of COMPRESS_EDGES) {
+      const scaled = longest ? Math.min(edge, longest) : edge;
+      if (scaled === previous) continue;
+      previous = scaled;
+      for (const quality of COMPRESS_QUALITIES) plan.push({ edge, scaled, quality });
+    }
+    return plan;
+  }
+
+  /**
+   * 一次尝试的「像素 × 质量」成本。
+   *
+   * 编码后的真实体积只有压完才知道（还取决于画面复杂度），但**档位序列是否单调变便宜**
+   * 是纯逻辑，可以在这里算清楚：测试按它断言 9 个档位确实一路往下走。
+   */
+  function attemptCost(attempt, width, height) {
+    const longest = Math.max(Number(width) || 0, Number(height) || 0);
+    const scaled = Math.min(attempt.edge, longest || attempt.edge);
+    const ratio = longest ? scaled / longest : 1;
+    const targetWidth = Math.max(1, Math.round((Number(width) || longest || 1) * ratio));
+    const targetHeight = Math.max(1, Math.round((Number(height) || longest || 1) * ratio));
+    return targetWidth * targetHeight * attempt.quality;
+  }
+
+  /** 从"每档压出来的字节数"里挑第一个 ≤ 预算的；全都超就取最小的那档并标记没达标。 */
+  function pickCompressedAttempt(attempts, sizes, budget) {
+    const plan = Array.isArray(attempts) ? attempts : [];
+    const values = Array.isArray(sizes) ? sizes : [];
+    for (let index = 0; index < plan.length && index < values.length; index += 1) {
+      if (values[index] <= budget) return { index, attempt: plan[index], bytes: values[index], withinBudget: true };
+    }
+    let smallest = -1;
+    for (let index = 0; index < values.length; index += 1) {
+      if (smallest < 0 || values[index] < values[smallest]) smallest = index;
+    }
+    if (smallest < 0) return { index: -1, attempt: null, bytes: 0, withinBudget: false };
+    return { index: smallest, attempt: plan[smallest], bytes: values[smallest], withinBudget: false };
+  }
+
+  /** 所有图片 dataUrl 的合计传输体积（发送前最后一道闸）。 */
+  function imageDataUrlBytes(records) {
+    return (Array.isArray(records) ? records : [])
+      .filter((record) => isImageFile(record) && record.dataUrl)
+      .reduce((sum, record) => sum + dataUrlBytes(record.dataUrl), 0);
+  }
+
   const FIELD_LABEL = {
     title: '标题',
     date: '日期',
@@ -140,6 +261,11 @@
     search: 'off',
     /** 待发送的附件（只活在内存里；发送后只在消息上留元信息）。 */
     attachments: [],
+    /**
+     * 附件压缩/读取中：此时 `attachments` 还没更新完，发送会把刚选的图漏掉。
+     * `addFiles` 用一条 Promise 链串行化多次选择，这个标志供发送按钮/回车做大白话拦截。
+     */
+    attaching: false,
     /** 模型选择器缓存的列表。 */
     models: null,
     health: null,
@@ -1776,11 +1902,28 @@
     // `/com` 是**用户指令**：命中后改走"压缩"这个动作，**不发给模型**（见 COMPACT_COMMAND 的说明）。
     // 放在最前面是为了"一个字都不落库"：它不该在对话流里留下一条用户消息。
     if (ContextMeter.isCompactCommand(content)) return compactContext();
+    // 图片还在读/压缩：此时 state.attachments 里没有它们，发出去会漏图（用户以为发了）
+    if (state.attaching) {
+      toast('图片还在压缩，稍等一下再发');
+      return null;
+    }
     const files = state.attachments;
     if (!content && !files.length) return;
     if (files.length && !state.ai.available) {
       toast('附件要配了 AI 才能解析，先去掉或去「设置 → AI 接入」填密钥');
       return;
+    }
+    /**
+     * 发送前最后一道体积闸：压缩不可用（无 canvas / 解码失败）时图片会回退原图，
+     * 此时如果合计仍超 9MB，**留在这里拒发** —— 让用户看到"哪张太大、删一张"，
+     * 而不是把请求发出去撞服务端 413（那个错误既没有文件名，也没有补救动作）。
+     */
+    const imageBytes = imageDataUrlBytes(files);
+    if (imageBytes > IMAGE_DATAURL_BUDGET) {
+      toast(
+        `图片合计 ${formatSize(imageBytes)}，超过 ${Math.round(IMAGE_DATAURL_BUDGET / 1024 / 1024)}MB 发送上限；请删掉一张或换小一点的图片`,
+      );
+      return null;
     }
     // 附件所有权已经交给这条消息：**无论立刻发还是排队**，都先把待发区清掉（避免下一条又带一遍）
     state.attachments = [];
@@ -2371,7 +2514,12 @@
 
   /* ------------------------------------------------------------ 输入区扩展 */
 
-  /** 待发送附件：小卡片列表（图片给缩略图，其它给文件名与大小）。 */
+  /**
+   * 待发送附件：小卡片列表（图片给缩略图，其它给文件名与大小）。
+   *
+   * 图片 chip 上的大小是**压缩后**的（`record.size` 在压缩成功时被改写），
+   * 鼠标悬停能看到原图大小；否则用户只会看到"明明选的是 12MB，怎么显示 1.2MB"。
+   */
   function renderAttachments() {
     const host = dom.chatAttachments;
     if (!host) return;
@@ -2387,14 +2535,22 @@
       } else {
         chip.appendChild(mk('span', 'attach-kind', file.type?.startsWith('image/') ? '🖼' : '📄'));
       }
+      if (file.compressed) {
+        chip.title = `原图 ${formatSize(file.originalSize)}，压缩后 ${formatSize(file.size)}`;
+      }
       chip.append(
         mk('span', 'attach-name', file.name),
-        mk('span', 'attach-size', formatSize(file.size)),
+        mk('span', 'attach-size', file.compressed ? `${formatSize(file.size)} · 已压缩` : formatSize(file.size)),
       );
       const remove = mk('button', 'attach-del', '×');
       remove.type = 'button';
       remove.title = '移除';
       remove.addEventListener('click', () => {
+        // 压缩中按旧数组回写会把刚移除的附件又"复活"（见 addFiles 的串行链）
+        if (state.attaching) {
+          toast('图片还在压缩，稍后再移除');
+          return;
+        }
         state.attachments.splice(index, 1);
         renderAttachments();
       });
@@ -2403,42 +2559,331 @@
     });
   }
 
+  /* ------------------------------------------------------------ 图片压缩 */
+
+  /**
+   * 解码图片。
+   *
+   * 优先 `createImageBitmap`（不阻塞主线程，且 `imageOrientation:'from-image'` 会按 EXIF
+   * 把手机竖拍的照片转正）；老环境退回 `<img>` + objectURL。两者都不可用就抛错，
+   * 由 `ingestFiles` 走"回退原图 + 超预算拒绝"的路径。
+   */
+  async function decodeImageSource(file) {
+    if (typeof createImageBitmap === 'function') {
+      try {
+        return await createImageBitmap(file, { imageOrientation: 'from-image' });
+      } catch {
+        try {
+          return await createImageBitmap(file);
+        } catch {
+          /* 落到 <img> 那条路 */
+        }
+      }
+    }
+    if (typeof Image !== 'function' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+      throw new Error('当前环境不支持解码图片');
+    }
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      const url = URL.createObjectURL(file);
+      image.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve(image);
+      };
+      image.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error('图片解码失败'));
+      };
+      image.src = url;
+    });
+  }
+
+  /** canvas.toBlob 的 Promise 包装；不支持 toBlob 时返回 null（调用方按编码失败处理）。 */
+  function canvasToBlob(canvas, type, quality) {
+    return new Promise((resolve) => {
+      if (typeof canvas.toBlob !== 'function') {
+        resolve(null);
+        return;
+      }
+      try {
+        canvas.toBlob((blob) => resolve(blob ?? null), type, quality);
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  /** Blob → dataURL（附件统一以 dataUrl 随 JSON 发送，见 `runAiChat`）。 */
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      if (typeof FileReader !== 'function') {
+        reject(new Error('当前环境不支持读取压缩结果'));
+        return;
+      }
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('读取压缩结果失败'));
+      reader.onload = () => resolve(String(reader.result ?? ''));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  /**
+   * 按一档尺寸/质量画布并编码。
+   *
+   * PNG/WebP/GIF 用 `image/webp` 编（保透明）；不支持 WebP 编码的浏览器会回落到 PNG ——
+   * 那比 JPEG 还大，所以检测到 blob 不是 webp 时**重画白底再编 JPEG**（透明区不能变黑）。
+   * JPEG 源本来就没有透明，直接 JPEG。
+   */
+  async function encodeImageAttempt(bitmap, attempt, source) {
+    const { width, height, type } = source;
+    const longest = Math.max(width, height);
+    const scaled = Math.min(attempt.edge, longest);
+    const ratio = longest ? scaled / longest : 1;
+    const targetWidth = Math.max(1, Math.round(width * ratio));
+    const targetHeight = Math.max(1, Math.round(height * ratio));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('画布不可用');
+
+    const paint = (outputType) => {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.clearRect(0, 0, targetWidth, targetHeight);
+      if (outputType === 'image/jpeg') {
+        // JPEG 没有 alpha：透明区域必须显式铺白，否则会变成黑块
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, targetWidth, targetHeight);
+      }
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(bitmap, 0, 0, targetWidth, targetHeight);
+    };
+
+    const preferred = /^image\/jpe?g$/i.test(type) ? 'image/jpeg' : 'image/webp';
+    paint(preferred);
+    let blob = await canvasToBlob(canvas, preferred, attempt.quality);
+    if (preferred === 'image/webp' && blob && blob.type && blob.type !== 'image/webp') {
+      paint('image/jpeg');
+      blob = await canvasToBlob(canvas, 'image/jpeg', attempt.quality);
+    }
+    if (!blob) throw new Error('图片编码失败');
+
+    const dataUrl = await blobToDataUrl(blob);
+    return {
+      dataUrl,
+      type: blob.type || preferred,
+      width: targetWidth,
+      height: targetHeight,
+      quality: attempt.quality,
+      edge: attempt.edge,
+    };
+  }
+
+  /**
+   * 把一张图片压进 `budget`（dataUrl 字节数）。
+   *
+   * 按 `compressionAttempts` 一档档试，第一档 ≤ 预算就停；全都超就把**最小**的那档交出去
+   * （`withinBudget:false`），由 `ingestFiles` 判是否整批拒绝 —— 这里不偷偷放弃，
+   * 否则用户会收到一张糊到看不清的图却不知道为什么。
+   */
+  async function compressImageRecord(record, { budget = IMAGE_DATAURL_BUDGET } = {}) {
+    if (!record?.source) throw new Error('没有原图，无法压缩');
+    const bitmap = await decodeImageSource(record.source);
+    const width = Number(bitmap.naturalWidth ?? bitmap.width) || 0;
+    const height = Number(bitmap.naturalHeight ?? bitmap.height) || 0;
+    if (!width || !height) throw new Error('读不到图片尺寸');
+
+    const plan = compressionAttempts(width, height);
+    const sizes = [];
+    const candidates = [];
+    try {
+      for (const attempt of plan) {
+        const candidate = await encodeImageAttempt(bitmap, attempt, { width, height, type: record.type });
+        sizes.push(candidate.dataUrl.length);
+        candidates.push(candidate);
+        if (candidate.dataUrl.length <= budget) {
+          return { ...candidate, withinBudget: true, attempts: sizes.length };
+        }
+      }
+    } finally {
+      if (typeof bitmap.close === 'function') bitmap.close();
+    }
+
+    const pick = pickCompressedAttempt(plan, sizes, budget);
+    const best = candidates[pick.index];
+    if (!best) throw new Error('图片编码失败');
+    return { ...best, withinBudget: false, attempts: sizes.length };
+  }
+
+  /* ------------------------------------------------------------ 附件入库 */
+
   /** 读一个文件：图片/文本读成 dataURL/文本，其它只留元信息（给模型知道有这么个文件）。 */
   function readFile(file) {
     return new Promise((resolve) => {
-      const base = { name: file.name, type: file.type, size: file.size, dataUrl: '', text: '' };
-      const isImage = file.type.startsWith('image/');
-      const isText = /^text\//.test(file.type) || /\.(txt|md|markdown|csv|json|ya?ml|log|ini|tex)$/i.test(file.name);
-      if (!isImage && !isText) return resolve(base);
-      if (isImage && file.size > 4 * 1024 * 1024) {
-        toast(`${file.name} 超过 4MB，图片先不放了`);
-        return resolve({ ...base, type: file.type });
+      const type = String(file?.type ?? '');
+      const name = String(file?.name ?? '附件');
+      const base = { name, type, size: Number(file?.size) || 0, dataUrl: '', text: '' };
+      const image = type.startsWith('image/');
+      const isText = /^text\//.test(type) || /\.(txt|md|markdown|csv|json|ya?ml|log|ini|tex)$/i.test(name);
+      if (!image && !isText) return resolve(base);
+      // 双保险：`ingestFiles` 在调用前已经拦过；这里再拦一次，避免以后有人绕过管线直接读
+      if (image) {
+        const check = checkImageSize(base.size);
+        if (!check.ok) {
+          return resolve({ ...base, error: 'too-large', message: `${name} ${check.message}` });
+        }
       }
+      if (typeof FileReader !== 'function') return resolve(base);
       const reader = new FileReader();
       reader.onerror = () => resolve(base);
-      reader.onload = () =>
-        resolve(isImage ? { ...base, dataUrl: String(reader.result ?? '') } : { ...base, text: String(reader.result ?? '') });
-      if (isImage) reader.readAsDataURL(file);
+      reader.onload = () => {
+        if (!image) return resolve({ ...base, text: String(reader.result ?? '') });
+        const dataUrl = String(reader.result ?? '');
+        // source 留着原 File 引用：张数变化要按新预算重压，必须能回到原图；
+        // 它只在内存里，runAiChat 只挑 name/type/size/dataUrl/text，不会进 JSON body
+        return resolve({
+          ...base,
+          dataUrl,
+          dataUrlBytes: dataUrlBytes(dataUrl),
+          originalSize: base.size,
+          source: file,
+        });
+      };
+      if (image) reader.readAsDataURL(file);
       else reader.readAsText(file);
       return undefined;
     });
   }
 
-  async function addFiles(list) {
-    const picked = [...(list ?? [])].slice(0, 8);
-    for (const file of picked) {
-      if (state.attachments.length >= 8) {
-        toast('最多 8 个附件');
-        break;
+  /**
+   * 附件入库管线：体积检查 → 读取 → 按张数均分预算压缩 → 合计超预算整批回滚。
+   *
+   * 依赖可注入（`read` / `compress`），所以渲染层不必真起浏览器就能测：
+   * `test/upload-limit.test.js` 用假 File 与假压缩器驱动同一份流程。
+   *
+   * 为什么整批回滚而不是"留几张算几张"：用户选的是 3 张，悄悄只留下 1 张比明确报错更糟；
+   * 而且已存在的附件可能刚按新预算重压过，回滚到调用前的列表能保证界面与发送内容一致。
+   */
+  async function ingestFiles(files, {
+    existing = [],
+    read = readFile,
+    compress = compressImageRecord,
+    maxImageBytes = MAX_IMAGE_BYTES,
+    totalBudget = IMAGE_DATAURL_BUDGET,
+    maxAttachments = UPLOAD_MAX_ATTACHMENTS,
+  } = {}) {
+    const previous = Array.isArray(existing) ? existing : [];
+    const records = [...previous];
+    const messages = [];
+    const picked = [...(files ?? [])];
+    const room = Math.max(0, maxAttachments - records.length);
+    if (picked.length > room) messages.push(`最多 ${maxAttachments} 个附件`);
+    let added = 0;
+
+    for (const file of picked.slice(0, room)) {
+      if (isImageFile(file)) {
+        const check = checkImageSize(file.size, maxImageBytes);
+        if (!check.ok) {
+          messages.push(`${file.name} ${check.message}`);
+          continue;
+        }
       }
-      const record = await readFile(file);
-      // 官方只认 JPEG/PNG/GIF/WebP（按内容判断），其它格式上游会 400 —— 提前说清楚
-      if (record.type.startsWith('image/') && !VISION_IMAGE_TYPES.includes(record.type)) {
-        toast(`${record.name} 的图片格式不支持（只认 PNG/JPEG/GIF/WebP），已作为普通文件附上`);
+      const record = await read(file);
+      if (!record) continue;
+      if (record.error === 'too-large') {
+        messages.push(record.message ?? `${record.name} 超过单张图片上限 ${Math.round(maxImageBytes / 1024 / 1024)}MB`);
+        continue;
       }
-      state.attachments.push(record);
+      records.push(record);
+      added += 1;
     }
-    renderAttachments();
+
+    // 张数变了，每张的预算就变了：已有图片也要按新预算重压（从原图压，不叠着压）
+    const images = records.filter((record) => isImageFile(record) && record.dataUrl);
+    const budget = imageBudgetPer(images.length, totalBudget);
+    let compressed = 0;
+    let beforeBytes = 0;
+    let afterBytes = 0;
+    for (const record of images) {
+      if (dataUrlBytes(record.dataUrl) <= budget) continue;
+      const sourceBytes = Number(record.originalSize ?? record.size) || 0;
+      const before = dataUrlBytes(record.dataUrl);
+      try {
+        const result = await compress(record, { budget });
+        const next = String(result?.dataUrl ?? '');
+        // 压完反而更大（极小图/已经压过）：保留原图，让合计体积那道闸去判
+        if (!next || next.length >= before) continue;
+        record.dataUrl = next;
+        record.dataUrlBytes = dataUrlBytes(next);
+        record.size = dataUrlDecodedBytes(next) || record.size;
+        record.type = result.type || record.type;
+        record.width = result.width ?? record.width;
+        record.height = result.height ?? record.height;
+        record.compressed = true;
+        record.withinBudget = result.withinBudget !== false;
+        compressed += 1;
+        beforeBytes += sourceBytes || before;
+        afterBytes += record.size;
+      } catch (error) {
+        // 压缩不可用（无 canvas / 解码失败）：回退原图，下面用合计体积决定是否拒绝
+        record.compressError = error?.message ?? '压缩失败';
+      }
+    }
+    if (compressed > 0) {
+      messages.push(`已压缩 ${compressed} 张图片（${formatSize(beforeBytes)} → ${formatSize(afterBytes)}）`);
+    }
+
+    // 官方只认 JPEG/PNG/GIF/WebP（按内容判断），其它格式上游会 400 —— 提前说清楚。
+    // 放在压缩之后：不支持的格式如果被压成 webp，就已经能看了，不该再吓用户一跳。
+    for (const record of records.slice(previous.length)) {
+      if (isImageFile(record) && !VISION_IMAGE_TYPES.includes(record.type)) {
+        messages.push(`${record.name} 的图片格式不支持（只认 PNG/JPEG/GIF/WebP），已作为普通文件附上`);
+      }
+    }
+
+    const total = imageDataUrlBytes(records);
+    if (total > totalBudget) {
+      messages.push(
+        `图片压缩后合计 ${formatSize(total)}，超过 ${Math.round(totalBudget / 1024 / 1024)}MB 总上限，已取消添加；请删掉一张或换小一点的图片`,
+      );
+      return { records: previous, messages, added: 0, compressed, overflow: true };
+    }
+    return { records, messages, added, compressed, overflow: false };
+  }
+
+  /**
+   * 串行化多次选择：用户连点两次「+」时，后一次必须等前一次把压缩结果写回 state，
+   * 否则两次都拿同一份旧 `state.attachments` 做预算，后完成的会把前一批覆盖掉。
+   */
+  let attachChain = Promise.resolve();
+  let attachPending = 0;
+
+  function addFiles(list) {
+    const picked = [...(list ?? [])];
+    attachPending += 1;
+    state.attaching = true;
+    const task = attachChain
+      .then(async () => {
+        const result = await ingestFiles(picked, { existing: state.attachments });
+        state.attachments = result.records;
+        renderAttachments();
+        for (const message of result.messages) toast(message);
+        return result;
+      })
+      .catch((error) => {
+        // 附件处理失败不能变成未处理的 Promise 拒绝（`change` 监听器是 async 的）
+        console.error('[app] 附件处理失败', error);
+        toast(`附件处理失败：${error?.message ?? '未知错误'}`);
+        return null;
+      })
+      .finally(() => {
+        attachPending = Math.max(0, attachPending - 1);
+        state.attaching = attachPending > 0;
+      });
+    attachChain = task;
+    return task;
   }
 
   /**
@@ -3304,8 +3749,10 @@
       }
     });
     dom.chatFiles.addEventListener('change', async () => {
-      await addFiles(dom.chatFiles.files);
-      dom.chatFiles.value = ''; // 允许再次选同一个文件
+      // 先把选择拷出来并清空 input：压缩可能几百毫秒，等待期间不应让同一个文件选不进来
+      const files = [...dom.chatFiles.files];
+      dom.chatFiles.value = '';
+      await addFiles(files);
     });
     // 点空白处收起所有向上展开的菜单（圆环那个弹层也走这条，只是多了 aria 同步）
     document.addEventListener('click', () => {
@@ -4308,6 +4755,35 @@
       }
     });
   }
+
+  /**
+   * 附件体积与压缩的纯逻辑 + 入库管线（渲染层没有模块系统，和 `PCUtil` / `PCSidebarLayout`
+   * 一样挂到 `window` 上）。
+   *
+   * 为什么暴露：这些口径（12MB 单张、9MB 合计、按张数均分、档位序列）是"选图 → 压缩 → 发送"
+   * 三处共用的唯一事实来源，`test/upload-limit.test.js` 直接喂假文件/假压缩器断言它们，
+   * 不必在 node:test 里伪造 canvas。真正的压缩仍在本文件内部，测试通过 `ingestFiles` 的
+   * `compress` 注入点驱动同一套预算/回滚逻辑。
+   */
+  window.PCUpload = Object.freeze({
+    MAX_IMAGE_BYTES,
+    IMAGE_DATAURL_BUDGET,
+    UPLOAD_MAX_ATTACHMENTS,
+    COMPRESS_EDGES: Object.freeze([...COMPRESS_EDGES]),
+    COMPRESS_QUALITIES: Object.freeze([...COMPRESS_QUALITIES]),
+    isImageFile,
+    checkImageSize,
+    imageBudgetPer,
+    dataUrlBytes,
+    dataUrlDecodedBytes,
+    compressionAttempts,
+    attemptCost,
+    pickCompressedAttempt,
+    imageDataUrlBytes,
+    ingestFiles,
+    readFile,
+    compressImageRecord,
+  });
 
   // ★ 在**加载时**就登记，而不是等 boot()：
   //   设置页「侧边栏」那块可能先于一次完整启动被渲染，而且测试里 boot() 是刻意不跑的
