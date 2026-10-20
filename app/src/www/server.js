@@ -383,12 +383,13 @@ export function createWwwServer(options = {}) {
    * 生成的（见 `renderer/kit/registry.js`），所以**不下发脚本 = 左栏不出现**。
    * 用白名单，以后有人往 `index.html` 里加新视图也不会意外漏进公网版。
    *
-   * 只放三个：日历与待办（`calendar.js` 同时管这两块）、对话、对话设置。
+   * 只放四个：日历与待办（`calendar.js` 同时管这两块）、笔记、对话、对话设置。
    * 与 `backends.js` 的 `DISABLED_MODULE_IDS` 是**同一件事的两半**，改一处必须改另一处：
    * 只砍服务端会留下"点进去 404"的死入口，只砍脚本会留下用不了的接口面。
    */
   const WEB_VISIBLE_VIEWS = [
     'views/calendar.js',
+    'views/notes/notes.js',
     'views/chat-hub.js',
     'views/chat-settings.js',
   ];

@@ -25,8 +25,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
  * 造一条待办（走代理 → 落到该账号自己的数据目录）。
  *
- * 2026-10-20：服务端版收窄成"只留日历与待办 / 对话"之后不再加载 notes 模块，
- * 所以隔离测试改用**待办**（calendar 模块）来验——它仍在服务端版可用。
+ * 用待办而不是笔记来验隔离：待办属于服务端版的核心功能（calendar 模块），
+ * 无论后面怎么收窄功能面它都该在，不会因为某天砍掉某个模块就让这条用例失效。
  */
 const createTodo = (app, cookie, title) =>
   app.call('/api/v1/todos', { method: 'POST', headers: { cookie }, body: { title } });
@@ -156,20 +156,25 @@ test('服务端版：登录后 /app/ 是应用页面，静态资源按登录态�
     // 其余字节（CSP、kit/shell 的加载顺序）原样下发。
     assert.match(page.text, /Content-Security-Policy/);
 
-    // 2026-10-20：服务端版只留最基础功能（日历与待办 / 对话）。
+    // 2026-10-20：服务端版只留基础功能（日历与待办 / 笔记 / 对话）。
     // 左栏是「脚本一加载就 PCModules.register 自我登记」生成的，所以不下发脚本 = 不出现在左栏。
-    // 断言查 `src="…"` 而不是裸文件名：index.html 的注释里也会提到这些路径，那是无害的。
-    for (const kept of ['views/calendar.js', 'views/chat-hub.js', 'views/chat-settings.js']) {
-      assert.ok(page.text.includes(`src="${kept}"`), `服务端版应当下发 ${kept}`);
+    // 注意 src 可能带 ?v=... 缓存串（notes 那条就带），正则必须允许查询串再判断，
+    // 否则会把"已经下发了"误判成"没下发" —— 这个坑我踩了两次。
+    const hasScript = (file) => {
+      const escaped = file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`src="${escaped}(\\?[^"]*)?"`).test(page.text);
+    };
+    for (const kept of ['views/calendar.js', 'views/notes/notes.js', 'views/chat-hub.js', 'views/chat-settings.js']) {
+      assert.ok(hasScript(kept), `服务端版应当下发 ${kept}`);
     }
     for (const gone of [
-      'views/notes/notes.js', 'views/lms.js', 'views/academic.js', 'views/pomodoro.js',
+      'views/lms.js', 'views/academic.js', 'views/pomodoro.js',
       'views/timetable.js', 'views/notifications.js', 'views/transfer.js',
       'views/account.js', 'views/sync.js', 'views/weekly-panel.js', 'views/auth-settings.js',
-      // shell 层的「日志」视图：audit 模块已禁用，留着就是点进去 404 的死入口
+      // shell 层的「日志」视图：网页版不展示，且它读的 /audit/log 属于桌面端功能
       'shell/message.js',
     ]) {
-      assert.equal(page.text.includes(`src="${gone}"`), false, `服务端版不该下发 ${gone}`);
+      assert.equal(hasScript(gone), false, `服务端版不该下发 ${gone}`);
     }
 
     const asset = await app.call('/app/kit/theme.js', { headers: { cookie: alice.cookie } });
@@ -243,13 +248,11 @@ test('服务端版：思源学堂（LMS）明确禁用 —— 403 + 原因，且
     const ids = modules.json.items.map((item) => item.id);
     assert.equal(ids.includes('lms'), false, `服务端版不该加载 lms，实际模块：${ids.join('、')}`);
     assert.equal(ids.includes('transfer'), false, `服务端版不该加载 transfer，实际模块：${ids.join('、')}`);
-    // 服务端版只留最基础功能：日历与待办（calendar）+ 对话（ai）。
-    // 2026-10-20 收窄：学业/笔记/通知/番茄钟/课表/周报/知识库/更改日志也不再加载。
-    for (const id of ['calendar', 'ai']) {
-      assert.ok(ids.includes(id), `模块 ${id} 应当仍然可用，实际：${ids.join('、')}`);
-    }
-    for (const id of ['academic', 'notes', 'notifications', 'pomodoro', 'timetable', 'weekly', 'knowledge', 'audit']) {
-      assert.equal(ids.includes(id), false, `服务端版不该加载 ${id}，实际：${ids.join('、')}`);
+    // 服务端版**只砍安全上有问题的两块**（lms / transfer）。
+    // 其余模块即便网页上看不到（视图脚本不下发）也必须照常加载：
+    // `sync` 要给桌面端同步各模块的集合，模块不存在它就无集合可同步。
+    for (const id of ['calendar', 'notes', 'ai', 'pomodoro', 'timetable', 'audit', 'sync']) {
+      assert.ok(ids.includes(id), `模块 ${id} 应当仍然加载（供桌面端同步等服务使用）`);
     }
   } finally {
     await app.close();
