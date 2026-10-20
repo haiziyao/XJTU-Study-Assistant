@@ -19,8 +19,8 @@
 import { resolveUpstream } from '../account/service.js';
 import { redactSecrets } from './merge.js';
 
-/** 默认超时：一次同步要搬的数据可能不小，20 秒是"网络正常但数据多"与"对方挂了"的分界。 */
-export const DEFAULT_TIMEOUT_MS = 20_000;
+/** 默认超时：一次同步要搬的数据可能不小，180 秒给"数据多 / 对端慢"留足余量（网关侧另有 30 秒上游超时，见 README）。 */
+export const DEFAULT_TIMEOUT_MS = 180_000;
 
 /** 同步接口的路径（冻结契约）。 */
 export const SYNC_PATHS = Object.freeze({
