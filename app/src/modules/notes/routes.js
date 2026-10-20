@@ -61,7 +61,38 @@ export function registerNoteRoutes(router, { services, apiPrefix = '/api/v1' }) 
     };
   });
 
-  for (const [path, kind] of [['note-views', 'views'], ['note-canvases', 'canvases']]) {
+  router.post(`${apiPrefix}/note-canvases/:id/ai-outline`, async ({ params, body }) => {
+    const canvas = notes.getResource('canvases', params.id);
+    const node = (canvas.nodes || []).find((item) => item.id === body?.nodeId);
+    if (!node) throw HttpError.notFound('找不到要扩展的画布节点');
+    if (!services.ai?.complete) throw new HttpError(501, 'AI_UNAVAILABLE', 'AI 尚未配置，可改用本地分支建议');
+    const maxDepth = Math.max(1, Math.min(4, Number(body?.maxDepth) || 2));
+    const maxNodes = Math.max(1, Math.min(24, Number(body?.maxNodes) || 8));
+    const instruction = String(body?.instruction || '补充适合学习与复习的关键分支').trim().slice(0, 500);
+    const result = await services.ai.complete({
+      system: `你是知识画布结构助手。只返回 JSON，不要 Markdown。格式为 {"nodes":[{"tempId":"n1","parentTempId":null,"title":"..."}],"advice":"..."}。所有建议都挂在用户选中的节点下面；最多 ${maxDepth} 层、${maxNodes} 个节点；标题简短，不得要求删除或覆盖已有内容。`,
+      user: `画布：${canvas.name}\n选中节点：${String(node.text || node.title || '').slice(0, 200)}\n用户要求：${instruction}\n现有相邻节点：${JSON.stringify((canvas.edges || []).filter((edge) => edge.fromNode === node.id || edge.toNode === node.id).slice(0, 20).map((edge) => { const otherId = edge.fromNode === node.id ? edge.toNode : edge.fromNode; const other = (canvas.nodes || []).find((item) => item.id === otherId); return String(other?.text || other?.title || '').slice(0, 80); }))}`,
+      thinking: 'none',
+      temperature: 0.2,
+    });
+    let parsed = {};
+    try { parsed = JSON.parse(String(result.text || '').replace(/^```(?:json)?\s*|\s*```$/gi, '').trim()); } catch { parsed = {}; }
+    const allowedIds = new Set();
+    const proposalDepth = new Map();
+    const proposal = [];
+    for (const item of (Array.isArray(parsed.nodes) ? parsed.nodes : []).slice(0, maxNodes)) {
+      const tempId = String(item?.tempId || `n${proposal.length + 1}`).slice(0, 60);
+      const parentTempId = item?.parentTempId ? String(item.parentTempId).slice(0, 60) : null;
+      const title = String(item?.title || '').trim().slice(0, 120);
+      if (!title || allowedIds.has(tempId) || (parentTempId && !allowedIds.has(parentTempId))) continue;
+      const depth = parentTempId ? (proposalDepth.get(parentTempId) || 1) + 1 : 1;
+      if (depth > maxDepth) continue;
+      allowedIds.add(tempId); proposalDepth.set(tempId, depth); proposal.push({ tempId, parentTempId, title });
+    }
+    return { proposal: { nodes: proposal, advice: String(parsed.advice || '建议从选中节点逐层展开，并在确认后再加入画布。').slice(0, 600) }, model: result.model };
+  });
+
+  for (const [path, kind] of [['note-canvases', 'canvases']]) {
     const R = `${apiPrefix}/${path}`;
     router.get(R, () => ({ items: notes.listResource(kind) }));
     router.post(R, async ({ body }) => ({ __status: 201, item: await notes.createResource(kind, body ?? {}) }));

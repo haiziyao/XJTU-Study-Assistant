@@ -270,13 +270,15 @@ const THEME_LABELS = Object.freeze({ system: '跟随系统', light: '白天模�
 /** 设置项不可写时统一的错误码（测试与上游 Agent 都靠它区分“字段不认识”和普通 400）。 */
 const SETTING_NOT_WRITABLE = 'SETTING_NOT_WRITABLE';
 
-/**
- * 联网检索档位（UI 上的「关闭 / 校外网 / 校内网」）。
+  /**
+   * 联网检索档位（UI 上的「关闭 / 校外网 / 校内网 / 信息查询」）。
  *
- * 目前**还没有真正的检索实现**：这个值只是原样交给提示词（`context.search`），
- * 让模型如实说明"检索还没接入"，而不是编造几条"搜到的"内容 —— 后者比不搜更糟。
+ * `info`（信息查询）是**第四档，且它不是"检索"**：这一档明确不做网页检索，
+ * 只查本地已同步的校内通知（target `notification`）。门控见 `#runWebQuery` 开头那段。
+ * 把它放进同一个枚举，是因为它和其余三档是**互斥的一次选择**（输入框下面那一个下拉），
+ * 用户每次只能处于其中一档。
  */
-const SEARCH_MODES = Object.freeze(['off', 'web', 'campus']);
+const SEARCH_MODES = Object.freeze(['off', 'web', 'campus', 'info']);
 
 /**
  * 历史摘要里给写操作用的动词（见 `#history`）。
@@ -2782,6 +2784,26 @@ export class AiChatService {
     }
     // 通道以界面为准：界面选校外时，模型写 campus 也不越权（反过来同理）
     const mode = searchMode;
+    /*
+     * 「信息查询」档**不做网页检索** —— 在这一档里 `target:"web"` 带 `query` 的草稿直接拒绝，
+     * 并告诉模型该走哪条路。这是这一档的**定义**，不是限制：它的语义是"我库里已经收到什么"，
+     * 一旦允许顺手搜一下，模型就会拿临时搜到的页面冒充"我们收到的通知"。
+     *
+     * 注意：读单个 URL 是**上面** `#readGivenUrls` 那条路，已经先返回了，
+     * 所以这一档仍然能读通知正文（`fields.url`），只是不能检索。
+     */
+    if (mode === 'info') {
+      return fail(
+        {
+          code: 'SEARCH_MODE_INFO',
+          message:
+            '当前是「信息查询」档，不做网页检索。查本地通知请用 {"action":"query","target":"notification",…}；'
+            + '要读某条通知正文请用 {"action":"query","target":"web","fields":{"url":"<url>"}}；'
+            + '确实要搜网页，请让用户把档位切到「从校内网搜索」或「从校外网搜索」。',
+        },
+        { attempt, remaining },
+      );
+    }
     const config = this.config.get() ?? {};
     // 「网络搜索最大条数」在设置里（5–30，默认 8）：改了立刻生效，不必重启进程
     const limit = normalizeSearchLimit(config.searchMaxPages, { fallback: SEARCH_LIMIT_DEFAULT });

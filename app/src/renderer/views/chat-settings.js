@@ -333,6 +333,7 @@
     for (const [value, label] of [
       ['web', '从校外网搜索'],
       ['campus', '从校内网搜索'],
+  ['info', '信息查询'],
     ]) {
       const option = mk('option', null, label);
       option.value = value;

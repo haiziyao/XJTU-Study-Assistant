@@ -102,7 +102,7 @@ test('属性搜索、历史版本、回收站和恢复可用', async () => {
   } finally { await app.close(); }
 });
 
-test('模板、每日笔记、数据库视图和 Canvas 均可持久化', async () => {
+test('模板、每日笔记和 Canvas 均可持久化，数据库视图接口已移除', async () => {
   const { app, call } = await fixture();
   try {
     const templates = await call('GET', '/note-templates');
@@ -110,13 +110,29 @@ test('模板、每日笔记、数据库视图和 Canvas 均可持久化', async 
     const daily1 = await call('POST', '/notes/daily', { date: '2026-10-12' });
     const daily2 = await call('POST', '/notes/daily', { date: '2026-10-12' });
     assert.equal(daily1.body.summary.id, daily2.body.summary.id);
-    const view = await call('POST', '/note-views', { name: '待复习', layout: 'kanban', filters: { status: '待复习' }, groupBy: 'status' });
-    assert.equal(view.status, 201); assert.equal(view.body.item.layout, 'kanban');
-    const canvas = await call('POST', '/note-canvases', { name: '复习图', nodes: [{ id: 'n1', type: 'file', noteId: daily1.body.summary.id, x: 10, y: 20 }], edges: [] });
+    const removedView = await call('GET', '/note-views'); assert.equal(removedView.status, 404);
+    const canvas = await call('POST', '/note-canvases', { name: '复习图', nodes: [
+      { id: 'n1', type: 'mind', role: 'root', mindMapId: 'old-map', text: '复习', x: 10, y: 20 },
+      { id: 'n2', type: 'file', noteId: daily1.body.summary.id, parentId: 'n1', x: 240, y: 20 },
+    ], edges: [{ id: 'e1', fromNode: 'n1', toNode: 'n2', mindmap: true }] });
     assert.equal(canvas.status, 201);
     const stored = await call('GET', `/note-canvases/${canvas.body.item.id}`);
-    assert.equal(stored.body.item.nodes[0].noteId, daily1.body.summary.id);
+    assert.equal(stored.body.item.schemaVersion, 2); assert.equal(stored.body.item.revision, 0);
+    assert.equal(stored.body.item.nodes[0].type, 'text'); assert.equal('mindMapId' in stored.body.item.nodes[0], false);
+    assert.equal(stored.body.item.nodes[1].noteId, daily1.body.summary.id);
+    assert.equal(stored.body.item.edges[0].kind, 'hierarchy'); assert.equal('mindmap' in stored.body.item.edges[0], false);
+    const updated = await call('PATCH', `/note-canvases/${canvas.body.item.id}`, { revision: 0, nodes: stored.body.item.nodes.map((node) => ({ ...node, locked: true })) });
+    assert.equal(updated.status, 200); assert.equal(updated.body.item.revision, 1); assert.equal(updated.body.item.nodes.every((node) => node.locked), true);
+    const stale = await call('PATCH', `/note-canvases/${canvas.body.item.id}`, { revision: 0, name: '过期修改' }); assert.equal(stale.status, 409);
+    const cyclic = await call('PATCH', `/note-canvases/${canvas.body.item.id}`, { revision: 1, nodes: [
+      { id: 'n1', type: 'text', parentId: 'n2' }, { id: 'n2', type: 'text', parentId: 'n1' },
+    ], edges: [] });
+    assert.equal(cyclic.status, 400); assert.match(cyclic.body.error.message, /循环/);
+    const tooLarge = await call('PATCH', `/note-canvases/${canvas.body.item.id}`, { revision: 1, nodes: Array.from({ length: 501 }, (_, index) => ({ id: `node-${index}`, type: 'text' })), edges: [] });
+    assert.equal(tooLarge.status, 400); assert.match(tooLarge.body.error.message, /最多 500/);
     const aiDesign = await call('POST', `/note-canvases/${canvas.body.item.id}/ai-design`, { nodeId: 'n1' });
     assert.equal(aiDesign.status, 501); assert.equal(aiDesign.body.error.code, 'AI_UNAVAILABLE');
+    const aiOutline = await call('POST', `/note-canvases/${canvas.body.item.id}/ai-outline`, { nodeId: 'n1' });
+    assert.equal(aiOutline.status, 501); assert.equal(aiOutline.body.error.code, 'AI_UNAVAILABLE');
   } finally { await app.close(); }
 });

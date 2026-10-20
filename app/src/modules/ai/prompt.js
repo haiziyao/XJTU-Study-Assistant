@@ -403,10 +403,33 @@ const SEARCH_NOTES = {
   {"action":"query","target":"web","fields":{"query":"关键词","mode":"campus","limit":8},"explain":"查校内…"}
 - 校内本地已同步的数据（成绩 / 课程 / 作业 / 课表）**优先用本地查询**（target grade / …）：
   比搜网页更准更快；只有本地没有的才联网。`,
+  /**
+   * 第四档「信息查询」：**不做网页检索**，只查本地已同步的校内通知。
+   *
+   * 为什么它必须是一个独立的档，而不是挂在 campus 下面：
+   * campus 的语义是"把检索收窄到校内站点"，答的是"网上有什么"；
+   * 信息查询答的是"**我库里已经收到什么**" —— 有已读状态、第一次发现时间、固定标记与保留期。
+   * 两者混在一档里，模型会拿"临时搜到的一条"冒充"我们已经收到的通知"，反之亦然。
+   */
+  info: `【信息查询（这一档已打开）】
+- 现在是**信息查询**档：**不做网页检索**，也不去搜校内站点。要答的是"我本地已经收到什么"。
+- 用户问"最近有什么通知 / 教务处的通知 / 有没有新的"→ 查本地已同步的通知：
+  {"action":"query","target":"notification","filters":{"unreadOnly":true,"limit":10},"explain":"查本地通知…"}
+- 本地为空、或用户明确要"最新的 / 刚发的"→ 先拉一次再查：
+  {"action":"sync","target":"notification"}（**会联网、会写库**，先征得同意）
+- 要看某条通知的正文 → 用那条的 url 直读**这一篇**：
+  {"action":"query","target":"web","fields":{"url":"<那条的 url>"}}（不做检索，只读这一页）
+- 这一档**不允许**发起网页检索（\`target:"web"\` 带 \`query\` 会被拒绝）。
+  确实需要搜网页时，请用户把档位切到「从校内网搜索」或「从校外网搜索」，不要自己绕过。
+- 每条通知都要带 url；本地没有的如实说没有，**不许编造通知**。`,
 };
 
 const PERMISSION_MODES = ['auto', 'manual', 'strict'];
-const SEARCH_MODES = ['off', 'web', 'campus'];
+/**
+ * 联网档位的合法取值。`info`（信息查询）是**第四档**：不检索网页，只查本地通知库。
+ * 四档的语义边界见上面 `SEARCH_NOTE` 里各自的段落，以及 `chat-service` 里那道 mode 门控。
+ */
+const SEARCH_MODES = ['off', 'web', 'campus', 'info'];
 
 /** 权限段落：三档都注入（缺省按 manual），因为"哪种说法"每轮都不一样。 */
 function permissionNote(context = {}) {

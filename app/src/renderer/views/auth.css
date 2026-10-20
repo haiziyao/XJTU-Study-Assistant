@@ -16,8 +16,8 @@
   font-size: 12px;
   border: 1px solid var(--line);
 }
-.auth-badge.is-ok { border-color: #3fa96b; color: #6fd39a; }
-.auth-badge.is-off { border-color: #8a8f98; color: #a9aeb6; }
+.auth-badge.is-ok { border-color: color-mix(in srgb,var(--green) 58%,var(--line)); color: var(--green); }
+.auth-badge.is-off { border-color: var(--line); color: var(--fg-3); }
 
 .auth-user { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .auth-count { font-size: 12px; color: var(--fg-3); }
@@ -40,6 +40,7 @@
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--bg-elevated);
+  color: var(--fg);
   flex-wrap: wrap;
 }
 
@@ -49,15 +50,15 @@
   height: 8px;
   border-radius: 50%;
   flex: none;
-  background: #8a8f98;
+  background: var(--fg-3);
 }
-.auth-dot.is-ok { background: #3fa96b; }
-.auth-dot.is-off { background: #8a8f98; }
+.auth-dot.is-ok { background: var(--green); }
+.auth-dot.is-off { background: var(--fg-3); }
 
 .auth-site-name { font-size: 13px; font-weight: 600; }
 .auth-site-state {
   font-size: 12px;
-  color: var(--fg-3);
+  color: var(--fg-2);
   overflow-wrap: anywhere;
 }
 .auth-site .ghost-btn { margin-left: auto; }
@@ -68,7 +69,7 @@
 .auth-input {
   width: 100%;
   box-sizing: border-box;
-  background: var(--bg-elevated);
+  background: var(--control-bg);
   border: 1px solid var(--line);
   border-radius: 8px;
   color: inherit;
@@ -95,3 +96,34 @@
 }
 
 .ghost-btn.small { padding: 4px 9px; font-size: 12px; }
+
+/* 「有站点掉线」时表单上方的解释条：告诉用户为什么又要输密码、且不必先退出登录 */
+.auth-relogin {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--amber, #d99b2b);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+}
+
+.auth-relogin-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.auth-relogin-text {
+  font-size: 12px;
+  color: var(--fg-2);
+  line-height: 1.5;
+}
+
+.auth-relogin-reason {
+  font-size: 11px;
+  color: var(--fg-3);
+  word-break: break-word;
+}

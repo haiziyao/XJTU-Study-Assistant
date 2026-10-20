@@ -47,47 +47,38 @@ test('笔记 Provider 与新富文本模块结合：摘要关联日程，正文�
   });
 
   assert.match(mount.textContent, /高等数学课堂笔记/);
-  assert.match(mount.textContent, /08:00–09:40 高等数学 · A101/);
+  assert.doesNotMatch(mount.textContent, /08:00–09:40 高等数学 · A101/, '列表卡片只显示标题和状态标签');
+  const card = mount.querySelector('.notes-card');
+  card.listeners.contextmenu[0]({ preventDefault() {}, stopPropagation() {}, clientX: 30, clientY: 40 });
+  assert.match(app.context.document.body.querySelector('.notes-card-menu').textContent, /08:00–09:40 高等数学 · A101/, '完整关联信息保留在右击菜单');
+  app.context.document.body.querySelector('.notes-card-menu').remove();
   assert.equal(markdownReads, 0, '正文只能在用户单击笔记后按需读取');
-  mount.querySelector('.notes-card').listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 5));
+  card.listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(markdownReads, 1);
   const preview = mount.querySelector('.notes-detail-preview');
   assert.match(preview.innerHTML, /<strong>洛必达法则<\/strong>/);
   assert.doesNotMatch(JSON.stringify(summary()), /洛必达法则/, '正文不进入 NoteSummary');
 });
 
-test('手动上传把 File 直接交给 Provider，返回摘要后可立即查看', async () => {
+test('笔记工具栏隐藏手动上传、今日笔记和模板新建入口，并启用点击动效', async () => {
   const app = bootRenderer({ api, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
   const mount = await app.render('notes');
   const notes = app.PCModules.getService('notes');
-  const received = [];
   await notes.connectProvider({
     capabilities: () => ({ upload: true, view: true }),
     listNotes: () => [],
-    uploadNotes: async (files, input) => {
-      received.push({ files, input });
-      return summary({ id: 'import-1', title: input.title || files[0].name, source: 'import', anchor: input.anchor });
-    },
-    readNote: async () => ({ format: 'markdown', text: '## 上传成功\n\n正文由主程序读取。' }),
+    uploadNotes: async () => summary({ id: 'import-1', source: 'import' }),
+    daily: async () => summary({ id: 'daily-1' }),
+    templates: async () => [],
   });
 
-  const uploadButton = mount.querySelectorAll('button').find((button) => button.textContent === '手动上传');
-  assert.ok(uploadButton && !uploadButton.disabled);
-  uploadButton.listeners.click[0]();
-  const fileInput = app.context.document.body.querySelector('.notes-file-input');
-  const titleInput = app.context.document.body.querySelector('.notes-title-input');
-  const fakeFile = { name: '课堂记录.md', size: 1024, type: 'text/markdown', privateBody: '不应进入摘要' };
-  fileInput.files = [fakeFile]; titleInput.value = '导入的课堂记录';
-  fileInput.listeners.change[0]();
-  const submit = app.context.document.body.querySelectorAll('button').find((button) => button.textContent === '上传并查看');
-  await submit.listeners.click[0]();
-
-  assert.equal(received.length, 1);
-  assert.equal(received[0].files[0], fakeFile, '文件对象应原样交给 Provider');
-  assert.equal(received[0].input.title, '导入的课堂记录');
-  assert.match(mount.textContent, /导入的课堂记录/);
-  assert.match(app.context.document.body.querySelector('.notes-note-viewer').innerHTML, /上传成功/);
-  assert.doesNotMatch(JSON.stringify(notes.ingestSnapshot(summary({ id: 'safe' }))), /privateBody/);
+  const labels = mount.querySelectorAll('button').map((button) => button.textContent);
+  assert.equal(labels.includes('手动上传'), false);
+  assert.equal(labels.includes('今日笔记'), false);
+  assert.equal(labels.includes('从模板新建'), false);
+  assert.equal(labels.includes('随手拍'), true);
+  assert.equal(labels.includes('专注模式'), true);
+  assert.ok(mount.listeners.pointerdown?.length, '笔记根节点应绑定统一点击动效');
 });
 
 test('笔记页只保留一个可用的随手拍入口，并把图片交给 Provider', async () => {
@@ -214,7 +205,9 @@ test('右击笔记卡片可查看并保存属性，正文编辑器不再承担�
   assert.equal(patch.favorite, true); assert.equal(patch.properties.status, '待复习');
   assert.equal(patch.properties.custom, '必须保留', '界面不认识的自定义属性不能被覆盖掉');
   assert.equal(patch.expectedUpdatedAt, NOW);
-  assert.match(mount.textContent, /数学\/期末复习/);
+  const updatedCard = mount.querySelector('.notes-card');
+  updatedCard.listeners.contextmenu[0]({ preventDefault() {}, stopPropagation() {}, clientX: 100, clientY: 100 });
+  assert.match(app.context.document.body.querySelector('.notes-card-menu').textContent, /数学\/期末复习/, '精简列表后目录应保留在右击菜单');
 });
 
 test('替换 Provider 会取消旧订阅', async () => {
@@ -261,15 +254,18 @@ test('Canvas 曲线随拖动实时更新，连线与卡片均可右键管理并�
   const app = bootRenderer({ api, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
   const mount = await app.render('notes'); const notes = app.PCModules.getService('notes');
   let canvas = { id: 'canvas-1', name: '测试画布', nodes: [{ id: 'n1', type: 'file', noteId: 'note-1', x: 20, y: 20 }, { id: 'n2', type: 'file', noteId: 'note-2', x: 240, y: 20 }], edges: [{ id: 'e1', fromNode: 'n1', toNode: 'n2' }] };
-  let noteDeletes = 0;
+  let noteDeletes = 0; let noteOpens = 0;
   await notes.connectProvider({
     capabilities: () => ({}), listNotes: () => [summary(), summary({ id: 'note-2', title: '线性代数' })],
     listCanvases: async () => [canvas], updateCanvas: async (id, patch) => { canvas = { ...canvas, ...patch }; return canvas; },
-    createCanvas: async () => canvas, deleteCanvas: async () => ({ deleted: true }), deleteNote: async () => { noteDeletes += 1; }, openNote() {},
+    createCanvas: async () => canvas, deleteCanvas: async () => ({ deleted: true }), deleteNote: async () => { noteDeletes += 1; }, openNote() { noteOpens += 1; },
   });
   const canvasTab = mount.querySelectorAll('button').find((button) => button.textContent === 'Canvas'); await canvasTab.listeners.click[0]();
   await new Promise((resolve) => setTimeout(resolve, 20));
   let card = mount.querySelector('.notes-canvas-node');
+  card.listeners.click[0]({ target: card });
+  assert.equal(mount.querySelector('.notes-canvas-preview'), null, '单击和拖动结束后不应弹出笔记内容预览');
+  card.listeners.dblclick[0]({ stopPropagation() {} }); assert.equal(noteOpens, 1, '双击笔记卡片应直接打开笔记');
   const path = mount.querySelector('.notes-canvas-edge'); const oldCurve = path.getAttribute('d');
   card.listeners.pointerdown[0]({ button: 0, clientX: 20, clientY: 20, pointerId: 1 });
   card.listeners.pointermove[0]({ clientX: 100, clientY: 80, pointerId: 1 });
@@ -284,14 +280,46 @@ test('Canvas 曲线随拖动实时更新，连线与卡片均可右键管理并�
   const removeEdge = mount.querySelectorAll('button').find((button) => button.textContent === '删除连接线'); await removeEdge.listeners.click[0]();
   assert.equal(canvas.edges.length, 0, '删除连接线不得删除两端卡片'); assert.equal(canvas.nodes.length, 2);
   card.listeners.contextmenu[0]({ preventDefault() {}, stopPropagation() {}, clientX: 100, clientY: 100 });
+  const menuBeforeZoom = mount.querySelector('.notes-canvas-menu'); const board = mount.querySelector('.notes-canvas-board'); board.listeners.wheel[0]({ deltaY: -100, clientX: 160, clientY: 120, preventDefault() {} });
+  assert.equal(mount.querySelector('.notes-canvas-menu'), menuBeforeZoom, '滚轮缩放重绘画布时标签属性菜单不应消失');
   const green = mount.querySelectorAll('button').find((button) => button.title === 'green'); await green.listeners.click[0]();
-  assert.equal(canvas.nodes[0].color, 'green');
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(canvas.nodes.find((node) => node.id === 'n1').color, 'green');
   card = mount.querySelector('.notes-canvas-node'); card.listeners.contextmenu[0]({ preventDefault() {}, stopPropagation() {}, clientX: 100, clientY: 100 });
   assert.equal(mount.querySelectorAll('button').some((button) => button.textContent === '置于顶层' || button.textContent === '置于底层'), false);
-  const remove = mount.querySelectorAll('button').find((button) => button.textContent === '删除卡片'); await remove.listeners.click[0]({ stopPropagation() {} });
+  const remove = mount.querySelectorAll('button').find((button) => button.textContent === '删除节点或分支'); await remove.listeners.click[0]({ stopPropagation() {} });
+  const confirmRemove = app.context.document.body.querySelectorAll('button').find((button) => button.textContent === '删除节点'); await confirmRemove.listeners.click[0]();
   assert.deepEqual(canvas.nodes.map((node) => node.id), ['n2']);
   assert.equal(canvas.edges.length, 0, '删除节点后不能保留悬空连线');
   assert.equal(noteDeletes, 0, '删除画布卡片不得删除原始笔记');
+});
+
+test('Canvas 父子线可设置外观，保存后保留样式并同步同类子主题配色', async () => {
+  const app = bootRenderer({ api }); const mount = await app.render('notes');
+  let canvas = { id: 'edge-settings', name: '连线设置', nodes: [
+    { id: 'root', type: 'text', text: '中心', x: 20, y: 100 },
+    { id: 'a', type: 'text', text: '同类一', parentId: 'root', color: 'blue', x: 320, y: 20 },
+    { id: 'b', type: 'text', text: '同类二', parentId: 'root', color: 'blue', x: 320, y: 180 },
+  ], edges: [{ id: 'old', kind: 'hierarchy', fromNode: 'root', toNode: 'a', lineColor: 'purple' }] };
+  await app.PCModules.getService('notes').connectProvider({
+    capabilities: () => ({}), listNotes: () => [], listCanvases: async () => [canvas],
+    updateCanvas: async (id, patch) => { Object.assign(canvas, patch); return canvas; }, openNote() {},
+  });
+  await mount.querySelectorAll('button').find((button) => button.textContent === 'Canvas').listeners.click[0]();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(canvas.edges.every((edge) => edge.lineColor === 'blue'), true, '旧的不一致连线应自动跟随同类子主题');
+  const openMenu = () => mount.querySelector('.notes-canvas-edge-hit').listeners.contextmenu[0]({ preventDefault() {}, stopPropagation() {}, clientX: 100, clientY: 100 });
+  const choose = async (label) => { openMenu(); await mount.querySelector('.notes-canvas-edge-menu').querySelectorAll('button').find((button) => button.textContent === label).listeners.click[0](); };
+  await choose('折线'); await choose('虚线'); await choose('粗');
+  assert.equal(canvas.edges[0].lineType, 'elbow'); assert.equal(canvas.edges[0].lineStyle, 'dashed'); assert.equal(canvas.edges[0].lineWidth, 5);
+  openMenu(); await mount.querySelector('.notes-canvas-edge-menu').querySelectorAll('button').find((button) => button.title === 'green').listeners.click[0]();
+  assert.equal(canvas.edges.every((edge) => edge.lineColor === 'green'), true, '手动颜色应同步到相同父级、同类子主题连线');
+  const root = mount.querySelectorAll('.notes-canvas-node').find((node) => node.dataset.nodeId === 'root');
+  await root.querySelector('.notes-canvas-child-add').listeners.click[0]({ stopPropagation() {} });
+  assert.equal(canvas.edges.every((edge) => edge.lineColor === 'green'), true, '新增同类子主题应继承该组手动颜色');
+  await choose('恢复自动配色（跟随子主题）');
+  assert.equal(canvas.edges.every((edge) => edge.lineColor === 'blue'), true);
+  assert.equal(canvas.edges[0].lineStyle, 'dashed', '恢复自动颜色不应重置线型');
 });
 
 test('Canvas 可从全部笔记中选择添加，并在确认后应用 AI 美化建议', async () => {
@@ -305,11 +333,126 @@ test('Canvas 可从全部笔记中选择添加，并在确认后应用 AI 美化
   });
   const canvasTab = mount.querySelectorAll('button').find((button) => button.textContent === 'Canvas'); await canvasTab.listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 20));
   const add = mount.querySelectorAll('button').find((button) => button.textContent === '添加笔记'); await add.listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 5));
-  const probability = app.context.document.body.querySelectorAll('button').find((button) => button.textContent.includes('概率论')); await probability.listeners.click[0]();
-  assert.equal(canvas.nodes.some((node) => node.noteId === 'note-3'), true, '选择器应能添加非当前笔记');
+  const probability = app.context.document.body.querySelectorAll('button').find((button) => button.textContent.includes('概率论')); const algebra = app.context.document.body.querySelectorAll('button').find((button) => button.textContent.includes('线性代数')); probability.listeners.click[0]();
+  assert.equal(app.context.document.body.querySelectorAll('button').find((button) => button.textContent.includes('概率论')), probability, '勾选笔记时不应重建列表或改变卡片尺寸'); assert.equal(probability.classList.contains('selected'), true);
+  algebra.listeners.click[0]();
+  assert.equal(canvas.nodes.some((node) => node.noteId === 'note-3'), false, '勾选时不应逐篇关闭弹窗并立即写入画布');
+  const addBatch = app.context.document.body.querySelectorAll('button').find((button) => button.textContent === '添加 2 篇笔记'); await addBatch.listeners.click[0]();
+  assert.equal(canvas.nodes.some((node) => node.noteId === 'note-2'), true); assert.equal(canvas.nodes.some((node) => node.noteId === 'note-3'), true, '选择器应一次批量添加多篇笔记');
   const card = mount.querySelector('.notes-canvas-node'); card.listeners.contextmenu[0]({ preventDefault() {}, stopPropagation() {}, clientX: 80, clientY: 80 });
-  const aiAction = mount.querySelectorAll('button').find((button) => button.textContent === 'AI 美化与画布建议'); await aiAction.listeners.click[0]({ stopPropagation() {} }); await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(mount.querySelectorAll('button').some((button) => button.textContent === '打开原笔记'), false, '右键菜单不再重复提供打开原笔记');
+  const aiAction = mount.querySelectorAll('button').find((button) => button.textContent === '✦ AI 助手'); await aiAction.listeners.click[0]({ stopPropagation() {} });
+  const aiChoices = app.context.document.body.querySelectorAll('.notes-canvas-ai-choice'); assert.equal(aiChoices.length, 2, 'AI 功能应合并在一个双选项入口中'); await aiChoices[1].listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 5));
   assert.match(app.context.document.body.textContent, /把核心概念放在中央/);
   const apply = app.context.document.body.querySelectorAll('button').find((button) => button.textContent === '应用此方案'); await apply.listeners.click[0]();
   assert.equal(canvas.nodes[0].shape, 'hexagon'); assert.equal(canvas.nodes[0].color, 'purple');
+});
+
+test('Canvas 统一自由节点与层级关系，兼容旧导图并提供快捷键帮助', async () => {
+  const app = bootRenderer({ api, state: { calendar: { mode: 'month', anchor: '2026-10-11' }, todo: { filter: 'all' } } });
+  const mount = await app.render('notes'); const notes = app.PCModules.getService('notes');
+  let canvas = { id: 'canvas-mixed', name: '混合知识画布', nodes: [
+    { id: 'free-1', type: 'text', text: '原有自由卡片', x: 30, y: 30 },
+    { id: 'legacy-root', type: 'mind', text: '旧中心主题', role: 'root', mindMapId: 'mind-old', x: 260, y: 70 },
+    { id: 'legacy-child', type: 'mind', text: '旧子主题', mindMapId: 'mind-old', mindLevel: 1, parentId: 'legacy-root', x: 510, y: 70 },
+  ], edges: [{ id: 'legacy-edge', fromNode: 'legacy-root', toNode: 'legacy-child', mindmap: true }] };
+  await notes.connectProvider({
+    capabilities: () => ({}), listNotes: () => [summary()], listCanvases: async () => [canvas],
+    updateCanvas: async (id, patch) => { Object.assign(canvas, patch); return canvas; }, createCanvas: async () => canvas, deleteCanvas: async () => ({}), openNote() {},
+  });
+  assert.equal(mount.querySelectorAll('button').some((button) => button.textContent === '数据库视图'), false);
+  const canvasTab = mount.querySelectorAll('button').find((button) => button.textContent === 'Canvas'); await canvasTab.listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 20));
+  const modeToolbar = mount.querySelector('.notes-toolbar');
+  assert.equal(modeToolbar.classList.contains('notes-toolbar-canvas-compact'), true, 'Canvas 模式应使用紧凑的顶部导航');
+  assert.equal(modeToolbar.querySelector('.notes-filter-row'), null, 'Canvas 模式不应占用空间显示笔记搜索与排序');
+  assert.equal(modeToolbar.querySelector('.seg'), null, 'Canvas 模式不应显示笔记状态筛选');
+  assert.equal(mount.querySelectorAll('button').some((button) => button.textContent.includes('插入思维导图')), false, '旧独立导图入口必须移除');
+  const toolbar = mount.querySelector('.notes-canvas-toolbar'); const toolbarToggle = mount.querySelector('.notes-canvas-toolbar-toggle');
+  assert.equal(toolbar.querySelectorAll('.notes-canvas-toolbar-group').length, 4, '展开工具栏应按画布、添加、结构、导出与帮助分组');
+  assert.equal(toolbar.querySelectorAll('button').some((button) => button.textContent === '连接节点'), false, '重复的连接节点按钮应从工具栏移除');
+  assert.match(toolbarToggle.textContent, /收起工具栏/); toolbarToggle.listeners.click[0]();
+  assert.equal(toolbar.classList.contains('is-collapsed'), true); assert.equal(mount.querySelector('.notes-canvas-hint').hidden, true);
+  assert.match(toolbarToggle.textContent, /展开工具栏/); toolbarToggle.listeners.click[0](); assert.equal(toolbar.classList.contains('is-collapsed'), false);
+  assert.equal(canvas.nodes.find((node) => node.id === 'legacy-root').type, 'text');
+  assert.equal(canvas.nodes.some((node) => 'mindMapId' in node || 'mindLevel' in node || 'role' in node), false);
+  assert.equal(canvas.edges.find((edge) => edge.id === 'legacy-edge').kind, 'hierarchy');
+  const board = mount.querySelector('.notes-canvas-board');
+  board.listeners.dblclick[0]({ target: board, clientX: 160, clientY: 240 }); await new Promise((resolve) => setTimeout(resolve, 10));
+  const root = canvas.nodes.find((node) => node.text === '新主题' && !node.parentId); assert.ok(root, '双击空白应创建根主题');
+  const rootCard = mount.querySelectorAll('.notes-canvas-node').find((node) => node.dataset.nodeId === root.id);
+  let selectedTitle = null;
+  app.context.document.createRange = () => ({ selectNodeContents(node) { selectedTitle = node; } });
+  app.context.window.getSelection = () => ({ removeAllRanges() {}, addRange() {} });
+  rootCard.listeners.dblclick[0]({ stopPropagation() {} });
+  assert.equal(selectedTitle, rootCard.querySelector('.notes-canvas-node-content'), '双击标签编辑时应默认全选完整标题');
+  await rootCard.querySelector('.notes-canvas-child-add').listeners.click[0]({ stopPropagation() {} }); await new Promise((resolve) => setTimeout(resolve, 10));
+  const child = canvas.nodes.find((node) => node.parentId === root.id); assert.ok(child, '节点旁加号应创建子主题');
+  assert.equal(child.shape, root.shape, '新子主题应继承父主题边框形状');
+  assert.ok(canvas.edges.some((edge) => edge.fromNode === root.id && edge.toNode === child.id && edge.kind === 'hierarchy'));
+  assert.ok(Number(child.x) > Number(root.x), '新子主题只设置右侧初始位置，不重排已有节点');
+  assert.equal(Number(child.x), Number(root.x) + Number(root.width) + 48, '第一个子主题应位于父主题正右方');
+  assert.equal(Number(child.y), Number(root.y), '第一个子主题应与父主题水平对齐');
+  const refreshedRootCard = mount.querySelectorAll('.notes-canvas-node').find((node) => node.dataset.nodeId === root.id);
+  await refreshedRootCard.querySelector('.notes-canvas-child-add').listeners.click[0]({ stopPropagation() {} }); await new Promise((resolve) => setTimeout(resolve, 10));
+  const sameLevelChildren = canvas.nodes.filter((node) => node.parentId === root.id);
+  assert.equal(sameLevelChildren.length, 2); assert.equal(sameLevelChildren[0].color, sameLevelChildren[1].color, '同一层级新建的子主题应默认使用相同颜色');
+  const layoutSelect = toolbar.querySelectorAll('select')[1]; const tidyButton = toolbar.querySelectorAll('button').find((button) => button.textContent === '整理结构');
+  const applyLayout = async (mode) => { layoutSelect.value = mode; tidyButton.listeners.click[0](); const apply = app.context.document.body.querySelectorAll('button').findLast((button) => button.textContent === '应用排列'); await apply.listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 10)); };
+  mount.querySelectorAll('.notes-canvas-node').find((node) => node.dataset.nodeId === root.id).listeners.click[0]({ target: mount.querySelectorAll('.notes-canvas-node').find((node) => node.dataset.nodeId === root.id) });
+  await applyLayout('right');
+  const rightChildren = canvas.nodes.filter((node) => node.parentId === root.id).sort((a, b) => a.y - b.y);
+  assert.ok(rightChildren.every((node) => node.x >= root.x + root.width + 138), '向右展开应为父子标签保留清晰的连线通道');
+  assert.ok(rightChildren[1].y - rightChildren[0].y >= rightChildren[0].height + 47, '向右展开的同级标签不能贴在一起');
+  await applyLayout('balanced');
+  const balancedChildren = canvas.nodes.filter((node) => node.parentId === root.id);
+  assert.ok(balancedChildren.some((node) => node.x + node.width < root.x) && balancedChildren.some((node) => node.x > root.x + root.width), '左右平衡应根据分支占位把节点分配到根节点两侧');
+  await applyLayout('tree');
+  const treeChildren = canvas.nodes.filter((node) => node.parentId === root.id).sort((a, b) => a.x - b.x);
+  assert.ok(treeChildren.every((node) => node.y >= root.y + root.height + 126), '树状排列应留出足够的上下层间距');
+  assert.ok(treeChildren[1].x - treeChildren[0].x >= treeChildren[0].width + 71, '树状排列的同级标签不能横向粘连');
+  const collapseButton = mount.querySelectorAll('.notes-canvas-node').find((node) => node.dataset.nodeId === root.id).querySelector('.notes-canvas-collapse');
+  let collapsePointerStopped = false; collapseButton.listeners.pointerdown[0]({ stopPropagation() { collapsePointerStopped = true; } });
+  assert.equal(collapsePointerStopped, true, '减号热区按下时不应触发节点拖动'); assert.ok(collapseButton.querySelector('.notes-canvas-collapse-glyph'), '减号图形应置于独立的大热区中');
+  await collapseButton.listeners.click[0]({ preventDefault() {}, stopPropagation() {} });
+  assert.equal(mount.querySelectorAll('.notes-canvas-node').some((node) => sameLevelChildren.some((childNode) => childNode.id === node.dataset.nodeId)), false, '点击减号应立即折叠子主题');
+  const expandButton = mount.querySelectorAll('.notes-canvas-node').find((node) => node.dataset.nodeId === root.id).querySelector('.notes-canvas-collapse');
+  await expandButton.listeners.click[0]({ preventDefault() {}, stopPropagation() {} });
+  assert.equal(mount.querySelectorAll('.notes-canvas-node').some((node) => sameLevelChildren.some((childNode) => childNode.id === node.dataset.nodeId)), true, '点击扩展热区应恢复子主题');
+  const hierarchyPath = mount.querySelector('.notes-canvas-edge.hierarchy').getAttribute('d');
+  const coordinates = hierarchyPath.match(/-?\d+(?:\.\d+)?/g).map(Number);
+  const [startX, startY, control1X, control1Y, control2X, control2Y, endX, endY] = coordinates;
+  const mostlyVertical = Math.abs(endY - startY) > Math.abs(endX - startX);
+  assert.ok(mostlyVertical ? (control1Y - startY) * (endY - startY) >= 0 && (endY - control2Y) * (endY - startY) >= 0 : (control1X - startX) * (endX - startX) >= 0 && (endX - control2X) * (endX - startX) >= 0, '父子曲线控制点应顺着排列方向延伸，不能反向形成回环');
+  const exportSelect = toolbar.querySelectorAll('select')[2]; assert.equal(exportSelect.value, 'markdown', '默认导出格式应为 Markdown');
+  assert.equal(exportSelect.querySelectorAll('option')[0].textContent, 'Markdown', 'Markdown 后不应重复显示扩展名');
+  const canvasFocus = toolbar.querySelector('.notes-canvas-focus'); assert.ok(canvasFocus, 'Canvas 工具栏应恢复专注模式入口');
+  assert.equal(canvasFocus.textContent, '专注模式'); assert.equal(canvasFocus.parentNode, toolbar, '专注模式应独立于导出与帮助分组');
+  assert.equal(toolbar.querySelector('.notes-canvas-toolbar-group-output').querySelector('.notes-canvas-focus'), null, '导出分组内不应再包含专注模式');
+  const adjustedRootCard = mount.querySelectorAll('.notes-canvas-node').find((node) => node.dataset.nodeId === root.id);
+  adjustedRootCard.listeners.pointerdown[0]({ button: 0, target: adjustedRootCard, clientX: 200, clientY: 200, pointerId: 20 });
+  adjustedRootCard.listeners.pointermove[0]({ target: adjustedRootCard, clientX: 260, clientY: 235, pointerId: 20 });
+  await adjustedRootCard.listeners.pointerup[0]({ pointerId: 20 });
+  const movedRootX = Number.parseFloat(adjustedRootCard.style.left); const movedRootY = Number.parseFloat(adjustedRootCard.style.top);
+  for (let index = 0; index < 5; index += 1) board.listeners.wheel[0]({ deltaY: 100, clientX: 200, clientY: 180, preventDefault() {} });
+  assert.ok(Math.abs(canvas.viewport.zoom - .5) < .001, '测试应先把画布缩到最小比例'); const cardBeforePan = mount.querySelectorAll('.notes-canvas-node').find((node) => node.dataset.nodeId === root.id); const visualXBeforePan = Number.parseFloat(cardBeforePan.style.left); const visualYBeforePan = Number.parseFloat(cardBeforePan.style.top); const panStartX = canvas.viewport.x; const panStartY = canvas.viewport.y;
+  board.listeners.pointerdown[0]({ button: 0, target: board, clientX: 100, clientY: 100, pointerId: 21, preventDefault() {} });
+  board.listeners.pointermove[0]({ target: board, clientX: 75, clientY: 80, pointerId: 21 });
+  assert.equal(canvas.viewport.x, panStartX - 25, '缩小后拖动画布仍应更新水平视口偏移'); assert.equal(canvas.viewport.y, panStartY - 20, '缩小后拖动画布仍应更新垂直视口偏移');
+  assert.equal(Number.parseFloat(cardBeforePan.style.left), visualXBeforePan - 25); assert.equal(Number.parseFloat(cardBeforePan.style.top), visualYBeforePan - 20);
+  board.listeners.pointerup[0]({ target: board, pointerId: 21 });
+  const savedRootX = root.x; const savedRootY = root.y; const beforeZoom = canvas.viewport.zoom; const beforeOffsetX = canvas.viewport.x; const beforeOffsetY = canvas.viewport.y; const contentAtPointerX = (200 - beforeOffsetX) / beforeZoom; const contentAtPointerY = (180 - beforeOffsetY) / beforeZoom;
+  const canvasWidthBefore = Number.parseFloat(board.querySelector('.notes-canvas-lines').style.width); board.listeners.wheel[0]({ deltaY: -100, clientX: 200, clientY: 180, preventDefault() {} });
+  const canvasWidthAfter = Number.parseFloat(board.querySelector('.notes-canvas-lines').style.width); assert.ok(canvasWidthAfter > canvasWidthBefore, '普通滚轮应直接缩放画布');
+  const zoomedRootCard = mount.querySelectorAll('.notes-canvas-node').find((node) => node.dataset.nodeId === root.id);
+  assert.equal(root.x, savedRootX); assert.equal(root.y, savedRootY, '缩放不能重置用户调整后的节点坐标');
+  assert.ok(Math.abs((200 - canvas.viewport.x) / canvas.viewport.zoom - contentAtPointerX) < .01, '缩放前后鼠标指向的横向内容位置应保持不变');
+  assert.ok(Math.abs((180 - canvas.viewport.y) / canvas.viewport.zoom - contentAtPointerY) < .01, '缩放前后鼠标指向的纵向内容位置应保持不变');
+  assert.ok(Number.isFinite(Number.parseFloat(zoomedRootCard.style.left)) && Number.isFinite(Number.parseFloat(zoomedRootCard.style.top)));
+  const childCard = mount.querySelectorAll('.notes-canvas-node').find((node) => node.dataset.nodeId === child.id);
+  await childCard.listeners.keydown[0]({ key: 'Backspace', preventDefault() {}, stopPropagation() {} }); await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(canvas.nodes.some((node) => node.id === child.id), false, 'Backspace 应直接删除选中节点');
+  const help = mount.querySelector('.notes-canvas-help-button'); await help.listeners.click[0]();
+  assert.match(app.context.document.body.textContent, /Shift \+ Tab/); assert.match(app.context.document.body.textContent, /拖动连接点/);
+  assert.match(mount.querySelector('.notes-canvas-hint').textContent, /所有卡片均可自由拖动/);
+  canvasFocus.listeners.click[0](); await new Promise((resolve) => setTimeout(resolve, 20)); const focusToolbar = mount.querySelector('.notes-canvas-toolbar'); assert.equal(focusToolbar.classList.contains('is-focus-mode'), true, '专注模式应启用单行紧凑工具栏布局');
 });

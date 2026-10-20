@@ -3636,15 +3636,34 @@ export const META_DESCRIPTION_NOTE =
  * 顺序很重要：先丢整块标签（连带内容），再把块级标签变成换行，最后才剥剩下的标签 ——
  * 反过来的话 `<script>` 里的代码会被当成正文留下来。
  */
-export function htmlToText(html) {
+/**
+ * @param {string} html
+ * @param {{ readable?: boolean }} [options]
+ *   `readable: true` 用于**在面板里读正文**（通知阅读器）：
+ *     · 表格按「一行一条记录」展开（单元格用制表符、行尾换行）；
+ *     · 剩余标签**直接删掉而不是换成空格** —— 校方页面常把数字包在 `<span>`/`<font>` 里，
+ *       换空格会把「2026 年 11 月 14 日」拆成「2 026 年 1 1 月 1 4 日」。
+ *   默认 `false`：保持搜索链路原有的切分口径不变（改它会影响相关度打分，实测会把
+ *   一组既有用例打红，所以这里只做**增量**，不动默认行为）。
+ */
+export function htmlToText(html, options = {}) {
+  const readable = options?.readable === true;
   let text = String(html ?? '');
   text = text.replace(/<!--[\s\S]*?-->/g, ' ');
   text = text.replace(new RegExp(`<(${DROP_TAGS})\\b[^>]*>[\\s\\S]*?<\\/\\1>`, 'gi'), ' ');
   // 被截断的页面常常有**没闭合**的 <script>：上面那条配对失败，这里再兜一刀
   text = text.replace(new RegExp(`<(${DROP_TAGS})\\b[^>]*>[\\s\\S]*$`, 'gi'), ' ');
   text = text.replace(/<br\s*\/?>/gi, '\n');
-  text = text.replace(/<\/(p|div|li|tr|td|th|h[1-6]|section|article|blockquote|dd|dt|pre|figure)\s*>/gi, '\n');
-  text = text.replace(/<[^>]*>/g, ' ');
+  if (readable) {
+    // 表格：单元格之间用制表符、行尾换行，读起来才是"一行一条记录"
+    text = text.replace(/<\/t[dh]\s*>/gi, '\t');
+    text = text.replace(/<\/(p|div|li|tr|h[1-6]|section|article|blockquote|dd|dt|pre|figure)\s*>/gi, '\n');
+    // 剩余标签直接删掉（不补空格），避免把被 <span> 包住的数字拆开
+    text = text.replace(/<[^>]*>/g, '');
+  } else {
+    text = text.replace(/<\/(p|div|li|tr|td|th|h[1-6]|section|article|blockquote|dd|dt|pre|figure)\s*>/gi, '\n');
+    text = text.replace(/<[^>]*>/g, ' ');
+  }
   return collapseWhitespace(decodeEntities(text));
 }
 
@@ -3967,6 +3986,8 @@ export async function readPages(results, options = {}) {
   const {
     fetchImpl, concurrency, maxChars = READ_MAX_CHARS, timeoutMs = READ_TIMEOUT_MS, log,
     config = {}, signal, retryDelayMs, endpoints, fetchTimeoutMs,
+    // `readable`：给“在面板里读正文”用的提取口径（见 htmlToText 的说明），默认关闭
+    readable = false,
   } = options;
   const warn = makeLogger(log);
   const list = (Array.isArray(results) ? results : []).filter((item) => item && typeof item.url === 'string' && item.url);

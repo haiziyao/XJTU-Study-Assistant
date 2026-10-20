@@ -1,16 +1,16 @@
-const VERSION = 'mobile-v1';
+const VERSION = 'mobile-v14';
 const SHELL = `potato-shell-${VERSION}`;
 const APP_ROOT = new URL('./', self.location.href).pathname;
 const ASSETS = [
   './', './index.html', './manifest.webmanifest', './assets/app-icon.svg',
-  './shell/shell.css', './shell/theme.css', './shell/app.js', './shell/icons.js',
-  './shell/message.js', './shell/planned.js', './shell/settings.js',
+  './shell/shell.css?v=20261019-5', './shell/theme.css', './shell/app.js?v=20261019-1', './shell/icons.js',
+  './shell/message.js', './shell/planned.js', './shell/settings.js?v=20261019-3',
   './shell/sidebar-layout.js', './shell/sidebar-customize.js',
-  './kit/theme.js', './kit/registry.js', './kit/util.js', './kit/labels.js',
+  './kit/theme.js?v=20261019-1', './kit/registry.js', './kit/util.js', './kit/labels.js',
   './kit/dom.js', './kit/richtext.js', './kit/qrcode.js', './kit/pwa.js',
-  './views/calendar.css', './views/calendar.js', './views/lms.css', './views/lms.js',
-  './views/academic.css', './views/academic.js', './views/notes/notes.css',
-  './views/notes/notes.js', './views/auth.css', './views/auth-settings.js',
+  './views/calendar.css', './views/calendar.js', './views/lms.css', './views/lms.js', './views/notifications.js?v=20261019-2',
+  './views/academic.css', './views/academic.js', './views/notes/notes.css?v=20261019-17',
+  './views/notes/notes.js?v=20261019-18', './views/auth.css?v=20261017-1', './views/auth-settings.js',
   './views/knowledge-settings.css', './views/knowledge-settings.js',
   './views/chat-hub.css', './views/chat-hub.js', './views/chat-settings.css',
   './views/chat-settings.js', './views/review.css', './views/review.js',
@@ -51,6 +51,19 @@ self.addEventListener('fetch', (event) => {
           return response;
         })
         .catch(() => caches.match(new URL('./', self.location.href))),
+    );
+    return;
+  }
+
+  // 联网时优先获取最新脚本和样式，失败时才回退到缓存，避免更新后仍显示旧界面。
+  if (/\.(?:js|css)$/i.test(url.pathname)) {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok) caches.open(SHELL).then((cache) => cache.put(request, response.clone()));
+          return response;
+        })
+        .catch(() => caches.match(request)),
     );
     return;
   }

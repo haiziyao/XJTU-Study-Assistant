@@ -113,15 +113,50 @@
       await loadStatus();
     });
 
+  /**
+   * 「重新连接」失败时该说什么。
+   *
+   * 静默 SSO 没成功 = 需要用户**重新输一次账号密码**，这是这条路上唯一的出路；
+   * 只说一句"票据已过期"用户是不知道下一步该做什么的（他刚点过"重新连接"，以为那就是答案）。
+   * 所以必须把"去下面输入账号密码、不必先退出登录"写进同一条提示里。
+   */
+  function describeEnsureFailure(outcome) {
+    const reason = String(outcome?.reason ?? '').trim() || '这个站点仍然连不上';
+    return `${reason} —— 请在下方重新输入账号与密码（不必先退出登录）。`;
+  }
+
   /** 让某个站点重新走一次认证（SSO 能救回来就静默救回）。 */
   const doEnsure = (siteId) =>
     withBusy(`ensure:${siteId}`, async () => {
-      const outcome = await PC.api(`/auth/sites/${encodeURIComponent(siteId)}/ensure`, {
-        method: 'POST',
-        body: { revalidate: true },
-      });
-      if (outcome && outcome.ok === false) {
-        ui.error = new Error(outcome.reason ?? '该站点仍不可用');
+      const label = (ui.status?.sites ?? []).find((site) => site.id === siteId)?.label ?? siteId;
+      /*
+       * ⚠️ 这个接口在"站点不可用"时返回的是 **HTTP 200 + `ok:false`**
+       * （业务结果而非 HTTP 错误，契约见 `auth/routes.js` 与 auth-routes.test.js）。
+       * 而 `PC.api` 见 `ok === false` 会**直接抛错**，且 message 取的是
+       * `payload.error?.message` —— 这个响应没有 `error` 字段，
+       * 抛出来就是一句废话「请求失败 (200)」。
+       *
+       * 所以两种结果都得接住：**抛出来的**从 `error.payload` 里读 `needsLogin` / `reason`，
+       * 万一将来改成不抛也照样认 `ok === false` / `connected === false`。
+       * 用户要的是"下一步做什么"，不能让他对着一句「请求失败 (200)」发呆。
+       */
+      try {
+        const outcome = await PC.api(`/auth/sites/${encodeURIComponent(siteId)}/ensure`, {
+          method: 'POST',
+          body: { revalidate: true },
+        });
+        const failed = Boolean(outcome) && (outcome.connected === false || outcome.ok === false);
+        if (failed) ui.error = new Error(describeEnsureFailure({ reason: outcome.reason ?? `${label}仍不可用` }));
+      } catch (error) {
+        const payload = error?.payload ?? {};
+        // SSE 那种 `{ok:false}` 的响应体会被挂在 error.payload 上，reason 就在里面
+        if (payload.ok === false || payload.needsLogin || payload.reason) {
+          ui.error = new Error(describeEnsureFailure({ reason: payload.reason ?? `${label}仍不可用` }));
+        } else {
+          // 真正的接口故障（网络 / 404 / 500）：原话 + 下一步，别只甩原始错误
+          const reason = payload?.error?.message ?? error?.message ?? `${label}连接失败`;
+          ui.error = new Error(describeEnsureFailure({ reason }));
+        }
       }
       await loadStatus();
     });
@@ -144,7 +179,24 @@
     mount.appendChild(summaryRow(status));
     mount.appendChild(siteList(status));
 
-    if (!status.loggedIn) {
+    /*
+     * 什么时候给账号密码表单？
+     *
+     * 判据不能只是 `!status.loggedIn` —— 后端的 `loggedIn` 是 `readyCount > 0`，
+     * 意思是"只要**还有任一站点**就绪就算已登录"。于是出现这个死锁：
+     *   教务还就绪、思源学堂的票据过期了 → `loggedIn` 仍是 true
+     *   → 只显示「重新连接」按钮，**永远没有输入密码的地方**
+     *   → 而「重新连接」只能做静默 SSO，CAS 的 TGC 也过期时必然失败
+     *   → 用户只能"退出登录"把整体打回未登录，才看得到表单。
+     *
+     * 所以只要有**已注册但未就绪**的站点，就必须把表单给出来 ——
+     * 那正是需要用户重新输一次密码的时刻。
+     */
+    const staleSites = (status.sites ?? []).filter((site) => site.registered && !site.ready);
+    const needsRelogin = staleSites.length > 0;
+
+    if (!status.loggedIn || needsRelogin) {
+      if (needsRelogin) mount.appendChild(reloginHint(staleSites));
       if (status.mfa) mount.appendChild(mfaPanel(status));
       else mount.appendChild(loginPanel(status));
     } else {
@@ -211,6 +263,30 @@
       wrap.appendChild(item);
     }
     return wrap;
+  }
+
+  /**
+   * 「有站点掉线、但整体还算已登录」时，在表单上方说清为什么又要输密码。
+   *
+   * 不给这句提示的话，用户会觉得"我明明登录着，为什么又让我输" ——
+   * 而这恰恰是最需要解释的一步：单个站点的票据过期了，重新输一次密码即可；
+   * 不需要（也不应该）先退出登录。
+   */
+  function reloginHint(staleSites) {
+    const box = mk('div', 'auth-relogin');
+    const names = staleSites.map((site) => site.label ?? site.id).join('、');
+    box.appendChild(mk('div', 'auth-relogin-title', `${names}的登录票据已过期`));
+    box.appendChild(
+      mk(
+        'div',
+        'auth-relogin-text',
+        '在下面重新输入一次密码即可（其它站点会一起恢复），不必先退出登录。',
+      ),
+    );
+    // 掉线的具体原因（后端给的）也露出来，便于判断是"票据过期"还是"被要求两步验证"
+    const reason = staleSites.map((site) => site.reason).filter(Boolean)[0];
+    if (reason) box.appendChild(mk('div', 'auth-relogin-reason', reason));
+    return box;
   }
 
   function loginPanel(status) {

@@ -314,6 +314,26 @@ export class AuthService {
     if (!username || !password) {
       throw new AuthError('需要账号与密码', { code: AUTH_ERROR.NEED_CREDENTIALS, status: 400 });
     }
+    /*
+     * ★ 用户**显式提交了密码** = 要求重新认证一次。这里先把该站点的 CasAuth 重置，
+     * 不能信任它里面"我已经登录过"的旧结论。
+     *
+     * 为什么必须这么做（实测过的 bug）：站点票据过期后，`casAuth.hasLogin` /
+     * `alreadyAuthenticated` 仍然是上一次成功时的 true，于是 `casAuth.login()` 会在
+     * 第一行 `if (this.hasLogin) return READY` 直接早退 —— 密码一个字节都没发出去，
+     * 界面却报"登录成功"，下次用还是过期。只有「退出登录」路径会 `casAuth.reset()`，
+     * 所以现象就成了"必须退出登录再登录才行"。
+     *
+     * 代价是每次登录多一次 `begin()` 往返；换来的是"显式登录一定真的走一趟认证"，
+     * 这个确定性比那一次请求值钱。
+     */
+    // `failCount` 是**连续失败次数**，用于"连续错 3 次就要求图形验证码"。
+    // 它跨会话累积才有意义，所以 reset 前后要保住 —— 否则每次登录都会清零，
+    // 暴力猜密码的防护就形同虚设（实测表现：连错多次仍不出现验证码）。
+    const failCount = site.casAuth.failCount;
+    site.casAuth.reset();
+    site.casAuth.failCount = failCount;
+    site.inflight = null;
     this.state.error = null;
     try {
       if (!site.casAuth.postUrl && !site.casAuth.hasLogin) {

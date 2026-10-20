@@ -32,9 +32,9 @@ await notes.connectProvider({
 
 Provider 声明 `markdown: true` 后，详情区会显示“查看笔记”。查看弹层复用仓库内置的 `kit/richtext.js`（支持公式与安全 SVG），正文只短暂存在于弹层内存中，不写入摘要状态或本地缓存。
 
-## 手动上传与查看
+## 附件兼容与查看
 
-- 声明 `upload: true` 并实现 `uploadNotes(files, input)` 后开放“手动上传”。`files` 是浏览器原始 `File[]`，`input` 只包含可选标题、标签与日历挂载；Provider 必须返回一个摘要、摘要数组或 `{ items }`。本模块不读取、复制或缓存文件内容。
+- 顶部工具栏不再显示“手动上传”“今日笔记”和“从模板新建”；底层 `uploadNotes(files, input)` 能力仍保留给兼容调用，不会删除既有附件、每日笔记或模板数据。本模块不读取、复制或缓存文件内容。
 - 声明 `view: true` 并实现 `readNote(noteId)` 后开放“查看笔记”。返回字符串，或 `{ format: 'markdown | text', text }`。为兼容旧 Provider，`markdown: true + renderMarkdown(noteId)` 仍可提供查看能力。
 - 查看内容仅存在于当前弹层。Markdown 经过 `PCRichText` 安全渲染，`text` 使用纯文本展示，Provider 返回的 HTML 不会直接注入页面。
 - 默认上传限制：单次最多 8 个文件、单文件 6 MB、合计 10 MB；支持 Markdown、文本、HTML、PDF、DOCX、PPTX 和常见图片。PDF 与图片可在网页内预览；DOCX/PPTX 会提取正文为 Markdown，PDF 同时尽力提取可搜索文本。旧版 DOC/PPT 只保留下载入口。
@@ -67,8 +67,9 @@ const context = await notes.readForAI({ ids: ['note-id'], limit: 5 });
 
 - 正文支持 `[[标题]]`、`[[标题#章节]]` 与 `[[标题|显示文字]]`；保存时生成出链，详情接口提供反向链接和未链接提及。
 - 笔记具备目录、别名、收藏和学习属性（课程、章节、类型、状态、掌握程度、复习日期）；搜索支持 `tag:`、`folder:`、`course:`、`type:`、`status:` 与排除词。
-- 笔记首页提供局部/全局知识图谱、表格/卡片/看板、每日笔记、内置学习模板、回收站和 Canvas。
+- 笔记首页提供局部/全局知识图谱、回收站和统一 Canvas。Canvas 不再区分自由卡片与思维导图模式：文本、笔记引用和分组都能成为根主题、父主题或子主题，并保留完全自由的位置。
+- Canvas 支持双击空白创建主题、节点旁“＋”添加子主题、层级线与普通关联线、折叠、锁定、撤销重做、主动整理及 PNG/SVG/Markdown/JSON 导出。工具栏的“快捷键 / 使用帮助”会展示键盘和触摸操作，首次进入还会显示三步引导。
 - 自动保存采用 800ms 防抖；服务端最多保留每篇 50 个版本，自动保存快照间隔不少于 5 分钟，手动保存、重命名和删除强制留档。
 - 删除默认为软删除；永久删除只能对回收站中的笔记执行。
 
-新增接口包括 `GET /notes/graph`、`GET /notes/:id/links`、`GET /notes/:id/versions`、`POST /notes/:id/restore`，以及 `/note-templates`、`/note-views`、`/note-canvases` 资源组。旧 `notes.json` 会在读取时补齐新字段，不需要破坏性迁移。
+新增接口包括 `GET /notes/graph`、`GET /notes/:id/links`、`GET /notes/:id/versions`、`POST /notes/:id/restore`，以及 `/note-templates`、`/note-canvases` 资源组。数据库视图接口已移除，旧的 `note-views.json` 文件不会被加载或删除；旧 `notes.json` 会在读取时补齐新字段，不需要破坏性迁移。

@@ -14,6 +14,8 @@
  */
 
 const path = require('node:path');
+// `spawn` 只用于 Windows 上经 explorer.exe 打开链接（见 openExternal 的说明）
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const { app, BrowserWindow, Notification, dialog, ipcMain, shell } = require('electron');
 
@@ -198,6 +200,81 @@ function createWindow() {
  *
  * 返回 `{ canceled, path }`：`canceled` 为真时调用方不该改动现有设置。
  */
+/**
+ * 用系统默认浏览器打开一个 http(s) 地址。
+ *
+ * 为什么要走主进程而不是渲染层 `window.open`：主进程装了
+ * `setWindowOpenHandler → shell.openExternal`，渲染层开新窗口最终也到这儿，
+ * 但那条路上我们**拿不到返回值、也没法先校验协议**。这里显式校验后直接调，
+ * 至少能保证只放行 http/https（别的协议交给系统是另一类风险）。
+ *
+ * ★ Windows 上**故意不用 `shell.openExternal`，改用 `explorer.exe`**。
+ *
+ * `shell.openExternal` 走 `ShellExecute`，会在**当前进程的权限上下文**里把 URL 交给
+ * 默认浏览器；本程序若以管理员身份运行、而浏览器不是，Windows 就会弹
+ * 「Edge 未响应，因为现有实例正在以提升的权限运行。是否要用普通权限重启现有实例？」
+ * ——用户点"是"，浏览器被重启（看起来就是"浏览器被关掉了"）；点"否"则什么都不发生。
+ *
+ * `explorer.exe` 是**以登录用户身份常驻的非提升进程**，把 URL 交给它就等于
+ * "让桌面去打开"，落到与手动双击快捷方式同一条路径上，不会触发那个权限比对。
+ * 它的退出码即使成功也常常非 0，所以**只 spawn、不等结果**，也不看 code。
+ */
+ipcMain.handle('potato:openExternal', async (_event, url) => {
+  const raw = String(url ?? '').trim();
+  if (!/^https?:\/\//i.test(raw)) throw new Error('只支持 http / https 地址');
+
+  /*
+   * 次序：**先官方做法 `shell.openExternal`，失败才降级到 explorer.exe**。
+   *
+   * 两条实测结论（2026-10-18，Windows 11 + Edge）：
+   *   1. `explorer.exe <url>` 在本机**静默无效** —— spawn 成功、进程立刻退出
+   *      （Explorer 是单例），请求没有交到已在运行的那个 Explorer 手里；
+   *   2. `shell.openExternal` 在**以管理员身份运行本程序时反而能通**；
+   *      普通权限下则常被 Edge 那个"提升权限实例"的弹窗拦住。
+   * 所以主路径走官方 API，explorer 只作为抛错后的兜底。
+   * 界面提示也不再谎称"管理员运行会被拦截"（那是反的）。
+   */
+  try {
+    await shell.openExternal(raw);
+    return { ok: true, url: raw, via: 'shell', elevated: isElevated() };
+  } catch (error) {
+    if (process.platform !== 'win32') {
+      return { ok: false, url: raw, error: error?.message ?? String(error), elevated: isElevated() };
+    }
+    // Windows 上还是给 explorer 一次机会（某些环境它确实能过）
+    try {
+      const explorer = `${process.env.SystemRoot ?? 'C:\\Windows'}\\explorer.exe`;
+      const child = spawn(explorer, [raw], { detached: true, stdio: 'ignore', windowsHide: true });
+      await new Promise((resolve, reject) => {
+        // 只等"进程起来了"这一下：explorer 成功时退出码也常非 0，不能等 exit
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+      child.unref();
+      return { ok: true, url: raw, via: 'explorer', elevated: isElevated() };
+    } catch (second) {
+      return { ok: false, url: raw, error: second?.message ?? String(second), elevated: isElevated() };
+    }
+  }
+});
+
+/**
+ * 本进程是不是以管理员身份运行。
+ *
+ * 只用来**如实告诉用户**为什么链接打不开：Windows 会拦截"提升进程 → 非提升浏览器"
+ * 的交接。这个判断本身不改变行为，但能让提示从"点不开"变成"因为你是管理员运行的"。
+ */
+function isElevated() {
+  if (process.platform !== 'win32') return false;
+  try {
+    // `net session` 只有管理员能成功执行（非管理员会返回非 0）
+    const { execFileSync } = require('node:child_process');
+    execFileSync('net', ['session'], { stdio: 'ignore', windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
 ipcMain.handle('potato:pickDirectory', async (_event, options = {}) => {
   const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
     title: typeof options?.title === 'string' && options.title ? options.title : '选择文件夹',

@@ -13,24 +13,40 @@ const settingsView = {
     const wrap = mk('div', 'settings');
 
     const card = (title, rows) => {
-      const box = mk('div', 'card');
-      box.appendChild(mk('div', 'card-title', title));
-      const body = mk('div', 'card-body');
+      const { box, body } = collapsibleCard(title, 'settings-runtime-card', '查看接口、推送通道、版本和平台信息');
       for (const [label, value] of rows) {
         const line = mk('div', 'kv');
         line.append(mk('span', 'kv-key', label), mk('span', 'kv-val', value ?? '—'));
         body.appendChild(line);
       }
-      box.appendChild(body);
       return box;
     };
 
-    // 置顶的模块区块（position: 'top'）先渲染。
-    // 为什么需要它：模块区块默认都排在外壳自带卡片之后，order 再小也到不了最上面；
-    // 而「统一身份认证」是不先做、别的都免谈的那一件 —— 登录之前课表与成绩都拉不到。
-    // 外壳不认识"登录"这个概念，只认 position 这个通用档位。
-    renderModuleSections(wrap, 'top');
+    // 两种账号用途不同，但用户都把它们理解为“登录”。集中到第一张卡片，
+    // 同时明确学校账号与 AI 智学服务端账号不会混用凭据。
+    renderIdentityCard(wrap);
 
+    const { box: themeCard, body: themeBody } = collapsibleCard('主题色板', '', '查看界面配色，并导出 ICS 日历文件');
+    const swatches = mk('div', 'swatches');
+    for (const name of ['blue', 'green', 'orange', 'red', 'purple']) {
+      const dot = mk('span', `swatch sw-${name}`, name);
+      swatches.appendChild(dot);
+    }
+    themeBody.appendChild(swatches);
+    const exportBtn = mk('button', 'ghost-btn', '导出 ICS 日历文件');
+    exportBtn.type = 'button';
+    exportBtn.addEventListener('click', exportIcs);
+    themeBody.appendChild(exportBtn);
+    wrap.appendChild(themeCard);
+
+    // 其余普通设置放在中间；身份与高级 AI 区块由专门的组合卡片承载。
+    renderModuleSections(wrap, 'top', GROUPED_SECTION_IDS);
+    renderModuleSections(wrap, 'normal', GROUPED_SECTION_IDS);
+
+    // 模型、联网检索和知识库维护对普通用户不是日常操作，收纳到页面最后。
+    renderAiAdvancedCard(wrap, PC.state.ai ?? {});
+
+    // 运行地址、版本和平台主要用于排障，放在最后并默认折叠。
     const info = PC.state.info ?? {};
     wrap.appendChild(
       card('运行信息', [
@@ -41,26 +57,6 @@ const settingsView = {
         ['平台', info.platform],
       ]),
     );
-
-    const ai = PC.state.ai ?? {};
-    wrap.appendChild(aiCard(ai));
-
-    const themeCard = mk('div', 'card');
-    themeCard.appendChild(mk('div', 'card-title', '主题色板'));
-    const swatches = mk('div', 'swatches');
-    for (const name of ['blue', 'green', 'orange', 'red', 'purple']) {
-      const dot = mk('span', `swatch sw-${name}`, name);
-      swatches.appendChild(dot);
-    }
-    themeCard.appendChild(swatches);
-    const exportBtn = mk('button', 'ghost-btn', '导出 ICS 日历文件');
-    exportBtn.type = 'button';
-    exportBtn.addEventListener('click', exportIcs);
-    themeCard.appendChild(exportBtn);
-    wrap.appendChild(themeCard);
-
-    // 其余模块登记的设置区块（日程分类、笔记接入等）
-    renderModuleSections(wrap, 'normal');
 
     ctx.mount.appendChild(wrap);
   },
@@ -77,9 +73,9 @@ const settingsView = {
  *   2. 卡片先按已知状态同步渲染，再异步拉 `/ai/status` 补全 —— 拉取失败也只是少几行字，
  *      不影响设置页其它区块。
  */
-function aiCard(ai) {
-  const box = mk('div', 'card');
-  box.appendChild(mk('div', 'card-title', 'AI 接入'));
+function aiCard(ai, { embedded = false } = {}) {
+  const box = mk('div', embedded ? 'settings-advanced-body' : 'card');
+  if (!embedded) box.appendChild(mk('div', 'card-title', 'AI 接入'));
 
   const state = mk('div', 'kv-list');
   const stateRows = {
@@ -262,20 +258,100 @@ async function exportIcs() {
  * @param {HTMLElement} host
  * @param {'top'|'normal'} position 渲染哪一档：置顶的排在外壳卡片之前，其余排在之后。
  */
-function renderModuleSections(host, position) {
+const IDENTITY_SECTION_IDS = ['auth.account', 'account.login'];
+const AI_SECTION_IDS = ['knowledge', 'chat.settings'];
+const GROUPED_SECTION_IDS = new Set([...IDENTITY_SECTION_IDS, ...AI_SECTION_IDS, 'appearance']);
+
+function registeredSection(id) {
+  return (window.PCModules.settingsSections?.() ?? []).find((section) => section.id === id) ?? null;
+}
+
+function renderSectionContent(section, host) {
+  try {
+    section.render(host);
+  } catch (error) {
+    host.appendChild(mk('div', 'eb-msg', `区块渲染失败：${error.message}`));
+  }
+}
+
+let settingsDisclosureId = 0;
+function collapsibleCard(title, extraClass = '', description = '') {
+  const box = mk('section', `card settings-collapsible-card settings-disclosure ${extraClass}`.trim());
+  const toggle = mk('button', 'card-title settings-card-summary');
+  toggle.type = 'button';
+  const bodyId = `settings-panel-${++settingsDisclosureId}`;
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.setAttribute('aria-controls', bodyId);
+  const copy = mk('span', 'settings-card-copy');
+  copy.appendChild(mk('span', 'settings-card-name', title));
+  copy.appendChild(mk('span', 'settings-card-description', description || `查看和调整${title}的详细设置`));
+  toggle.appendChild(copy);
+  const body = mk('div', 'card-body settings-card-panel');
+  body.id = bodyId;
+  body.hidden = true;
+  toggle.addEventListener('click', () => {
+    const open = !box.classList.contains('is-open');
+    box.classList.toggle('is-open', open);
+    toggle.setAttribute('aria-expanded', String(open));
+    body.hidden = !open;
+  });
+  box.appendChild(toggle);
+  box.appendChild(body);
+  return { box, body, toggle };
+}
+
+function renderIdentityCard(host) {
+  const box = mk('div', 'card settings-group-card settings-identity-card');
+  box.appendChild(mk('div', 'card-title', '身份认证'));
+  box.appendChild(mk('p', 'settings-group-intro', '学校账号用于思源学堂和教务，AI 智学账号用于连接个人服务端与多端同步。两个入口集中管理，但账号和密码互不混用。'));
+  const sections = mk('div', 'settings-group-sections settings-advanced-sections');
+  const labels = { 'auth.account': '学校统一身份认证', 'account.login': 'AI 智学账号' };
+  for (const id of IDENTITY_SECTION_IDS) {
+    const descriptor = registeredSection(id); if (!descriptor) continue;
+    sections.appendChild(advancedPanel(labels[id] || descriptor.title, id, (body) => renderSectionContent(descriptor, body)));
+  }
+  box.appendChild(sections); host.appendChild(box);
+}
+
+function advancedPanel(title, id, render) {
+  const details = mk('details', 'settings-advanced-section'); details.dataset.settingsSection = id;
+  details.appendChild(mk('summary', 'settings-advanced-summary', title));
+  const body = mk('div', 'settings-advanced-panel'); details.appendChild(body); render(body); return details;
+}
+
+function renderAiAdvancedCard(host, ai) {
+  const box = mk('div', 'card settings-group-card settings-ai-advanced');
+  box.appendChild(mk('div', 'card-title', 'AI 高级设置'));
+  box.appendChild(mk('p', 'settings-group-intro', '仅在更换模型、配置联网检索或维护知识库时需要调整；日常使用保持默认即可。'));
+  const sections = mk('div', 'settings-advanced-sections');
+  sections.appendChild(advancedPanel('模型、接口与会话', 'ai.connection', (body) => body.appendChild(aiCard(ai, { embedded: true }))));
+  for (const [id, title] of [['knowledge', '知识库维护'], ['chat.settings', '对话与联网检索']]) {
+    const descriptor = registeredSection(id); if (!descriptor) continue;
+    sections.appendChild(advancedPanel(title, id, (body) => renderSectionContent(descriptor, body)));
+  }
+  box.appendChild(sections); host.appendChild(box);
+}
+
+function renderModuleSections(host, position, excludedIds = new Set()) {
   const sections = window.PCModules.settingsSections?.(position) ?? [];
   for (const section of sections) {
-    const card = mk('div', 'card');
-    card.appendChild(mk('div', 'card-title', section.title));
-    const body = mk('div', 'card-body');
-    card.appendChild(body);
+    if (excludedIds.has(section.id)) continue;
+    const { box: card, body } = collapsibleCard(section.title, '', sectionDescription(section));
     host.appendChild(card);
-    try {
-      section.render(body);
-    } catch (error) {
-      body.appendChild(mk('div', 'eb-msg', `区块渲染失败：${error.message}`));
-    }
+    renderSectionContent(section, body);
   }
+}
+
+function sectionDescription(section) {
+  const descriptions = {
+    'calendar.categories': '管理日程分类、颜色和显示方式',
+    'shell.sidebar': '调整侧边栏功能顺序与「更多」菜单',
+    'notes.integration': '查看笔记连接状态并管理摘要缓存',
+    'notifications.settings': '设置通知保留时间、抓取来源和自定义站点',
+    'mobile-pwa': '管理手机安装、离线内容和缓存',
+    'sync.devices': '管理多端数据同步范围与状态',
+  };
+  return descriptions[section.id] || `查看和调整${section.title}的详细设置`;
 }
 
 window.PCModules.register({

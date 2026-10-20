@@ -35,7 +35,7 @@ async function loadRenderer() {
   for (const asset of assets) {
     const response = await fetch(`${origin}/app/${asset}`);
     const record = { asset, status: response.status, type: response.headers.get('content-type') ?? '', text: await response.text() };
-    (asset.endsWith('.css') ? styles : scripts).push(record);
+    (asset.split(/[?#]/, 1)[0].endsWith('.css') ? styles : scripts).push(record);
   }
 
   return { app, origin, html, assets, scripts, styles };
@@ -126,7 +126,7 @@ test('视图注册表：顺序、插槽与跨模块服务符合外壳约定', as
     // 「课表导入」（order 23）在待办(20)之后、学堂(30)之前，是本次新增的独立页面。
     // 学习周报不再占左栏入口：它是「待办」页里的一个面板（views/weekly-panel.js），
     // 因此这里**不该**再出现周报入口（学习周报是待办页里的面板）。
-    assert.deepEqual(main, ['chat', 'calendar', 'todo', 'pomodoro', 'timetable', 'lms', 'academic', 'notes', 'transfer', 'message']);
+    assert.deepEqual(main, ['chat', 'calendar', 'todo', 'pomodoro', 'timetable', 'lms', 'notifications', 'academic', 'notes', 'transfer', 'message']);
     // id 保持 `message` 是为了不破坏用户已存盘的左栏布局；展示名已改为「日志」。
     assert.equal(modules.get('message').label, '日志');
     assert.equal(modules.get('message').icon, 'clock');
@@ -292,4 +292,35 @@ test('输入区：回车发送必须避开输入法组合（isComposing / keyCod
   assert.match(source, /event\.keyCode === 229/, '要判 keyCode === 229（部分输入法只给这个）');
   assert.match(source, /Date\.now\(\) < composingUntil/, '要有组合结束后的时间窗（Safari 的 isComposing 复位更早）');
   assert.match(source, /if \(event\.shiftKey\) return;/, 'Shift+回车仍是换行');
+});
+
+test('设置页按钮与侧边栏共用同一套按压波纹动画', async () => {
+  const source = await readFile(new URL('../src/renderer/shell/app.js', import.meta.url), 'utf8');
+  const shared = source.match(/function playSidebarMotion\([\s\S]*?\n  \}/)?.[0] ?? '';
+  const sidebar = source.match(/function bindSidebarMotion\([\s\S]*?\n  \}/)?.[0] ?? '';
+  const settings = source.match(/function bindSettingsMotion\([\s\S]*?\n  \}/)?.[0] ?? '';
+
+  assert.match(shared, /sidebar-motion-pressed/, '共享动画要使用侧边栏的按压状态');
+  assert.match(shared, /sidebar-ripple/, '共享动画要使用侧边栏波纹');
+  assert.match(sidebar, /playSidebarMotion\(button, event\)/, '侧边栏要调用共享动画');
+  assert.match(settings, /\.settings button, \.settings summary/, '设置页按钮和折叠栏都要有波纹');
+  assert.match(settings, /playSidebarMotion\(control, event\)/, '设置页要调用与侧边栏相同的函数');
+});
+
+test('通知设置的保留期、通知来源和自定义站点分别折叠', async () => {
+  const source = await readFile(new URL('../src/renderer/views/notifications.js', import.meta.url), 'utf8');
+  assert.match(source, /mk\('section', 'card settings-collapsible-card settings-disclosure notif-settings-card'\)/, '通知内的二级设置应为自定义入口卡');
+  assert.match(source, /settingsCard\(\s*'retention',\s*'\u4fdd留期'/);
+  assert.match(source, /settingsCard\(\s*'sources',\s*'\u901a知来源'/);
+  assert.match(source, /settingsCard\(\s*'custom',\s*'\u81ea定义站点'/);
+  assert.match(source, /openPanels: new Set\(\)/, '重画时应保留当前展开项');
+});
+
+test('设置入口卡关闭时强制隐藏网格内容，不让内容遮住标题和点击区', async () => {
+  const source = await readFile(new URL('../src/renderer/shell/shell.css', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /\.settings-collapsible-card:not\(\.is-open\)\s*>\s*\.settings-card-panel[^\{]*\{\s*display:\s*none\s*!important;/,
+    '自定义入口卡关闭时必须明确隐藏详细内容',
+  );
 });

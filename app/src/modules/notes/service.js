@@ -11,6 +11,9 @@ const MAX_ATTACHMENT_DATA = 9 * 1024 * 1024;
 const MAX_OCR_CHARS = 20000;
 const VERSION_LIMIT = 50;
 const AUTO_VERSION_MS = 5 * 60 * 1000;
+const CANVAS_SCHEMA_VERSION = 2;
+const MAX_CANVAS_NODES = 500;
+const MAX_CANVAS_EDGES = 1000;
 
 const cleanText = (value, max = 200) => String(value ?? '').trim().slice(0, max);
 const uniqueText = (value, max = 20) => [...new Set((Array.isArray(value) ? value : []).map((item) => cleanText(item)).filter(Boolean))].slice(0, max);
@@ -36,6 +39,143 @@ function propertiesOf(value) {
     else if (['string', 'number', 'boolean'].includes(typeof rawValue) || rawValue === null) result[key] = typeof rawValue === 'string' ? rawValue.slice(0, 1000) : rawValue;
   }
   return result;
+}
+
+/**
+ * Canvas v2：普通卡片与原“思维导图节点”使用同一模型。
+ * 这里只返回兼容视图，不改写集合；旧数据会在用户下一次保存画布时自然升级。
+ */
+function normalizeCanvas(value = {}) {
+  const rawNodes = Array.isArray(value.nodes) ? value.nodes.slice(0, MAX_CANVAS_NODES) : [];
+  const nodes = rawNodes.map((raw, index) => {
+    const node = { ...raw };
+    node.id = cleanText(node.id, 120) || `node-${index + 1}`;
+    if (node.type === 'mind') node.type = 'text';
+    node.type = ['text', 'file', 'group'].includes(node.type) ? node.type : 'text';
+    node.parentId = node.parentId ? String(node.parentId) : null;
+    node.order = Number.isFinite(Number(node.order)) ? Number(node.order) : index;
+    node.collapsed = Boolean(node.collapsed);
+    node.locked = Boolean(node.locked);
+    delete node.mindMapId;
+    delete node.mindLevel;
+    delete node.role;
+    return node;
+  });
+  const ids = new Set(nodes.map((node) => node.id));
+  const edges = (Array.isArray(value.edges) ? value.edges : []).slice(0, MAX_CANVAS_EDGES).map((raw, index) => {
+    const edge = { ...raw };
+    edge.id = cleanText(edge.id, 120) || `edge-${index + 1}`;
+    edge.fromNode = String(edge.fromNode ?? '');
+    edge.toNode = String(edge.toNode ?? '');
+    edge.kind = edge.kind === 'hierarchy' || edge.kind === 'association' ? edge.kind : edge.mindmap ? 'hierarchy' : 'association';
+    delete edge.mindmap;
+    delete edge.mindMapId;
+    return edge;
+  }).filter((edge) => ids.has(edge.fromNode) && ids.has(edge.toNode) && edge.fromNode !== edge.toNode);
+
+  // 旧版层级同时写在 parentId 与 mindmap edge 中。优先保留 parentId，缺失时从旧连线补齐。
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  for (const edge of edges) {
+    if (edge.kind !== 'hierarchy') continue;
+    const child = byId.get(edge.toNode);
+    if (child && !child.parentId) child.parentId = edge.fromNode;
+  }
+  for (const node of nodes) if (node.parentId && !ids.has(node.parentId)) node.parentId = null;
+
+  // 损坏的历史数据不能让整张画布打不开：发现环时只把该节点提升为根节点。
+  for (const node of nodes) {
+    const seen = new Set([node.id]); let cursor = node;
+    while (cursor.parentId) {
+      if (seen.has(cursor.parentId)) { node.parentId = null; break; }
+      seen.add(cursor.parentId); cursor = byId.get(cursor.parentId);
+      if (!cursor) break;
+    }
+  }
+
+  const hierarchyPairs = new Set(edges.filter((edge) => edge.kind === 'hierarchy').map((edge) => `${edge.fromNode}:${edge.toNode}`));
+  for (const node of nodes) if (node.parentId && !hierarchyPairs.has(`${node.parentId}:${node.id}`)) {
+    edges.push({ id: `hierarchy-${node.id}`, fromNode: node.parentId, toNode: node.id, kind: 'hierarchy', lineType: 'curve', lineStyle: 'solid', arrow: 'none' });
+  }
+  return {
+    ...value,
+    schemaVersion: CANVAS_SCHEMA_VERSION,
+    revision: Math.max(0, Number(value.revision) || 0),
+    nodes,
+    edges,
+    viewport: value.viewport && typeof value.viewport === 'object' ? { ...value.viewport } : { x: 0, y: 0, zoom: 1 },
+  };
+}
+
+function validateCanvas(value) {
+  const rawNodes = Array.isArray(value.nodes) ? value.nodes : [];
+  const rawEdges = Array.isArray(value.edges) ? value.edges : [];
+  if (rawNodes.length > MAX_CANVAS_NODES) throw HttpError.badRequest(`单个画布最多 ${MAX_CANVAS_NODES} 个节点`);
+  if (rawEdges.length > MAX_CANVAS_EDGES) throw HttpError.badRequest(`单个画布最多 ${MAX_CANVAS_EDGES} 条连线`);
+
+  // 写入时必须拒绝坏结构；只有读取历史数据时才由 normalizeCanvas 做温和修复。
+  const rawIds = new Set();
+  for (let index = 0; index < rawNodes.length; index += 1) {
+    const id = cleanText(rawNodes[index]?.id, 120) || `node-${index + 1}`;
+    if (rawIds.has(id)) throw HttpError.badRequest(`画布节点 ID 重复：${id}`);
+    rawIds.add(id);
+  }
+  const rawParents = new Map();
+  for (const node of rawNodes) {
+    if (!node?.parentId) continue;
+    const id = cleanText(node.id, 120);
+    const parentId = String(node.parentId);
+    if (!rawIds.has(parentId)) throw HttpError.badRequest('父节点不存在');
+    rawParents.set(id, parentId);
+  }
+  for (const edge of rawEdges) {
+    const from = String(edge?.fromNode ?? ''); const to = String(edge?.toNode ?? '');
+    if (!rawIds.has(from) || !rawIds.has(to)) throw HttpError.badRequest('画布连线引用了不存在的节点');
+    if (from === to) throw HttpError.badRequest('节点不能连接到自己');
+    const kind = edge.kind === 'hierarchy' || edge.mindmap ? 'hierarchy' : 'association';
+    if (kind !== 'hierarchy') continue;
+    const previous = rawParents.get(to);
+    if (previous && previous !== from) throw HttpError.badRequest('一个节点只能有一个层级父节点');
+    rawParents.set(to, from);
+  }
+  for (const id of rawIds) {
+    const seen = new Set([id]); let cursor = id;
+    while (rawParents.has(cursor)) {
+      cursor = rawParents.get(cursor);
+      if (seen.has(cursor)) throw HttpError.badRequest('层级关系不能形成循环');
+      seen.add(cursor);
+    }
+  }
+
+  const canvas = normalizeCanvas(value);
+  const ids = new Set();
+  for (const node of canvas.nodes) {
+    if (ids.has(node.id)) throw HttpError.badRequest(`画布节点 ID 重复：${node.id}`);
+    ids.add(node.id);
+  }
+  const parents = new Map();
+  for (const edge of canvas.edges) {
+    if (!ids.has(edge.fromNode) || !ids.has(edge.toNode)) throw HttpError.badRequest('画布连线引用了不存在的节点');
+    if (edge.fromNode === edge.toNode) throw HttpError.badRequest('节点不能连接到自己');
+    if (edge.kind !== 'hierarchy') continue;
+    const previous = parents.get(edge.toNode);
+    if (previous && previous !== edge.fromNode) throw HttpError.badRequest('一个节点只能有一个层级父节点');
+    parents.set(edge.toNode, edge.fromNode);
+  }
+  for (const node of canvas.nodes) {
+    if (node.parentId && !ids.has(node.parentId)) throw HttpError.badRequest('父节点不存在');
+    if (node.parentId && parents.has(node.id) && parents.get(node.id) !== node.parentId) throw HttpError.badRequest('节点父级与层级连线不一致');
+    if (node.parentId) parents.set(node.id, node.parentId);
+  }
+  for (const id of ids) {
+    const seen = new Set([id]); let cursor = id;
+    while (parents.has(cursor)) {
+      cursor = parents.get(cursor);
+      if (seen.has(cursor)) throw HttpError.badRequest('层级关系不能形成循环');
+      seen.add(cursor);
+    }
+  }
+  canvas.nodes.forEach((node) => { node.parentId = parents.get(node.id) || null; });
+  return canvas;
 }
 
 function attachmentsOf(value) {
@@ -487,13 +627,18 @@ export class NoteService {
     return this.instantiateTemplate('builtin-daily', { title: `${date} 学习记录`, date, folder: '每日笔记', properties: { dailyDate: date } });
   }
 
-  listResource(kind) { return this[`${kind}Collection`].all(); }
-  getResource(kind, id) { const item = this[`${kind}Collection`].get(String(id)); if (!item) throw HttpError.notFound(kind === 'views' ? '视图不存在' : '画布不存在'); return item; }
+  listResource(kind) { return this[`${kind}Collection`].all().map((item) => normalizeCanvas(item)); }
+  getResource(kind, id) { const item = this[`${kind}Collection`].get(String(id)); if (!item) throw HttpError.notFound('画布不存在'); return normalizeCanvas(item); }
   async createResource(kind, input = {}) {
-    if (kind === 'views') return this.viewsCollection.insert({ name: cleanText(input.name) || '未命名视图', layout: ['table', 'cards', 'kanban'].includes(input.layout) ? input.layout : 'table', filters: propertiesOf(input.filters), sort: cleanText(input.sort, 60) || 'updatedAt:desc', groupBy: cleanText(input.groupBy, 60) });
-    return this.canvasesCollection.insert({ name: cleanText(input.name) || '未命名画布', nodes: Array.isArray(input.nodes) ? input.nodes.slice(0, 500) : [], edges: Array.isArray(input.edges) ? input.edges.slice(0, 1000) : [], viewport: input.viewport && typeof input.viewport === 'object' ? input.viewport : { x: 0, y: 0, zoom: 1 } });
+    const canvas = validateCanvas({ name: cleanText(input.name) || '未命名画布', nodes: input.nodes, edges: input.edges, viewport: input.viewport, revision: 0 });
+    return this.canvasesCollection.insert(canvas);
   }
-  async updateResource(kind, id, input = {}) { this.getResource(kind, id); const allowed = kind === 'views' ? ['name', 'layout', 'filters', 'sort', 'groupBy'] : ['name', 'nodes', 'edges', 'viewport']; const patch = {}; for (const key of allowed) if (input[key] !== undefined) patch[key] = input[key]; return this[`${kind}Collection`].update(String(id), patch); }
+  async updateResource(kind, id, input = {}) {
+    const current = this.getResource(kind, id);
+    if (input.revision !== undefined && Number(input.revision) !== current.revision) throw HttpError.conflict('画布已在其他位置更新，请刷新后重试');
+    const merged = validateCanvas({ ...current, ...Object.fromEntries(['name', 'nodes', 'edges', 'viewport'].filter((key) => input[key] !== undefined).map((key) => [key, input[key]])), revision: current.revision + 1 });
+    return this[`${kind}Collection`].update(String(id), merged);
+  }
   async removeResource(kind, id) { this.getResource(kind, id); await this[`${kind}Collection`].remove(String(id)); return { deleted: true, id: String(id) }; }
 
   queryForAI({ ids, query, limit = 10 } = {}) {
