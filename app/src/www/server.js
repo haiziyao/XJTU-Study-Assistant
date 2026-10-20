@@ -376,6 +376,54 @@ export function createWwwServer(options = {}) {
    * 少了结尾斜杠浏览器会以 `/` 为基准解析成 `/kit/theme.js` → 全部 404 →
    * "HTTP 200 但白屏"，最难排查的那种坏法。
    */
+  /**
+   * 服务端版**放行的视图脚本**（其余全部不下发）。
+   *
+   * 为什么用白名单而不是黑名单：渲染层的左栏是「脚本一加载就 `PCModules.register` 自我登记」
+   * 生成的（见 `renderer/kit/registry.js`），所以**不下发脚本 = 左栏不出现**。
+   * 用白名单，以后有人往 `index.html` 里加新视图也不会意外漏进公网版。
+   *
+   * 只放三个：日历与待办（`calendar.js` 同时管这两块）、对话、对话设置。
+   * 与 `backends.js` 的 `DISABLED_MODULE_IDS` 是**同一件事的两半**，改一处必须改另一处：
+   * 只砍服务端会留下"点进去 404"的死入口，只砍脚本会留下用不了的接口面。
+   */
+  const WEB_VISIBLE_VIEWS = [
+    'views/calendar.js',
+    'views/chat-hub.js',
+    'views/chat-settings.js',
+  ];
+
+  /**
+   * 另外要剔掉的 **shell 层**脚本。
+   *
+   * `shell/message.js` 不是 `views/` 下的文件，但它同样只干一件事：注册「日志」视图
+   * （`PCModules.register({ id: 'message' })`，读 `/audit/log`）。而 `audit` 模块在
+   * `DISABLED_MODULE_IDS` 里已经禁用，留着这个入口点进去就是 404。
+   * 外壳对它没有依赖（`app.js` 里的 `messages` 全是局部变量），剔掉不影响启动。
+   */
+  const WEB_HIDDEN_SHELL_SCRIPTS = ['shell/message.js'];
+
+  /** 服务端版会下发的 index.html（按上面两张表裁剪），只算一次。 */
+  let appIndexCache = null;
+
+  async function appIndexHtml() {
+    if (appIndexCache === null) {
+      const raw = await fs.readFile(path.join(rendererDir, 'index.html'), 'utf8');
+      appIndexCache = raw
+        .split('\n')
+        .filter((line) => {
+          const hit = line.match(/<script\s[^>]*src="([^"?]+)/);
+          if (!hit) return true;
+          const src = hit[1];
+          // views/** 走白名单；shell/** 只按黑名单剔
+          if (src.startsWith('views/')) return WEB_VISIBLE_VIEWS.includes(src);
+          return !WEB_HIDDEN_SHELL_SCRIPTS.includes(src);
+        })
+        .join('\n');
+    }
+    return appIndexCache;
+  }
+
   async function serveApp(res, url, pathname) {
     if (pathname === APP_PREFIX) {
       redirectToDirectory(res, APP_PREFIX, url.searchParams.toString());
@@ -383,6 +431,13 @@ export function createWwwServer(options = {}) {
     }
     let relative = pathname.slice(APP_PREFIX.length).replace(/^\/+/, '');
     if (!relative || relative.endsWith('/')) relative += 'index.html';
+
+    // 应用页外壳要按白名单裁剪后再发；其余静态资源原样发。
+    if (relative === 'index.html') {
+      sendHtml(res, await appIndexHtml());
+      return;
+    }
+
     const { file } = await resolveStaticFile(rendererDir, relative, { label: '应用页面资源' });
     await sendFile(res, file);
   }

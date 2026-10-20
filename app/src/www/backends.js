@@ -42,8 +42,29 @@ import { loadModules } from '../core/module/registry.js';
  *
  * 注意：`modules/auth`（学校统一身份认证）**保留** —— 它是教务/成绩模块的前置依赖，
  * 与"思源学堂"是两件事；而它在服务端版也不会被主动使用（没有入口去触发登录）。
+ *
+ * 2026-10-20：服务端版**进一步收窄成"只留最基础功能"** —— 日历与待办（`calendar`）、
+ * 对话（`ai`）以及它们依赖的服务层（`aisearch` / `memory` / `auth` / `uiprefs`）。
+ * 其余模块不再加载。理由：公网版面向的是"想随手记日程、查待办、问 AI"的用户，
+ * 学业/笔记/通知/番茄钟/课表/周报这些在桌面端才完整；留着既没人用，又多一批要维护的接口面。
+ * 对应的视图脚本在 `server.js` 的 `WEB_VISIBLE_VIEWS` 里也有白名单，两处必须一起改。
  */
-export const DISABLED_MODULE_IDS = ['lms', 'transfer'];
+export const DISABLED_MODULE_IDS = [
+  // 公网语义不安全：学堂要代持学校凭据、直传要在服务器上起 8886 + UDP 广播
+  'lms',
+  'transfer',
+  // 服务端版不收窄后不加载的业务模块
+  'academic',
+  'notes',
+  'notifications',
+  'pomodoro',
+  'timetable',
+  'weekly',
+  'knowledge',
+  'audit',
+  'account',
+  'sync',
+];
 
 /** 默认空闲回收时间：30 分钟没有请求就关掉实例（下次访问再懒启动一次，约几百毫秒）。 */
 export const DEFAULT_IDLE_MS = 30 * 60 * 1000;

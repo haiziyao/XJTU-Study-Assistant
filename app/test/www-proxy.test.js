@@ -22,12 +22,17 @@ import { connectWs } from './helpers/ws-client.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** 造一条笔记（走代理 → 落到该账号自己的数据目录）。 */
-const createNote = (app, cookie, title) =>
-  app.call('/api/v1/notes', { method: 'POST', headers: { cookie }, body: { title, body: `${title} 的正文` } });
+/**
+ * 造一条待办（走代理 → 落到该账号自己的数据目录）。
+ *
+ * 2026-10-20：服务端版收窄成"只留日历与待办 / 对话"之后不再加载 notes 模块，
+ * 所以隔离测试改用**待办**（calendar 模块）来验——它仍在服务端版可用。
+ */
+const createTodo = (app, cookie, title) =>
+  app.call('/api/v1/todos', { method: 'POST', headers: { cookie }, body: { title } });
 
-const listNotes = async (app, cookie) => {
-  const res = await app.call('/api/v1/notes', { headers: { cookie } });
+const listTodos = async (app, cookie) => {
+  const res = await app.call('/api/v1/todos', { headers: { cookie } });
   return res.json?.items ?? [];
 };
 
@@ -108,21 +113,21 @@ test('服务端版：A 用户看不到 B 用户的数据（HTTP 侧，两个账�
     const bob = await register(app, { username: 'bob', inviteCode: invite.json.invite.code });
     assert.equal(bob.status, 201);
 
-    const aliceNote = await createNote(app, alice.cookie, 'Alice 的笔记');
-    assert.equal(aliceNote.status, 201);
-    const bobNote = await createNote(app, bob.cookie, 'Bob 的笔记');
-    assert.equal(bobNote.status, 201);
+    const aliceTodo = await createTodo(app, alice.cookie, 'Alice 的待办');
+    assert.equal(aliceTodo.status, 201);
+    const bobTodo = await createTodo(app, bob.cookie, 'Bob 的待办');
+    assert.equal(bobTodo.status, 201);
 
-    const aliceSees = await listNotes(app, alice.cookie);
-    const bobSees = await listNotes(app, bob.cookie);
+    const aliceSees = await listTodos(app, alice.cookie);
+    const bobSees = await listTodos(app, bob.cookie);
     assert.equal(aliceSees.length, 1, `Alice 应当只看到自己那条，实际 ${aliceSees.length} 条`);
     assert.equal(bobSees.length, 1, `Bob 应当只看到自己那条，实际 ${bobSees.length} 条`);
-    assert.equal(aliceSees[0].title, 'Alice 的笔记');
-    assert.equal(bobSees[0].title, 'Bob 的笔记');
+    assert.equal(aliceSees[0].title, 'Alice 的待办');
+    assert.equal(bobSees[0].title, 'Bob 的待办');
     assert.notEqual(aliceSees[0].id, bobSees[0].id);
 
-    // 连 id 也跨不过去：拿对方的 id 直接读 → 404
-    const cross = await app.call(`/api/v1/notes/${bobSees[0].id}`, { headers: { cookie: alice.cookie } });
+    // 连 id 也跨不过去：拿对方的 id 直接读 → 404 或 200 但拿不到（两个实例各自独立）
+    const cross = await app.call(`/api/v1/todos/${bobSees[0].id}`, { headers: { cookie: alice.cookie } });
     assert.equal(cross.status, 404);
 
     // 两个实例、两个数据目录
@@ -131,9 +136,9 @@ test('服务端版：A 用户看不到 B 用户的数据（HTTP 侧，两个账�
     assert.notEqual(instances[0].port, instances[1].port);
 
     // alice 的删除只影响 alice 自己
-    await app.call(`/api/v1/notes/${aliceSees[0].id}`, { method: 'DELETE', headers: { cookie: alice.cookie } });
-    assert.equal((await listNotes(app, alice.cookie)).length, 0);
-    assert.equal((await listNotes(app, bob.cookie)).length, 1, 'Alice 的操作绝不能动到 Bob 的数据');
+    await app.call(`/api/v1/todos/${aliceSees[0].id}`, { method: 'DELETE', headers: { cookie: alice.cookie } });
+    assert.equal((await listTodos(app, alice.cookie)).length, 0);
+    assert.equal((await listTodos(app, bob.cookie)).length, 1, 'Alice 的操作绝不能动到 Bob 的数据');
   } finally {
     await app.close();
   }
@@ -147,8 +152,25 @@ test('服务端版：登录后 /app/ 是应用页面，静态资源按登录态�
     assert.equal(page.status, 200);
     assert.match(page.headers['content-type'], /text\/html/);
     assert.match(page.text, /id="chat-log"/, '登录后拿到的应当是渲染层应用页面');
-    // 渲染层的 CSP 在页面自己的 meta 里（宿主不改渲染层的任何字节）
+    // 渲染层的 CSP 在页面自己的 meta 里。宿主只按白名单剔掉视图脚本那一行，
+    // 其余字节（CSP、kit/shell 的加载顺序）原样下发。
     assert.match(page.text, /Content-Security-Policy/);
+
+    // 2026-10-20：服务端版只留最基础功能（日历与待办 / 对话）。
+    // 左栏是「脚本一加载就 PCModules.register 自我登记」生成的，所以不下发脚本 = 不出现在左栏。
+    // 断言查 `src="…"` 而不是裸文件名：index.html 的注释里也会提到这些路径，那是无害的。
+    for (const kept of ['views/calendar.js', 'views/chat-hub.js', 'views/chat-settings.js']) {
+      assert.ok(page.text.includes(`src="${kept}"`), `服务端版应当下发 ${kept}`);
+    }
+    for (const gone of [
+      'views/notes/notes.js', 'views/lms.js', 'views/academic.js', 'views/pomodoro.js',
+      'views/timetable.js', 'views/notifications.js', 'views/transfer.js',
+      'views/account.js', 'views/sync.js', 'views/weekly-panel.js', 'views/auth-settings.js',
+      // shell 层的「日志」视图：audit 模块已禁用，留着就是点进去 404 的死入口
+      'shell/message.js',
+    ]) {
+      assert.equal(page.text.includes(`src="${gone}"`), false, `服务端版不该下发 ${gone}`);
+    }
 
     const asset = await app.call('/app/kit/theme.js', { headers: { cookie: alice.cookie } });
     assert.equal(asset.status, 200);
@@ -221,10 +243,13 @@ test('服务端版：思源学堂（LMS）明确禁用 —— 403 + 原因，且
     const ids = modules.json.items.map((item) => item.id);
     assert.equal(ids.includes('lms'), false, `服务端版不该加载 lms，实际模块：${ids.join('、')}`);
     assert.equal(ids.includes('transfer'), false, `服务端版不该加载 transfer，实际模块：${ids.join('、')}`);
-    // 其它模块照常可用（证明只砍了这两块，没有把服务端版砍成空壳）
-    // cards / goals / 复习页已由 main 的「拆除复习系统」移除，这里改断言 main 现有的模块。
-    for (const id of ['calendar', 'notes', 'ai', 'pomodoro', 'timetable', 'audit']) {
-      assert.ok(ids.includes(id), `模块 ${id} 应当仍然可用`);
+    // 服务端版只留最基础功能：日历与待办（calendar）+ 对话（ai）。
+    // 2026-10-20 收窄：学业/笔记/通知/番茄钟/课表/周报/知识库/更改日志也不再加载。
+    for (const id of ['calendar', 'ai']) {
+      assert.ok(ids.includes(id), `模块 ${id} 应当仍然可用，实际：${ids.join('、')}`);
+    }
+    for (const id of ['academic', 'notes', 'notifications', 'pomodoro', 'timetable', 'weekly', 'knowledge', 'audit']) {
+      assert.equal(ids.includes(id), false, `服务端版不该加载 ${id}，实际：${ids.join('、')}`);
     }
   } finally {
     await app.close();
