@@ -1,13 +1,14 @@
 /**
  * 账号模块的路由。
  *
- * 五条路由，全部挂在 `${API_PREFIX}/account`（= 浏览器看到的 `/api/v1/account`；
+ * 六条路由，全部挂在 `${API_PREFIX}/account`（= 浏览器看到的 `/api/v1/account`；
  * 渲染层用 `PC.api('/account')` 调用，前缀由外壳补齐）：
  *
  *   POST /account/login     `{serverUrl, username, password}` -> 后端代登录，成功后落盘
  *   POST /account/register  `{serverUrl, username, password, inviteCode}` -> 代注册（成功即登录）
  *   GET  /account           `{connected, serverUrl, user, loginAt}` —— **不含 token**
  *   GET  /account/probe     `?serverUrl=` -> `{reachable, serverName, version, features}`
+ *   POST /account/server    `{serverUrl}` -> 先探测再切换；令牌有效则保留，否则清掉并提示重登
  *   POST /account/logout    尽力通知服务器，本地一定清掉
  *
  * 为什么这几个动作必须走"后端代做"而不是渲染层直接 fetch 服务器：见 service.js 顶部
@@ -55,6 +56,17 @@ export function registerAccountRoutes(router, ctx = {}) {
   // 探测服务器：面板用它显示"服务器可达 / 版本 / LMS 是否可用"。
   // 地址不通或写错都返回 reachable:false（**不抛错**）——它本来就是给用户试地址用的。
   router.get(`${P}/probe`, async ({ query }) => service.probe({ serverUrl: query?.serverUrl }));
+
+  /*
+   * 更改服务器地址。
+   *
+   * 语义：**先探测（/auth/config）再切换**，不是"把字符串写进文件"——
+   * 地址打错/填成别人的站点时，一个字段都不该改（详见 service.js 的 switchServer）。
+   * 旧令牌会用 `GET /api/v1/health` 在新地址上试一次：
+   * 200 保留登录态；401/403 切换地址但清掉令牌（requiresLogin:true，界面提示重登）。
+   * 失败抛 HttpError（400 BAD_SERVER_URL / 502 NOT_POTATO_SERVER / 502 SERVER_UNREACHABLE）。
+   */
+  router.post(`${P}/server`, async ({ body }) => service.switchServer(body ?? {}));
 
   // 退出登录：即使服务器连不上也要成功（本地一定清掉）
   router.post(`${P}/logout`, async () => service.logout());

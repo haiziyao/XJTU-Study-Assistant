@@ -43,6 +43,13 @@
     /** 退出登录的两步确认（不用 window.confirm：那会阻塞渲染进程，样式也不受控） */
     confirmLogout: false,
     /**
+     * 「更改服务器」的编辑态。
+     *
+     * `null` = 还没展开（只显示当前地址 + 「更改」按钮）；字符串 = 输入框里的值。
+     * 保存失败时**不清空**它，用户改一位再点保存即可（见 saveServer）。
+     */
+    serverDraft: null,
+    /**
      * 表单里用户已经敲进去的内容。
      *
      * **必须存一份**：本区块的 `paint()` 是整块重建 DOM 的，而 `run()` 在发请求**之前**
@@ -315,6 +322,110 @@
 
   /* ------------------------------------------------------------ 已登录 */
 
+  /** 从地址里取 host 用于 toast（`已切换到 studywhy.3q.hair`）；解析不了就原样显示。 */
+  function hostOf(value) {
+    try {
+      return new URL(value).host || String(value ?? '');
+    } catch {
+      return String(value ?? '');
+    }
+  }
+
+  /**
+   * 「更改服务器」：一行只读地址 + 「更改」按钮；展开后是行内输入 + 保存/取消。
+   *
+   * 为什么入口放在**已登录**面板里：没登录时登录表单本来就有一个可编辑的服务器地址，
+   * 再来一个入口只会让用户分不清"改哪个才生效"。已登录时地址是只读的，
+   * 用户才需要一个明确的"换一台服务器"动作。
+   *
+   * 保存过程交给 run()：按钮立即禁用并显示「正在验证…」，请求回来后面板整体重画 ——
+   * 成功会变成新地址（保留登录态）或未登录表单（需要重登）；失败则原样显示后端 message，
+   * 输入框里的内容由 `ui.serverDraft` 保住，不会被重画清空。
+   */
+  function serverSection(status) {
+    const box = mk('div', 'acct-server');
+    box.appendChild(mk('div', 'acct-group-title', '更改服务器'));
+
+    if (ui.serverDraft === null) {
+      box.appendChild(kv('当前服务器地址', status.serverUrl || '（同源：和页面同一台服务器）'));
+      const actions = mk('div', 'acct-actions');
+      const edit = mk('button', 'ghost-btn', '更改');
+      edit.type = 'button';
+      edit.disabled = Boolean(ui.busy);
+      edit.addEventListener('click', () => {
+        // 默认填当前地址：多数人只是把域名改一段，不想从头敲
+        ui.serverDraft = status.serverUrl || '';
+        ui.error = null;
+        paint();
+      });
+      actions.appendChild(edit);
+      box.appendChild(actions);
+      return box;
+    }
+
+    const editor = mk('div', 'acct-form');
+    const addressInput = input('acct-input', {
+      placeholder: EXAMPLE_SERVER_URL,
+      autocomplete: 'off',
+      value: ui.serverDraft,
+    });
+    // 每次输入都记进 ui.serverDraft：保存时 run() 会立刻重画（按钮变「正在验证…」），
+    // 若只读 DOM，重画后拿到的是重建后的空值。
+    addressInput.addEventListener('input', () => {
+      ui.serverDraft = addressInput.value;
+    });
+    addressInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') saveServer(addressInput);
+    });
+    editor.appendChild(field('服务器地址', addressInput, SERVER_HINT));
+
+    const actions = mk('div', 'acct-actions');
+    actions.appendChild(button('primary-btn', '保存', '正在验证…', () => saveServer(addressInput), 'server'));
+    const cancel = mk('button', 'ghost-btn', '取消');
+    cancel.type = 'button';
+    cancel.disabled = Boolean(ui.busy);
+    cancel.addEventListener('click', () => {
+      ui.serverDraft = null;
+      ui.error = null;
+      paint();
+    });
+    actions.appendChild(cancel);
+    editor.appendChild(actions);
+    box.appendChild(editor);
+    return box;
+  }
+
+  /**
+   * 保存新服务器地址。
+   *
+   * 成功后的 toast 分三种：
+   *   - 令牌在新服务器上有效 → 「已切换到 {host}（登录态有效）」；
+   *   - 新服务器拒绝令牌 → 「已切换到 {host}，请重新登录」，并把登录表单预填成新地址；
+   *   - 本来就没登录（理论上这个入口只在已登录时出现）→ 只提示切换成功。
+   * 失败**不弹笼统 toast**：run() 会把后端的 `error.message` 原样显示在面板上
+   * （BAD_SERVER_URL / SERVER_UNREACHABLE / NOT_POTATO_SERVER 都是中文人话），
+   * 同时 ui.serverDraft 保留，用户改一位就能重试。
+   */
+  function saveServer(addressInput) {
+    const value = String(addressInput?.value ?? ui.serverDraft ?? '').trim();
+    ui.serverDraft = value;
+    void run('server', async () => {
+      const result = await PC.api('/account/server', { method: 'POST', body: { serverUrl: value } });
+      ui.serverDraft = null;
+      const target = result?.serverUrl ?? value;
+      if (result?.keptSession) {
+        PC.toast(`已切换到 ${hostOf(target)}（登录态有效）`);
+      } else if (result?.requiresLogin) {
+        // 令牌已被清除：把登录表单的地址预填成新服务器，用户只需再输一次密码
+        ui.form.serverUrl = target;
+        ui.form.password = '';
+        PC.toast(`已切换到 ${hostOf(target)}，请重新登录`);
+      } else {
+        PC.toast(`已切换到 ${hostOf(target)}`);
+      }
+    });
+  }
+
   function connectedPanel() {
     const status = ui.status;
     const user = status.user ?? {};
@@ -328,11 +439,13 @@
 
     const list = mk('div', 'acct-kv');
     list.append(
-      kv('服务器地址', status.serverUrl || '（同源：和页面同一台服务器）'),
       kv('登录时间', formatTime(status.loginAt)),
     );
     if (user.role) list.appendChild(kv('角色', user.role === 'admin' ? '管理员' : '普通用户'));
     box.appendChild(list);
+
+    // 服务器地址单独成段：它是这次唯一能改的东西，和"登录时间/角色"这种纯展示信息分开
+    box.appendChild(serverSection(status));
 
     const actions = mk('div', 'acct-actions');
     if (ui.confirmLogout) {
@@ -387,6 +500,13 @@
     if (!mount) return;
     // **先收值、再重建**：用户敲进去的内容不能因为一次重画就没了（详见 ui.form 的说明）
     captureForm();
+    /*
+     * 收完就把引用清空：下一轮 captureForm 不能再从**已经脱离文档的旧节点**读值。
+     * 典型场景：切换服务器后令牌失效 -> 回到登录表单，本该预填新地址，
+     * 却会被上一次渲染（已丢弃）的地址输入框覆盖回旧值。
+     * 本轮真正渲染出来的输入框会由 boundInput 重新登记。
+     */
+    for (const key of Object.keys(formInputs)) formInputs[key] = null;
     mount.innerHTML = '';
 
     if (!ui.status) {

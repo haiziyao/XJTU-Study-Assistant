@@ -51,6 +51,14 @@ const FILE_MODE = 0o600;
 /** 请求上游的超时。10 秒足够一次登录往返，又不至于让界面卡到用户以为死机。 */
 export const DEFAULT_TIMEOUT_MS = 10_000;
 
+/**
+ * 「更改服务器」时探测 `/auth/config` 的超时。
+ *
+ * 比普通请求短（8 秒）：这是一个用户正盯着「正在验证…」的动作。在一个打错的地址上
+ * 干等 10 秒没有意义 —— 他真正需要的是尽快知道"这个地址不对，换一个"。
+ */
+export const SWITCH_PROBE_TIMEOUT_MS = 8_000;
+
 /** 会话 Cookie 名（与 server 分支 `src/www/server.js` 的 `SESSION_COOKIE` 一字不差）。 */
 export const SESSION_COOKIE = 'potato_session';
 
@@ -308,9 +316,19 @@ class PrivateJsonFile {
  * @param {number} [options.timeoutMs]        上游请求超时
  * @param {Function} [options.fetchImpl]      注入 fetch（测试用）
  * @param {Function} [options.now]            注入时钟（测试固定 loginAt 用）
+ * @param {Function} [options.broadcast]      WebSocket 广播（改地址后通知界面重画）
  */
 export class AccountService {
-  constructor({ dataDir = process.cwd(), defaultServerUrl = DEFAULT_SERVER_URL, origin = '', timeoutMs = DEFAULT_TIMEOUT_MS, fetchImpl, now = () => Date.now(), logger = console } = {}) {
+  constructor({
+    dataDir = process.cwd(),
+    defaultServerUrl = DEFAULT_SERVER_URL,
+    origin = '',
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    fetchImpl,
+    now = () => Date.now(),
+    logger = console,
+    broadcast = () => {},
+  } = {}) {
     this.file = new PrivateJsonFile(path.join(dataDir, ACCOUNT_FILE));
     this.defaultServerUrl = String(defaultServerUrl ?? '');
     this.origin = String(origin ?? '') || 'http://127.0.0.1';
@@ -318,8 +336,17 @@ export class AccountService {
     this.fetchImpl = fetchImpl ?? globalThis.fetch;
     this.now = now;
     this.logger = logger;
+    this.broadcast = typeof broadcast === 'function' ? broadcast : () => {};
     /** @type {{serverUrl:string, token:string, user:object, loginAt:string}|null} */
     this.session = null;
+    /**
+     * 最近一次选定的服务器地址（**即使没有 token 也记着**）。
+     *
+     * 为什么单独留一份：切换服务器时如果新服务器不认旧令牌，token 必须清掉，
+     * 但"用户选了哪台服务器"仍然要记住 —— 登录表单要预填它，否则用户刚切过去
+     * 又被弹回默认地址，等于这次切换白做了。有会话时它只是 `session.serverUrl` 的镜像。
+     */
+    this.lastServerUrl = '';
   }
 
   /* ------------------------------------------------------------ 会话存取 */
@@ -328,6 +355,15 @@ export class AccountService {
   async load() {
     const saved = await this.file.read();
     this.session = this.#normalizeSession(saved);
+    /*
+     * 地址要**在没有有效会话时也读回来**。
+     *
+     * 切换服务器时如果新服务器回了 401，我们清掉 token 但保留 `{serverUrl}` ——
+     * 下次启动若只认"有 token 的会话"，这条记录就被丢掉了，登录表单又回到默认地址。
+     * 地址不是凭据，单独记住它没有安全问题。
+     */
+    const savedUrl = String(saved?.serverUrl ?? '').trim();
+    if (savedUrl) this.lastServerUrl = savedUrl;
     return this;
   }
 
@@ -345,6 +381,7 @@ export class AccountService {
 
   async #save(session) {
     this.session = session;
+    this.lastServerUrl = session.serverUrl;
     await this.file.write({
       serverUrl: session.serverUrl,
       token: session.token,
@@ -352,6 +389,18 @@ export class AccountService {
       loginAt: session.loginAt,
     });
     return session;
+  }
+
+  /**
+   * 只记地址、不记令牌（切换服务器后旧令牌被新服务器拒绝时走这里）。
+   *
+   * 文件里**没有 token 字段**：`#normalizeSession` 因此不会把它当成会话，
+   * 界面显示"未登录"；但地址还在，登录表单能预填。
+   */
+  async #rememberServer(serverUrl) {
+    this.session = null;
+    this.lastServerUrl = serverUrl;
+    await this.file.write({ serverUrl });
   }
 
   async #clear() {
@@ -362,7 +411,8 @@ export class AccountService {
   /** 面板状态：**绝不包含 token**（凭据不出后端）。 */
   status() {
     if (!this.session) {
-      return { connected: false, serverUrl: this.defaultServerUrl, user: null, loginAt: null };
+      // 没登录也回"上次选定的地址"：切换服务器后需要重登时，登录表单要预填它
+      return { connected: false, serverUrl: this.lastServerUrl || this.defaultServerUrl, user: null, loginAt: null };
     }
     return {
       connected: true,
@@ -378,11 +428,15 @@ export class AccountService {
    * **三个来源都过 `normalizeServerUrl`**：老版本 `account.json` 里可能留着带尾斜杠的地址，
    * 配置文件里的默认值也可能被人手写成 `localhost:8866`。解析只留这一处口径，
    * 别的地方一律拿归一化后的字符串拼 URL。
+   *
+   * 「切换服务器后被新服务器 401」会清掉会话但留下地址（`lastServerUrl`），
+   * 此时它排在默认值前面：用户刚选过的服务器就是他下一步要登录的那台。
    */
   resolveServerUrl(input) {
     const raw = input === undefined || input === null ? '' : String(input).trim();
     if (raw) return normalizeServerUrl(raw);
     if (this.session?.serverUrl) return normalizeServerUrl(this.session.serverUrl);
+    if (this.lastServerUrl) return normalizeServerUrl(this.lastServerUrl);
     return normalizeServerUrl(this.defaultServerUrl);
   }
 
@@ -433,9 +487,9 @@ export class AccountService {
   }
 
   /** 发一次请求（**单跳**，不跟跳转）。网络层失败统一翻成 502 + 人话。 */
-  async #fetchOnce(target, { method, headers, payload }) {
+  async #fetchOnce(target, { method, headers, payload, timeoutMs = this.timeoutMs }) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       return await this.fetchImpl(target, {
         method,
@@ -449,7 +503,7 @@ export class AccountService {
     } catch (error) {
       // 网络层失败：DNS 解析不了、对方没监听、TLS 失败、超时被 abort……
       // 统一成一句人话，原因留在 details 里给排查用（不进 message）。
-      const reason = error?.name === 'AbortError' ? `等待超过 ${Math.round(this.timeoutMs / 1000)} 秒` : error?.message;
+      const reason = error?.name === 'AbortError' ? `等待超过 ${Math.round(timeoutMs / 1000)} 秒` : error?.message;
       throw new HttpError(502, 'SERVER_UNREACHABLE', UNREACHABLE_MESSAGE, { hint: reason });
     } finally {
       clearTimeout(timer);
@@ -500,7 +554,7 @@ export class AccountService {
    * `Authorization: Bearer` 与 `X-Potato-Token` 都带上：服务端版三种令牌载体都认
    * （Cookie / Bearer / 头），桌面端起见多发两个头，省得将来换载体又要改这里。
    */
-  async #request(serverUrl, pathname, { method = 'GET', body, token } = {}) {
+  async #request(serverUrl, pathname, { method = 'GET', body, token, timeoutMs } = {}) {
     let base = trimBase(serverUrl);
     let target = this.#absoluteUrl(base, pathname);
     const headers = { Accept: 'application/json' };
@@ -513,7 +567,7 @@ export class AccountService {
     const payload = body === undefined ? undefined : JSON.stringify(body);
 
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
-      const response = await this.#fetchOnce(target, { method, headers, payload });
+      const response = await this.#fetchOnce(target, { method, headers, payload, timeoutMs });
 
       if (!REDIRECT_STATUSES.has(response.status)) {
         const text = await response.text().catch(() => '');
@@ -700,6 +754,105 @@ export class AccountService {
         error: error.message,
       };
     }
+  }
+
+  /* ------------------------------------------------------------ 更改服务器 */
+
+  /** 广播"账号状态变了"：界面收到后会重画设置页，切换到登录表单/新地址。 */
+  #broadcastServerChanged(serverUrl, { keptSession, requiresLogin = false }) {
+    try {
+      this.broadcast({
+        type: 'data_changed',
+        module: 'account',
+        payload: { target: 'account', action: 'server', serverUrl, keptSession, requiresLogin },
+      });
+    } catch (error) {
+      // 广播通道坏了不该让"地址已经切好"变成一次失败：HTTP 响应里已经带着结果，
+      // 当前窗口会自己重画；其它窗口最迟下次轮询/重连时也会读到新状态。
+      this.logger?.warn?.(`[account] 广播服务器地址变更失败：${error.message}`);
+    }
+  }
+
+  /**
+   * 更改服务器地址：**先探测、再用令牌试一次，成功才落盘**。
+   *
+   * 为什么不能只改 `account.json` 里的 `serverUrl`
+   * --------------------------------------------
+   * 1. **地址可能根本不是本程序**（打错域名、填成别人的首页）。先把地址存下来，
+   *    下次启动就会拿令牌去跟一个陌生地址说话；`/auth/config` 是唯一能确认
+   *    "对面是「AI 智学」服务端"的探测点，所以必须**先探测再切换**。
+   * 2. **令牌属于服务器**：换一台服务器后它可能有效（同一套部署的多个域名共用一个
+   *    账号库/签名密钥 —— 真机上的 `study.xjtuwhy.com` → `studywhy.3q.hair` 就是
+   *    这种情况），也可能无效。用 `GET /api/v1/health` 带令牌试一次，把
+   *    "要不要重新登录"在**切换的当下**告诉用户，而不是等他去点同步时才吃一个 401。
+   * 3. 探测/验证失败时**一个字段都不改**：用户至少还留在原来那台能用的服务器上。
+   *
+   * 为什么令牌有效时要保留（而不是让用户重登一次更"干净"）
+   * ----------------------------------------------------
+   * 本程序**从不保存密码**（登录时只把密码转给服务器，拿到的是令牌）。令牌就是这个
+   * 程序的"登录态"：它由服务器签发、代表一个已认证会话，不是本地的密码副本。
+   * 新地址认这个令牌，说明它就是同一套部署的另一个入口 —— 此时清掉令牌不会有任何
+   * 安全收益（令牌本来就只存在本机 0600 文件里），只会逼用户重新输一次密码。
+   * 反过来，新服务器回 401/403 时**必须**清掉：留着令牌只会让界面显示"已登录"，
+   * 而每个请求都 401，用户还得自己猜为什么。
+   *
+   * @param {{serverUrl?: string}} [input]
+   * @returns {Promise<{ok:true, serverUrl:string, switched:true, keptSession:boolean, requiresLogin?:boolean, user?:object}>}
+   * @throws {HttpError} 400 `BAD_SERVER_URL` / 502 `NOT_POTATO_SERVER` / 502 `SERVER_UNREACHABLE`
+   */
+  async switchServer({ serverUrl } = {}) {
+    const raw = String(serverUrl ?? '').trim();
+    if (!raw) throw badServerUrl('不能为空');
+    // 允许用户只写域名：normalizeServerUrl 按主机名补 https://（本机/回环补 http://）
+    const base = normalizeServerUrl(raw);
+
+    /*
+     * 第一步：探测。用 8 秒超时（用户正盯着"正在验证…"）。
+     * 判定口径是**必须有 `serverName`**：`/auth/config` 回 200 但没有服务名的地址，
+     * 可能只是某个恰好也有这个路径的站点，不能把登录态托付给它。
+     */
+    const config = await this.#request(base, '/auth/config', { timeoutMs: SWITCH_PROBE_TIMEOUT_MS });
+    if (config.status !== 200 || typeof config.body?.serverName !== 'string' || !config.body.serverName) {
+      throw new HttpError(502, 'NOT_POTATO_SERVER', NOT_POTATO_SERVER_MESSAGE);
+    }
+    // 跟完 301/302（http -> https）之后的最终 base 才是要落盘的地址
+    const target = config.base;
+    const previous = this.session;
+    const token = previous?.token ? String(previous.token) : '';
+
+    if (!token) {
+      // 本来就没登录：没有会话可保，只把"下次用哪台服务器"记下来
+      await this.#rememberServer(target);
+      this.#broadcastServerChanged(target, { keptSession: false });
+      return { ok: true, serverUrl: target, switched: true, keptSession: false, requiresLogin: false };
+    }
+
+    /*
+     * 第二步：拿旧令牌问新服务器"你认不认我"。
+     * 200 = 认 → 保留令牌（理由见上面「为什么令牌有效时要保留」）；
+     * 401/403 = 明确不认 → 切换地址、清掉令牌，让界面提示重新登录；
+     * 其它（连不上 / 5xx）= **判断不了** → 原样不动，报不可达让用户重试。
+     */
+    const health = await this.#request(target, '/api/v1/health', { token });
+    if (health.status === 200) {
+      const session = await this.#save({ ...previous, serverUrl: target });
+      this.#broadcastServerChanged(target, { keptSession: true });
+      return {
+        ok: true,
+        serverUrl: session.serverUrl,
+        switched: true,
+        keptSession: true,
+        user: clone(session.user),
+      };
+    }
+    if (health.status === 401 || health.status === 403) {
+      await this.#rememberServer(target);
+      this.#broadcastServerChanged(target, { keptSession: false, requiresLogin: true });
+      return { ok: true, serverUrl: target, switched: true, keptSession: false, requiresLogin: true };
+    }
+    throw new HttpError(502, 'SERVER_UNREACHABLE', UNREACHABLE_MESSAGE, {
+      hint: `新服务器健康检查返回 HTTP ${health.status}`,
+    });
   }
 
   /**
