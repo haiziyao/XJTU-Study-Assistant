@@ -119,21 +119,20 @@
 
   /* ------------------------------------------------------------ 顶栏 */
 
-  let subtitle = null;
-
-  /** 模型名/未接入状态就在桌面那份 `#ai-badge` 里，盯着它改文字，不另取一份数据。 */
-  function mirrorBadge() {
-    const badge = document.getElementById('ai-badge');
-    if (!badge || !subtitle) return;
-    const paint = () => {
-      const text = String(badge.textContent ?? '').trim();
-      subtitle.textContent = text || '智学助手';
-      subtitle.classList.toggle('is-warn', /未接入|失败|错误/.test(text));
-    };
-    paint();
-    new MutationObserver(paint).observe(badge, { childList: true, characterData: true, subtree: true });
+  /**
+   * 顶栏右侧的两个操作。真正的 `<header>` 由外壳统一画（`.m-appbar`），
+   * 这样 AI 和「主页 / 日历 / 笔记 / 我的」是同一套标题、同一套安全区。
+   * 旧版在这里自绘 `.m-ai-head`（22px 大标题 + 另一个内边距），是风格割裂的主因。
+   */
+  function actions() {
+    const { h, iconButton } = window.PCMobileUI;
+    return h(
+      'div',
+      { class: 'm-ai-actions' },
+      iconButton({ icon: 'history', label: '历史对话', onClick: openHistory }),
+      iconButton({ icon: 'compose', label: '新对话', onClick: newChat }),
+    );
   }
-
   /** 发送键原本是文字按钮；手机上是圆形图标键。只换内容，节点与点击处理器都不动。 */
   function paintSendIcon() {
     const send = document.getElementById('chat-send');
@@ -241,25 +240,8 @@
     }
   }
 
-  function buildHead(chat) {
-    if (chat.querySelector(':scope > .m-ai-head')) return;
-    const { h, iconButton } = window.PCMobileUI;
-
-    subtitle = h('span', { class: 'm-ai-sub', text: '智学助手' });
-    const head = h(
-      'header',
-      { class: 'm-ai-head' },
-      h('div', { class: 'm-ai-head-main' }, h('h1', { class: 'm-ai-title', text: 'AI' }), subtitle),
-      h(
-        'div',
-        { class: 'm-ai-actions' },
-        iconButton({ icon: 'history', label: '历史对话', onClick: openHistory }),
-        iconButton({ icon: 'compose', label: '新对话', onClick: newChat }),
-      ),
-    );
-
-    chat.prepend(head);
-    mirrorBadge();
+  /** 外壳切到 AI 标签时调用；重复调用无副作用。 */
+  function enter() {
     paintSendIcon();
     decorateControls();
     wirePickers();
@@ -269,15 +251,5 @@
     if (input) input.placeholder = '说点什么…';
   }
 
-  /** 外壳切到 AI 标签时调用；重复调用无副作用。 */
-  function enter() {
-    const chat = document.querySelector('.chat');
-    if (!chat) return;
-    buildHead(chat);
-    paintSendIcon();
-    decorateControls();
-    wirePickers();
-  }
-
-  window.PCMobileAI = { enter };
+  window.PCMobileAI = { enter, actions };
 })();

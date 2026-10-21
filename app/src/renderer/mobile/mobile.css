@@ -609,7 +609,8 @@ html.m-app .mobile-more-sheet {
 }
 
 .m-segment.is-active {
-  background: var(--bg-elevated);
+  /* `--bg-elevated` 在夜间比轨道还暗，选中项会“消失”；从前景色提亮一档，两种主题都看得见 */
+  background: color-mix(in srgb, var(--fg) 10%, var(--bg-hover));
   color: var(--fg);
   font-weight: 600;
   box-shadow: var(--shadow-1);
@@ -1193,16 +1194,12 @@ html.m-app .mobile-more-sheet {
 
 /* ---------------------------------------------------------------- 按标签切换布局 */
 
-/* AI 标签：交回桌面那套对话列 —— 它本身就是完整的一屏（消息列表 + 输入区 + 控件行），
-   再在手机外壳里造第二份输入区只会多出一份要同步的状态。
-   外壳保留底部标签栏，导航栏与内容区让开（对话列自己的顶栏就是导航栏）。
+/* AI 标签：对话列永远是完整的一屏（消息列表 + 输入区 + 控件行），外壳只负责把它
+   放进「顶栏 + 内容 + 标签栏」的三段式里。顶栏与其它标签共用同一个 `.m-appbar`，
+   不再由对话列自绘一个大标题头 —— 那正是 AI 页看起来像另一个应用的原因。
 
    `z-index: 5` 是必需的：`.m-shell` 是 fixed 且带底色，不加层级会把它整块盖住。
    标签栏是 20，仍在对话列之上。 */
-html.m-app[data-tab='ai'] .m-appbar {
-  display: none;
-}
-
 html.m-app[data-tab='ai'] .m-scroll {
   display: none;
 }
@@ -1211,7 +1208,8 @@ html.m-app[data-tab='ai'] .app {
   display: block;
   position: fixed;
   z-index: 5;
-  inset: 0 0 calc(var(--m-tabbar-h) + var(--m-safe-bottom)) 0;
+  /* 顶部让给外壳的 appbar，底部让给标签栏；对话列自己不再留顶栏 */
+  inset: calc(var(--m-appbar-h) + var(--m-safe-top)) 0 calc(var(--m-tabbar-h) + var(--m-safe-bottom)) 0;
   /* shell.css 的窄屏规则给了 .app 一个 100dvh：top + height 都在时 inset 的 bottom 会被忽略，
      对话列就会盖住标签栏。这里显式交回高度 */
   height: auto;
@@ -1465,46 +1463,14 @@ html.m-app[data-stack='1'] .m-tabbar {
 
 /* ---------------------------------------------------------------- AI 页（对话） */
 
-/* 桌面那份顶栏（推送点 / 标题 / 模型徽标 / 连接状态 / 收面板）在手机上是调试信息堆，
-   换成手机自己的顶栏：左边标题与模型，右边「历史」「新对话」。 */
+/* 桌面那份顶栏（推送点 / 标题 / 模型徽标 / 连接状态 / 收面板）在手机上是调试信息堆。
+   外壳的 `.m-appbar` 统一画「AI」与右侧操作，这里只把桌面顶栏让出去。 */
 html.m-app[data-tab='ai'] .chat-head {
   display: none;
 }
 
 html.m-app[data-tab='ai'] .chat {
   border-right: none;
-}
-
-.m-ai-head {
-  flex: none;
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: var(--m-sp-2);
-  padding: calc(var(--m-safe-top) + 10px) var(--m-page-x) var(--m-sp-2);
-  border-bottom: 0.5px solid var(--line);
-  background: color-mix(in srgb, var(--bg-base) 90%, transparent);
-  backdrop-filter: blur(16px) saturate(1.3);
-}
-
-.m-ai-title {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  line-height: 1.2;
-}
-
-.m-ai-sub {
-  display: block;
-  margin-top: 1px;
-  color: var(--fg-3);
-  font-size: var(--m-fs-cap);
-  line-height: 1.2;
-}
-
-.m-ai-sub.is-warn {
-  color: var(--orange);
 }
 
 .m-ai-actions {
@@ -1757,5 +1723,437 @@ html.m-app[data-tab='ai'] .chat-attachments {
 }
 
 html.m-app[data-tab='ai'] .attach-chip {
+  font-size: var(--m-fs-sub);
+}
+
+/* ---------------------------------------------------------------- 点按反馈 */
+
+/* Chrome 的点按高亮（tap highlight）是半透明蓝色、且不完全跟随控件圆角，
+   在胶囊按钮上看起来就像一个突兀的蓝矩形。手机外壳里一律关掉，
+   按压反馈改用整体不透明度，既跟手又不盖住图标。 */
+html.m-app,
+html.m-app * {
+  -webkit-tap-highlight-color: transparent;
+}
+
+html.m-app :where(button, [role='button'], a, .m-cell--action, summary):active {
+  opacity: 0.72;
+}
+
+/* 触屏设备没有物理键盘，:focus-visible 只会在某些 Android 版本的点按后亮起，
+   表现为“点一下多出蓝色描边”。键盘可达性在桌面端保持原样。 */
+@media (hover: none) {
+  html.m-app :focus,
+  html.m-app :focus-visible {
+    outline: none;
+  }
+}
+
+/* ---------------------------------------------------------------- 主页 */
+
+.m-home-hero {
+  padding: var(--m-sp-2) var(--m-page-x) var(--m-sp-3);
+}
+
+.m-home-greeting {
+  margin: 0;
+  font-size: var(--m-fs-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.m-home-date {
+  margin: 4px 0 0;
+  color: var(--fg-3);
+  font-size: var(--m-fs-sub);
+}
+
+.m-home-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--m-sp-2);
+  margin-top: var(--m-sp-3);
+}
+
+.m-home-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--bg-surface);
+  color: var(--fg);
+  text-align: left;
+}
+
+button.m-home-stat:active {
+  background: var(--bg-hover);
+}
+
+.m-home-stat-value {
+  overflow: hidden;
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-home-stat-label {
+  overflow: hidden;
+  color: var(--fg-3);
+  font-size: var(--m-fs-cap);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-stats-flat {
+  margin: var(--m-sp-4) var(--m-page-x) var(--m-sp-2);
+}
+
+/* 快捷入口：3 列 × 2 行，图标块 + 名称，和「我的」的列表是同一套色调 */
+.m-home-quick {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--m-sp-2);
+  padding: 0 var(--m-page-x) var(--m-sp-3);
+}
+
+.m-home-quick-item {
+  display: flex;
+  align-items: center;
+  gap: var(--m-sp-2);
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg-surface);
+  color: var(--fg);
+  font-size: 13px;
+  text-align: left;
+}
+
+.m-home-quick-item:active {
+  background: var(--bg-hover);
+}
+
+.m-home-quick-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- 二级页通用 */
+
+.m-page-head {
+  padding: var(--m-sp-2) var(--m-page-x) var(--m-sp-3);
+}
+
+.m-page-title {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.m-page-sub {
+  margin: 4px 0 0;
+  color: var(--fg-3);
+  font-size: var(--m-fs-sub);
+}
+
+/* ---------------------------------------------------------------- 笔记 */
+
+.m-note-head {
+  padding: var(--m-sp-2) var(--m-page-x) var(--m-sp-3);
+}
+
+.m-note-title {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.m-note-meta {
+  margin: 6px 0 0;
+  color: var(--fg-3);
+  font-size: var(--m-fs-cap);
+}
+
+.m-note-tagrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.m-note-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* 阅读区：只做排版，不复制桌面笔记那套面板背景 */
+.m-note-body {
+  padding: 0 var(--m-page-x) var(--m-sp-6);
+  color: var(--fg);
+  font-size: var(--m-fs-body);
+  line-height: 1.72;
+  overflow-wrap: anywhere;
+}
+
+.m-note-body h1,
+.m-note-body h2,
+.m-note-body h3,
+.m-note-body h4 {
+  margin: 1.3em 0 0.5em;
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.m-note-body h1:first-child,
+.m-note-body h2:first-child,
+.m-note-body h3:first-child {
+  margin-top: 0;
+}
+
+.m-note-body p {
+  margin: 0.6em 0;
+}
+
+.m-note-body ul,
+.m-note-body ol {
+  margin: 0.6em 0;
+  padding-left: 1.4em;
+}
+
+.m-note-body blockquote {
+  margin: 0.8em 0;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--line);
+  color: var(--fg-2);
+}
+
+.m-note-body pre {
+  margin: 0.8em 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--bg-surface);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-x: auto;
+}
+
+.m-note-body code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--bg-surface);
+  font-size: 0.92em;
+}
+
+.m-note-body pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.m-note-body table {
+  width: 100%;
+  margin: 0.8em 0;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.m-note-body th,
+.m-note-body td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+
+.m-note-body img {
+  max-width: 100%;
+  border-radius: 12px;
+}
+
+.m-note-body .diagram,
+.m-note-body .math-block {
+  overflow-x: auto;
+}
+
+.m-note-empty {
+  color: var(--fg-3);
+}
+
+.m-note-actions {
+  display: grid;
+  gap: 10px;
+  padding: 0 var(--m-page-x) var(--m-sp-6);
+}
+
+/* 编辑页：高度撑满内容区，正文输入独占剩下的空间 */
+.m-note-editor {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100dvh - var(--m-appbar-h) - var(--m-safe-top));
+}
+
+.m-note-editor-fields {
+  border-bottom: 0.5px solid var(--line);
+  background: var(--bg-surface);
+}
+
+.m-note-editor-title .m-field-label {
+  display: none;
+}
+
+.m-note-editor-title input {
+  font-size: 19px;
+  font-weight: 600;
+}
+
+.m-note-editor-tools {
+  display: flex;
+  justify-content: center;
+  padding: var(--m-sp-2) var(--m-page-x);
+}
+
+.m-note-editor-body {
+  flex: 1;
+  min-height: 44vh;
+  margin: 0;
+  padding: var(--m-sp-2) var(--m-page-x) var(--m-sp-6);
+  border: 0;
+  background: var(--bg-base);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 15px;
+  line-height: 1.7;
+  resize: none;
+  outline: none;
+}
+
+.m-note-editor-preview {
+  padding-top: var(--m-sp-3);
+}
+
+/* ---------------------------------------------------------------- 番茄钟 */
+
+.m-pomo-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--m-sp-4);
+  padding: var(--m-sp-3) var(--m-page-x) var(--m-sp-4);
+}
+
+/* 进度环：--m-pomo-progress 是 0–360 的角度，由 JS 每秒写一次 */
+.m-pomo-ring {
+  --m-pomo-progress: 360;
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: min(232px, 62vw);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--blue) calc(var(--m-pomo-progress) * 1deg),
+    color-mix(in srgb, var(--fg) 8%, transparent) 0
+  );
+}
+
+.m-pomo-ring::before {
+  content: '';
+  position: absolute;
+  inset: 12px;
+  border-radius: 50%;
+  background: var(--bg-base);
+}
+
+.m-pomo-inner {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.m-pomo-time {
+  font-size: 46px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.m-pomo-phase {
+  color: var(--fg-3);
+  font-size: var(--m-fs-sub);
+}
+
+.m-pomo-controls {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+}
+
+.m-pomo-controls > * {
+  flex: 1;
+}
+
+/* ---------------------------------------------------------------- 传输 */
+
+.m-transfer-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin: var(--m-sp-2) var(--m-page-x) var(--m-sp-3);
+  padding: 22px 18px 16px;
+  border-radius: var(--m-r-xl);
+  background: var(--bg-surface);
+}
+
+.m-transfer-label {
+  color: var(--fg-3);
+  font-size: var(--m-fs-cap);
+}
+
+.m-transfer-code {
+  font-size: 40px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.18em;
+  line-height: 1.15;
+}
+
+.m-transfer-expiry {
+  margin-bottom: 8px;
+  color: var(--fg-3);
+  font-size: var(--m-fs-cap);
+}
+
+/* ---------------------------------------------------------------- 通知阅读 */
+
+.m-notif-reader {
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: 0 var(--m-sp-1) var(--m-sp-2);
+  color: var(--fg);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.m-muted {
+  margin: 0;
+  color: var(--fg-3);
   font-size: var(--m-fs-sub);
 }

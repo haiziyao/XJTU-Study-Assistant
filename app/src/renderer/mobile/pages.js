@@ -123,9 +123,7 @@ window.PCMobilePages = (function () {
       for (const mark of marks) dots.append(h('span', { class: `m-cal-dot is-${mark}` }));
       cellNode.append(dots);
       cellNode.addEventListener('click', () => {
-        calendar.selected = key;
-        if (!inMonth) calendar.cursor = key;
-        paintCalendar();
+        selectDate(key, { cursor: !inMonth });
       });
       cells.append(cellNode);
     }
@@ -147,8 +145,7 @@ window.PCMobilePages = (function () {
         h('span', { class: `m-cal-weekday-num${isToday ? ' is-today' : ''}`, text: String(Number(key.slice(-2))) }),
       );
       node.addEventListener('click', () => {
-        calendar.selected = key;
-        paintCalendar();
+        selectDate(key);
       });
       wrap.append(node);
     }
@@ -224,7 +221,9 @@ window.PCMobilePages = (function () {
     });
     host.append(seg);
 
-    const body = h('div', { class: 'm-cal-body m-page' });
+    // 不要给内容块挂 `m-page`：那个类自带"进入新页面"的动画。
+    // 点一个日期只是同一页里换选中项，动画会让人以为整页刷新了。
+    const body = h('div', { class: 'm-cal-body' });
     host.append(body);
 
     if (calendar.mode === 'month') {
@@ -278,6 +277,20 @@ window.PCMobilePages = (function () {
       for (let m = 1; m <= 12; m++) wrap.append(miniMonth(`${year}-${String(m).padStart(2, '0')}-01`));
       body.append(wrap);
     }
+  }
+
+  /**
+   * 选中某一天：只换内容，不重建页面。
+   * 旧实现每次点日期都走 `paintCalendar()`，等于把整页（含分段控件）重新造一遍，
+   * 于是 `.m-page` 的进场动画被重放 —— 看起来像"点一下日期就跳了一次页"。
+   */
+  function selectDate(key, { cursor = false } = {}) {
+    calendar.selected = key;
+    if (cursor) calendar.cursor = key;
+    paintCalendarChrome();
+    const body = calendar.host?.querySelector('.m-cal-body');
+    if (body) paintCalendarBody(body);
+    else paintCalendar();
   }
 
   function mountCalendar(host, chrome) {

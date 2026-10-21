@@ -1,4 +1,4 @@
-const VERSION = 'mobile-v14';
+const VERSION = 'mobile-v15';
 const SHELL = `potato-shell-${VERSION}`;
 const APP_ROOT = new URL('./', self.location.href).pathname;
 const ASSETS = [
@@ -15,7 +15,9 @@ const ASSETS = [
   './views/chat-hub.css', './views/chat-hub.js', './views/chat-settings.css',
   './views/chat-settings.js', './views/review.css', './views/review.js',
   './views/transfer.css', './views/transfer.js', './views/account.css',
-  './views/account.js', './views/sync.css', './views/sync.js'
+  './views/account.js', './views/sync.css', './views/sync.js',
+  './mobile/detect.js', './mobile/mobile.css', './mobile/logic.js', './mobile/ui.js',
+  './mobile/pages.js', './mobile/ai.js', './mobile/notes.js', './mobile/modules.js', './mobile/shell.js'
 ];
 
 self.addEventListener('install', (event) => {

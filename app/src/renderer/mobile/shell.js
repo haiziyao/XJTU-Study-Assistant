@@ -48,7 +48,7 @@
   /* ------------------------------------------------------------ 状态 */
 
   const TABS = [
-    { id: 'today', label: '今天', icon: 'today' },
+    { id: 'today', label: '主页', icon: 'home' },
     { id: 'calendar', label: '日历', icon: 'calendar' },
     { id: 'ai', label: 'AI', icon: 'sparkle' },
     { id: 'notes', label: '笔记', icon: 'note' },
@@ -58,6 +58,7 @@
   const state = {
     tab: 'today',
     stack: [],
+    suppressPop: 0,
     viewCache: new Map(),
   };
 
@@ -85,7 +86,12 @@
     close(entry) {
       return new Promise((resolve) => {
         if (state.layer === entry) state.layer = null;
-        if (history.state?.m === 'layer') history.back();
+        // 浮层自己占了一条历史记录，关掉时要退回去；但这次 popstate 只属于浮层，
+        // 不能再让页面栈跟着退一层（否则「确认放弃」会连详情页一起关掉）。
+        if (history.state?.m === 'layer') {
+          state.suppressPop = (state.suppressPop || 0) + 1;
+          history.back();
+        }
         entry?.close?.();
         resolve();
       });
@@ -125,21 +131,34 @@
    * 打开二级页面（模块视图、详情）。
    * 二级页面隐藏标签栏：手机上"进到下一层"就不该还能横跳。
    */
-  function pushPage({ title, render, right }) {
-    state.stack.push({ title, render, right });
+  function pushPage({ title, render, right, beforePop }) {
+    const entry = { title, render, right, beforePop };
+    state.stack.push(entry);
     renderStack();
+    return entry;
   }
 
-  function popPage() {
-    if (!state.stack.length) return;
+  /**
+   * 退一层。`beforePop` 可以拦住（例如编辑页还有未保存的正文）；
+   * 用户确认放弃后用 `{ force: true }` 真正退出去。
+   * 返回是否真的退了一层，浏览器后退的 popstate 靠它判断要不要补一条历史记录。
+   */
+  function popPage({ force = false } = {}) {
+    const top = state.stack[state.stack.length - 1];
+    if (!top) return false;
+    if (!force && typeof top.beforePop === 'function' && top.beforePop() === false) return false;
     state.stack.pop();
     renderStack();
+    return true;
   }
 
   /** 给手机侧的页面模块（`mobile/ai.js` 等）用的窄接口：只开/关页面，不碰内部状态。 */
   window.PCMobileShell = {
     pushPage,
     popPage,
+    rerender: renderStack,
+    setAppbar,
+    currentPage: () => state.stack[state.stack.length - 1] ?? null,
     go,
     renderViewInto,
   };
@@ -189,47 +208,118 @@
 
   /* ------------------------------------------------------------ 今天 */
 
+  /** 首页上的一个数字块（日程 / 待办 / 专注）。没有点击目标时就是普通信息块。 */
+  function statTile(label, value, onClick) {
+    const node = h(
+      onClick ? 'button' : 'div',
+      { type: onClick ? 'button' : undefined, class: 'm-home-stat' },
+      h('strong', { class: 'm-home-stat-value', text: value }),
+      h('span', { class: 'm-home-stat-label', text: label }),
+    );
+    if (onClick) node.addEventListener('click', onClick);
+    return node;
+  }
+
+  /** 首页快捷入口：只列当前真的注册了的功能，避免出现点了没反应的格子。 */
+  function quickGrid() {
+    const entries = [
+      { id: 'todo', label: '待办', icon: 'checkCircle', tone: 'blue' },
+      { id: 'pomodoro', label: '番茄钟', icon: 'clock', tone: 'red' },
+      { id: 'timetable', label: '课表', icon: 'grid', tone: 'indigo' },
+      { id: 'lms', label: '思源学堂', icon: 'graduation', tone: 'orange' },
+      { id: 'notifications', label: '通知', icon: 'bell', tone: 'teal' },
+      { id: 'academic', label: '学业', icon: 'chart', tone: 'purple' },
+    ].filter((item) => window.PCModules?.get?.(item.id));
+
+    const wrap = h('div', { class: 'm-home-quick' });
+    for (const item of entries) {
+      const node = h(
+        'button',
+        { type: 'button', class: 'm-home-quick-item' },
+        iconBadge(item.icon, item.tone),
+        h('span', { class: 'm-home-quick-label', text: item.label }),
+      );
+      node.addEventListener('click', () => {
+        const view = window.PCModules.get(item.id);
+        openModule(item.id, view?.title ?? item.label);
+      });
+      wrap.append(node);
+    }
+    return wrap;
+  }
+
+  /** 秒 → 「x 分钟」，首页只需要一个量级，不显示秒。 */
+  function minutes(sec) {
+    const value = Math.max(0, Number(sec) || 0);
+    if (value < 60) return String(Math.round(value));
+    return String(Math.round(value / 60));
+  }
+
   async function renderToday(host) {
     const key = today();
+
+    const stats = h('div', { class: 'm-home-stats' });
+    const agenda = h('div');
+    const todos = h('div');
+    const notes = h('div');
+
     host.append(
       h(
         'div',
-        { class: 'm-today-hero' },
-        h('p', { class: 'm-today-greeting', text: Logic.greeting() }),
-        h('p', { class: 'm-today-date', text: `${Logic.monthTitle(key)} · ${Logic.weekdayLabel(key)}` }),
+        { class: 'm-home-hero' },
+        h('p', { class: 'm-home-greeting', text: Logic.greeting() }),
+        h('p', { class: 'm-home-date', text: `${Logic.monthTitle(key)} · ${Logic.weekdayLabel(key)}` }),
+        stats,
       ),
+      quickGrid(),
+      agenda,
+      todos,
+      notes,
     );
 
-    const agenda = h('div');
-    const todos = h('div');
-    host.append(agenda, todos);
+    stats.append(statTile('今日日程', '—'), statTile('待办', '—'), statTile('专注', '—'));
     agenda.append(skeleton(2));
     todos.append(skeleton(3));
+    notes.append(skeleton(2));
 
-    const [cal, upcoming] = await Promise.all([
+    const [cal, upcoming, recent, pomodoro] = await Promise.all([
       fetchApi(`/calendar?from=${key}&to=${key}`).catch(() => null),
       fetchApi('/todos/upcoming?limit=6').catch(() => null),
+      fetchApi('/notes?limit=3').catch(() => null),
+      fetchApi('/pomodoro/status').catch(() => null),
     ]);
 
-    // ---- 今日日程
-    agenda.replaceChildren();
-    const day = cal?.days?.[0];
-    const items = [...(day?.schedules ?? []), ...(day?.events ?? [])].sort((a, b) =>
-      String(a.startTime ?? a.time ?? '').localeCompare(String(b.startTime ?? b.time ?? '')),
+    // ---- 今日日程（含课表导入与待办，顺序按时间）
+    const rows = Logic.dayAgenda(cal?.days?.[0] ?? {});
+    const schedules = rows.filter((row) => row.kind !== 'todo');
+    const todoRows = upcoming?.items ?? [];
+
+    stats.replaceChildren(
+      statTile('今日日程', String(schedules.length), () => go('calendar')),
+      statTile('待办', String(todoRows.filter((item) => !item.completed).length), () => openModule('todo', '待办')),
+      statTile('专注', `${minutes(pomodoro?.today?.studySec)} 分`, () => openModule('pomodoro', '番茄钟')),
     );
-    if (!items.length) {
-      agenda.append(section({ header: '今日日程', children: [emptyState({ icon: 'calendar', title: '今天没有安排', message: '在日历里新建，或让 AI 帮你排。' })] }));
+
+    agenda.replaceChildren();
+    if (!schedules.length) {
+      agenda.append(
+        section({
+          header: '今日日程',
+          children: [emptyState({ icon: 'calendar', title: '今天没有安排', message: '在日历里新建，或让 AI 帮你排。' })],
+        }),
+      );
     } else {
-      const list = section({ header: `今日日程 · ${items.length}`, inset: 'wide' });
-      for (const item of items) {
-        const start = String(item.startTime ?? item.time ?? '').slice(0, 5);
-        const end = String(item.endTime ?? '').slice(0, 5);
+      const list = section({ header: `今日日程 · ${schedules.length}`, inset: 'wide' });
+      for (const row of schedules) {
+        const time = row.allDay ? '全天' : row.start;
+        const span = row.end ? `${row.start}–${row.end}` : '';
         list.list.append(
           cell({
-            leading: h('span', { class: 'm-agenda-time', text: start || '全天' }),
-            title: item.title ?? '未命名',
-            subtitle: [end ? `${start}–${end}` : '', item.location ?? ''].filter(Boolean).join(' · '),
-            value: item.courseName ?? '',
+            leading: h('span', { class: 'm-agenda-time', text: time || '全天' }),
+            title: row.title ?? '未命名',
+            subtitle: [span, row.location].filter(Boolean).join(' · '),
+            chevron: false,
+            onClick: undefined,
           }),
         );
       }
@@ -238,14 +328,13 @@
 
     // ---- 待办
     todos.replaceChildren();
-    const rows = upcoming?.items ?? [];
-    if (!rows.length) {
+    if (!todoRows.length) {
       todos.append(section({ header: '待办', children: [emptyState({ icon: 'checkCircle', title: '没有待办', message: '所有事情都清空了。' })] }));
     } else {
       const list = section({
         header: { title: '待办', action: { label: '全部', onClick: () => openModule('todo', '待办') } },
       });
-      for (const item of rows) {
+      for (const item of todoRows) {
         const due = Logic.dueLabel(item.deadline);
         const row = cell({
           leading: iconButton({
@@ -260,23 +349,76 @@
           }),
           title: item.title,
           subtitle: [due, item.category ?? ''].filter(Boolean).join(' · '),
-          meta: item.priority && item.priority !== 'normal' ? tag(item.priority, item.priority === 'high' ? 'red' : 'blue') : null,
+          meta: item.priority ? tag(item.priority, item.priority >= 2 ? 'red' : 'blue') : null,
           chevron: false,
         });
-        list.list.append(UI.swipeable(row, [
-          {
-            label: item.completed ? '取消' : '完成',
-            icon: 'check',
-            tone: 'green',
-            onSelect: async () => {
-              await fetchApi(`/todos/${item.id}/completed`, { method: 'POST', body: { completed: !item.completed } });
-              renderTab({ silent: true });
+        list.list.append(
+          UI.swipeable(row, [
+            {
+              label: item.completed ? '取消' : '完成',
+              icon: 'check',
+              tone: 'green',
+              onSelect: async () => {
+                await fetchApi(`/todos/${item.id}/completed`, { method: 'POST', body: { completed: !item.completed } });
+                renderTab({ silent: true });
+              },
             },
-          },
-        ]));
+          ]),
+        );
       }
       todos.append(list);
     }
+
+    // ---- 最近笔记
+    notes.replaceChildren();
+    const noteItems = recent?.items ?? [];
+    if (!noteItems.length) {
+      notes.append(
+        section({
+          header: { title: '最近笔记', action: { label: '去写', onClick: () => go('notes') } },
+          children: [emptyState({ icon: 'note', title: '还没有笔记', message: '在笔记页新建一篇，或用 AI 随手记。' })],
+        }),
+      );
+    } else {
+      const list = section({ header: { title: '最近笔记', action: { label: '全部', onClick: () => go('notes') } } });
+      for (const item of noteItems) {
+        list.list.append(
+          cell({
+            icon: 'note',
+            tone: 'orange',
+            title: item.title || '未命名笔记',
+            subtitle: String(window.PCMobileNotes?.plain?.(item.previewText) ?? item.previewText ?? '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 60) || '空白笔记',
+            value: Logic.relativeTime(item.updatedAt),
+            onClick: () => window.PCMobileNotes?.openNote?.(item.id),
+          }),
+        );
+      }
+      notes.append(list);
+    }
+
+    // ---- 设备：从「我的」里拎上来的两项常用信息（服务器地址、主题）
+    const device = section({ header: '设备' });
+    device.list.append(
+      cell({ leading: iconBadge('globe', 'green'), title: '服务器', value: location.host, chevron: false }),
+      cell({
+        title: '主题',
+        accessory: segmented({
+          size: 'sm',
+          items: [
+            { value: 'system', label: '系统' },
+            { value: 'light', label: '白天' },
+            { value: 'dark', label: '夜间' },
+          ],
+          value: window.PCTheme?.getMode?.() ?? 'light',
+          onChange: (value) => window.PCTheme?.setMode?.(value),
+        }),
+        chevron: false,
+      }),
+    );
+    host.append(device);
   }
 
   /* ------------------------------------------------------------ 我的 */
@@ -308,6 +450,7 @@
         accessory: segmented({
           size: 'sm',
           items: [
+            { value: 'system', label: '系统' },
             { value: 'light', label: '白天' },
             { value: 'dark', label: '夜间' },
           ],
@@ -349,13 +492,9 @@
       cell({
         title: '诊断',
         subtitle: '连接状态、接口版本',
-        onClick: () =>
-          pushPage({
-            title: '诊断',
-            render: (page) => renderViewInto(page, 'settings'),
-          }),
+        onClick: () => openModule('settings', '设置'),
       }),
-      cell({ title: '版本', value: '手机外壳 v1' }),
+      cell({ title: '版本', value: '手机外壳 v2' }),
     );
 
     host.append(appearance, account, entries, about);
@@ -367,15 +506,14 @@
     pushPage({
       title: title ?? viewId,
       render: (page) => {
-        // 待办有重建过的手机页（iOS 提醒事项形态），优先用它；
-        // 其余模块暂时挂现有视图（文档里"未重建前用通用二级页面容器承载"）。
+        // 待办有重建过的手机页（iOS 提醒事项形态）
         if (viewId === 'todo' && window.PCMobilePages?.todos) {
           window.PCMobilePages.todos(page, { setAppbar });
           return;
         }
-        const wrap = h('div', { class: 'm-view-host' });
-        page.append(wrap);
-        renderViewInto(wrap, viewId);
+        // 其余功能走 `mobile/modules.js` 的手机页；没写手机页的给一句明确说明，
+        // 不再把桌面三栏视图直接塞进手机（那是「点进去像另一个应用」的根源）。
+        window.PCMobileModules?.mount?.(viewId, page, { setAppbar, title: title ?? viewId });
       },
     });
   }
@@ -424,7 +562,10 @@
     // AI 标签：交回桌面那套对话列（它自己就是完整的一屏），不重复造一份输入区
     if (tab === 'ai') {
       scroller.replaceChildren();
-      clearAppbar();
+      // 顶栏和其它标签完全同构：居中标题 + 右侧操作。
+      // 旧版在这里藏掉 appbar、由对话列自绘一个 22px 大标题的头，
+      // 和「主页 / 日历 / 笔记 / 我的」站在一起像是另一个应用。
+      setAppbar({ title: 'AI', right: window.PCMobileAI?.actions?.() ?? null });
       window.PC.openView?.('chat');
       window.PC.state.view = 'chat';
       // 手机侧的顶栏（历史 / 新对话）与气泡样式；重复调用不会重复插入
@@ -437,9 +578,11 @@
       scroller.replaceChildren();
       const page = h('div', { class: 'm-page m-scroll--flush' });
       scroller.append(page);
-      // 日历已经按 iOS 系统日历重建；笔记与其余模块仍是挂现有视图
+      // 日历与笔记都已按手机形态重建；其余模块走「我的」里的手机页
       if (tab === 'calendar' && window.PCMobilePages?.calendar) {
         window.PCMobilePages.calendar(page, { setAppbar });
+      } else if (tab === 'notes' && window.PCMobileNotes) {
+        window.PCMobileNotes.mount(page, { setAppbar });
       } else {
         renderViewInto(page, tab);
       }
@@ -448,7 +591,7 @@
     }
 
     if (tab === 'today') {
-      setAppbar({ title: '今天' });
+      setAppbar({ title: '主页' });
       scroller.replaceChildren();
       const page = h('div', { class: 'm-page' });
       scroller.append(page);
@@ -470,6 +613,11 @@
   /* ------------------------------------------------------------ 返回栈 */
 
   window.addEventListener('popstate', () => {
+    // 这是浮层关闭时自己补的那次 history.back()：只消费历史记录，不动页面栈。
+    if (state.suppressPop > 0) {
+      state.suppressPop -= 1;
+      return;
+    }
     if (state.layer) {
       const entry = state.layer;
       state.layer = null;
@@ -477,7 +625,9 @@
       return;
     }
     if (state.stack.length) {
-      popPage();
+      // 页面可能拒绝退出（编辑页有未保存内容）。历史记录已经后退了一格，
+      // 这里补回来，保证外壳的返回栈和浏览器历史仍然一一对应。
+      if (!popPage()) history.pushState({ m: 'guard' }, '');
       return;
     }
     const tab = history.state?.tab;
