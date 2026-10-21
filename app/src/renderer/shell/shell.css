@@ -4162,4 +4162,98 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
     font-size: 11px;
     line-height: 1.2;
   }
+
+  /* ---------- 6. 工具栏：手机上别再拿顶栏压正文 ----------
+     移动端有一条「可点击元素统一 44px」的规则，工具栏里几十个控件全按 44 排，
+     于是待办 / 笔记的顶栏堆到 300+ px —— 而**桌面端同样的控件只有 28px**
+     （`.ghost-btn { min-height: 28px }`），是移动端这条规则把它们吹起来的。
+
+     实测（390×844，面板正文 721px）：
+       待办 335px = 筛选 52 + 「显示已完成」44（独占一行）+ 快速添加 98 + 按钮 2 行 76
+       笔记 304px = 模式页签 54 + 筛选/操作 104 + 搜索/排序 97
+
+     办法：工具栏这一族的触摸高度收到 **36px**（仍比桌面高 8px，点得中），
+     再把「独占一行」和「白白换行」的两处合并掉。 */
+
+  .toolbar {
+    padding: 6px 8px;
+    gap: 6px;
+  }
+
+  .toolbar-row {
+    gap: 6px;
+  }
+
+  /* 36px 覆盖那条零特异度的 `:where(button, input, select)` 44px 规则。
+     用 `:is()` 把特异度提到 (0,1,1) 以上，不依赖加载顺序。 */
+  .toolbar :is(.seg-btn, .ghost-btn, .primary-btn, .danger-btn, .check-field, .chip-btn),
+  .toolbar :is(input, select) {
+    min-height: 36px;
+  }
+
+  /* 左右内边距 9 → 6：待办页 5 个筛选按钮合计从 278px 降到 248px，
+     才装得进「筛选条 + 显示已完成」这一行（可用 254px）。
+     否则「已完成」会被横滑容器裁掉半个字——能滑到，但看起来像坏了一半。 */
+  .toolbar .seg-btn {
+    padding: 4px 6px;
+  }
+
+  .toolbar .seg,
+  .toolbar-row .seg {
+    padding: 2px;
+  }
+
+  /* 筛选条与「显示已完成」并排成一行。
+     `.seg` 里只有分段按钮、没有弹层，所以可以横滑（上一个坑是弹层被 overflow 裁掉）。
+
+     basis 必须是 **0** 而不是 auto：flex 换行是按「假设主尺寸」（basis）判断的，
+     basis:auto 等于内容宽度（约 332px），加上右边的开关就超了 → 先换行、再收缩，
+     于是开关永远独占一行。basis:0 才能让它们先排在同一行，再由 shrink 分配。 */
+  .toolbar > .seg {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .toolbar > .check-field {
+    flex: 0 0 auto;
+  }
+
+  /* 快速添加：桌面本来就是一行（标题 + 日期 + 工时 + 按钮）。
+     上一版在窄屏让它换行、标题独占一整行 —— 等于白送 45px。
+     改回一行，靠给日期/工时定宽把标题的空间腾出来。 */
+  .quick-add {
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+
+  .quick-add .qa-title {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  /* 日期框**不许收缩**：它一旦被压到 90px 以下，「2026/10/14」就会显示不全
+     （实测 flex-shrink 让它掉到 89px）。让标题输入框去收缩，它有 min-width:0。 */
+  .quick-add .qa-date {
+    flex: 0 0 116px;
+  }
+
+  /* 工时框 46px 会把「工时」这个 placeholder 裁成「工E」（实测）。给到 56px。 */
+  .quick-add .qa-hours {
+    flex: 0 0 56px;
+  }
+
+  .quick-add .primary-btn {
+    flex: 0 0 auto;
+    padding: 4px 9px;
+  }
+
+  /* 面板自己的标题条（「待办」「笔记系统」那一行）同样是 44px 控件撑到 61px。 */
+  .panel-head {
+    padding: 6px 8px;
+    gap: 6px;
+  }
+
+  .panel-head :is(button, .ghost-btn, .primary-btn) {
+    min-height: 36px;
+  }
 }

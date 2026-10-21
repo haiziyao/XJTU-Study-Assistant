@@ -248,3 +248,70 @@ body.notes-focus .notes-canvas-toolbar { margin-bottom: 4px; }
   .notes-canvas-help-remember { grid-column: auto; }
   .notes-canvas-help-button { position: sticky; right: 0; }
 }
+
+/* ---------------------------------------------------------------------------
+   窄屏：笔记工具栏压高度（2026-10-21）
+
+   实测 390×844：`.notes-toolbar` 304px，正文只剩 417px。构成是三块 44px 控件堆的：
+     模式页签 54 + 筛选/操作 104（seg 一行 + 三个按钮一行）+ 搜索/排序 97（两行）
+
+   桌面端这些控件只有 28px，是移动端的「统一 44px」规则吹起来的，所以这里收到 36px。
+   写在 notes.css 而不是 shell.css：本文件在 shell.css **之后**加载，
+   同特异度下必须在这里才压得住（shell.css 里已有一份通用的 `.toolbar` 收窄）。
+   --------------------------------------------------------------------------- */
+@media (max-width: 900px) {
+  .notes-toolbar {
+    padding: 6px 8px;
+    gap: 6px;
+  }
+
+  .notes-toolbar .toolbar-row {
+    gap: 6px;
+  }
+
+  .notes-toolbar :is(button, input, select, .check-field) {
+    min-height: 36px;
+  }
+
+  /* 模式页签（笔记 / 知识图谱 / Canvas / 回收站）：页签本身收到 36，容器内边距也收 */
+  .notes-mode-tabs {
+    padding: 2px;
+    gap: 4px;
+  }
+
+  .notes-mode-tab {
+    padding: 4px 8px;
+  }
+
+  /* 搜索框让出空间给标签/排序，避免多折一行 */
+  .notes-search {
+    flex: 1 1 150px;
+    min-width: 0;
+  }
+
+  .notes-tag-filter,
+  .notes-sort {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  /* 这三个是**包装层**（里面才装 input / button），它们 44~45px 是"内部控件 +
+     包装内边距"叠出来的，所以只压内部控件不够，包装本身也要收。 */
+  .notes-toolbar .notes-search,
+  .notes-toolbar .notes-tag-filter,
+  .notes-toolbar .notes-sort {
+    min-height: 36px;
+    padding-block: 2px;
+  }
+
+  .notes-toolbar .notes-search input,
+  .notes-toolbar .notes-tag-filter > button,
+  .notes-toolbar .notes-sort > button {
+    min-height: 30px;
+  }
+
+  /* 「主程序已连接」是状态提示，不是操作；窄屏挤在筛选条里只会把按钮顶到第二行 */
+  .notes-connection {
+    display: none;
+  }
+}
