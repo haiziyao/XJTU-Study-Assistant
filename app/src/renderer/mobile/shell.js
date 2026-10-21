@@ -235,7 +235,7 @@
       todos.append(section({ header: '待办', children: [emptyState({ icon: 'checkCircle', title: '没有待办', message: '所有事情都清空了。' })] }));
     } else {
       const list = section({
-        header: { title: '待办', action: { label: '全部', onClick: () => openModule('todo', '待办') } },
+        header: { title: '待办', action: { label: '全部', onClick: () => openModule('calendar', '待办') } },
       });
       for (const item of rows) {
         const due = Logic.dueLabel(item.deadline);
@@ -359,12 +359,6 @@
     pushPage({
       title: title ?? viewId,
       render: (page) => {
-        // 待办有重建过的手机页（iOS 提醒事项形态），优先用它；
-        // 其余模块暂时挂现有视图（文档里"未重建前用通用二级页面容器承载"）。
-        if (viewId === 'todo' && window.PCMobilePages?.todos) {
-          window.PCMobilePages.todos(page, { setAppbar });
-          return;
-        }
         const wrap = h('div', { class: 'm-view-host' });
         page.append(wrap);
         renderViewInto(wrap, viewId);
@@ -427,12 +421,7 @@
       scroller.replaceChildren();
       const page = h('div', { class: 'm-page m-scroll--flush' });
       scroller.append(page);
-      // 日历已经按 iOS 系统日历重建；笔记与其余模块仍是挂现有视图
-      if (tab === 'calendar' && window.PCMobilePages?.calendar) {
-        window.PCMobilePages.calendar(page, { setAppbar });
-      } else {
-        renderViewInto(page, tab);
-      }
+      renderViewInto(page, tab);
       if (!silent) scroller.scrollTop = 0;
       return;
     }
