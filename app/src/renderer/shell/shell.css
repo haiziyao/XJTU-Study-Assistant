@@ -913,6 +913,13 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
   flex: none;
 }
 
+/* 窄屏工具栏的图标行（由 `kit/dom.js` 的 `toolbarTools()` 建）。
+   桌面端**不渲染** —— 桌面把各分组平铺成两行，不需要折叠。
+   窄屏的展开规则见文件末尾第 7 节。 */
+.toolbar-tools {
+  display: none;
+}
+
 .toolbar.wrap {
   flex-wrap: wrap;
 }
@@ -4255,5 +4262,75 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
 
   .panel-head :is(button, .ghost-btn, .primary-btn) {
     min-height: 36px;
+  }
+
+  /* ---------- 7. 工具栏收成一排图标 ----------
+     窄屏不再把「筛选 / 快速添加 / 更多操作」全部铺开，而是只留一排图标**（一行 36px）**，
+     点哪个开哪个。分组本身不动（DOM 一个字节没改），只按 `bar.dataset.open` 显示：
+     这样桌面端的平铺布局丝毫没有风险，窄屏又只剩一行。
+
+     图标由 `kit/dom.js` 的 `toolbarTools()` 建，点击时把自己的面板名写到
+     `toolbar.dataset.open`，同时给按钮加 `.active`。 */
+
+  .toolbar-tools {
+    display: flex;
+    flex: 1 1 100%;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .toolbar-tool {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--fg-2);
+    transition: background var(--t), color var(--t), border-color var(--t);
+  }
+
+  .toolbar-tool.active {
+    background: var(--bg-hover);
+    color: var(--blue);
+    border-color: currentColor;
+  }
+
+  .toolbar-tool svg {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* 默认全部收起 —— 只剩图标行 */
+  .toolbar > .seg,
+  .toolbar > .check-field,
+  .toolbar .quick-add,
+  .toolbar .toolbar-row > .ghost-btn,
+  .toolbar .toolbar-row > .primary-btn {
+    display: none;
+  }
+
+  /* 展开：点开哪一组显示哪一组 */
+  .toolbar[data-open='filter'] > .seg,
+  .toolbar[data-open='filter'] > .check-field {
+    display: flex;
+  }
+
+  .toolbar[data-open='add'] .quick-add {
+    display: flex;
+  }
+
+  .toolbar[data-open='more'] .toolbar-row > .ghost-btn,
+  .toolbar[data-open='more'] .toolbar-row > .primary-btn {
+    display: inline-flex;
   }
 }

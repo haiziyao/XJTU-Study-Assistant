@@ -504,17 +504,31 @@
 
   function renderToolbar(host) {
     const bar = mk('div', 'toolbar wrap notes-toolbar');
+    // 窄屏图标行：**先建好、暂不挂**。
+    // ① canvas 模式只有模式页签，挂一排"搜索/筛选/更多"图标但对应控件都不在，点了没反应；
+    // ② 顺序上图标行要在模式页签**前面**，所以不能等 append 完再往前插 ——
+    //    测试里的 DOM 桩没有 `prepend`（实测 15 个用例因此全红），
+    //    这里用"先 append 图标行、再 append 模式页签"来保证顺序，不依赖 prepend。
+    const tools = toolbarTools(bar, [
+      ['mode', 'grid', '切换模式'],
+      ['search', 'search', '搜索'],
+      ['filter', 'filter', '筛选与排序'],
+      ['more', 'more', '更多操作'],
+    ]);
     const modes = mk('div', 'notes-mode-tabs');
     for (const [key, label] of [['notes', '笔记'], ['graph', '知识图谱'], ['canvas', 'Canvas'], ['trash', '回收站']]) {
       const button = mk('button', `notes-mode-tab${state.mode === key ? ' active' : ''}`, label); button.type = 'button';
       button.addEventListener('click', async () => { const leavingTrash = state.mode === 'trash' && key !== 'trash'; state.mode = key; state.graphData = null; if (key === 'notes' || key === 'trash' || leavingTrash) await refresh(); else render(); }); modes.appendChild(button);
     }
-    bar.appendChild(modes);
+    // canvas 分支只要模式页签
     if (state.mode === 'canvas') {
+      bar.appendChild(modes);
       bar.classList.add('notes-toolbar-canvas-compact');
       host.appendChild(bar);
       return;
     }
+    bar.appendChild(tools);
+    bar.appendChild(modes);
     const first = mk('div', 'toolbar-row');
     const seg = mk('div', 'seg');
     for (const [key, label] of [['all', '全部'], ['today', '今天'], ['pending', '待整理']]) {

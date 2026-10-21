@@ -315,3 +315,86 @@ body.notes-focus .notes-canvas-toolbar { margin-bottom: 4px; }
     display: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   窄屏：工具栏收成一排图标（2026-10-21）
+
+   只留一行图标 —— 模式 / 搜索 / 筛选 / 更多 —— 点哪个展开哪一组。
+   图标行本身由 `kit/dom.js` 的 `toolbarTools()` 建，点击把面板名写进
+   `bar.dataset.open`，这里按它决定显示什么。
+
+   分组和按钮**一个都没删**，只是默认 `display: none`；桌面端这套规则不生效（媒体查询内）。
+   --------------------------------------------------------------------------- */
+@media (max-width: 900px) {
+  /* 两个 .toolbar-row 默认整行收起：否则里面的子元素全隐藏、行本身还留着，
+     白白多出两处 gap（实测约 12px）。 */
+  .notes-toolbar .toolbar-row {
+    display: none;
+  }
+
+  .notes-toolbar .notes-mode-tabs,
+  .notes-toolbar .seg,
+  .notes-toolbar .notes-search,
+  .notes-toolbar .notes-tag-filter,
+  .notes-toolbar .notes-sort,
+  .notes-toolbar .toolbar-row > .ghost-btn,
+  .notes-toolbar .toolbar-row > .primary-btn {
+    display: none;
+  }
+
+  /* canvas 模式没有图标行（renderToolbar 只在非 canvas 时插入），
+     所以它的模式页签必须一直可见，否则整个工具栏会空掉。 */
+  .notes-toolbar.notes-toolbar-canvas-compact .notes-mode-tabs {
+    display: flex;
+  }
+
+  /* ---- 展开某一组 ---- */
+  .notes-toolbar[data-open='mode'] .notes-mode-tabs {
+    display: flex;
+  }
+
+  .notes-toolbar[data-open='search'] .notes-filter-row {
+    display: flex;
+  }
+
+  .notes-toolbar[data-open='search'] .notes-search {
+    display: inline-block;
+  }
+
+  .notes-toolbar[data-open='filter'] .toolbar-row {
+    display: flex;
+  }
+
+  .notes-toolbar[data-open='filter'] .seg {
+    display: flex;
+  }
+
+  .notes-toolbar[data-open='filter'] .notes-tag-filter,
+  .notes-toolbar[data-open='filter'] .notes-sort {
+    display: inline-block;
+  }
+
+  .notes-toolbar[data-open='filter'] .notes-filter-row > .ghost-btn {
+    display: inline-flex;
+  }
+
+  .notes-toolbar[data-open='more'] .toolbar-row {
+    display: flex;
+  }
+
+  /* 只认**第一行**的按钮（随手拍 / 专注 / 新建笔记）。
+     不加 `:not(.notes-filter-row)` 的话，筛选行的「★ 收藏」也会跟着出现在"更多"里 ——
+     它属于"筛选"，出现在两个面板里会让人以为有两份。 */
+  .notes-toolbar[data-open='more'] .toolbar-row:not(.notes-filter-row) > .ghost-btn,
+  .notes-toolbar[data-open='more'] .toolbar-row:not(.notes-filter-row) > .primary-btn {
+    display: inline-flex;
+  }
+
+  /* 还必须**显式**再藏一次筛选行的「★ 收藏」。
+     原因：shell.css 里有一条通用规则 `.toolbar[data-open='more'] .toolbar-row > .ghost-btn`
+     （特异度 0,4,0）—— 笔记工具栏同样带 `.toolbar` 类，于是它把 `:not()` 排除掉的
+     收藏又显示了出来。这里用 0,5,0 压回去。 */
+  .notes-toolbar[data-open='more'] .notes-filter-row > .ghost-btn {
+    display: none;
+  }
+}
