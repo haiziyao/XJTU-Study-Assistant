@@ -136,6 +136,14 @@
     renderStack();
   }
 
+  /** 给手机侧的页面模块（`mobile/ai.js` 等）用的窄接口：只开/关页面，不碰内部状态。 */
+  window.PCMobileShell = {
+    pushPage,
+    popPage,
+    go,
+    renderViewInto,
+  };
+
   function renderStack() {
     const top = state.stack[state.stack.length - 1];
     document.documentElement.dataset.stack = top ? '1' : '0';
@@ -419,6 +427,8 @@
       clearAppbar();
       window.PC.openView?.('chat');
       window.PC.state.view = 'chat';
+      // 手机侧的顶栏（历史 / 新对话）与气泡样式；重复调用不会重复插入
+      window.PCMobileAI?.enter?.();
       return;
     }
 
