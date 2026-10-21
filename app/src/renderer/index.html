@@ -39,6 +39,9 @@
     <link rel="icon" href="assets/app-icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="assets/app-icon.svg" />
     <script src="kit/theme.js?v=20261019-1"></script>
+    <!-- 手机外壳开关：必须在 <head> 里尽早执行，给 <html> 挂 `m-app`，
+         否则首帧会先画出桌面三栏再切走（闪一下）。见 mobile/detect.js -->
+    <script src="mobile/detect.js"></script>
 
     <!-- 样式：外壳 → 各视图自带的样式（新增功能在这里加一行 link） -->
     <link rel="stylesheet" href="shell/shell.css?v=20261019-5" />
@@ -62,6 +65,9 @@
     <link rel="stylesheet" href="views/account.css" />
     <!-- 「设置 → 多端同步」：账号数据在桌面/服务器/手机之间双向同步（见 views/sync.js） -->
     <link rel="stylesheet" href="views/sync.css" />
+    <!-- 手机外壳与手机组件库的样式。**放最后**：它只在 `html.m-app` 下生效，
+         但需要压过前面那些窄屏补丁（同特异度靠顺序取胜）。见 mobile/mobile.css -->
+    <link rel="stylesheet" href="mobile/mobile.css" />
   </head>
   <body>
     <div class="app">
@@ -217,5 +223,10 @@
     <!-- 「设置 → 侧边栏」：自定义排序与「更多」，本身只加一块设置卡片 + 一个弹窗 -->
     <script src="shell/sidebar-customize.js"></script>
     <script src="shell/app.js?v=20261019-1"></script>
+    <!-- 手机外壳：必须在 app.js **之后**（它要读 window.PC 与 PCModules），
+         且 detect.js 没挂上 `m-app` 时自己直接 return，桌面端不产生任何副作用 -->
+    <script src="mobile/logic.js"></script>
+    <script src="mobile/ui.js"></script>
+    <script src="mobile/shell.js"></script>
   </body>
 </html>

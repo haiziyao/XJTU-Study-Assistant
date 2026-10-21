@@ -1,0 +1,1226 @@
+/**
+ * 手机外壳与组件库的样式（`mobile/ui.js` 的 71 个 `m-*` 类 + 外壳骨架）。
+ *
+ * 为什么单独一份而不是塞进 shell.css：
+ *   shell.css 里已经有两段互相覆盖的 760px 规则（一段缩侧栏、一段隐藏侧栏换底部标签栏），
+ *   再往里加第三套只会更难维护。手机外壳走自己的文件，只在 `html.m-app` 下生效，
+ *   桌面端与旧手机布局都不受影响（见文件末尾的 m-app 段落）。
+ *
+ * 约束：
+ *   - 只引用 theme.css 的白天/夜间令牌，不写死颜色（色调类 `m-tone-*` 例外，见下）；
+ *   - 不用 `!important`；层叠靠顺序与 `html.m-app` 前缀；
+ *   - 点按目标 ≥ 44px（`--m-tap`），字号不小于 12px，输入框 ≥ 16px（避免 iOS 聚焦放大）。
+ */
+
+/* ---------------------------------------------------------------- 令牌 */
+
+html.m-app {
+  /* 字号：大标题 / 标题 / 正文 / 次要 / 说明 */
+  --m-fs-display: 28px;
+  --m-fs-title: 20px;
+  --m-fs-body: 16px;
+  --m-fs-sub: 14px;
+  --m-fs-cap: 12px;
+
+  /* 间距 4 / 8 / 12 / 16 / 24 */
+  --m-sp-1: 4px;
+  --m-sp-2: 8px;
+  --m-sp-3: 12px;
+  --m-sp-4: 16px;
+  --m-sp-6: 24px;
+
+  /* 圆角：列表分组 12、卡片 16、弹层 20 */
+  --m-r-sm: 8px;
+  --m-r-md: 12px;
+  --m-r-lg: 16px;
+  --m-r-xl: 20px;
+
+  --m-tap: 44px;
+  --m-page-x: var(--m-sp-4);
+  --m-appbar-h: 52px;
+  --m-tabbar-h: 56px;
+  --m-safe-top: env(safe-area-inset-top, 0px);
+  --m-safe-bottom: env(safe-area-inset-bottom, 0px);
+
+  /* 层次靠背景色区分：页面底色 --bg-base，分组底色 --bg-surface */
+  --m-ease: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* 色调（用于 `m-tone-*` 图标块与标签）。用 color-mix 从主题色派生，夜间自动跟随 */
+html.m-app {
+  --m-tone-blue: var(--blue);
+  --m-tone-green: var(--green);
+  --m-tone-orange: var(--orange);
+  --m-tone-red: var(--red);
+  --m-tone-purple: var(--purple);
+  --m-tone-teal: #2fb8b0;
+  --m-tone-indigo: #5a6df0;
+  --m-tone-pink: #e26a9c;
+  --m-tone-gray: var(--fg-3);
+}
+
+/* ---------------------------------------------------------------- 外壳骨架 */
+
+html.m-app,
+html.m-app body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg-base);
+  color: var(--fg);
+  font-size: var(--m-fs-body);
+  -webkit-text-size-adjust: 100%;
+}
+
+/* 桌面三栏整块让位给手机外壳；旧手机布局的底部标签栏一并关掉，避免两条标签栏 */
+html.m-app .app {
+  display: none;
+}
+
+html.m-app .mobile-tabbar,
+html.m-app .mobile-more-mask,
+html.m-app .mobile-more-sheet {
+  display: none;
+}
+
+/* 外壳：nav + 内容 + tabbar 三段式；内容区是唯一滚动容器 */
+.m-shell {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-base);
+  color: var(--fg);
+}
+
+/* 导航栏：左返回 / 中标题 / 右主操作 */
+.m-appbar {
+  position: relative;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: var(--m-sp-2);
+  flex: none;
+  height: calc(var(--m-appbar-h) + var(--m-safe-top));
+  padding: var(--m-safe-top) var(--m-page-x) 0;
+  border-bottom: 0.5px solid transparent;
+  background: var(--bg-base);
+  transition: border-color 0.2s var(--m-ease);
+}
+
+.m-appbar.is-scrolled {
+  border-bottom-color: var(--line);
+}
+
+.m-appbar-side {
+  display: flex;
+  align-items: center;
+  gap: var(--m-sp-1);
+  min-width: 0;
+}
+
+.m-appbar-side--right {
+  justify-content: flex-end;
+}
+
+.m-appbar-title {
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--m-fs-body);
+  font-weight: 600;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 一级页面的大标题（滚动后收起） */
+.m-display-title {
+  margin: var(--m-sp-2) 0 var(--m-sp-1);
+  padding: 0 var(--m-page-x);
+  font-size: var(--m-fs-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.m-display-sub {
+  margin: 0 0 var(--m-sp-3);
+  padding: 0 var(--m-page-x);
+  color: var(--fg-3);
+  font-size: var(--m-fs-sub);
+}
+
+/* 内容区 */
+.m-scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  padding-bottom: var(--m-sp-4);
+}
+
+.m-scroll--flush {
+  padding-bottom: 0;
+}
+
+/* 标签栏 */
+.m-tabbar {
+  position: relative;
+  z-index: 20;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  flex: none;
+  height: calc(var(--m-tabbar-h) + var(--m-safe-bottom));
+  padding-bottom: var(--m-safe-bottom);
+  border-top: 0.5px solid var(--line);
+  background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
+  backdrop-filter: blur(18px) saturate(1.4);
+}
+
+.m-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: var(--m-tap);
+  border: 0;
+  background: transparent;
+  color: var(--fg-3);
+  font-size: var(--m-fs-cap);
+  transition: color 0.16s var(--m-ease);
+}
+
+.m-tab.is-active {
+  color: var(--blue);
+}
+
+.m-tab .m-icon {
+  display: block;
+}
+
+.m-tab-label {
+  line-height: 1.1;
+}
+
+/* 浮层宿主：所有 sheet / alert 都挂在这里，脱离内容区的滚动与裁剪 */
+#m-overlays {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+}
+
+#m-overlays > * {
+  pointer-events: auto;
+}
+
+/* ---------------------------------------------------------------- 图标 */
+
+.m-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  line-height: 0;
+}
+
+.m-icon svg {
+  display: block;
+}
+
+/* 有色方块图标（设置列表左侧） */
+.m-badge-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--m-r-sm);
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  color: var(--m-tone-gray);
+}
+
+.m-tone-blue { color: var(--m-tone-blue); }
+.m-tone-green { color: var(--m-tone-green); }
+.m-tone-orange { color: var(--m-tone-orange); }
+.m-tone-red { color: var(--m-tone-red); }
+.m-tone-purple { color: var(--m-tone-purple); }
+.m-tone-teal { color: var(--m-tone-teal); }
+.m-tone-indigo { color: var(--m-tone-indigo); }
+.m-tone-pink { color: var(--m-tone-pink); }
+.m-tone-gray { color: var(--m-tone-gray); }
+
+/* ---------------------------------------------------------------- 按钮 */
+
+.m-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: var(--m-tap);
+  padding: 0 var(--m-sp-4);
+  border: 1px solid transparent;
+  border-radius: var(--m-r-md);
+  background: var(--bg-hover);
+  color: var(--fg);
+  font-size: var(--m-fs-body);
+  font-weight: 500;
+  transition: transform 0.1s var(--m-ease), opacity 0.16s var(--m-ease), background 0.16s var(--m-ease);
+}
+
+.m-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.m-btn:disabled {
+  opacity: 0.45;
+}
+
+.m-btn--filled {
+  background: var(--blue);
+  color: #fff;
+}
+
+.m-btn--tinted {
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
+  color: var(--blue);
+}
+
+.m-btn--plain {
+  padding: 0 var(--m-sp-2);
+  background: transparent;
+  color: var(--blue);
+}
+
+.m-btn--destructive {
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  color: var(--red);
+}
+
+.m-btn--sm {
+  min-height: 32px;
+  padding: 0 var(--m-sp-3);
+  border-radius: var(--m-r-sm);
+  font-size: var(--m-fs-sub);
+}
+
+.m-btn--lg {
+  min-height: 50px;
+  font-size: 17px;
+}
+
+.m-btn--block {
+  width: 100%;
+}
+
+.m-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--m-tap);
+  height: var(--m-tap);
+  margin: 0 -10px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-2);
+  transition: background 0.16s var(--m-ease);
+}
+
+.m-icon-btn:active:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.m-nav-btn {
+  min-height: 36px;
+  padding: 0 var(--m-sp-2);
+  border: 0;
+  border-radius: var(--m-r-sm);
+  background: transparent;
+  color: var(--blue);
+  font-size: var(--m-fs-body);
+  /* 不写 nowrap：长一点的本地化文案宁可换行，也不要被裁掉半个字 */
+}
+
+.m-nav-btn.is-strong {
+  font-weight: 600;
+}
+
+.m-nav-btn-placeholder {
+  display: inline-block;
+  min-width: 44px;
+}
+
+/* ---------------------------------------------------------------- 分组列表 */
+
+.m-section {
+  margin: var(--m-sp-4) 0 0;
+}
+
+.m-section + .m-section {
+  margin-top: var(--m-sp-6);
+}
+
+.m-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--m-sp-2);
+  padding: 0 var(--m-page-x) var(--m-sp-2);
+}
+
+.m-section-header h2 {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: var(--m-fs-sub);
+  font-weight: 600;
+}
+
+.m-section-action {
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font-size: var(--m-fs-sub);
+}
+
+.m-section-footer {
+  margin: var(--m-sp-2) 0 0;
+  padding: 0 var(--m-page-x);
+  color: var(--fg-3);
+  font-size: var(--m-fs-cap);
+  line-height: 1.5;
+}
+
+.m-list,
+.m-plain {
+  background: var(--bg-surface);
+}
+
+.m-list {
+  margin: 0 var(--m-page-x);
+  border-radius: var(--m-r-md);
+  overflow: hidden;
+}
+
+.m-plain {
+  margin: 0;
+  border-radius: 0;
+}
+
+.m-cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--m-sp-3);
+  width: 100%;
+  min-height: 52px;
+  padding: var(--m-sp-3) var(--m-sp-4);
+  border: 0;
+  background: var(--bg-surface);
+  color: var(--fg);
+  text-align: left;
+  font-size: var(--m-fs-body);
+}
+
+/* 分隔线：从文字起始处开始（iOS 习惯），左侧有图标/时间列时由 inset 变体让开 */
+.m-cell + .m-cell::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: var(--m-inset, var(--m-sp-4));
+  right: 0;
+  height: 0.5px;
+  background: var(--line);
+}
+
+.m-list--inset-icon {
+  --m-inset: 56px;
+}
+
+.m-list--inset-wide {
+  --m-inset: 72px;
+}
+
+.m-cell--action {
+  transition: background 0.14s var(--m-ease);
+}
+
+.m-cell--action:active {
+  background: var(--bg-hover);
+}
+
+.m-cell--destructive {
+  justify-content: center;
+  color: var(--red);
+}
+
+.m-cell-leading {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.m-cell-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.m-cell-title {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-cell-subtitle {
+  overflow: hidden;
+  color: var(--fg-2);
+  font-size: var(--m-fs-sub);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-cell-meta {
+  color: var(--fg-3);
+  font-size: var(--m-fs-cap);
+}
+
+.m-cell-value {
+  flex: none;
+  color: var(--fg-3);
+  font-size: var(--m-fs-sub);
+}
+
+.m-cell-accessory {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.m-cell-chevron {
+  flex: none;
+  color: var(--fg-3);
+  opacity: 0.7;
+}
+
+/* 副标题多行：靠 CSS 行数截断，不用 JS 量高度 */
+.m-lines-1,
+.m-lines-2,
+.m-lines-3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+}
+
+.m-lines-1 { -webkit-line-clamp: 1; }
+.m-lines-2 { -webkit-line-clamp: 2; }
+.m-lines-3 { -webkit-line-clamp: 3; }
+
+/* 小标签 */
+.m-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--fg-2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.m-tag--blue { background: color-mix(in srgb, var(--blue) 15%, transparent); color: var(--blue); }
+.m-tag--green { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
+.m-tag--orange { background: color-mix(in srgb, var(--orange) 16%, transparent); color: var(--orange); }
+.m-tag--red { background: color-mix(in srgb, var(--red) 16%, transparent); color: var(--red); }
+.m-tag--purple { background: color-mix(in srgb, var(--purple) 16%, transparent); color: var(--purple); }
+
+/* ---------------------------------------------------------------- 控件 */
+
+/* 开关：原生 checkbox 换成 iOS 胶囊 */
+.m-switch {
+  position: relative;
+  flex: none;
+  width: 46px;
+  height: 28px;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--line);
+  appearance: none;
+  -webkit-appearance: none;
+  transition: background 0.2s var(--m-ease);
+}
+
+.m-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.2s var(--m-ease);
+}
+
+.m-switch:checked {
+  background: var(--green);
+}
+
+.m-switch:checked::after {
+  transform: translateX(18px);
+}
+
+/* 分段控件 */
+.m-segmented {
+  display: flex;
+  gap: 2px;
+  margin: var(--m-sp-3) var(--m-page-x);
+  padding: 3px;
+  border-radius: var(--m-r-sm);
+  background: var(--bg-hover);
+}
+
+.m-segment {
+  flex: 1;
+  min-height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-2);
+  font-size: var(--m-fs-sub);
+  transition: background 0.16s var(--m-ease), color 0.16s var(--m-ease);
+}
+
+.m-segment.is-active {
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-weight: 600;
+  box-shadow: var(--shadow-1);
+}
+
+.m-segmented--sm .m-segment {
+  min-height: 28px;
+  font-size: var(--m-fs-cap);
+}
+
+/* 单选胶囊 */
+.m-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--m-sp-2);
+  padding: var(--m-sp-3) var(--m-page-x);
+}
+
+.m-chip {
+  min-height: 34px;
+  padding: 0 var(--m-sp-3);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-2);
+  font-size: var(--m-fs-sub);
+  transition: background 0.16s var(--m-ease), color 0.16s var(--m-ease), border-color 0.16s var(--m-ease);
+}
+
+.m-chip.is-active {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--blue) 15%, transparent);
+  color: var(--blue);
+}
+
+/* 搜索框 */
+.m-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: var(--m-sp-3) var(--m-page-x);
+  padding: 0 var(--m-sp-2) 0 var(--m-sp-3);
+  min-height: 38px;
+  border-radius: 10px;
+  background: var(--bg-hover);
+  color: var(--fg-3);
+}
+
+.m-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font-size: var(--m-fs-body);
+  outline: none;
+}
+
+.m-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.m-search-clear {
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  color: var(--fg-3);
+}
+
+/* 表单行 */
+.m-field {
+  display: flex;
+  align-items: center;
+  gap: var(--m-sp-3);
+  min-height: 52px;
+  padding: var(--m-sp-2) var(--m-sp-4);
+  background: var(--bg-surface);
+}
+
+.m-field + .m-field {
+  position: relative;
+}
+
+.m-field + .m-field::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: var(--m-sp-4);
+  right: 0;
+  height: 0.5px;
+  background: var(--line);
+}
+
+.m-field-label {
+  flex: none;
+  color: var(--fg-2);
+  font-size: var(--m-fs-body);
+}
+
+.m-field input,
+.m-field textarea {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font-size: var(--m-fs-body);
+  outline: none;
+}
+
+.m-field--multiline {
+  align-items: flex-start;
+  padding-block: var(--m-sp-3);
+}
+
+.m-field--multiline textarea {
+  resize: none;
+  line-height: 1.5;
+}
+
+.m-field--bare {
+  padding-inline: var(--m-sp-4);
+}
+
+/* ---------------------------------------------------------------- 状态 */
+
+.m-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--m-sp-2);
+  padding: var(--m-sp-6) var(--m-page-x);
+  text-align: center;
+}
+
+.m-empty-icon {
+  color: var(--fg-3);
+  opacity: 0.6;
+}
+
+.m-empty-title {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: var(--m-fs-body);
+  font-weight: 600;
+}
+
+.m-empty-message {
+  margin: 0;
+  color: var(--fg-3);
+  font-size: var(--m-fs-sub);
+  line-height: 1.5;
+}
+
+.m-skeleton-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--m-sp-3) var(--m-sp-4);
+}
+
+.m-skeleton-bar {
+  height: 12px;
+  border-radius: 6px;
+  background: var(--bg-hover);
+  animation: m-shimmer 1.4s ease-in-out infinite;
+}
+
+.m-skeleton-bar.is-short {
+  width: 45%;
+  height: 10px;
+}
+
+@keyframes m-shimmer {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+.m-spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid color-mix(in srgb, var(--fg) 18%, transparent);
+  border-top-color: var(--fg-2);
+  border-radius: 50%;
+  animation: m-spin 0.8s linear infinite;
+}
+
+@keyframes m-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.m-app .m-skeleton-bar,
+  html.m-app .m-spinner {
+    animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------- 浮层 */
+
+.m-sheet-mask,
+.m-alert-mask {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay);
+  opacity: 0;
+  transition: opacity 0.28s var(--m-ease);
+}
+
+.m-sheet-mask.is-open,
+.m-alert-mask.is-open {
+  opacity: 1;
+}
+
+.m-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 88vh;
+  padding-bottom: var(--m-safe-bottom);
+  border-radius: var(--m-r-xl) var(--m-r-xl) 0 0;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-2);
+  transform: translateY(calc(100% + var(--m-drag, 0px)));
+  transition: transform 0.3s var(--m-ease);
+  will-change: transform;
+}
+
+.m-sheet.is-open {
+  transform: translateY(var(--m-drag, 0px));
+}
+
+.m-sheet--large {
+  height: 88vh;
+}
+
+.m-sheet-grabber {
+  flex: none;
+  width: 36px;
+  height: 5px;
+  margin: var(--m-sp-2) auto var(--m-sp-1);
+  border-radius: 999px;
+  background: var(--line);
+  touch-action: none;
+}
+
+.m-sheet-head {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: var(--m-sp-2);
+  padding: var(--m-sp-1) var(--m-sp-2) var(--m-sp-2);
+  touch-action: none;
+}
+
+.m-sheet-head .m-nav-btn:last-child {
+  justify-self: end;
+}
+
+.m-sheet-title {
+  margin: 0;
+  font-size: var(--m-fs-body);
+  font-weight: 600;
+  text-align: center;
+}
+
+.m-sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: var(--m-sp-4);
+}
+
+/* 操作菜单 */
+.m-action-sheet {
+  position: fixed;
+  left: var(--m-sp-2);
+  right: var(--m-sp-2);
+  bottom: calc(var(--m-sp-2) + var(--m-safe-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: var(--m-sp-2);
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 0.24s var(--m-ease), transform 0.24s var(--m-ease);
+}
+
+.m-action-sheet.is-open {
+  opacity: 1;
+  transform: none;
+}
+
+.m-action-group {
+  overflow: hidden;
+  border-radius: var(--m-r-lg);
+  background: var(--bg-elevated);
+}
+
+.m-action-head {
+  padding: var(--m-sp-3);
+  border-bottom: 0.5px solid var(--line);
+  text-align: center;
+}
+
+.m-action-title {
+  margin: 0;
+  font-size: var(--m-fs-sub);
+  font-weight: 600;
+}
+
+.m-action-message {
+  margin: 4px 0 0;
+  color: var(--fg-3);
+  font-size: var(--m-fs-cap);
+  line-height: 1.4;
+}
+
+.m-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--m-sp-2);
+  width: 100%;
+  min-height: 52px;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font-size: var(--m-fs-body);
+}
+
+.m-action + .m-action {
+  position: relative;
+}
+
+.m-action + .m-action::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 0.5px;
+  background: var(--line);
+}
+
+.m-action:active {
+  background: var(--bg-hover);
+}
+
+.m-action.is-destructive {
+  color: var(--red);
+}
+
+.m-action--cancel {
+  border-radius: var(--m-r-lg);
+  background: var(--bg-elevated);
+  font-weight: 600;
+}
+
+/* 居中确认 */
+.m-alert {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: min(300px, calc(100vw - 56px));
+  overflow: hidden;
+  border-radius: var(--m-r-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-2);
+  opacity: 0;
+  transform: translate(-50%, -46%) scale(0.94);
+  transition: opacity 0.2s var(--m-ease), transform 0.2s var(--m-ease);
+}
+
+.m-alert.is-open {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.m-alert-content {
+  padding: var(--m-sp-4) var(--m-sp-4) var(--m-sp-3);
+  text-align: center;
+}
+
+.m-alert-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.m-alert-message {
+  margin: var(--m-sp-2) 0 0;
+  color: var(--fg-2);
+  font-size: var(--m-fs-sub);
+  line-height: 1.5;
+}
+
+.m-alert-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-top: 0.5px solid var(--line);
+}
+
+.m-alert-btn {
+  min-height: 46px;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font-size: var(--m-fs-body);
+}
+
+.m-alert-btn + .m-alert-btn {
+  border-left: 0.5px solid var(--line);
+}
+
+.m-alert-btn.is-strong {
+  font-weight: 600;
+}
+
+.m-alert-btn.is-destructive {
+  color: var(--red);
+}
+
+/* ---------------------------------------------------------------- 手势 */
+
+.m-swipe {
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-surface);
+}
+
+.m-swipe-actions {
+  position: absolute;
+  inset: 0 0 0 auto;
+  display: flex;
+}
+
+.m-swipe-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 78px;
+  border: 0;
+  color: #fff;
+  font-size: var(--m-fs-cap);
+  background: var(--m-tone-gray);
+}
+
+.m-swipe-action.m-tone-red { background: var(--red); color: #fff; }
+.m-swipe-action.m-tone-green { background: var(--green); color: #fff; }
+.m-swipe-action.m-tone-orange { background: var(--orange); color: #fff; }
+
+.m-swipe-front {
+  position: relative;
+  z-index: 1;
+  background: var(--bg-surface);
+  transform: translateX(var(--m-swipe-x, 0px));
+  transition: transform 0.22s var(--m-ease);
+  touch-action: pan-y;
+}
+
+.m-swipe.is-dragging .m-swipe-front {
+  transition: none;
+}
+
+/* 下拉刷新指示器：浮在内容上方，不推内容 */
+.m-ptr {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-top: -34px;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-1);
+  opacity: 0;
+  transform: translate(-50%, var(--m-pull, 0px)) scale(0.7);
+  transition: opacity 0.18s var(--m-ease), transform 0.18s var(--m-ease);
+  pointer-events: none;
+}
+
+.m-ptr.is-visible {
+  opacity: 1;
+}
+
+.m-ptr.is-armed .m-ptr-ring {
+  border-top-color: var(--blue);
+}
+
+.m-ptr-ring {
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, var(--fg) 20%, transparent);
+  border-top-color: var(--fg-2);
+  border-radius: 50%;
+}
+
+/* ---------------------------------------------------------------- 页面转场 */
+
+.m-page {
+  animation: m-page-in 0.26s var(--m-ease) both;
+}
+
+@keyframes m-page-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.m-app .m-page,
+  html.m-app .m-sheet,
+  html.m-app .m-action-sheet,
+  html.m-app .m-alert {
+    animation: none;
+    transition: opacity 0.2s linear;
+  }
+}
+
+/* ---------------------------------------------------------------- 今天页 */
+
+.m-today-hero {
+  padding: var(--m-sp-2) var(--m-page-x) var(--m-sp-3);
+}
+
+.m-today-greeting {
+  margin: 0;
+  font-size: var(--m-fs-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.m-today-date {
+  margin: 4px 0 0;
+  color: var(--fg-3);
+  font-size: var(--m-fs-sub);
+}
+
+/* 时间轴：左侧时间列 + 右侧内容，分隔线让开时间列 */
+.m-agenda-time {
+  flex: none;
+  width: 46px;
+  color: var(--fg-2);
+  font-size: var(--m-fs-sub);
+  font-variant-numeric: tabular-nums;
+}
+
+.m-agenda-bar {
+  flex: none;
+  width: 3px;
+  align-self: stretch;
+  border-radius: 2px;
+  background: var(--blue);
+}
+
+.m-agenda-bar.is-muted {
+  background: var(--line);
+}
+
+/* ---------------------------------------------------------------- 挂载现有视图 */
+
+/* 「日历 / 笔记 / 二级页面」这里放的是现有视图（暂时没重建）。
+   它们原本长在桌面面板里，背景与内边距都按面板给过，这里不再额外加，免得双重缩进。 */
+.m-view-host {
+  min-height: 100%;
+}
+
+/* ---------------------------------------------------------------- 按标签切换布局 */
+
+/* AI 标签：交回桌面那套对话列 —— 它本身就是完整的一屏（消息列表 + 输入区 + 控件行），
+   再在手机外壳里造第二份输入区只会多出一份要同步的状态。
+   外壳保留底部标签栏，导航栏与内容区让开（对话列自己的顶栏就是导航栏）。
+
+   `z-index: 5` 是必需的：`.m-shell` 是 fixed 且带底色，不加层级会把它整块盖住。
+   标签栏是 20，仍在对话列之上。 */
+html.m-app[data-tab='ai'] .m-appbar {
+  display: none;
+}
+
+html.m-app[data-tab='ai'] .m-scroll {
+  display: none;
+}
+
+html.m-app[data-tab='ai'] .app {
+  display: block;
+  position: fixed;
+  z-index: 5;
+  inset: 0 0 calc(var(--m-tabbar-h) + var(--m-safe-bottom)) 0;
+}
+
+html.m-app[data-tab='ai'] .sidebar,
+html.m-app[data-tab='ai'] .panel {
+  display: none;
+}
+
+html.m-app[data-tab='ai'] .chat {
+  height: 100%;
+}
+
+/* 二级页面（进到下一层）不显示标签栏：手机上"进去了"就不该还能横跳 */
+html.m-app[data-stack='1'] .m-tabbar {
+  display: none;
+}
