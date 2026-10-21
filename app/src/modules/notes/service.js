@@ -1,4 +1,9 @@
 import path from 'node:path';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { mkdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { HttpError } from '../../core/http/router.js';
 import { extractImportedDocument } from './docx.js';
 import { firstImageAttachment, recognizeImageDataUrl } from './ocr.js';
@@ -8,6 +13,8 @@ const STATUSES = new Set(['draft', 'unorganized', 'processing', 'ready', 'failed
 const MAX_BODY_CHARS = 200000;
 const MAX_ATTACHMENTS = 8;
 const MAX_ATTACHMENT_DATA = 9 * 1024 * 1024;
+const MAX_IMPORTED_FILE_BYTES = 200 * 1024 * 1024;
+const MAX_EXTRACT_FILE_BYTES = 32 * 1024 * 1024;
 const MAX_OCR_CHARS = 20000;
 const VERSION_LIMIT = 50;
 const AUTO_VERSION_MS = 5 * 60 * 1000;
@@ -186,8 +193,24 @@ function attachmentsOf(value) {
     return {
       name: String(item?.name ?? '附件').slice(0, 200), type: String(item?.type ?? 'application/octet-stream').slice(0, 100),
       size: Math.max(0, Number(item?.size) || 0), dataUrl,
+      assetId: /^[a-f\d-]{36}$/i.test(String(item?.assetId ?? '')) ? String(item.assetId) : '',
+      url: /^\/notes\/assets\/[a-f\d-]{36}$/i.test(String(item?.url ?? '')) ? String(item.url) : '',
     };
   });
+}
+
+function annotationsOf(value) {
+  const strokes = Array.isArray(value?.strokes) ? value.strokes : [];
+  return {
+    strokes: strokes.slice(0, 3000).map((stroke) => ({
+      color: /^#[\da-f]{6}$/i.test(String(stroke?.color ?? '')) ? String(stroke.color).toLowerCase() : '#2f63d8',
+      width: Math.max(1, Math.min(24, Number(stroke?.width) || 3)),
+      points: (Array.isArray(stroke?.points) ? stroke.points : []).slice(0, 4000).map((point) => ({
+        x: Math.max(0, Math.min(1, Number(point?.x) || 0)),
+        y: Math.max(0, Math.min(1, Number(point?.y) || 0)),
+      })),
+    })).filter((stroke) => stroke.points.length > 1),
+  };
 }
 
 /**
@@ -200,7 +223,7 @@ function attachmentsOf(value) {
  * 没有图片附件时返回 `null`（明确表示"这篇没有图可识别"，与"还没识别"区分开）。
  */
 function imageFingerprint(attachments) {
-  const images = (Array.isArray(attachments) ? attachments : []).filter((item) => String(item?.type ?? '').startsWith('image/'));
+  const images = (Array.isArray(attachments) ? attachments : []).filter((item) => String(item?.type ?? '').startsWith('image/') && item?.dataUrl);
   if (!images.length) return null;
   return images.map((item) => `${item.name}|${item.type}|${item.size}|${String(item.dataUrl ?? '').length}`).join(';');
 }
@@ -263,6 +286,7 @@ function normalized(record) {
     title: cleanText(record.title) || '未命名笔记', folder: cleanText(record.folder, 300), aliases: uniqueText(record.aliases, 20),
     body: importedBody, properties: propertiesOf(record.properties), favorite: Boolean(record.favorite), links: parseWikiLinks(importedBody),
     revision: Math.max(1, Number(record.revision) || 1), deletedAt: record.deletedAt ?? null,
+    annotations: annotationsOf(record.annotations),
     // 图片识别结果（见 ocr.js）：识别文本同样截断，避免一条坏数据把整份笔记文件撑大
     ocr: normalizeOcr(record.ocr),
   };
@@ -274,6 +298,7 @@ export function noteSummary(record, matchText = '') {
     id: item.id, title: item.title, source: item.source, status: item.status, anchor: item.anchor ?? null, tags: item.tags ?? [],
     folder: item.folder, aliases: item.aliases, properties: item.properties, favorite: item.favorite, links: item.links,
     revision: item.revision, deletedAt: item.deletedAt, mediaCount: item.mediaCount ?? 0, ocr: item.ocr,
+    annotationCount: item.annotations?.strokes?.length ?? 0,
     createdAt: item.createdAt, updatedAt: item.updatedAt,
     previewText: String(item.body ?? '').replace(/\s+/g, ' ').trim().slice(0, 180),
     ...(matchText ? { matchText } : {}),
@@ -367,6 +392,7 @@ export class NoteService {
     // 同名实例属性会把它整个盖掉（那个 bug 会让 POST /notes/:id/ocr 连不存在的笔记都返回 200）。
     this.ocrEngine = typeof recognize === 'function' ? recognize : recognizeImageDataUrl;
     this.ocrAssetDir = dataDir ? path.join(dataDir, '.ocr') : null;
+    this.assetDir = dataDir ? path.join(dataDir, 'note-assets') : null;
   }
 
   all({ deleted = false } = {}) { return this.collection.all().map(normalized).filter((item) => deleted ? Boolean(item.deletedAt) : !item.deletedAt); }
@@ -390,6 +416,73 @@ export class NoteService {
     return normalized(raw);
   }
 
+  /**
+   * 以文件流导入笔记。原文件单独落在 note-assets，JSON 中只保留元信息，
+   * 因此 200MB 文件不会被 Base64 放大，也不会让 notes.json 失控。
+   */
+  async importFile(req, input = {}) {
+    if (!this.assetDir) throw new HttpError(503, 'NOTE_ASSET_UNAVAILABLE', '当前运行环境没有可用的附件目录');
+    const declared = Math.max(0, Number(req.headers['content-length']) || 0);
+    if (declared > MAX_IMPORTED_FILE_BYTES) throw new HttpError(413, 'PAYLOAD_TOO_LARGE', '单个导入文件不能超过 200MB');
+    const name = cleanText(input.name || req.headers['x-file-name'], 200) || '导入文件';
+    const type = cleanText(input.type || req.headers['x-file-type'], 100) || 'application/octet-stream';
+    const assetId = randomUUID();
+    await mkdir(this.assetDir, { recursive: true });
+    const temporary = path.join(this.assetDir, `${assetId}.uploading`);
+    const target = path.join(this.assetDir, assetId);
+    let size = 0;
+    const limiter = new Transform({
+      transform(chunk, encoding, callback) {
+        size += chunk.length;
+        if (size > MAX_IMPORTED_FILE_BYTES) return callback(new HttpError(413, 'PAYLOAD_TOO_LARGE', '单个导入文件不能超过 200MB'));
+        callback(null, chunk);
+      },
+    });
+    try {
+      await pipeline(req, limiter, createWriteStream(temporary, { flags: 'wx', mode: 0o600 }));
+      if (!size) throw HttpError.badRequest('导入文件为空');
+      await rename(temporary, target);
+      const attachment = { assetId, url: `/notes/assets/${assetId}`, name, type, size, dataUrl: '' };
+      let body = '';
+      if (size <= MAX_EXTRACT_FILE_BYTES) {
+        const bytes = await readFile(target);
+        if (/^text\//i.test(type) || /\.(md|markdown|txt|html?|csv|json|ya?ml|log|tex)$/i.test(name)) body = bytes.toString('utf8').slice(0, MAX_BODY_CHARS);
+        else body = extractImportedDocument({ ...attachment, dataUrl: `data:${type};base64,${bytes.toString('base64')}` });
+      }
+      if (!body) body = `# ${name.replace(/\.[^.]+$/, '')}\n\n> 原文件已完整导入（${Math.max(0.1, size / 1024 / 1024).toFixed(1)} MB）。当前文件没有可提取的文本，可在下方打开原文件并添加批注。`;
+      try {
+        let importedAnchor = null;
+        try { importedAnchor = anchorOf(typeof input.anchor === 'string' ? JSON.parse(input.anchor) : input.anchor); } catch {}
+        return await this.create({
+          title: cleanText(input.title) || name.replace(/\.[^.]+$/, '') || name,
+          tags: String(input.tags ?? '').split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
+          anchor: importedAnchor, source: 'import', status: 'ready', format: 'markdown', body, attachments: [attachment],
+        });
+      } catch (error) {
+        await rm(target, { force: true });
+        throw error;
+      }
+    } catch (error) {
+      await rm(temporary, { force: true });
+      throw error;
+    }
+  }
+
+  async asset(assetId) {
+    const id = String(assetId ?? '');
+    if (!/^[a-f\d-]{36}$/i.test(id) || !this.assetDir) throw HttpError.notFound('附件不存在');
+    let attachment = null;
+    for (const note of this.collection.all().map((item) => normalized(item))) {
+      attachment = (note.attachments ?? []).find((item) => item.assetId === id);
+      if (attachment) break;
+    }
+    if (!attachment) throw HttpError.notFound('附件不存在');
+    const file = path.join(this.assetDir, id);
+    const info = await stat(file).catch(() => null);
+    if (!info?.isFile()) throw HttpError.notFound('附件文件不存在');
+    return { file, stream: createReadStream(file), name: attachment.name, type: attachment.type, size: info.size };
+  }
+
   resolveMap() {
     const map = new Map();
     for (const item of this.all()) for (const name of [item.title, ...item.aliases]) if (name) map.set(name.toLowerCase(), item);
@@ -405,7 +498,7 @@ export class NoteService {
       status: STATUSES.has(input.status) ? input.status : body || attachments.length ? 'ready' : 'draft', anchor: anchorOf(input.anchor),
       tags: tagsOf(input.tags), folder: cleanText(input.folder, 300), aliases: uniqueText(input.aliases, 20), properties: propertiesOf(input.properties),
       favorite: Boolean(input.favorite), mediaCount: Math.max(0, Number(input.mediaCount) || attachments.filter((file) => file.type.startsWith('image/')).length),
-      format: input.format === 'text' ? 'text' : 'markdown', body, attachments, links: parseWikiLinks(body), revision: 1, deletedAt: null,
+      format: input.format === 'text' ? 'text' : 'markdown', body, attachments, annotations: annotationsOf(input.annotations), links: parseWikiLinks(body), revision: 1, deletedAt: null,
       // 「还没识别」的初值：`ok:false` + `error:'pending'` 明确区别于"识别过、图里没字"。
       // 没有图片附件时留 null —— 一篇纯文字笔记不该显示"图片识别中"。
       ocr: fingerprint ? pendingOcr() : null, ocrFingerprint: fingerprint,
@@ -444,6 +537,7 @@ export class NoteService {
     if (input.favorite !== undefined) patch.favorite = Boolean(input.favorite);
     if (input.format !== undefined) { if (!['markdown', 'text'].includes(input.format)) throw HttpError.badRequest('不支持的笔记格式'); patch.format = input.format; }
     if (input.status !== undefined) { if (!STATUSES.has(input.status)) throw HttpError.badRequest('不支持的笔记状态'); patch.status = input.status; }
+    if (input.annotations !== undefined) patch.annotations = annotationsOf(input.annotations);
     /**
      * **刻意不碰附件、也不在这里重排 OCR**（保持既有语义）：
      * 编辑接口只允许改编辑字段，附件、来源、日历关联由创建方负责 ——
@@ -545,6 +639,7 @@ export class NoteService {
     if (permanent) {
       if (!current.deletedAt) throw HttpError.conflict('请先将笔记移入回收站');
       await this.collection.remove(String(id));
+      if (this.assetDir) for (const attachment of current.attachments ?? []) if (attachment.assetId) await rm(path.join(this.assetDir, attachment.assetId), { force: true });
       for (const version of this.versionsCollection.all().filter((item) => item.noteId === String(id))) await this.versionsCollection.remove(version.id);
       this.broadcast?.({ type: 'notes_changed', payload: { action: 'deleted', id: String(id) } });
       if (this.services?.__actor !== 'ai') this.audit?.record({ actor: 'user', source: 'api', module: 'note', action: 'delete', targetId: String(id), title: current.title, before: current, summary: '永久删除笔记' });

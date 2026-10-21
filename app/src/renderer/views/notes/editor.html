@@ -7,8 +7,8 @@
     <title>笔记编辑 · 智学</title>
     <script src="../../kit/theme.js"></script>
     <link rel="stylesheet" href="../../shell/shell.css" />
-    <link rel="stylesheet" href="../../shell/theme.css" />
-    <link rel="stylesheet" href="editor.css" />
+    <link rel="stylesheet" href="../../shell/theme.css?v=20261021-1" />
+    <link rel="stylesheet" href="editor.css?v=20261021-2" />
   </head>
   <body class="note-editor-body">
     <main id="note-editor" class="note-editor" data-view="split">
@@ -26,11 +26,26 @@
           <button type="button" id="undo-note" aria-label="撤销" title="撤销（Ctrl / ⌘ + Z）" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5-5 5 5 5M4 10h10a5 5 0 0 1 0 10h-3" /></svg></button>
           <button type="button" id="redo-note" aria-label="重做" title="重做（Ctrl / ⌘ + Shift + Z）" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5 5 5-5 5M20 10H10a5 5 0 0 0 0 10h3" /></svg></button>
         </div>
+        <div class="note-editor-tool-group note-editor-word-tools" aria-label="字体和颜色">
+          <select id="note-font-family" aria-label="字体" title="字体">
+            <option value="sans">默认字体</option><option value="song">宋体</option><option value="hei">黑体</option><option value="kai">楷体</option><option value="mono">等宽</option>
+          </select>
+          <select id="note-font-size" aria-label="字号" title="字号">
+            <option value="14">14</option><option value="12">12</option><option value="16">16</option><option value="18">18</option><option value="24">24</option><option value="32">32</option>
+          </select>
+          <select id="note-font-color" aria-label="文字颜色" title="文字颜色">
+            <option value="black">文字颜色</option><option value="blue">蓝色</option><option value="purple">紫色</option><option value="green">绿色</option><option value="red">红色</option><option value="orange">橙色</option>
+          </select>
+        </div>
         <div class="note-editor-tool-group">
           <button type="button" data-format="heading" aria-label="插入二级标题" title="二级标题" class="note-editor-heading-tool">标题 <span aria-hidden="true">⌄</span></button>
           <button type="button" data-format="bold" aria-label="加粗" title="加粗"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h8a4 4 0 0 1 0 8H6V4h7a4 4 0 0 1 0 8" /></svg></button>
           <button type="button" data-format="italic" aria-label="斜体" title="斜体"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 4h-9M14 20H5M15 4 9 20" /></svg></button>
+          <button type="button" data-format="underline" aria-label="下划线" title="下划线"><u>U</u></button>
           <button type="button" data-format="strike" aria-label="删除线" title="删除线"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 5H9a4 4 0 0 0-4 4M4 12h16M7 19h8a4 4 0 0 0 4-4" /></svg></button>
+        </div>
+        <div class="note-editor-tool-group" aria-label="段落对齐">
+          <button type="button" data-align="left" title="左对齐">左</button><button type="button" data-align="center" title="居中">中</button><button type="button" data-align="right" title="右对齐">右</button><button type="button" data-align="justify" title="两端对齐">齐</button>
         </div>
         <div class="note-editor-tool-group">
           <button type="button" data-format="list" aria-label="插入列表" title="列表"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01" /></svg></button>
@@ -41,6 +56,7 @@
           <button type="button" data-format="wiki" aria-label="插入内部链接" title="内部链接 [[笔记]]">[[ ]]</button>
         </div>
         <div class="note-editor-view-tabs" role="group" aria-label="显示方式">
+          <button type="button" data-view="file" id="note-file-view" aria-pressed="false" hidden>原文件</button>
           <button type="button" data-view="source" aria-pressed="false">源码</button>
           <button type="button" data-view="split" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M12 3v18" /></svg>分栏</button>
           <button type="button" data-view="read" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5C8 3 5 3 2 4v16c3-1 6-1 10 1 4-2 7-2 10-1V4c-3-1-6-1-10 1Zm0 0v16" /></svg>阅读</button>
@@ -80,7 +96,7 @@
         <button type="button" id="leave-save" class="primary-btn">保存并返回</button>
       </div>
     </dialog>
-    <script src="../../kit/richtext.js"></script>
-    <script src="editor.js"></script>
+    <script src="../../kit/richtext.js?v=20261021-1"></script>
+    <script src="editor.js?v=20261021-2"></script>
   </body>
 </html>

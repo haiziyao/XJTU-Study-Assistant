@@ -60,3 +60,7 @@ input::placeholder, textarea::placeholder { color: var(--fg-3); opacity: 1; }
 .theme-toggle:hover { background: var(--bg-hover); color: var(--fg); }
 .appearance-setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .appearance-hint { margin: 8px 0 0; color: var(--fg-3); font-size: 12px; }
+.richtext .rt-color-blue{color:#2f63d8}.richtext .rt-color-purple{color:#7d48b5}.richtext .rt-color-green{color:#16845b}.richtext .rt-color-red{color:#d23f57}.richtext .rt-color-orange{color:#c87812}.richtext .rt-color-black{color:var(--fg)}
+.richtext .rt-size-12{font-size:12px}.richtext .rt-size-14{font-size:14px}.richtext .rt-size-16{font-size:16px}.richtext .rt-size-18{font-size:18px}.richtext .rt-size-24{font-size:24px}.richtext .rt-size-32{font-size:32px}
+.richtext .rt-font-sans{font-family:"Microsoft YaHei","PingFang SC",sans-serif}.richtext .rt-font-song{font-family:SimSun,"Songti SC",serif}.richtext .rt-font-hei{font-family:SimHei,"Heiti SC",sans-serif}.richtext .rt-font-kai{font-family:KaiTi,"Kaiti SC",serif}.richtext .rt-font-mono{font-family:Consolas,"Cascadia Code",monospace}
+.richtext .rt-align-left{text-align:left}.richtext .rt-align-center{text-align:center}.richtext .rt-align-right{text-align:right}.richtext .rt-align-justify{text-align:justify}

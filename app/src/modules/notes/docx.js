@@ -2,6 +2,7 @@ import { inflateRawSync, inflateSync } from 'node:zlib';
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 function decodeXml(value) {
   return String(value ?? '')
@@ -127,6 +128,58 @@ export function extractPptxMarkdown(attachment) {
   } catch { return ''; }
 }
 
+export function isXlsxAttachment(attachment) {
+  return String(attachment?.type ?? '').toLowerCase() === XLSX_MIME || /\.xlsx$/i.test(String(attachment?.name ?? ''));
+}
+
+function excelColumn(reference = '') {
+  const letters = String(reference).match(/^[A-Z]+/i)?.[0]?.toUpperCase() ?? '';
+  let value = 0;
+  for (const letter of letters) value = value * 26 + letter.charCodeAt(0) - 64;
+  return Math.max(0, value - 1);
+}
+
+function worksheetMarkdown(xml, shared, title) {
+  const rows = [];
+  for (const rowMatch of String(xml).matchAll(/<row(?:\s[^>]*)?>([\s\S]*?)<\/row>/g)) {
+    const row = [];
+    for (const cellMatch of rowMatch[1].matchAll(/<c(?:\s([^>]*))?>([\s\S]*?)<\/c>/g)) {
+      const attrs = cellMatch[1] ?? ''; const cell = cellMatch[2];
+      const column = excelColumn(attrs.match(/\br="([A-Z]+\d+)"/i)?.[1]);
+      const type = attrs.match(/\bt="([^"]+)"/i)?.[1] ?? '';
+      const raw = cell.match(/<v(?:\s[^>]*)?>([\s\S]*?)<\/v>/i)?.[1]
+        ?? cell.match(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/i)?.[1] ?? '';
+      const value = type === 's' ? shared[Number(raw)] ?? '' : decodeXml(raw);
+      while (row.length < column) row.push('');
+      row[column] = String(value).replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>');
+    }
+    if (row.some((value) => value !== '')) rows.push(row.slice(0, 40));
+    if (rows.length >= 2000) break;
+  }
+  if (!rows.length) return `## ${title}\n\n（工作表为空）`;
+  const width = Math.max(...rows.map((row) => row.length));
+  const normalize = (row) => [...row, ...Array(Math.max(0, width - row.length)).fill('')];
+  return [`## ${title}`, '', `| ${normalize(rows[0]).join(' | ')} |`, `| ${Array(width).fill('---').join(' | ')} |`, ...rows.slice(1).map((row) => `| ${normalize(row).join(' | ')} |`)].join('\n');
+}
+
+export function extractXlsxMarkdown(attachment) {
+  if (!isXlsxAttachment(attachment)) return '';
+  const buffer = attachmentBuffer(attachment); if (!buffer) return '';
+  try {
+    const entries = zipEntries(buffer, (name) => name === 'xl/sharedStrings.xml' || name === 'xl/workbook.xml' || /^xl\/worksheets\/sheet\d+\.xml$/i.test(name));
+    const sharedXml = entries.get('xl/sharedStrings.xml')?.toString('utf8') ?? '';
+    const shared = [...sharedXml.matchAll(/<si(?:\s[^>]*)?>([\s\S]*?)<\/si>/g)].map((item) =>
+      [...item[1].matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)].map((part) => decodeXml(part[1])).join(''),
+    );
+    const workbook = entries.get('xl/workbook.xml')?.toString('utf8') ?? '';
+    const names = [...workbook.matchAll(/<sheet(?:\s[^>]*)?\bname="([^"]+)"[^>]*>/g)].map((match) => decodeXml(match[1]));
+    const sheets = [...entries.keys()].filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(name))
+      .sort((a, b) => Number(a.match(/sheet(\d+)/i)?.[1]) - Number(b.match(/sheet(\d+)/i)?.[1]));
+    const body = sheets.map((name, index) => worksheetMarkdown(entries.get(name)?.toString('utf8') ?? '', shared, names[index] || `工作表 ${index + 1}`)).join('\n\n');
+    return body ? `# ${String(attachment.name ?? 'Excel 笔记').replace(/\.xlsx$/i, '')}\n\n${body}`.slice(0, 200000) : '';
+  } catch { return ''; }
+}
+
 function pdfString(value) {
   return String(value).replace(/\\([nrtbf()\\])/g, (unused, char) => ({ n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' }[char] ?? char))
     .replace(/\\([0-7]{1,3})/g, (unused, octal) => String.fromCharCode(Number.parseInt(octal, 8))).replace(/\\\r?\n/g, '');
@@ -162,18 +215,25 @@ export function extractPdfMarkdown(attachment) {
   const buffer = attachmentBuffer(attachment); if (!buffer) return '';
   try {
     const source = buffer.toString('latin1'); const chunks = [];
+    // 自定义字体编码需要完整的 CMap 解码；把字形编号当 Latin-1 会生成乱码。
+    // 这类文件保留原文件阅读，不能伪装成成功提取的正文。
+    if (/\/ToUnicode\b|\/Subtype\s*\/Type0\b|\/Encoding\s*\/Identity-[HV]\b/.test(source)) return '';
     for (const match of source.matchAll(/stream\r?\n([\s\S]*?)\r?\nendstream/g)) {
-      const dictionary = source.slice(Math.max(0, match.index - 1000), match.index);
+      const preceding = source.slice(0, match.index);
+      const dictionary = preceding.slice(preceding.lastIndexOf('obj') + 3);
+      if (/\/Subtype\s*\/(?:Image|OpenType)\b|\/FontFile[23]?\b/.test(dictionary)) continue;
       let bytes = Buffer.from(match[1], 'latin1');
-      if (/\/FlateDecode\b/.test(dictionary)) { try { bytes = inflateSync(bytes); } catch { continue; } }
+      if (/\/FlateDecode\b/.test(dictionary)) { try { bytes = inflateSync(bytes, { maxOutputLength: 16 * 1024 * 1024 }); } catch { continue; } }
       else if (/\/Filter\s*\//.test(dictionary)) continue;
       const text = pdfOperators(bytes.toString('latin1')); if (text) chunks.push(text);
     }
     const body = chunks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+    const invalid = [...body].filter((char) => /[\u007f-\u009f\ufffd]/.test(char)).length;
+    if (invalid > Math.max(2, body.length * 0.01)) return '';
     return body ? `# ${String(attachment.name ?? 'PDF 笔记').replace(/\.pdf$/i, '')}\n\n${body}`.slice(0, 200000) : '';
   } catch { return ''; }
 }
 
 export function extractImportedDocument(attachment) {
-  return extractDocxMarkdown(attachment) || extractPptxMarkdown(attachment) || extractPdfMarkdown(attachment) || '';
+  return extractDocxMarkdown(attachment) || extractPptxMarkdown(attachment) || extractXlsxMarkdown(attachment) || extractPdfMarkdown(attachment) || '';
 }

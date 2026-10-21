@@ -6,6 +6,21 @@ export function registerNoteRoutes(router, { services, apiPrefix = '/api/v1' }) 
 
   router.get(P, ({ query }) => ({ items: notes.list(query) }));
   router.get(`${P}/graph`, ({ query }) => notes.graph(query));
+  router.postRaw(`${P}/import`, async ({ req, query }) => ({ __status: 201, summary: await notes.importFile(req, query) }));
+  router.get(`${P}/assets/:assetId`, async ({ params, res, req }) => {
+    const asset = await notes.asset(params.assetId);
+    const encoded = encodeURIComponent(asset.name).replace(/'/g, '%27');
+    res.writeHead(200, {
+      'Content-Type': asset.type || 'application/octet-stream',
+      'Content-Length': asset.size,
+      'Content-Disposition': `inline; filename*=UTF-8''${encoded}`,
+      'Cache-Control': 'private, max-age=3600',
+      'Access-Control-Allow-Origin': req?.headers?.origin ?? '*',
+    });
+    await new Promise((resolve, reject) => {
+      asset.stream.on('error', reject); res.on('finish', resolve); res.on('close', resolve); asset.stream.pipe(res);
+    });
+  });
   router.post(`${P}/daily`, async ({ body }) => ({ summary: await notes.daily(body?.date) }));
   router.post(`${P}/ai-context`, ({ body }) => ({ items: notes.queryForAI(body ?? {}) }));
   router.post(P, async ({ body }) => ({ __status: 201, summary: await notes.create(body ?? {}) }));

@@ -6,6 +6,13 @@ import path from 'node:path';
 
 import { createServer } from '../src/server/index.js';
 import { parseWikiLinks } from '../src/modules/notes/service.js';
+import { extractPdfMarkdown } from '../src/modules/notes/docx.js';
+
+test('PDF 自定义字体编码与损坏文本不会被当成可读正文', () => {
+  const extract = (source) => extractPdfMarkdown({ name: '课程.pdf', type: 'application/pdf', dataUrl: `data:application/pdf;base64,${Buffer.from(source, 'latin1').toString('base64')}` });
+  assert.equal(extract('%PDF-1.4\n1 0 obj << /Subtype /Type0 /Encoding /Identity-H >> endobj\n2 0 obj <<>>stream\nBT (wrong glyph ids) Tj ET\nendstream\nendobj'), '');
+  assert.equal(extract('%PDF-1.4\n1 0 obj <<>>stream\nBT (\x80\x81\x82garbled) Tj ET\nendstream\nendobj'), '');
+});
 
 function storedZip(name, content) {
   const fileName = Buffer.from(name); const data = Buffer.from(content);
@@ -64,6 +71,24 @@ test('上传 PPTX 按幻灯片提取正文，PDF 尽力提取可搜索文字', a
     const documentNote = await call('GET', `/notes/${document.body.summary.id}`);
     assert.match(documentNote.body.note.body, /Searchable PDF text/);
   } finally { await app.close(); }
+});
+
+test('文件流导入不经过 JSON，原文件可下载且彩色批注可保存', async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'potato-note-stream-'));
+  const server = await createServer({ dataDir }); const info = await server.listen({ port: 0 });
+  try {
+    const bytes = Buffer.from('# 平板课堂笔记\n\n这是直接导入的正文。', 'utf8');
+    const importedResponse = await fetch(`${info.baseUrl}/notes/import?name=${encodeURIComponent('课堂笔记.md')}&type=text%2Fmarkdown`, { method: 'POST', headers: { 'Content-Type': 'text/markdown' }, body: bytes });
+    assert.equal(importedResponse.status, 201); const imported = await importedResponse.json();
+    const noteResponse = await fetch(`${info.baseUrl}/notes/${imported.summary.id}`); const note = (await noteResponse.json()).note;
+    assert.match(note.body, /直接导入的正文/); assert.equal(note.attachments[0].size, bytes.length); assert.match(note.attachments[0].url, /^\/notes\/assets\//);
+    const assetResponse = await fetch(`${info.baseUrl}${note.attachments[0].url}`);
+    assert.equal(assetResponse.status, 200); assert.deepEqual(Buffer.from(await assetResponse.arrayBuffer()), bytes);
+    const patched = await fetch(`${info.baseUrl}/notes/${note.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ annotations: { strokes: [{ color: '#d23f57', width: 4, points: [{ x: 0.1, y: 0.2 }, { x: 0.4, y: 0.5 }] }] } }) });
+    assert.equal(patched.status, 200);
+    const after = await fetch(`${info.baseUrl}/notes/${note.id}`); const stored = (await after.json()).note;
+    assert.equal(stored.annotations.strokes[0].color, '#d23f57'); assert.equal(stored.annotations.strokes[0].points.length, 2);
+  } finally { await server.close(); }
 });
 
 test('双向链接、重命名和知识图谱保持一致', async () => {
