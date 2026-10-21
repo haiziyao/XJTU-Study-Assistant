@@ -26,8 +26,9 @@
  */
 
 import { HttpError } from '../../core/http/router.js';
+import { DEFAULT_DOC_MAX_CHARS } from './service.js';
 
-/** 检索条数上限：6 条 × 片段 ≈ 1.5k 字，再多会把对话里的其余上下文挤掉（与 module.js 的 aiQueryLimits 同口径）。 */
+/** 检索条数上限：6 条 × 约 800 字片段 ≈ 4.8k 字，再多会把对话里的其余上下文挤掉（与 module.js 的 aiQueryLimits 同口径）。 */
 const MAX_LIMIT = 10;
 const DEFAULT_LIMIT = 5;
 
@@ -63,12 +64,20 @@ function normalizeLimit(value) {
   return Math.min(MAX_LIMIT, Math.max(1, base));
 }
 
-/** 可选字数：缺省返回 undefined，交给服务用自己的默认值（本版是 8000），避免两处默认值各说各话。 */
+/** 可选字数：缺省返回 undefined，交给服务用自己的默认值；显式传时夹在 [500, 20000]。 */
 function normalizeMaxChars(value) {
   if (value === undefined || value === null || value === '') return undefined;
   const size = Number(value);
   if (!Number.isFinite(size)) return undefined;
   return Math.min(MAX_MAX_CHARS, Math.max(MIN_MAX_CHARS, Math.floor(size)));
+}
+
+/** 可选续读位置：负值/非数字按 0 处理（等价于从头读），避免一个拼错的参数把整篇读空。 */
+function normalizeOffset(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const offset = Number(value);
+  if (!Number.isFinite(offset)) return undefined;
+  return Math.max(0, Math.floor(offset));
 }
 
 /**
@@ -105,12 +114,17 @@ export function registerKnowledgeRoutes(router, { services, apiPrefix = '/api/v1
     return knowledge.search({
       q,
       category: optionalText(query?.category),
+      // 精确到章 / 条：`?q=退学&section=第六章 退学警告与退学` 只在这一节里找
+      section: optionalText(query?.section),
       limit: normalizeLimit(query?.limit),
     });
   });
 
   /**
-   * 读某一篇（`content` 默认截前 8000 字，超出用 `truncated` 标出来）。
+   * 读某一篇（正文窗口默认 8000 字，带 offset / nextOffset / truncated）。
+   *
+   * `offset` 是续读入口：模型 / Agent 从上一轮结果里拿 `nextOffset`，下一次直接传回来。
+   * 没有它时，8213 字的《学籍规定》永远只能读到前 8000 字，第六章仍在窗口外。
    *
    * `path` 必填，且**越界一律 400**：`..`、绝对路径、站外路径都由服务层的
    * "必须落在 knowledge/ 目录内"判定挡掉（§14.3）；这里只负责"没给 path"这一种 400，
@@ -119,8 +133,13 @@ export function registerKnowledgeRoutes(router, { services, apiPrefix = '/api/v1
   router.get(`${P}/doc`, ({ query }) => {
     const docPath = requireText(query?.path, 'path');
     const maxChars = normalizeMaxChars(query?.maxChars);
-    // 只有显式传了才覆盖：让服务层的默认值（8000）仍然是唯一真源
-    return knowledge.read(maxChars === undefined ? { path: docPath } : { path: docPath, maxChars });
+    const offset = normalizeOffset(query?.offset);
+    return knowledge.read({
+      path: docPath,
+      // HTTP 契约保持 8000 字：这里显式给，服务层默认值（4000）服务于"对话续读窗口"
+      maxChars: maxChars ?? DEFAULT_DOC_MAX_CHARS,
+      ...(offset === undefined ? {} : { offset }),
+    });
   });
 
   /**
