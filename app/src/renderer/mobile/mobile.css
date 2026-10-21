@@ -380,7 +380,8 @@ html.m-app .mobile-more-sheet {
 
 .m-section-header h2 {
   margin: 0;
-  color: var(--fg-2);
+  /* 分组标题是标题，不是说明文字：原来用 --fg-2，深色底下看着像禁用态 */
+  color: var(--fg);
   font-size: var(--m-fs-sub);
   font-weight: 600;
 }
@@ -751,7 +752,7 @@ html.m-app .mobile-more-sheet {
 
 .m-empty-title {
   margin: 0;
-  color: var(--fg-2);
+  color: var(--fg);
   font-size: var(--m-fs-body);
   font-weight: 600;
 }
@@ -1214,6 +1215,8 @@ html.m-app[data-tab='ai'] .app {
   /* shell.css 的窄屏规则给了 .app 一个 100dvh：top + height 都在时 inset 的 bottom 会被忽略，
      对话列就会盖住标签栏。这里显式交回高度 */
   height: auto;
+  /* 旧窄屏规则给 .app 留过底部内边距；不归零时输入区下面会空出一条死区 */
+  padding: 0;
 }
 
 html.m-app[data-tab='ai'] .sidebar,
@@ -1526,9 +1529,13 @@ html.m-app[data-tab='ai'] .bubble {
 }
 
 html.m-app[data-tab='ai'] .bubble.bot {
-  border-radius: 18px 18px 18px 6px;
-  background: var(--bg-surface);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  /* 助手消息不再套一层卡片：文字直接落在页面上，只有用户消息是气泡。
+     卡片套卡片（气泡 + 示例按钮 + 操作卡）是这一页看起来"乱"的主因。 */
+  max-width: 100%;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 html.m-app[data-tab='ai'] .bubble.user {
@@ -1571,21 +1578,16 @@ html.m-app[data-tab='ai'] .chat-compose {
   order: 5;
 }
 
-/* 控件一行胶囊：可横向滑动，不折行 */
+/* 控件胶囊：换行而不是横向滚动。
+   `overflow-x: auto` 会建立裁剪上下文，把绝对定位的下拉菜单整块裁掉 ——
+   表现就是「点一下，选项框不出现 / 出现的位置跟点的地方对不上」。 */
 html.m-app[data-tab='ai'] .chat-controls {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
+  row-gap: 6px;
   gap: 6px;
   padding: var(--m-sp-1) var(--m-sp-4) var(--m-sp-2);
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-  -webkit-overflow-scrolling: touch;
-}
-
-html.m-app[data-tab='ai'] .chat-controls::-webkit-scrollbar {
-  display: none;
 }
 
 html.m-app[data-tab='ai'] .chat-controls .spacer {
@@ -1609,7 +1611,7 @@ html.m-app[data-tab='ai'] .chat-controls .compose-select > button {
   width: auto;
   height: 32px;
   min-height: 32px;
-  padding: 0 12px;
+  padding: 0 10px;
   border: 1px solid var(--line);
   border-radius: 16px;
   background: var(--bg-surface);
@@ -1617,6 +1619,11 @@ html.m-app[data-tab='ai'] .chat-controls .compose-select > button {
   font-size: 13px;
   line-height: 1;
   white-space: nowrap;
+}
+
+/* 选项统一走底部弹层（见 mobile/ai.js 的 openPicker），桌面的气泡菜单在手机上不再出现 */
+html.m-app[data-tab='ai'] .chat-controls .compose-menu {
+  display: none;
 }
 
 html.m-app[data-tab='ai'] .chat-controls .compose-icon-btn svg {
@@ -1663,13 +1670,13 @@ html.m-app[data-tab='ai'] .chat-controls .m-ai-chip-empty {
 
 /* 欢迎语里的示例提示：虚线框太像占位元素，换成实线淡底的小卡片 */
 html.m-app[data-tab='ai'] .chat-log .chip-btn {
-  min-height: 40px;
-  padding: 8px 14px;
+  min-height: 34px;
+  padding: 6px 12px;
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 12px;
   background: var(--bg-hover);
-  font-size: 15px;
-  line-height: 1.4;
+  font-size: 14px;
+  line-height: 1.35;
 }
 
 /* 输入区：一条胶囊，内含「+ / 输入框 / 圆形发送」 */
@@ -1693,6 +1700,19 @@ html.m-app[data-tab='ai'] .chat-compose textarea {
   background: transparent;
   font-size: var(--m-fs-body);
   line-height: 1.45;
+}
+
+/* 聚焦框画在整条胶囊上：原来那圈 2px 蓝色描边是给 textarea 的，
+   在圆角输入条里就是一个突兀的直角矩形（看起来像框错了元素）。 */
+html.m-app[data-tab='ai'] .chat-compose textarea:focus,
+html.m-app[data-tab='ai'] .chat-compose textarea:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+html.m-app[data-tab='ai'] .chat-compose:focus-within {
+  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 14%, transparent);
 }
 
 html.m-app[data-tab='ai'] .compose-plus {

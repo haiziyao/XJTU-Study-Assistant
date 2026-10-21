@@ -160,6 +160,64 @@
   /** 三个开关型胶囊补上短语：光有图标（地球 / 盾牌 / 画笔）在手机上没人认得。 */
   const CHIP_LABELS = { search: '联网', permission: '权限', draw: '绘图' };
 
+  const PICKER_TITLES = { search: '联网搜索', permission: '权限' };
+
+  /**
+   * 选项改走底部弹层。
+   *
+   * 原来的下拉菜单是绝对定位在胶囊上方，而胶囊行用了 `overflow-x: auto` ——
+   * 浮层被滚动容器整个裁掉，点下去只会看到一片空白或错位的框。
+   * 这里不改数据与回调：读菜单里的按钮，点哪一项就点原来那颗按钮，走同一条 onChange。
+   */
+  function openPicker(btn) {
+    const menu = btn.closest('.compose-select')?.querySelector('.compose-menu');
+    const options = menu ? [...menu.querySelectorAll('button')] : [];
+    if (!options.length) return;
+
+    const { sheet, section, cell, icon } = window.PCMobileUI;
+    const label = String(btn.querySelector('.cs-label')?.textContent ?? '').trim();
+    const title = PICKER_TITLES[btn.dataset.control] ?? label ?? '选择';
+    const current = options.find((option) => option.classList.contains('active')) ?? null;
+
+    const box = section({});
+    const control = sheet({ title, content: box });
+    for (const option of options) {
+      const isCurrent = option === current;
+      box.list.append(
+        cell({
+          title: String(option.textContent ?? '').trim(),
+          accessory: isCurrent ? icon('check', { size: 18 }) : null,
+          chevron: false,
+          className: isCurrent ? 'is-current' : '',
+          onClick: () => {
+            option.click();
+            control.close();
+          },
+        }),
+      );
+    }
+  }
+
+  /** 拦截胶囊的点击：有选项的走底部弹层，开关型（绘图）保持原样。 */
+  function wirePickers() {
+    const host = document.getElementById('chat-controls');
+    if (!host || host.dataset.mPicker) return;
+    host.dataset.mPicker = '1';
+    host.addEventListener(
+      'click',
+      (event) => {
+        const btn = event.target?.closest?.('.compose-select > button');
+        if (!btn || btn.disabled) return;
+        if (btn.dataset.control === 'draw') return;
+        if (!btn.closest('.compose-select')?.querySelector('.compose-menu')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        openPicker(btn);
+      },
+      true,
+    );
+  }
+
   function decorateControls() {
     const host = document.getElementById('chat-controls');
     if (!host) return;
@@ -204,6 +262,7 @@
     mirrorBadge();
     paintSendIcon();
     decorateControls();
+    wirePickers();
 
     // 手机上的占位提示要短：原来那句在 390px 宽会折成三行，把输入区撑得很高
     const input = document.getElementById('chat-input');
@@ -217,6 +276,7 @@
     buildHead(chat);
     paintSendIcon();
     decorateControls();
+    wirePickers();
   }
 
   window.PCMobileAI = { enter };
