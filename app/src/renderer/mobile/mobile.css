@@ -1224,3 +1224,219 @@ html.m-app[data-tab='ai'] .chat {
 html.m-app[data-stack='1'] .m-tabbar {
   display: none;
 }
+
+/* ---------------------------------------------------------------- 日历页（照 iOS 系统日历） */
+
+/* 导航栏右侧那一组：今天 + › + + */
+.m-cal-actions {
+  display: flex;
+  align-items: center;
+}
+
+.m-cal-actions .m-icon-btn {
+  margin: 0 -6px;
+}
+
+/* 星期表头（与 weekStart 一致，从周一开始） */
+.m-cal-week-head {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  padding: 0 var(--m-sp-2);
+  color: var(--fg-3);
+  font-size: var(--m-fs-cap);
+  text-align: center;
+}
+
+.m-cal-week-head span {
+  padding: 6px 0;
+}
+
+/* 固定 6 行 × 7 列：切月时高度不跳（与 iOS 一致） */
+.m-cal-cells {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  grid-auto-rows: 46px;
+  padding: 0 var(--m-sp-2) var(--m-sp-2);
+}
+
+.m-cal-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 3px;
+  padding: 3px 0 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font-size: var(--m-fs-body);
+  font-variant-numeric: tabular-nums;
+}
+
+.m-cal-cell.is-dim {
+  color: var(--fg-3);
+  opacity: 0.5;
+}
+
+/* 今天 = 实心蓝圆；选中 = 浅底（实心优先） */
+.m-cal-daynum {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  transition: background 0.16s var(--m-ease), color 0.16s var(--m-ease);
+}
+
+.m-cal-daynum.is-today {
+  background: var(--blue);
+  color: #fff;
+  font-weight: 600;
+}
+
+.m-cal-cell.is-selected .m-cal-daynum:not(.is-today) {
+  background: var(--bg-hover);
+  font-weight: 600;
+}
+
+/* 「有事」标记：日程 / 全天 / 待办各一个点 */
+.m-cal-dots {
+  display: flex;
+  gap: 3px;
+  min-height: 5px;
+}
+
+.m-cal-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--fg-3);
+}
+
+.m-cal-dot.is-schedule { background: var(--blue); }
+.m-cal-dot.is-event { background: var(--orange); }
+.m-cal-dot.is-todo { background: var(--green); }
+
+.m-cal-agenda-head {
+  padding: var(--m-sp-3) var(--m-page-x) var(--m-sp-1);
+}
+
+.m-cal-agenda-head h2 {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: var(--m-fs-sub);
+  font-weight: 600;
+}
+
+/* 周视图：7 个日期格 */
+.m-cal-week {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+  padding: var(--m-sp-2);
+}
+
+.m-cal-weekday {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 6px 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg-2);
+}
+
+.m-cal-weekday.is-selected {
+  background: var(--bg-hover);
+}
+
+.m-cal-weekday-label {
+  color: var(--fg-3);
+  font-size: var(--m-fs-cap);
+}
+
+.m-cal-weekday-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-size: var(--m-fs-sub);
+  font-variant-numeric: tabular-nums;
+}
+
+.m-cal-weekday-num.is-today {
+  background: var(--blue);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* 年视图：12 个迷你月，点一下回到月视图 */
+.m-year {
+  display: grid;
+  gap: var(--m-sp-6);
+  padding: var(--m-sp-3) var(--m-page-x) var(--m-sp-6);
+}
+
+.m-mini-title {
+  margin: 0 0 4px;
+  color: var(--blue);
+  font-size: var(--m-fs-sub);
+  font-weight: 600;
+}
+
+.m-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 1px;
+}
+
+.m-mini-head {
+  color: var(--fg-3);
+  font-size: 10px;
+  text-align: center;
+}
+
+.m-mini-day {
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 19px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.m-mini-day.is-dim {
+  color: transparent;
+}
+
+.m-mini-day.is-today {
+  border-radius: 50%;
+  background: var(--blue);
+  color: #fff;
+}
+
+/* ---------------------------------------------------------------- 待办页（照 iOS 提醒事项） */
+
+/* 勾选圈：去掉 icon-btn 默认的负外边距，让它正常占位 */
+.m-todo-check {
+  margin: 0;
+  color: var(--blue);
+}
+
+.m-todo-group .m-cell.is-done .m-todo-check {
+  color: var(--green);
+}
+
+/* 已完成：标题降级 + 划线 */
+.m-todo-group .m-cell.is-done .m-cell-title {
+  color: var(--fg-3);
+  text-decoration: line-through;
+}
+
+.m-todo-group .m-cell-title {
+  font-weight: 400;
+}
