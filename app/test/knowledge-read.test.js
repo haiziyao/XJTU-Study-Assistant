@@ -6,11 +6,12 @@
  *   跨功能实测（用户问"学校对学业预警是怎么规定的？我会不会被预警？"）失败过 ——
  *   模型引用了真链接、也确实按 url 读到了那一篇，却说"这一页正文读到第三条就断了"，
  *   给不出 12 / 8 / 4 学分三档阈值。根因不是模型，是工具面：
- *     - `search()` 只把 240 字片段放进 item（`service.js` 的 `#searchByPath`）；
+ *     - `search()` 只把 240 字片段放进 item（当时 `service.js` 的 `#searchByPath`；本版已调到 800）；
  *     - 模型唯一的入口是 `commands.js` 的 `query()`，它只调 `search()`；
  *     - 能返回全文的 `read()` 只挂在 HTTP `GET /knowledge/doc` 上，**不是 AI target**。
  *   而《学业预警与学籍处理实施细则》2169 字，那张 "12 / 8 / 4 学分" 的表格在**第 341 字**处 ——
  *   240 字片段刚好停在"一级预警、二级预警、三级…"，**差一行就是数字**。
+ *   现在片段默认 800 字，且带 `offset` / `nextOffset`，模型可以先检索、再按位置续读。
  *
  * 所以这里的断言刻意"看数字，不看长度"：`/12\s*学分/` 这类模式必须真的出现在返回内容里。
  * 只断言 `content.length > 240` 是骗得过去的（片段长一点就绿了），而数字骗不过去。
@@ -60,14 +61,17 @@ test('点名读一篇：filters.path 用**语料相对路径**写，回正文且
   assert.equal(item.url, WARNING_URL, '正文要带着能点回去的出处');
   assert.equal(item.score, null, '直接定位不是排序出来的');
 
-  // 片段**照旧**是短的（它服务于"扫一眼"），长正文另走 content
-  assert.ok(item.snippet.length <= 300, `片段仍应短：${item.snippet.length}`);
-  // 而这正是过去失败的现场：片段停在阈值表格之前
-  assert.doesNotMatch(item.snippet, /12\s*学分/, '片段本来就停在表格之前（这就是当初读不到数字的原因）');
+  // 片段**仍然比正文短**（它服务于"扫一眼"），长正文另走 content。
+  // 本版把默认片段调到 800 字：240 字会停在阈值表格之前，模型只能回去整篇读。
+  assert.ok(item.snippet.length <= 900, `片段仍应短于全文：${item.snippet.length}`);
+  assert.ok(item.snippet.length < item.content.length, '片段不该等于全文');
+  assert.match(item.snippet, /学业预警/, '片段要包含命中处的上下文');
 
   assert.equal(typeof item.content, 'string');
-  assert.equal(item.truncated, false, '2169 字没超过 4000 字上限');
-  assert.equal(item.totalChars, item.content.length, '没截断时 totalChars 应与 content 长度一致');
+  // 带 q 时窗口会从命中处附近开始（offset 可能不是 0），"没截断"的判据是
+  // offset + content 覆盖到原文末尾，而不是 content 从第 0 字开始。
+  assert.equal(item.truncated, false, '2169 字没超过 4000 字窗口');
+  assert.equal(item.offset + item.content.length, item.totalChars, '没截断时窗口应覆盖到原文末尾');
   assert.ok(item.content.length > 2000, `正文要给够：${item.content.length}`);
   assertThresholds(item.content, 'path 直读的 content');
 
@@ -108,7 +112,7 @@ test('按关键词检索：只给片段，绝不把整篇（或整库）倒出�
   assert.ok(result.count >= 1, '「学业预警」应该能查到东西');
   for (const item of result.items) {
     assert.equal(typeof item.snippet, 'string');
-    assert.ok(item.snippet.length > 0 && item.snippet.length <= 300, `片段长度异常：${item.snippet.length}`);
+    assert.ok(item.snippet.length > 0 && item.snippet.length <= 900, `片段长度异常：${item.snippet.length}`);
     // 契约（§14.1/§14.4）：没点名哪一篇时，正文一个字都不出去
     assert.equal(item.content, undefined, '关键词检索不许返回正文');
     assert.equal(item.totalChars, undefined);
@@ -121,7 +125,8 @@ test('按关键词检索：只给片段，绝不把整篇（或整库）倒出�
   assert.ok(hit.path, '要给出可以再点名一次的 path');
   assert.ok(hit.url, '要给出可以再点名一次的 url');
 
-  // 六条结果 × 240 字是刻意的上限口径（module.js 的 aiQueryLimits）
+  // 六条结果 × 800 字是刻意的上限口径（module.js 的 aiQueryLimits）：
+  // 足够覆盖一条完整条款，又不会像整篇正文那样把对话挤掉。
   assert.ok(result.items.length <= 6);
 });
 

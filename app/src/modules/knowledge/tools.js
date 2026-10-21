@@ -27,9 +27,10 @@ export const KNOWLEDGE_TOOLS = [
     name: 'knowledge_search',
     description:
       '检索本地教务处政策/规章/校历语料（148 篇：学籍管理、课程考核、学业预警、毕业学位、培养方案、校历与作息时间等），' +
-      '只读、不写数据、不联网。回答"转专业要什么条件""课程考核怎么算"这类校规问题时先用它；' +
-      '结果只给命中片段（snippet）而不是全文，每条都带来源 url。' +
-      '引用校规必须带这个 url，语料里没有的要如实说不知道，不许凭记忆编校规。' +
+      '只读、不写数据、不联网。**具体条款优先用它**：问"挂几科会被退学""转专业要绩点多少""补考怎么算"这类' +
+      '具体条款 / 数字 / 条件时，先用 q 关键词检索命中片段（默认约 800 字，含命中位置附近原文与 offset），' +
+      '不要一上来按篇目整篇读；片段不够再用 knowledge_doc 的 offset 续读，或传 section 精确到小节。' +
+      '每条结果都带来源 url，引用校规必须带这个 url；语料里没有的要如实说不知道，不许凭记忆编校规。' +
       'kind 为 portal / attachments / external-links 的篇目没有可检索正文（正文在附件或图片里），' +
       '只能回复"原文见此链接"。',
     method: 'GET',
@@ -37,25 +38,26 @@ export const KNOWLEDGE_TOOLS = [
     requiresAuth: false,
     mutates: false,
     implemented: true,
-    // 与服务层一致：q 必填（空白 → 400），limit 缺省 5、夹在 1~10
-    params: { q: 'string', category: 'string?', limit: 'number?' },
+    // 与服务层一致：q 必填（空白 → 400），limit 缺省 5、夹在 1~10；section 精确到章/条
+    params: { q: 'string', category: 'string?', section: 'string?', limit: 'number?' },
     returns: { count: 'number', items: 'KnowledgeHit[]' },
   },
   {
     name: 'knowledge_doc',
     description:
       '按 knowledge_search 返回的 path 读取某一篇教务处政策原文（只读、不联网），' +
-      '返回正文（默认截前 8000 字，超出时 truncated 为 true，末尾字会被截断而不是丢整段）与来源 url、' +
-      '栏目、发布日期、kind。用在已经定位到具体篇目、需要引用条款原文的时候；' +
-      '不要用它来"扫一遍语料"——先 search 拿 path，再按需取一两次就够，整篇塞上下文会挤掉对话。' +
-      'path 必须落在语料目录内，越界（含 ..）会被拒。',
+      '返回正文窗口（HTTP 默认前 8000 字）与来源 url、栏目、发布日期、kind，' +
+      '并带 offset / nextOffset / truncated / totalChars：窗口没给全时用 offset=nextOffset 继续读，' +
+      '不要以为原文只有 8000 字。用在已经检索定位到具体篇目、需要引用条款原文或续读的时候；' +
+      '具体条款优先先用 knowledge_search，不要一上来整篇 read —— 整篇读也只能拿到一个窗口，' +
+      '关键条款可能在第 8000 字之后。path 必须落在语料目录内，越界（含 ..）会被拒。',
     method: 'GET',
     path: '/knowledge/doc',
     requiresAuth: false,
     mutates: false,
     implemented: true,
-    // maxChars 缺省 8000（交给服务层），显式传时夹在 500~20000
-    params: { path: 'string', maxChars: 'number?' },
-    returns: { title: 'string', url: 'string', content: 'string', truncated: 'boolean' },
+    // maxChars 缺省 8000（HTTP 契约，交给服务层显式指定）；offset 从第 N 字续读
+    params: { path: 'string', maxChars: 'number?', offset: 'number?' },
+    returns: { title: 'string', url: 'string', content: 'string', offset: 'number', nextOffset: 'number|null', truncated: 'boolean', totalChars: 'number' },
   },
 ];

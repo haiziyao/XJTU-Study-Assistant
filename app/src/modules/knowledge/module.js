@@ -18,23 +18,39 @@ import { KNOWLEDGE_TOOLS } from './tools.js';
 /**
  * 给对话模型的领域说明。
  *
- * 三条硬规则都写在这里，因为模型最容易犯的错就是"没查到就凭记忆编校规"——
- * 那比答不出来危险得多：用户会照着办。
+ * 核心规则只有两条，都是被真机缺陷逼出来的：
+ *   1. **具体条款优先 search**：问"挂几科退学""转专业要绩点多少"这类数字/条件时，
+ *      先用 `filters.q` 关键词检索拿命中片段与 `offset`，不要一上来按 path/url 整篇读；
+ *   2. **不要整篇 read**：整篇读永远只能拿到一个窗口（默认 4000 字），而长文的关键条款
+ *      经常在窗口之外（《学籍管理与学位授予规定》正文 8213 字，第六章从第 4860 字开始）。
+ *      窗口被截断时用 `filters.offset=nextOffset` 续读，不许把"窗口没给全"说成"语料里没有"。
+ *
+ * 其余几条（引用带 url、没有就不知道、portal 篇目没有正文、政策会修订）是安全底线：
+ * 校规会被用户照着办，编一条比答不出来危险得多。
  */
 const AI_PROMPT = `【知识库：教务处政策 / 规章 / 校历】
-- 可以用只读指令 {"ok":true,"action":"query","target":"knowledge","filters":{"q":"转专业 条件","limit":5}} 检索教务处政策语料
+- 可以用只读指令 {"ok":true,"action":"query","target":"knowledge","filters":{"q":"挂科 退学","limit":5}} 检索教务处政策语料
   （148 篇：学籍管理、课程考核、学业预警、毕业学位、培养方案、校历与作息时间等）。filters 还支持
-  category（栏目 slug）、path（直接读某一篇）、url（那一篇的来源链接）。
-- **要读某篇的具体条款（数字、学分、比例、时限、名单、表格），必须用 filters.path 或 filters.url 点名那一篇**：
-  {"ok":true,"action":"query","target":"knowledge","filters":{"url":"https://dean.xjtu.edu.cn/info/1033/1130.htm"}}
-  —— 点名时系统会回**较长正文**（content，默认 4000 字，带 truncated 与 totalChars）。
-- **只给 q 的检索只回 240 字片段（snippet），那不是全文**。片段断在句中、或你要的条款显然在更后面时：
-  绝不许把片段当全文、更不许拿片段外推或编数字；要么说"我只读到片段"，要么拿这条结果的 path/url 再查一次。
-- content 的 truncated 为 true 时，表示这篇比 content 更长（totalChars 是它真实的总字数）：
-  说明"我只读到这部分"，不要把截断处当成结尾，也不要补全没读到的部分。
+  category（栏目 slug）、path（直接读某一篇）、url（那一篇的来源链接）、offset（从第几字续读）、
+  section（精确到小节，如"第六章 退学警告与退学""第二十七条"）。
+- **具体条款优先 search**：问"挂几科会被退学""转专业要绩点多少""补考怎么算"这类具体条款 / 数字 / 条件时，
+  必须先用 filters.q 关键词检索（对话里的 search 就是 filters.q），把命中片段（snippet，默认约 800 字）读完再回答；
+  不要凭记忆直接给数字，也不要一上来就按 path/url 整篇读。
+- **不要整篇 read**：filters.path / filters.url（对话里的 read）只在两种情况下用：
+  ① "给我看全文 / 这一章完整内容"；② 检索确认篇目后，按 filters.offset 或 filters.section 续读条款。
+  不要不带 offset/section 就整篇 read。
+- 检索结果每条都带 snippet（命中位置附近的原文）与 offset（命中位置在全文第几字）：
+  先读 snippet；不够时用 filters.path + filters.offset 续读，或带 filters.section 精确到小节。
+  按 path 读时 offset 是本次窗口起点、matchOffset 才是命中位置。
+  例：{"filters":{"path":"…","offset":5000}}、{"filters":{"path":"…","section":"第六章 退学警告与退学"}}。
+- 按 path/url 读到的 content 是原文的一个窗口（默认 4000 字），带 truncated、totalChars、offset、nextOffset。
+  truncated 为 true 只表示"这次窗口没给全"，**不代表条款不存在**：必须用 filters.offset=nextOffset
+  继续读，直到读到目标条款或 nextOffset 为 null；绝不许回一句"我只能读到 4000 字"就结束。
+- **引用必须带 url，并写清文件与小节**：回答具体条款时说明"这是检索到的条款原文（《title》· section）"，
+  每条结论都要能点回教务处原文；把校规说成"一般来说"是不行的。
 - 结果里 kind 为 portal / attachments / external-links 的篇目**没有可检索正文**
-  （正文在图片或附件里）：只能告诉用户"原文见此链接"，不要展开想象。
-- **引用必须带 url**：把校规说成"一般来说"是不行的，每条结论都要能点回教务处原文。
+  （正文在图片或附件里）：只能告诉用户"原文见此链接"，不要展开想象；它们也可能因为标题精确而
+  排在前几条，**不要停在第一条**，继续看后面有 snippet 的条目。
 - **语料里没有的，如实说不知道**（例如"今年保研名额"）——绝不许用你自己的记忆编政策。
 - 政策会修订：publishedAt 较早的条款要提示"以官网最新版本为准"。`;
 
@@ -48,15 +64,35 @@ export default {
   /**
    * 回灌给对话模型的字段白名单（`chat-service` 的 `#compactQueryResult` 按它挑字段）。
    *
-   * `content` / `truncated` / `totalChars` 必须在这里 —— 它们**只在 filters 带 path/url 时才有值**
-   * （按关键词检索的那条路径根本没有这三个字段，见 `service.js` 的 search()），
-   * 所以加上它们是安全的：不会把整库倒进上下文，只会让"点名读一篇"真的读得到条款。
-   * 白名单一旦漏字段，模型就永远看不见正文全文 —— 这正是本次"读不到 12/8/4 学分阈值"的根因之一。
+   * 三类字段缺一不可：
+   *   - `snippet` / `offset` / `matchOffset`：**具体条款先检索**的落点 —— 片段告诉模型
+   *     "条款长什么样"，offset 告诉它"在第几个字"，两者一起才能既不整篇读、又能续读到原文；
+   *   - `path` / `section`：续读的地址（`filters.path + filters.offset/section`）；
+   *     以前白名单没有 path，模型只拿到 url，只能整篇读，读不到就卡住；
+   *   - `content` / `truncated` / `nextOffset` / `totalChars`：点名读时的正文与"还有没有"，
+   *     没有 nextOffset 模型就不知道窗口能往后移，只会说"我只能读到 4000 字"。
+   * 关键词检索本来就不返回 content，所以放行这些字段不会把整库倒进上下文。
    */
   aiQueryFields: {
-    knowledge: ['title', 'url', 'publishedAt', 'category', 'kind', 'snippet', 'content', 'truncated', 'totalChars'],
+    knowledge: [
+      'title',
+      'url',
+      'path',
+      'publishedAt',
+      'category',
+      'kind',
+      'score',
+      'snippet',
+      'offset',
+      'matchOffset',
+      'nextOffset',
+      'section',
+      'content',
+      'truncated',
+      'totalChars',
+    ],
   },
-  // 检索结果只给片段，条数也别多：6 条 × 240 字 ≈ 1.5k 字，够模型引用又不淹掉对话。
+  // 检索结果只给片段，条数也别多：6 条 × 800 字 ≈ 4.8k 字，够模型引用又不淹掉对话。
   // path 直读是 count:1（只可能 1 条），所以这条上限对它没有影响，不必为它放宽。
   aiQueryLimits: { knowledge: 6 },
   aiTools: KNOWLEDGE_TOOLS,

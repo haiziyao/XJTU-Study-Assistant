@@ -86,8 +86,9 @@ test('知识库：/knowledge/search 命中政策，且每条都带来源 URL 与
       assert.ok(item.title);
       assert.ok(item.category);
       assert.equal(typeof item.score, 'number');
-      // 片段而不是全文：整篇进提示词会淹掉对话
-      assert.ok(item.snippet.length > 0 && item.snippet.length <= 600, `snippet 长度异常：${item.snippet.length}`);
+      // 片段而不是全文：整篇进提示词会淹掉对话。默认片段 800 字（要能覆盖一整条条款），
+      // 但绝不能接近整篇的长度。
+      assert.ok(item.snippet.length > 0 && item.snippet.length <= 900, `snippet 长度异常：${item.snippet.length}`);
       assert.ok(Array.isArray(item.matches));
     }
     // 标题命中的那篇要排在前面（打分里标题权重远高于正文）
@@ -345,15 +346,16 @@ test('知识库：模型按 url 点名读《学业预警细则》，回灌上下
     assert.match(fedBack, /4\s*学分/);
     assert.match(fedBack, /"totalChars":\s*\d+/, '要如实给出原文总字数');
 
-    // 系统提示词里要写清"点名读才有正文、片段不是全文" —— 模型不知道这条就会继续用 q 检索
+    // 系统提示词里要写清「具体条款先检索、别整篇读」—— 模型不知道这条就会继续整篇 read。
     const system = mock.state.bodies
       .flatMap((body) => body.messages ?? [])
       .filter((message) => message.role === 'system')
       .map((message) => String(message.content ?? ''))
       .join('\n');
-    assert.match(system, /filters\.path 或 filters\.url/, '提示词要教模型怎么点名读某篇');
-    assert.match(system, /240 字片段（snippet）/, '提示词要说清"只给 q 时只有片段"');
-    assert.match(system, /绝不许把片段当全文/, '提示词要禁掉"拿片段当全文/外推"');
+    assert.match(system, /具体条款优先 search/, '提示词要把「具体条款优先 search」写成硬规则');
+    assert.match(system, /不要整篇 read/, '提示词要明确禁掉「整篇 read」');
+    assert.match(system, /filters\.offset=nextOffset/, '提示词要教模型用 nextOffset 续读，而不是停在 4000 字');
+    assert.match(system, /这是检索到的条款原文/, '提示词要求引用时说明这是检索到的条款原文');
 
     // 前端卡片也看得到正文（用户有权核对模型读到的到底是哪一段）
     const entry = (sent.body.queried ?? []).find((item) => item.result?.target === 'knowledge');

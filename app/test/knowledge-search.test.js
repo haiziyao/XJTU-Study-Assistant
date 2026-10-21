@@ -174,7 +174,7 @@ test('真实语料：search({ path }) 直接定位那一篇，返回 1 条带片
   assert.equal(knowledge.search({ path: ZHUANZHUANYE }).items[0].title, item.title);
 });
 
-test('真实语料：read() 给出正文（去重标题行、默认 8000 字截断）', async () => {
+test('真实语料：read() 给出正文（去重标题行、默认 4000 字窗口可续读）', async () => {
   const knowledge = await realService();
   const doc = knowledge.read({ path: ZHUANZHUANYE });
   assert.equal(doc.title, '西安交通大学本科生转专业实施细则');
@@ -188,13 +188,20 @@ test('真实语料：read() 给出正文（去重标题行、默认 8000 字截�
   assert.equal(clipped.truncated, true);
   assert.equal(clipped.content.length, 60);
 
-  // 8000 字上限：正文最长的那些篇目在默认参数下应被截断
+  // 4000 字默认窗口：正文最长的那些篇目在默认参数下应被截断，但能按 offset 续读
   const longest = knowledge.categories
     .flatMap((category) => category.items)
     .reduce((best, item) => (item.chars > best.chars ? item : best));
   const big = knowledge.read({ path: longest.path });
-  assert.equal(big.truncated, true, `最长的一篇（${longest.chars} 字）在 8000 字上限下应被截断`);
-  assert.equal(big.content.length, 8000);
+  assert.equal(big.truncated, true, `最长的一篇（${longest.chars} 字）在 4000 字窗口下应被截断`);
+  assert.equal(big.content.length, 4000);
+  assert.equal(big.offset, 0);
+  assert.equal(big.nextOffset, 4000);
+  const rest = knowledge.read({ path: longest.path, offset: big.nextOffset });
+  assert.equal(rest.offset, 4000);
+  assert.equal(rest.content.length, 4000);
+  assert.equal(rest.nextOffset, 8000);
+  assert.notEqual(rest.content.slice(0, 50), big.content.slice(0, 50), 'offset 之后应该是另一段正文');
 });
 
 test('真实语料：read() 的 path 越界一律 400（HttpError.badRequest）', async () => {

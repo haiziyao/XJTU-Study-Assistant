@@ -246,6 +246,23 @@ export function scoreDocument(doc, query) {
   return { score: Math.round(score * 1000) / 1000, titleHits, bodyHits, chars };
 }
 
+/**
+ * 在「每个词各自的第一次出现」里挑一个最值得展示的命中。
+ *
+ * 为什么不能简单取位置最靠前的：查询「退学警告」会拆出整串（权重 1）、词（0.5）
+ * 与二元组（0.25）。"退学"两个字在长文开头就可能出现（"按退学处理"），
+ * 而真正讲"退学警告"的那一条在第 5000 字。按位置取最早，片段会停在无关的第一次提及；
+ * 按**词权重优先、同权重取最早**，才会落在用户真正问的那个短语上。
+ */
+function pickBestHit(hits) {
+  return hits.reduce((best, hit) => {
+    if (!best) return hit;
+    if (hit.term.weight > best.term.weight) return hit;
+    if (hit.term.weight === best.term.weight && hit.at < best.at) return hit;
+    return best;
+  }, null);
+}
+
 /** 一篇文章里，命中词实际出现在哪些位置（大小写不敏感的模糊定位）。 */
 function findMatches(haystack, terms) {
   const hay = haystack.toLowerCase();
@@ -255,6 +272,124 @@ function findMatches(haystack, terms) {
     if (at >= 0) hits.push({ term, at });
   }
   return hits;
+}
+
+/**
+ * 第一个命中（权重最高、同权重取最早）。给 `search()` 回填 `offset` 用。
+ *
+ * 为什么需要它：片段是**清洗后**的文本（`stripMarkdown` 去掉 `#`、`**`、表格竖线），
+ * 而 `read({ offset })` 切的是**原文**。两者坐标不同，直接把片段里的位置当 offset 会偏；
+ * 这个函数只在清洗文本里定位，映射到原文由 `rawOffsetFor()` 完成。
+ */
+export function findFirstMatch(text, query) {
+  const terms = Array.isArray(query?.terms) ? query.terms : expandQuery(query).terms;
+  return pickBestHit(findMatches(String(text ?? ''), terms));
+}
+
+/**
+ * 把「清洗文本里的第 N 个字」换算成「原文里的第几个字」。
+ *
+ * 为什么用**出现次序**而不是按长度比例估算：
+ *   - `stripMarkdown` 只删字符、不重排词序（图片语法整段删掉、链接只留可见文字）；
+ *   - 同一个词在原文与清洗文本里的出现顺序一致，所以"第 k 次出现"能精确对上；
+ *   - 按比例估算在长文里可能差出几百字，而 `read({ offset })` 的价值就在于"从命中处附近接着读"。
+ *
+ * 词本身被清洗掉（例如查询里带了 Markdown 标记）时退回"原文里第一次出现"，
+ * 再不行就退回清洗位置——宁可偏一点，也不能给出一个越过全文长度的 offset。
+ */
+export function rawOffsetFor(rawText, cleanText, cleanOffset, term) {
+  const raw = String(rawText ?? '');
+  const clean = String(cleanText ?? '');
+  const pin = String(term ?? '').toLowerCase();
+  if (!raw || !pin) return Math.max(0, cleanOffset);
+
+  let ordinal = 0;
+  let from = 0;
+  const hay = clean.toLowerCase();
+  while (ordinal < 1000) {
+    const at = hay.indexOf(pin, from);
+    if (at < 0 || at > cleanOffset) break;
+    ordinal += 1;
+    from = at + 1;
+  }
+
+  const rawHay = raw.toLowerCase();
+  let scan = 0;
+  let found = -1;
+  for (let index = 0; index < Math.max(1, ordinal); index += 1) {
+    found = rawHay.indexOf(pin, scan);
+    if (found < 0) break;
+    scan = found + 1;
+  }
+  if (found >= 0) return found;
+  const first = rawHay.indexOf(pin);
+  return first >= 0 ? first : Math.max(0, cleanOffset);
+}
+
+/** 小节标签归一：去 Markdown 标记、空白与全半角差异，只留可比较的文字。 */
+const normalizeSection = (value) =>
+  String(value ?? '')
+    .normalize('NFKC')
+    .replace(/[*#]/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+
+/**
+ * 在原文里找一个小节（章 / 条 / Markdown 标题），返回它的字符区间。
+ *
+ * 为什么需要 `section`：用户问「挂几科退学」时，真正回答问题的可能只是《学籍规定》
+ * 里「第六章 退学警告与退学」这 1000 多字；整篇 8213 字既读不完，也没必要读。
+ * 有了区间，`search({ section })` 只在这个范围里找片段，`read` 也能从这一节开头读。
+ *
+ * 识别三种写法（语料里都真实存在）：
+ *   - 章：`第六章 退学警告与退学`（普通一行，不是 Markdown 标题）；
+ *   - 条：`**第二十六条 **学生出现…`（整条就是一段，粗体只是排版）；
+ *   - Markdown 标题：`## 学业预警`。
+ *
+ * 区间终点按类型取：章到下一章/标题为止，条到下一章/条/标题为止。
+ * 不能一律"到下一个第 X 条"——那会把一整章切碎，问"第六章是怎么规定的"只会拿到第一条。
+ */
+export function findSection(text, section) {
+  const wanted = normalizeSection(section);
+  // 一两个字的要求（如"退学"）太宽，会把正文里随便一句当小节标题；至少要求"第X章/第X条"级别的信息量
+  if (!wanted || wanted.length < 2) return null;
+
+  const source = String(text ?? '');
+  const lines = [];
+  let offset = 0;
+  for (const rawLine of source.split('\n')) {
+    const trimmed = rawLine.trim();
+    const plain = trimmed.replace(/\*/g, '').replace(/^#+\s*/, '').trim();
+    let kind = null;
+    if (/^第[一二三四五六七八九十百零〇\d]+章(?:\s|$|[、.．:：])/.test(plain)) kind = 'chapter';
+    else if (/^第[一二三四五六七八九十百零〇\d]+条/.test(plain)) kind = 'clause';
+    else if (/^\s{0,3}#{1,6}\s+\S/.test(rawLine)) kind = 'heading';
+    if (kind) lines.push({ kind, label: plain || trimmed, offset });
+    offset += rawLine.length + 1;
+  }
+
+  const matches = [];
+  lines.forEach((line, index) => {
+    const label = normalizeSection(line.label);
+    // `startsWith` 覆盖「第六章」查「第六章 退学警告与退学」；
+    // `includes` 覆盖用户只记得正文里的关键词、没抄全标题的情况。
+    if (label === wanted || label.startsWith(wanted) || label.includes(wanted)) matches.push(index);
+  });
+  if (!matches.length) return null;
+  // 章/条优先于 Markdown 标题：用户说 `section:"学业预警"` 时想要的是「第二章 学业预警」，
+  // 而不是页面最上面那行 H1 标题（它也会包含同样的关键词，但只覆盖前言）。
+  const index = matches.find((at) => lines[at].kind !== 'heading') ?? matches[0];
+
+  const found = lines[index];
+  const stopKinds = found.kind === 'clause' ? ['clause', 'chapter', 'heading'] : ['chapter', 'heading'];
+  const next = lines.slice(index + 1).find((line) => stopKinds.includes(line.kind));
+  return {
+    title: found.label.length > 80 ? `${found.label.slice(0, 80)}…` : found.label,
+    kind: found.kind,
+    offset: found.offset,
+    end: next ? next.offset : source.length,
+    chars: (next ? next.offset : source.length) - found.offset,
+  };
 }
 
 /**
@@ -281,7 +416,7 @@ export function buildSnippet(doc, query, snippetChars = 240) {
     const head = text.slice(0, size);
     return text.length > size ? `${head}${ELLIPSIS}` : head;
   }
-  const first = hits.reduce((best, hit) => (hit.at < best.at ? hit : best), hits[0]);
+  const first = pickBestHit(hits);
   const start = Math.max(0, first.at - half);
   const end = Math.min(text.length, start + size);
   const body = text.slice(start, end).trim();
@@ -293,7 +428,7 @@ export function buildSnippet(doc, query, snippetChars = 240) {
  *
  * 排序：分数降序 → 标题命中多者优先 → 短的优先（同分时更"专注"的那篇）→ path 升序（保证确定性）。
  *
- * @param {Array<{title:string, text?:string, kind?:string, path?:string, chars?:number}>} docs
+ * @param {Array<{title:string, text?:string, kind?:string, path?:string, chars?:number, rawText?:string, offsetBase?:number}>} docs
  * @param {string|{terms:Array}} query 查询串或 `expandQuery()` 的结果
  * @param {{limit?:number, snippetChars?:number}} [options]
  * @returns {{ count:number, items:Array<object> }} items 原样带上 doc 的其它字段
@@ -310,6 +445,18 @@ export function searchDocuments(docs, query, { limit = 5, snippetChars = 240 } =
     const result = scoreDocument({ ...doc, text }, expanded);
     // 正文为空（图片 / 附件页）时只有标题能命中；仅凭正文命中的篇目才算数
     if (!result.titleHits && !result.bodyHits) continue;
+    const hit = findFirstMatch(text, expanded);
+    /**
+     * `offset` 是**命中位置在原文里的字符偏移**，模型可以拿它直接 `read({ offset })`。
+     *
+     * 片段给的是"命中处长什么样"，offset 给的是"这句话在第几个字"——两者缺一不可：
+     * 只有片段时模型知道条款存在却不知道它在全文的哪里，只好整篇 read 碰运气；
+     * 而长文的关键条款常常在第 4000 字之后，整篇 read 的前 4000 字根本读不到。
+     *
+     * 清洗文本与原文的坐标不同（见 `rawOffsetFor`），`offsetBase` 是"按小节检索"时的节首偏移。
+     */
+    const mapped = hit ? rawOffsetFor(doc.rawText ?? text, text, hit.at, hit.term.value) : 0;
+    const offset = Math.max(0, Number(doc.offsetBase) || 0) + mapped;
     scored.push({
       ...doc,
       kind,
@@ -324,6 +471,8 @@ export function searchDocuments(docs, query, { limit = 5, snippetChars = 240 } =
         .map((hit) => hit.term.value)
         // 同一个字符串可能在标题和正文各命中一次：去重并保持已排好的权重顺序
         .filter((value, index, all) => all.indexOf(value) === index),
+      offset,
+      ...(hit ? { matchOffset: offset } : {}),
     });
   }
 
