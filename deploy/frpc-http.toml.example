@@ -1,0 +1,29 @@
+# HTTP 隧道 —— 只穿 8866（AI 智学 web 版，bin/www.js）
+#
+# 用法：把下面三个 TODO 换成服务商面板上的值，然后
+#   E:\WHYidea\frp_0.61.1_windows_amd64\frpc.exe -c E:\WHYidea\frp_0.61.1_windows_amd64\frpc-http.toml
+#
+# 这条隧道**独立于**现有的 frpc.toml（chat/docs）与 frpc-study.toml（香港那条），
+# 三个可以同时跑，互不干扰；不想用了单独把这个进程关掉即可。
+
+serverAddr = "TODO_服务商节点域名"
+serverPort = 7000
+auth.token = "TODO_面板给的token"
+# 有的服务商还要用户标识，面板上会写，没有就删掉这行：
+# user = "TODO_用户ID"
+
+loginFailExit = false
+
+transport.dialServerKeepAlive = 15
+transport.heartbeatInterval = 30
+transport.heartbeatTimeout = 90
+
+[[proxies]]
+name = "study-http"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 8866
+
+# 面板允许自定义域名 → 填你的域名；
+# 不允许（免费档常见）→ 把它分配给你的域名填这里，或整行删掉看面板默认给什么。
+customDomains = ["study.xjtuwhy.com"]

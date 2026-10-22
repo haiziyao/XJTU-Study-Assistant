@@ -1,0 +1,22 @@
+# frp 客户端配置 —— XJTU-Study-Assistant 公网版
+# 独立实例：不干扰 frpc.toml（chat / docs）那条隧道，
+# 由 frpc-study.toml 单独带一条代理，随时可单独启停。
+serverAddr = "47.82.118.193"
+serverPort = 7000
+auth.token = "LJ7vWBzEQglH5Sa0UC3Yn4sw"
+
+# 首次登录失败不退出, 持续重试
+loginFailExit = false
+
+# 传输层保活
+transport.dialServerKeepAlive = 15
+transport.heartbeatInterval = 30
+transport.heartbeatTimeout = 90
+
+# 学习助理服务（公开网页版 bin/www.js，本地 8866）
+[[proxies]]
+name = "study-assistant-web"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 8866
+customDomains = ["study.xjtuwhy.com"]
