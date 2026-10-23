@@ -281,7 +281,7 @@
      */
     view: new URLSearchParams(location.search).get('view') ?? 'calendar',
     /**
-     * **窄屏（≤760px）当前显示哪一屏**：`'chat'` | `'panel'`。
+     * **窄屏（≤900px）当前显示哪一屏**：`'chat'` | `'panel'`。
      *
      * 为什么要有它：宽屏三栏本身就能同时显示"对话 + 功能页"，窄屏一次只能给一屏，
      * 于是需要一个"现在给哪一屏"的开关。它**不是第二套状态源** ——
@@ -306,17 +306,39 @@
   const MOBILE_PRIMARY = ['chat', 'calendar', 'todo', 'notes'];
 
   /**
-   * 窄屏断点，与 `shell.css` 里 `@media (max-width: 760px)` **必须一致**。
+   * 窄屏断点，与 `shell.css` 里 `@media (max-width: 900px)` **必须一致**。
    *
    * 两边各写一份是无奈之举：CSS 的媒体查询条件 JavaScript 读不到，而"要不要给
    * iOS 自动聚焦"这类行为又必须在 JS 里判断。改断点时两处一起改。
+   *
+   * 为什么是 900 而不是早先的 760：桌面三栏网格的最小内容宽度约
+   * `clamp(80px,10%,128px) + 300px + min(56%,780px)` ≈ 900px。设备宽度落在
+   * 761–900 这一段时（iPad 竖屏 768 / 810 / 820 全在里面），760 断点不命中，
+   * 于是走桌面三栏；三栏放不下就横向溢出，移动端浏览器为了容纳内容反而把
+   * **布局视口撑宽**（实测请求 768px 时 `innerWidth` 变成 810），媒体查询更不可能命中，
+   * 最终定格在"缩小版桌面 + 横向滚动条"。断点抬到 900 之后这一段全部落到单屏模式。
    */
-  const MOBILE_QUERY = '(max-width: 760px)';
+  const MOBILE_QUERY = '(max-width: 900px)';
 
   /** 当前是不是窄屏（真实的 matchMedia 结果，不缓存：窗口可拖宽、手机可横竖屏切换）。 */
   function isMobile() {
     return window.matchMedia(MOBILE_QUERY).matches;
   }
+
+  /**
+   * 窄屏输入框的提示语。
+   *
+   * 只写窄屏这一句：桌面原文由 `applyLayoutMode()` 首次调用时从 index.html 读一次留底，
+   * 免得两处文案各写一份、改了一处忘了另一处。
+   *
+   * 长度按 **1 行**算 —— 手机输入框约 255px 宽、16px 字号，一行大约 15 个字符宽，
+   * 再长就会被输入框裁掉（窄屏 min-height 只给一行 44px，见 shell.css）。
+   * 原文案「说点什么，例：明天 15:00 项目周会」是两行，会把输入框撑到 68px。
+   */
+  const PLACEHOLDER_MOBILE = '例：明天 15:00 项目周会';
+
+  /** 桌面 placeholder 的留底，由 `applyLayoutMode()` 从 DOM 读入。 */
+  let placeholderDesktop = null;
 
   /* ------------------------------------------------------------ 基础工具 */
 
@@ -911,7 +933,7 @@
    * 手机端的显隐关系由两个 body 类表达，别无它法：
    *   body.mobile-chat   显示中间那一大屏 = 聊天框（默认）
    *   body.mobile-panel  显示整屏功能页（`.panel` 吃满内容区，聊天列 display:none）
-   * 两个类只在 `@media (max-width: 760px)` 里有定义，所以宽屏上加了也没有任何效果，
+   * 两个类只在 `@media (max-width: 900px)` 里有定义，所以宽屏上加了也没有任何效果，
    * 桌面端的 DOM 与像素都不受影响（这是硬要求）。
    *
    * 为什么改的是 body 类而不是给 `.app` 挂 `data-screen`：
@@ -1054,6 +1076,16 @@
     // 判断本身在 `PCSidebarLayout.isNavActive()`（纯函数、有单测），宽屏与窄屏共用一处 ——
     // 以前这里与 selectView 各写一个循环，两边规则一旦漂移就会出现"高亮与面板对不上"。
     syncNavActive();
+    // 输入框提示语：窄屏换短句。
+    // 桌面那句是按 780px 宽的面板写的；落到手机约 200px 宽的输入框里会折成三行，
+    // 光提示文字就占掉近半屏。窄屏换成两句、按"恰好两行"算（配合 shell.css 里
+    // 窄屏的 `min-height: 62px`）。桌面原文从 index.html 读一次留底，不另抄一份。
+    if (dom.chatInput) {
+      if (placeholderDesktop === null) {
+        placeholderDesktop = dom.chatInput.getAttribute('placeholder') ?? '';
+      }
+      dom.chatInput.setAttribute('placeholder', mobile ? PLACEHOLDER_MOBILE : placeholderDesktop);
+    }
     // 窄屏下 hash 是**状态的一部分**（刷新要靠它回到同一屏），所以首屏就补上，
     // 而不是等用户点一次导航才开始记。宽屏不写：地址栏干净，也不给桌面端引入新行为。
     if (mobile && !readHashView()) syncHashForScreen(state.mobileScreen);
@@ -3724,6 +3756,14 @@
   function autoGrowInput() {
     const input = dom.chatInput;
     if (!input) return;
+    // 空输入时**不要**把 placeholder 算进高度：scrollHeight 会把折行的提示文字
+    // 当成内容，390px 宽的手机上那句长 placeholder 折成三行，框就被撑到 108px
+    // ——三行高只为了显示一句提示，白吃掉整屏 1/8。空的时候清掉行内高度，
+    // 由 CSS 的 min-height 决定（窄屏 52px）。
+    if (!input.value) {
+      input.style.height = '';
+      return;
+    }
     const max = isMobile() ? Math.max(108, Math.round(window.innerHeight * 0.28)) : 180;
     input.style.height = 'auto';
     input.style.height = `${Math.min(max, input.scrollHeight)}px`;

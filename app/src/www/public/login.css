@@ -1,0 +1,251 @@
+/*
+ * 公开登录页的样式（与页面分离，见 index.html 里"零内联"的说明）。
+ *
+ * 配色跟渲染层的夜间配色同一路（深底 + 蓝紫强调 + 柔和的边框），这样登录进应用时
+ * 视觉上不会"跳"一下。系统字体栈，不外链任何字体或图片：少一个外部依赖，
+ * 就少一个在别人网络里加载失败的资源，也少一条需要放宽的 CSP。
+ *
+ * 自适应：手机上一列铺满（卡片占满宽度、按钮足够大），宽屏居中一张 30rem 的卡片。
+ */
+
+:root {
+  color-scheme: dark light;
+  --bg: #131318;
+  --card: #1c1c22;
+  --border: #31313c;
+  --text: #eceff4;
+  --muted: #9a9ea9;
+  --accent: #5b7cfa;
+  --accent-strong: #4a68e6;
+  --danger: #ff8b8b;
+  --warn: #ffcf70;
+  --field: #14141a;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f3f4f8;
+    --card: #ffffff;
+    --border: #d9dbe4;
+    --text: #1b1d23;
+    --muted: #5f6472;
+    --field: #f7f8fb;
+    --danger: #c02626;
+    --warn: #8a5a00;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 1rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.65 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+
+.card {
+  width: min(30rem, 100%);
+  padding: 1.6rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--card);
+}
+
+.brand {
+  display: flex;
+  gap: 0.85rem;
+  align-items: flex-start;
+  margin-bottom: 1.2rem;
+}
+
+.mark {
+  flex: 0 0 auto;
+  width: 2.4rem;
+  height: 2.4rem;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: linear-gradient(150deg, var(--accent), #8a6cf0);
+  color: #fff;
+  font-weight: 700;
+  font-size: 1.15rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.3rem;
+  letter-spacing: 0.02em;
+}
+
+.tagline {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.25rem;
+  margin-bottom: 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--field);
+}
+
+.tab {
+  flex: 1;
+  padding: 0.5rem 0.6rem;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.tab.is-active {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.tab:focus-visible,
+input:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+label {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+input {
+  width: 100%;
+  padding: 0.62rem 0.7rem;
+  margin-bottom: 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--field);
+  color: inherit;
+  font-size: 1rem;
+}
+
+input::placeholder {
+  color: var(--muted);
+  opacity: 0.75;
+}
+
+button.primary {
+  margin-top: 0.35rem;
+  padding: 0.68rem 1rem;
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+button.primary:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.hint,
+.note {
+  margin: 0.6rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+
+.error {
+  margin: 1rem 0 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+  font-size: 0.85rem;
+}
+
+.about {
+  margin-top: 1.35rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--border);
+}
+
+.about h2 {
+  margin: 0 0 0.55rem;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.features {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 0.2rem;
+  padding: 0;
+  list-style: none;
+}
+
+.features li {
+  padding: 0.22rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.note.warn {
+  color: var(--warn);
+}
+
+.note.warn b {
+  color: var(--warn);
+}
+
+.foot {
+  margin-top: 1.25rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.76rem;
+  display: flex;
+  gap: 0.4rem;
+  justify-content: center;
+}
+
+@media (max-width: 420px) {
+  .card {
+    padding: 1.2rem;
+  }
+
+  .tagline {
+    font-size: 0.84rem;
+  }
+}

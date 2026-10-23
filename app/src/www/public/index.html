@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      公开登录 / 介绍页（未登录时 `GET /` 返回的就是它）。
+
+      三条硬约束决定了它长这样：
+        1. **零构建**：纯 HTML + CSS + 一个普通的外链 script（`login.js`），没有打包器、
+           没有框架、没有内联脚本与内联样式 —— 所以它能吃下最严的 CSP
+           （见宿主发的 Content-Security-Policy）；
+        2. **零数据**：这一页在未登录时对任何人可见，因此页面上**没有**任何用户数据，
+           连"服务器上有几个账号"这种信息都不显示；
+        3. 它**不是**渲染层那套三栏界面（那个只在登录后从 `/app/` 拿得到）。
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="robots" content="noindex" />
+    <title>AI 智学 · 登录</title>
+    <link rel="stylesheet" href="/login/login.css" />
+  </head>
+  <body>
+    <main class="card">
+      <header class="brand">
+        <span class="mark" aria-hidden="true">智</span>
+        <div>
+          <h1>AI 智学</h1>
+          <p class="tagline">把课表、笔记、复习卡片和 AI 对话放在一起的学习助理 —— 登录后，这些数据只属于你自己的账号。</p>
+        </div>
+      </header>
+
+      <div class="tabs" role="tablist" aria-label="登录或注册">
+        <button type="button" id="tab-login" class="tab is-active" role="tab" aria-selected="true" aria-controls="panel-login">
+          登录
+        </button>
+        <button type="button" id="tab-register" class="tab" role="tab" aria-selected="false" aria-controls="panel-register">
+          注册
+        </button>
+      </div>
+
+      <section id="panel-login" role="tabpanel" aria-labelledby="tab-login">
+        <form id="form-login" autocomplete="on">
+          <label for="login-username">用户名</label>
+          <input id="login-username" name="username" type="text" autocomplete="username" required
+                 autocapitalize="off" spellcheck="false" placeholder="你的用户名" />
+
+          <label for="login-password">密码</label>
+          <input id="login-password" name="password" type="password" autocomplete="current-password" required
+                 placeholder="至少 8 位" />
+
+          <button type="submit" class="primary" id="login-submit">登录</button>
+        </form>
+        <p class="hint">连续输错 5 次会锁定 60 秒（同一个 IP + 用户名）。</p>
+      </section>
+
+      <section id="panel-register" role="tabpanel" aria-labelledby="tab-register" hidden>
+        <form id="form-register" autocomplete="on">
+          <label for="register-username">用户名</label>
+          <input id="register-username" name="username" type="text" autocomplete="username" required
+                 autocapitalize="off" spellcheck="false" placeholder="3–32 位字母、数字、_ . -" />
+
+          <label for="register-password">密码</label>
+          <input id="register-password" name="password" type="password" autocomplete="new-password" required
+                 minlength="8" placeholder="至少 8 位" />
+
+          <label for="register-invite">邀请码</label>
+          <input id="register-invite" name="inviteCode" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="形如 K7Q3-M9XW" />
+          <p class="hint" id="invite-hint">注册需要邀请码。这台服务器上的<b>第一个</b>账号不需要邀请码，并会自动成为管理员。</p>
+
+          <button type="submit" class="primary" id="register-submit">注册并登录</button>
+        </form>
+      </section>
+
+      <p class="error" id="error" role="alert" hidden></p>
+
+      <section class="about">
+        <h2>登录后可以做什么</h2>
+        <ul class="features">
+          <li>日历、课表与待办</li>
+          <li>笔记（含图片随手拍）</li>
+          <li>间隔重复复习卡片</li>
+          <li>学习目标与周报</li>
+          <li>AI 对话与知识库检索</li>
+        </ul>
+        <p class="note">
+          每个账号的数据存在服务器上它自己的目录里，互不可见；AI 的 API Key 也由你自己在设置里填、
+          只存在你自己的账号下 —— 本站不提供公共 Key，因此也不会拿你的额度去服务别人。
+        </p>
+        <p class="note warn">
+          <b>思源学堂（LMS）在服务端版不可用。</b>
+          学堂的登录与同步需要把学校账号密码交给运行本站的那台机器，
+          本地客户端能做到"凭据不出你的电脑"，公网服务器做不到；需要学堂同步请使用本地客户端。
+        </p>
+      </section>
+
+      <footer class="foot">
+        <span id="server-name">AI 智学</span>
+        <span class="dot" aria-hidden="true">·</span>
+        <span id="server-version">服务端版</span>
+      </footer>
+    </main>
+    <script src="/login/login.js"></script>
+  </body>
+</html>

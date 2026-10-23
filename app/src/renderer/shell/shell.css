@@ -913,6 +913,13 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
   flex: none;
 }
 
+/* 窄屏工具栏的图标行（由 `kit/dom.js` 的 `toolbarTools()` 建）。
+   桌面端**不渲染** —— 桌面把各分组平铺成两行，不需要折叠。
+   窄屏的展开规则见文件末尾第 7 节。 */
+.toolbar-tools {
+  display: none;
+}
+
 .toolbar.wrap {
   flex-wrap: wrap;
 }
@@ -2714,7 +2721,7 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
    -------------------------------------------------------------------------- */
 
 /* 只在窄屏生效的尺寸令牌。放在媒体查询里，宽屏根本读不到，桌面端逐像素不变。 */
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   :root {
     /* 窄导航：56–64px 之间取 60px。图标仍是 22px（不缩小图标），
        多出来的宽度用来把文字标签放大到 12px 并留出左右内边距。 */
@@ -3583,7 +3590,7 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
      这不是"偷懒压样式"：它是"手机端字号下限"这条产品约束的**唯一落点**。
    -------------------------------------------------------------------------- */
 
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   /* 下限的三块地盘：
        .view-content  绝大多数视图自己建的那层滚动容器；
        .settings      设置页是直接挂进 .panel-body 的，没有 .view-content（见 settings.js）；
@@ -3886,7 +3893,7 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
 
 /* ------------------------------------------------------------------ 手机上 */
 
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   /* 排队条：内边距收紧一点，把宽度让给 chip 本身 */
   .chat-queue {
     padding: 8px 10px 0;
@@ -3936,5 +3943,394 @@ body.notes-focus .panel { grid-column: 2; width: auto; }
 
   .chat .bubble-stop {
     font-size: 12px !important;
+  }
+}
+
+/* ==========================================================================
+   窄屏可用性修复
+   ==========================================================================
+
+   append-only：上面的 900px 媒体查询已经定好了骨架（两栏 / 单屏切换）、字号下限
+   和大部分控件尺寸。这里只修"实测下来仍然不可用"的几处，全部只在窄屏生效。
+
+   实测依据（390×844，Chrome CDP `Emulation.setDeviceMetricsOverride`）。
+   注意：headless 的 `--window-size` 在 Windows 上会被最小窗口宽度（约 500px）夹住，
+   量不出真实的 390 —— 用它截图会得到"看起来三栏溢出"的假象，据此改样式必然改错。
+
+     修复前  .chat-head      67px  —— 「对话」被挤成 25×50 的竖排两行
+             .chat-controls 102px  —— 7 个控件折成两行
+             #theme-toggle         —— 文字被裁（white-space 被 theme.css 覆盖成 nowrap）
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  /* ---------- 1. 顶栏：一行放得下，放不下就省略，绝不折行 ----------
+     .chat-title 早先是 flex 默认的 `0 1 auto`，被同行的徽标和状态挤到只剩 25px，
+     「对话」于是折成竖排两行、顶栏被顶到 67px。标题必须不可压缩。 */
+  .chat-head {
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+
+  .chat-title {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  /* 徽标（模型选择器）和状态是"可牺牲"的那两个。但**牺牲的必须是状态，不是徽标**：
+     .compose-select 被 flex 压窄后，内层的 `span.badge` 是 inline 元素、宽度由内容决定，
+     并不会跟着变窄，而是**溢出父级、盖住右边的状态文字** —— 实测父级 112px 里装着
+     145px 的徽标，正好压掉「已连接」的「已」。所以徽标保持内容宽度（放不下时由下面
+     的 max-width 兜底），让本来就有 min-width:0 + 省略号的 .status-pill 去收缩。 */
+  .chat-head .compose-select {
+    min-width: 0;
+    flex: 0 0 auto;
+    max-width: 52vw;
+    overflow: hidden;
+  }
+
+  .chat-head .badge {
+    display: inline-block;
+    max-width: 100%;
+    vertical-align: middle;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* 顶栏徽标别跟着控件区吃 44px 触摸高度。
+       移动端给可点击元素统一设了 `min-height: 44px`，顶栏里这个模型徽标
+       （`<span class="badge badge-btn" role="button">`）也算"可点击"，
+       于是标题只有 25px 高、整行却被撑到 61px，白占 20px 屏高。
+       顶栏是常驻信息条，不是主要点击区，收回内容高度即可。 */
+    min-height: 0;
+    padding: 3px 8px;
+  }
+
+  /* （原来这里还有一条 `.chat-head .compose-select > button { min-height: 0 }`，
+     是**无效的**：顶栏那一格不是 button，而是 `<span class="badge badge-btn"
+     role="button">`。真正的修法在上面那条 `.chat-head .badge` 里。教训：
+     改之前先用 `getComputedStyle` 确认到底是哪个元素在撑着高度。 */
+
+  /* ---------- 2. 控件行：单行优先，但**绝不能裁剪弹出的菜单** ----------
+     联网 / 思考模式 / 权限 / 上下文 / 用量 / 绘图 在 390px 下总宽约 358px，
+     可用宽度只有 369px —— 挤一挤能进一行，进不去就换行。
+
+     ⚠ 这里曾经写成 `nowrap + overflow-x: auto`（横滑），那是**错的**：
+     这些控件点开的是 `.compose-menu`，它 `position: absolute; bottom: 100%`，
+     是向上弹出的。父级一旦有 `overflow` 就形成裁剪上下文 —— 实测 390×844 下
+     菜单盒子在 y=431..726，而 `.chat-controls` 的裁剪区是 y=732..782，
+     **菜单整个落在裁剪区上方，一点都看不见**（点按钮像没反应）。
+
+     所以：`overflow: visible` 是硬要求，装不下就让它换行（换行不裁剪）。
+     为了通常不换行，下面同时把两处大件收窄：
+       - `.ctx-pct`（圆环旁边的百分比文字）隐藏，只留圆环，省约 17px
+       - 控件的左右内边距 9px → 7px
+     `.spacer` 的 `margin-left: auto` 保留：装得下时把右侧那组推到最右。 */
+  .chat-controls {
+    flex-wrap: wrap;
+    overflow: visible;
+    padding: 0 6px 4px;
+    gap: 4px;
+  }
+
+  .chat-controls > .compose-select {
+    flex: 0 0 auto;
+  }
+
+  .chat-controls .compose-select > button {
+    padding: 3px 7px;
+  }
+
+  /* 「思考模式 高 ▴」右边那个小三角是装饰，不承载信息。
+     窄屏拿它的 8px 去换「上下文占用」的百分比文字。
+
+     ⚠ 百分比**必须留着**：没有会话时 `paintRing()` 故意不画 0% 的环
+     （`ringBox.innerHTML = view ? ringSvg(...) : ''`），只剩一圈淡轨道。
+     实测把 `.ctx-pct` 藏掉之后，那格就是个**空白圆圈**，比挤一点难看得多。
+     所以宁可少一个小三角，也不要把唯一的内容藏了。 */
+  .chat-controls .cs-caret {
+    display: none;
+  }
+
+  /* 更窄的机型（≤380px，如 360×780）：控件行实在挤不进一行。
+     这时让「上下文占用」这一格让步 —— 它是纯读数，而换行会把整块顶高 48px。
+     宁可少一个读数，也不要把输入区做高（这正是用户反馈的问题）。 */
+  @media (max-width: 380px) {
+    .chat-controls .context-meter {
+      display: none;
+    }
+  }
+
+  /* ---------- 3. 输入框与附件条：手机上别占屏 ----------
+     桌面的 min-height 58px 是按 780px 宽的面板定的；落到约 200px 宽的输入框里，
+     那句长 placeholder 会折成三行，autoGrow 于是把框撑到 108px。
+
+     窄屏收到 **44px = 一行**（16px × 1.5 行高 + 上下内边距约 12px），
+     并配合 app.js 把窄屏 placeholder 换成一行以内、能完整显示的短句。
+     语音输入、长文粘贴都还能用 —— 超过 max-height 才滚动。 */
+  .chat-compose textarea {
+    /* 必须写 `height`：`min-height` 只是下限，实际高度由 HTML 上的 `rows="2"` 决定，
+       实测 2 行 × 24px 行高 + 18px 内边距 = 68px，光压 min-height 一点用都没有。
+       autoGrow 在输入时会写行内 height，清空时清掉行内值 → 回到这里的 44px。 */
+    height: 44px;
+    min-height: 44px;
+    max-height: 108px;
+  }
+
+  /* 空附件条虽然带 `hidden`，但 `.chat-attachments { display: flex }` 会盖掉
+     `[hidden]` 的默认 `display: none`，实测白占 16px 高度。 */
+  .chat-attachments[hidden] {
+    display: none;
+  }
+
+  /* ---------- 5. 工具条：放开收缩下限，分段控件改横滑 ----------
+     "待办"页实测：`.toolbar-row` 明明写了 `flex-wrap: wrap`，实际宽度却还是 524px，
+     于是面板横向溢出 206px；而 `.panel-body` 是 `overflow-x: hidden` ——
+     被切掉的「已完成」「工时」**滚不回来，等于不可用**。
+
+     根因不是 wrap 失效，而是 `.toolbar-row { flex: 1 1 100% }` 的 `min-width: auto`：
+     它的 min-content 被子元素 `.quick-add` 的 `flex-basis: 380px` 撑到约 524px，
+     容器再窄也压不下去（wrap 只在"放不下"时换行，压不住 min-content）。
+     给工具条这一族统一放开收缩下限，让 flex 真正能压窄它们。 */
+  .toolbar,
+  .toolbar.wrap,
+  .toolbar-row {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .toolbar-row > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* 分段控件（月/周/日/年、全部/今天/本周…）：桌面按内容宽度排，是 `flex: none`。
+     手机上内容比屏幕宽，改成横向滚动 —— 而不是被 `overflow-x: hidden` 裁掉。
+     notes.css 里对笔记工具栏已经用了同样的办法（`.notes-toolbar .seg{overflow-x:auto}`）。
+
+     里面的按钮必须 `flex: 0 0 auto`：否则它们会先被压窄，把「全部」挤成上下两行的
+     「全 / 部」——那是"看起来没坏但其实更难读"的坏法，比横向滚动差得多。 */
+  .seg {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .seg > * {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .seg::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* "待办"页的快速添加行：桌面排成一行（标题 + 日期 + 工时 + 新建）共约 426px，
+     手机上可用宽度只有 306px，而它是 `flex-wrap: nowrap` 且标题输入框有
+     `min-width: 120px` 下限 —— 于是整行溢出到 516px 被裁掉。
+     窄屏让它换行：标题独占一行，日期/工时/新建排第二行。 */
+  .quick-add {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .quick-add > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .quick-add .qa-title {
+    flex: 1 1 100%;
+  }
+
+  /* 日期 / 工时 / 快速添加 排第二行。basis 按"刚好放得下"给：
+     140 + 56 + 约98 + 2×6 间距 = 306 = 390px 屏的可用宽度。
+     日期框给足 140px，否则会把「2026/10/14」裁成「2026/10/1」（末位"4"看不到）。 */
+  .quick-add .qa-date {
+    flex: 1 1 140px;
+  }
+
+  .quick-add .qa-hours {
+    flex: 0 1 56px;
+  }
+
+  .quick-add .primary-btn {
+    flex: 0 0 auto;
+  }
+
+  /* ---------- 4. 主题开关：修层叠顺序 ----------
+     theme.css 在 index.html 里**最后**加载，它有 `.theme-toggle{white-space:nowrap}`，
+     与 shell.css 移动端块里的 `.theme-toggle{white-space:normal}` 同优先级，
+     靠"后加载"取胜 —— 于是 51px 宽的按钮里塞 70px 的「☾ 夜间模式」，直接被裁。
+     这里加 `.sidebar` 前缀把优先级提到 (0,2,0)，从此与加载顺序无关。 */
+  .sidebar .theme-toggle {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    font-size: 11px;
+    line-height: 1.2;
+  }
+
+  /* ---------- 6. 工具栏：手机上别再拿顶栏压正文 ----------
+     移动端有一条「可点击元素统一 44px」的规则，工具栏里几十个控件全按 44 排，
+     于是待办 / 笔记的顶栏堆到 300+ px —— 而**桌面端同样的控件只有 28px**
+     （`.ghost-btn { min-height: 28px }`），是移动端这条规则把它们吹起来的。
+
+     实测（390×844，面板正文 721px）：
+       待办 335px = 筛选 52 + 「显示已完成」44（独占一行）+ 快速添加 98 + 按钮 2 行 76
+       笔记 304px = 模式页签 54 + 筛选/操作 104 + 搜索/排序 97
+
+     办法：工具栏这一族的触摸高度收到 **36px**（仍比桌面高 8px，点得中），
+     再把「独占一行」和「白白换行」的两处合并掉。 */
+
+  .toolbar {
+    padding: 6px 8px;
+    gap: 6px;
+  }
+
+  .toolbar-row {
+    gap: 6px;
+  }
+
+  /* 36px 覆盖那条零特异度的 `:where(button, input, select)` 44px 规则。
+     用 `:is()` 把特异度提到 (0,1,1) 以上，不依赖加载顺序。 */
+  .toolbar :is(.seg-btn, .ghost-btn, .primary-btn, .danger-btn, .check-field, .chip-btn),
+  .toolbar :is(input, select) {
+    min-height: 36px;
+  }
+
+  /* 左右内边距 9 → 6：待办页 5 个筛选按钮合计从 278px 降到 248px，
+     才装得进「筛选条 + 显示已完成」这一行（可用 254px）。
+     否则「已完成」会被横滑容器裁掉半个字——能滑到，但看起来像坏了一半。 */
+  .toolbar .seg-btn {
+    padding: 4px 6px;
+  }
+
+  .toolbar .seg,
+  .toolbar-row .seg {
+    padding: 2px;
+  }
+
+  /* 筛选条与「显示已完成」并排成一行。
+     `.seg` 里只有分段按钮、没有弹层，所以可以横滑（上一个坑是弹层被 overflow 裁掉）。
+
+     basis 必须是 **0** 而不是 auto：flex 换行是按「假设主尺寸」（basis）判断的，
+     basis:auto 等于内容宽度（约 332px），加上右边的开关就超了 → 先换行、再收缩，
+     于是开关永远独占一行。basis:0 才能让它们先排在同一行，再由 shrink 分配。 */
+  .toolbar > .seg {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .toolbar > .check-field {
+    flex: 0 0 auto;
+  }
+
+  /* 快速添加：桌面本来就是一行（标题 + 日期 + 工时 + 按钮）。
+     上一版在窄屏让它换行、标题独占一整行 —— 等于白送 45px。
+     改回一行，靠给日期/工时定宽把标题的空间腾出来。 */
+  .quick-add {
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+
+  .quick-add .qa-title {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  /* 日期框**不许收缩**：它一旦被压到 90px 以下，「2026/10/14」就会显示不全
+     （实测 flex-shrink 让它掉到 89px）。让标题输入框去收缩，它有 min-width:0。 */
+  .quick-add .qa-date {
+    flex: 0 0 116px;
+  }
+
+  /* 工时框 46px 会把「工时」这个 placeholder 裁成「工E」（实测）。给到 56px。 */
+  .quick-add .qa-hours {
+    flex: 0 0 56px;
+  }
+
+  .quick-add .primary-btn {
+    flex: 0 0 auto;
+    padding: 4px 9px;
+  }
+
+  /* 面板自己的标题条（「待办」「笔记系统」那一行）同样是 44px 控件撑到 61px。 */
+  .panel-head {
+    padding: 6px 8px;
+    gap: 6px;
+  }
+
+  .panel-head :is(button, .ghost-btn, .primary-btn) {
+    min-height: 36px;
+  }
+
+  /* ---------- 7. 工具栏收成一排图标 ----------
+     窄屏不再把「筛选 / 快速添加 / 更多操作」全部铺开，而是只留一排图标**（一行 36px）**，
+     点哪个开哪个。分组本身不动（DOM 一个字节没改），只按 `bar.dataset.open` 显示：
+     这样桌面端的平铺布局丝毫没有风险，窄屏又只剩一行。
+
+     图标由 `kit/dom.js` 的 `toolbarTools()` 建，点击时把自己的面板名写到
+     `toolbar.dataset.open`，同时给按钮加 `.active`。 */
+
+  .toolbar-tools {
+    display: flex;
+    flex: 1 1 100%;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .toolbar-tool {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--fg-2);
+    transition: background var(--t), color var(--t), border-color var(--t);
+  }
+
+  .toolbar-tool.active {
+    background: var(--bg-hover);
+    color: var(--blue);
+    border-color: currentColor;
+  }
+
+  .toolbar-tool svg {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* 默认全部收起 —— 只剩图标行 */
+  .toolbar > .seg,
+  .toolbar > .check-field,
+  .toolbar .quick-add,
+  .toolbar .toolbar-row > .ghost-btn,
+  .toolbar .toolbar-row > .primary-btn {
+    display: none;
+  }
+
+  /* 展开：点开哪一组显示哪一组 */
+  .toolbar[data-open='filter'] > .seg,
+  .toolbar[data-open='filter'] > .check-field {
+    display: flex;
+  }
+
+  .toolbar[data-open='add'] .quick-add {
+    display: flex;
+  }
+
+  .toolbar[data-open='more'] .toolbar-row > .ghost-btn,
+  .toolbar[data-open='more'] .toolbar-row > .primary-btn {
+    display: inline-flex;
   }
 }

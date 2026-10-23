@@ -1059,7 +1059,11 @@ function todoToolbar() {
 
   const row2 = mk('div', 'toolbar-row');
   row2.append(quick, create, rollover, weeklyBtn, selectMode);
-  bar.append(seg, showDone, row2);
+  bar.append(toolbarTools(bar, [
+    ['filter', 'filter', '筛选与已完成'],
+    ['add', 'plus', '快速添加'],
+    ['more', 'more', '更多操作'],
+  ]), seg, showDone, row2);
   return bar;
 }
 

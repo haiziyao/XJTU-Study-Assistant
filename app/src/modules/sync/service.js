@@ -77,7 +77,7 @@ export const LEDGER_LIMIT = 5000;
 export const PULL_MAX_ITEMS = 2000;
 /** push 单批上限：主服务的请求体上限是 12 MB，这里按 1 MB 切（与直传同一个量级）。 */
 export const PUSH_CHUNK_BYTES = 1024 * 1024;
-/** 单条记录上限：超过就不参与本次同步（网关 30s 超时，单条无法再切片） */
+/** 单条记录上限：超过就不参与本次同步（单条无法再切片；网关超时 2026-10-21 已放宽到 240s，但超大单条仍可能顶满） */
 export const MAX_SINGLE_RECORD_BYTES = 900 * 1024;
 /** 报告里逐条明细最多回多少条（页面只用来列"疑似重复/冲突"，不需要几万条）。 */
 export const REPORT_ITEM_LIMIT = 200;
@@ -963,9 +963,12 @@ export class SyncService {
      *
      * 为什么：同步是按体积切片发的（PUSH_CHUNK_BYTES），但**单条记录不能再切**。
      * 真机上一条内联了照片的笔记就有 3.7MB，推到小服务器上要几十秒，
-     * 网关（www 的 UPSTREAM_TIMEOUT_MS = 30s）会先超时 —— 整次同步因此永远失败，
+     * 网关（www 的 UPSTREAM_TIMEOUT_MS，2026-10-21 由 30s 放宽到 240s）在超大单条上仍可能先超时
+     * —— 整次同步因此永远失败，
      * 用户看到的就是"服务器响应太慢 / 一直中断"。与其让它卡死整批，不如跳过并如实报出来。
-     * 想真正同步这类大记录，需要服务器把网关超时调大（见 README）。
+     * 网关超时已放宽到 240s（2026-10-21），但单条上限仍按 900KB 保守留着：
+     * 一条 3.7MB 的记录在慢上行链路上本身就可能要几十秒，且中途断了要整条重来。
+     * 真要放开，调 `MAX_SINGLE_RECORD_BYTES` 即可，与网关无关。
      */
     const oversized = [];
     const pick = (name, items) => {

@@ -202,7 +202,7 @@ body.notes-focus .notes-canvas-toolbar { margin-bottom: 4px; }
 .notes-trash-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .danger { color: var(--red) !important; }
 @media (max-width:1180px) { .notes-workspace { grid-template-columns: 1fr; overflow: auto; } .notes-list,.notes-detail { overflow: visible; } .notes-list { border-right: 0; border-bottom: 1px solid var(--line); } }
-@media (max-width:760px) { .notes-toolbar .toolbar-row { flex-wrap: wrap; } .notes-toolbar .seg { max-width: 100%; overflow-x: auto; } .notes-trash-row { grid-template-columns: 1fr auto auto; }.notes-trash-row .notes-meta { grid-column: 1/-1; }.notes-properties-grid { grid-template-columns: 1fr; } }
+@media (max-width:900px) { .notes-toolbar .toolbar-row { flex-wrap: wrap; } .notes-toolbar .seg { max-width: 100%; overflow-x: auto; } .notes-trash-row { grid-template-columns: 1fr auto auto; }.notes-trash-row .notes-meta { grid-column: 1/-1; }.notes-properties-grid { grid-template-columns: 1fr; } }
 .notes-viewer-attachments { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .notes-viewer-attachments strong { width: 100%; }
 .notes-viewer-attachments a { text-decoration: none; }
@@ -258,4 +258,154 @@ body.notes-focus .notes-canvas-toolbar { margin-bottom: 4px; }
   .notes-canvas-help-remember { grid-column: auto; }
   .notes-canvas-help-button { position: sticky; right: 0; }
   .notes-document-stage { height: 62vh; min-height: 360px; }.notes-document-layer { padding: 12px; }.notes-annotation-tools { width: 100%; order: -1; }
+}
+
+/* ---------------------------------------------------------------------------
+   窄屏：笔记工具栏压高度（2026-10-21）
+
+   实测 390×844：`.notes-toolbar` 304px，正文只剩 417px。构成是三块 44px 控件堆的：
+     模式页签 54 + 筛选/操作 104（seg 一行 + 三个按钮一行）+ 搜索/排序 97（两行）
+
+   桌面端这些控件只有 28px，是移动端的「统一 44px」规则吹起来的，所以这里收到 36px。
+   写在 notes.css 而不是 shell.css：本文件在 shell.css **之后**加载，
+   同特异度下必须在这里才压得住（shell.css 里已有一份通用的 `.toolbar` 收窄）。
+   --------------------------------------------------------------------------- */
+@media (max-width: 900px) {
+  .notes-toolbar {
+    padding: 6px 8px;
+    gap: 6px;
+  }
+
+  .notes-toolbar .toolbar-row {
+    gap: 6px;
+  }
+
+  .notes-toolbar :is(button, input, select, .check-field) {
+    min-height: 36px;
+  }
+
+  /* 模式页签（笔记 / 知识图谱 / Canvas / 回收站）：页签本身收到 36，容器内边距也收 */
+  .notes-mode-tabs {
+    padding: 2px;
+    gap: 4px;
+  }
+
+  .notes-mode-tab {
+    padding: 4px 8px;
+  }
+
+  /* 搜索框让出空间给标签/排序，避免多折一行 */
+  .notes-search {
+    flex: 1 1 150px;
+    min-width: 0;
+  }
+
+  .notes-tag-filter,
+  .notes-sort {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  /* 这三个是**包装层**（里面才装 input / button），它们 44~45px 是"内部控件 +
+     包装内边距"叠出来的，所以只压内部控件不够，包装本身也要收。 */
+  .notes-toolbar .notes-search,
+  .notes-toolbar .notes-tag-filter,
+  .notes-toolbar .notes-sort {
+    min-height: 36px;
+    padding-block: 2px;
+  }
+
+  .notes-toolbar .notes-search input,
+  .notes-toolbar .notes-tag-filter > button,
+  .notes-toolbar .notes-sort > button {
+    min-height: 30px;
+  }
+
+  /* 「主程序已连接」是状态提示，不是操作；窄屏挤在筛选条里只会把按钮顶到第二行 */
+  .notes-connection {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   窄屏：工具栏收成一排图标（2026-10-21）
+
+   只留一行图标 —— 模式 / 搜索 / 筛选 / 更多 —— 点哪个展开哪一组。
+   图标行本身由 `kit/dom.js` 的 `toolbarTools()` 建，点击把面板名写进
+   `bar.dataset.open`，这里按它决定显示什么。
+
+   分组和按钮**一个都没删**，只是默认 `display: none`；桌面端这套规则不生效（媒体查询内）。
+   --------------------------------------------------------------------------- */
+@media (max-width: 900px) {
+  /* 两个 .toolbar-row 默认整行收起：否则里面的子元素全隐藏、行本身还留着，
+     白白多出两处 gap（实测约 12px）。 */
+  .notes-toolbar .toolbar-row {
+    display: none;
+  }
+
+  .notes-toolbar .notes-mode-tabs,
+  .notes-toolbar .seg,
+  .notes-toolbar .notes-search,
+  .notes-toolbar .notes-tag-filter,
+  .notes-toolbar .notes-sort,
+  .notes-toolbar .toolbar-row > .ghost-btn,
+  .notes-toolbar .toolbar-row > .primary-btn {
+    display: none;
+  }
+
+  /* canvas 模式没有图标行（renderToolbar 只在非 canvas 时插入），
+     所以它的模式页签必须一直可见，否则整个工具栏会空掉。 */
+  .notes-toolbar.notes-toolbar-canvas-compact .notes-mode-tabs {
+    display: flex;
+  }
+
+  /* ---- 展开某一组 ---- */
+  .notes-toolbar[data-open='mode'] .notes-mode-tabs {
+    display: flex;
+  }
+
+  .notes-toolbar[data-open='search'] .notes-filter-row {
+    display: flex;
+  }
+
+  .notes-toolbar[data-open='search'] .notes-search {
+    display: inline-block;
+  }
+
+  .notes-toolbar[data-open='filter'] .toolbar-row {
+    display: flex;
+  }
+
+  .notes-toolbar[data-open='filter'] .seg {
+    display: flex;
+  }
+
+  .notes-toolbar[data-open='filter'] .notes-tag-filter,
+  .notes-toolbar[data-open='filter'] .notes-sort {
+    display: inline-block;
+  }
+
+  .notes-toolbar[data-open='filter'] .notes-filter-row > .ghost-btn {
+    display: inline-flex;
+  }
+
+  .notes-toolbar[data-open='more'] .toolbar-row {
+    display: flex;
+  }
+
+  /* 只认**第一行**的按钮（随手拍 / 专注 / 新建笔记）。
+     不加 `:not(.notes-filter-row)` 的话，筛选行的「★ 收藏」也会跟着出现在"更多"里 ——
+     它属于"筛选"，出现在两个面板里会让人以为有两份。 */
+  .notes-toolbar[data-open='more'] .toolbar-row:not(.notes-filter-row) > .ghost-btn,
+  .notes-toolbar[data-open='more'] .toolbar-row:not(.notes-filter-row) > .primary-btn {
+    display: inline-flex;
+  }
+
+  /* 还必须**显式**再藏一次筛选行的「★ 收藏」。
+     原因：shell.css 里有一条通用规则 `.toolbar[data-open='more'] .toolbar-row > .ghost-btn`
+     （特异度 0,4,0）—— 笔记工具栏同样带 `.toolbar` 类，于是它把 `:not()` 排除掉的
+     收藏又显示了出来。这里用 0,5,0 压回去。 */
+  .notes-toolbar[data-open='more'] .notes-filter-row > .ghost-btn {
+    display: none;
+  }
 }
