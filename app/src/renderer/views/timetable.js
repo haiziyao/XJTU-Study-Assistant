@@ -408,8 +408,36 @@
         `${describeWeeks(course.weeks)} · ${course.eventCount ?? 0} 条日程${course.weeks?.min ? ` · 第${course.weeks.min}-${course.weeks.max}周` : ''}`,
       ),
     );
+    // 作息切换（5/1、10/1）会把一条下午课的周次段切成两条日程。
+    // 不说明的话，用户看到「一条课 2 条日程」会以为是重复导入；这里把切点与两段作息写清楚。
+    const splitNote = seasonSplitNote(course.seasonSplit);
+    if (splitNote) main.appendChild(mk('div', 'tt-course-meta tt-course-season-split', splitNote));
     row.appendChild(main);
     return row;
+  }
+
+  /**
+   * 「因作息切换拆为 N 条」的说明文案。
+   *
+   * 后端只在真的切过时带 `seasonSplit`：`runs` 个原始周次段被切成 `segments` 条日程，
+   * `groups` 里是每个时段的切点与各段作息。没切过的课程不会出现这一行。
+   */
+  function seasonSplitNote(split) {
+    if (!split || !((split.segments ?? 0) > (split.runs ?? 0))) return '';
+    const groups = (split.groups ?? []).map((group) => {
+      const periods = `${weekDayText(group.weekDay)} 第${group.periodRange[0]}-${group.periodRange[1]}节`;
+      const parts = (group.parts ?? [])
+        .map((part) => `${describeRun(part.weeks)} ${part.season === 'summer' ? '夏季' : '冬季'} ${part.startTime}起`)
+        .join(' / ');
+      return `${periods}：${parts}`;
+    });
+    const detail = groups.length ? `（${groups.join('；')}）` : '';
+    return `因作息切换拆为 ${split.segments} 条${detail}`;
+  }
+
+  /** 连续周次段 →「第1-3周」。 */
+  function describeRun(run) {
+    return run.start === run.end ? `第${run.start}周` : `第${run.start}-${run.end}周`;
   }
 
   /** 实时条数：选中课程里、段首不晚于「导入到第几周」的日程预览条数。 */

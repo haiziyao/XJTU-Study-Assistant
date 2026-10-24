@@ -209,6 +209,16 @@ body.notes-focus .notes-canvas-toolbar { margin-bottom: 4px; }
 .notes-attachment-image { display: block; max-width: min(100%,900px); max-height: 65vh; border-radius: 8px; object-fit: contain; background: var(--bg-base); }
 .notes-attachment-pdf { width: min(100%,900px); height: 65vh; min-height: 420px; border: 1px solid var(--line); border-radius: 8px; background: white; }
 .notes-import-warning { width: 100%; margin: 0; color: var(--amber); }
+.notes-import-button { border-color: color-mix(in srgb,var(--blue) 28%,var(--line)); color: var(--blue); }
+.notes-import-dropzone { display: grid; place-items: center; gap: 7px; min-height: 150px; padding: 24px; border: 1.5px dashed color-mix(in srgb,var(--blue) 45%,var(--line)); border-radius: 16px; background: color-mix(in srgb,var(--blue) 4%,var(--bg-surface)); color: var(--fg-2); text-align: center; cursor: pointer; transition: border-color .18s,background .18s,transform .18s; }
+.notes-import-dropzone:hover,.notes-import-dropzone.is-dragging { border-color: var(--blue); background: color-mix(in srgb,var(--blue) 9%,var(--bg-surface)); transform: translateY(-1px); }
+.notes-import-dropzone strong { color: var(--fg); font-size: 15px; }.notes-import-dropzone small { color: var(--fg-3); }.notes-import-drop-icon { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; background: var(--blue); color: white; font-size: 23px; box-shadow: 0 8px 20px color-mix(in srgb,var(--blue) 25%,transparent); }
+.notes-file-input-hidden { position: absolute !important; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.notes-import-progress { position: relative; min-height: 38px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-base); }.notes-import-progress-bar { position: absolute; inset: 0 auto 0 0; width: 0; background: color-mix(in srgb,var(--blue) 18%,transparent); transition: width .12s linear; }.notes-import-progress strong { position: relative; display: block; padding: 10px 12px; color: var(--fg-2); font-size: 12px; }
+.notes-document-stage { position: relative; height: min(68vh,760px); min-height: 420px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-base); }
+.notes-document-layer { position: absolute; inset: 0; overflow: auto; padding: 20px; }.notes-document-stage.is-annotating .notes-document-layer { overflow: hidden; pointer-events: none; user-select: none; }
+.notes-annotation-canvas { position: absolute; inset: 0; z-index: 3; width: 100%; height: 100%; pointer-events: none; touch-action: none; cursor: crosshair; }.notes-annotation-canvas.is-active { pointer-events: auto; }
+.notes-annotation-tools { display: flex; flex: 1 1 auto; align-items: center; gap: 7px; min-width: 0; overflow-x: auto; }.notes-annotation-tools button.active { border-color: var(--blue); background: color-mix(in srgb,var(--blue) 10%,var(--bg-surface)); color: var(--blue); }.notes-annotation-colors { display: flex; gap: 5px; }.notes-annotation-color { width: 26px !important; min-width: 26px !important; height: 26px !important; padding: 0 !important; border: 2px solid var(--bg-surface) !important; border-radius: 50% !important; background: var(--annotation-color) !important; box-shadow: 0 0 0 1px var(--line); }.notes-annotation-color.active { box-shadow: 0 0 0 2px var(--fg); }.notes-annotation-width { width: 70px; min-width: 70px; }
 
 @keyframes notes-panel-in { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
 @keyframes notes-card-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }
@@ -247,6 +257,7 @@ body.notes-focus .notes-canvas-toolbar { margin-bottom: 4px; }
   .notes-canvas-help-tip { grid-column: auto; }
   .notes-canvas-help-remember { grid-column: auto; }
   .notes-canvas-help-button { position: sticky; right: 0; }
+  .notes-document-stage { height: 62vh; min-height: 360px; }.notes-document-layer { padding: 12px; }.notes-annotation-tools { width: 100%; order: -1; }
 }
 
 /* ---------------------------------------------------------------------------

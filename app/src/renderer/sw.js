@@ -1,21 +1,23 @@
-const VERSION = 'mobile-v14';
+const VERSION = 'mobile-v15';
 const SHELL = `potato-shell-${VERSION}`;
 const APP_ROOT = new URL('./', self.location.href).pathname;
 const ASSETS = [
   './', './index.html', './manifest.webmanifest', './assets/app-icon.svg',
-  './shell/shell.css?v=20261019-5', './shell/theme.css', './shell/app.js?v=20261019-1', './shell/icons.js',
+  './shell/shell.css?v=20261019-5', './shell/theme.css?v=20261021-1', './shell/app.js?v=20261019-1', './shell/icons.js',
   './shell/message.js', './shell/planned.js', './shell/settings.js?v=20261019-3',
   './shell/sidebar-layout.js', './shell/sidebar-customize.js',
   './kit/theme.js?v=20261019-1', './kit/registry.js', './kit/util.js', './kit/labels.js',
-  './kit/dom.js', './kit/richtext.js', './kit/qrcode.js', './kit/pwa.js',
+  './kit/dom.js', './kit/richtext.js?v=20261021-1', './kit/qrcode.js', './kit/pwa.js',
   './views/calendar.css', './views/calendar.js', './views/lms.css', './views/lms.js', './views/notifications.js?v=20261019-2',
-  './views/academic.css', './views/academic.js', './views/notes/notes.css?v=20261019-17',
-  './views/notes/notes.js?v=20261019-18', './views/auth.css?v=20261017-1', './views/auth-settings.js',
+  './views/academic.css', './views/academic.js', './views/notes/notes.css?v=20261021-1',
+  './views/notes/notes.js?v=20261021-1', './views/auth.css?v=20261017-1', './views/auth-settings.js',
   './views/knowledge-settings.css', './views/knowledge-settings.js',
   './views/chat-hub.css', './views/chat-hub.js', './views/chat-settings.css',
   './views/chat-settings.js', './views/review.css', './views/review.js',
   './views/transfer.css', './views/transfer.js', './views/account.css',
-  './views/account.js', './views/sync.css', './views/sync.js'
+  './views/account.js', './views/sync.css', './views/sync.js',
+  './mobile/detect.js', './mobile/mobile.css', './mobile/logic.js', './mobile/ui.js',
+  './mobile/pages.js', './mobile/ai.js', './mobile/notes.js', './mobile/modules.js', './mobile/shell.js'
 ];
 
 self.addEventListener('install', (event) => {

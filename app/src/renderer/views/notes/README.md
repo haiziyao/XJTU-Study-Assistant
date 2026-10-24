@@ -34,10 +34,11 @@ Provider 声明 `markdown: true` 后，详情区会显示“查看笔记”。�
 
 ## 附件兼容与查看
 
-- 顶部工具栏不再显示“手动上传”“今日笔记”和“从模板新建”；底层 `uploadNotes(files, input)` 能力仍保留给兼容调用，不会删除既有附件、每日笔记或模板数据。本模块不读取、复制或缓存文件内容。
+- “导入文件”与“新建笔记”并列显示。支持一次选择多个文件；文件通过流式接口写入本地附件目录，不以 Base64 塞入 `notes.json`，也不会进入浏览器摘要缓存。
 - 声明 `view: true` 并实现 `readNote(noteId)` 后开放“查看笔记”。返回字符串，或 `{ format: 'markdown | text', text }`。为兼容旧 Provider，`markdown: true + renderMarkdown(noteId)` 仍可提供查看能力。
 - 查看内容仅存在于当前弹层。Markdown 经过 `PCRichText` 安全渲染，`text` 使用纯文本展示，Provider 返回的 HTML 不会直接注入页面。
-- 默认上传限制：单次最多 8 个文件、单文件 6 MB、合计 10 MB；支持 Markdown、文本、HTML、PDF、DOCX、PPTX 和常见图片。PDF 与图片可在网页内预览；DOCX/PPTX 会提取正文为 Markdown，PDF 同时尽力提取可搜索文本。旧版 DOC/PPT 只保留下载入口。
+- 导入限制：单次最多 20 个文件、单文件 200 MB、合计 1 GB；支持 Markdown、文本、HTML、CSV、PDF、DOC/DOCX、XLS/XLSX、PPT/PPTX 和常见图片。PDF 与图片可在网页内预览；DOCX、XLSX、PPTX 和 PDF 会尽力提取正文供搜索，旧版二进制 Office 文件仍完整保留并提供下载。
+- 文件查看弹层提供画笔、橡皮、六种颜色和三档粗细；笔迹按页面归一化坐标保存到笔记，调整窗口后仍与文件画面保持对齐。
 
 ## AI 读取挂载点
 
@@ -56,7 +57,7 @@ const context = await notes.readForAI({ ids: ['note-id'], limit: 5 });
 
 内置 Provider 声明 `edit: true` 并实现 `openNote(id)`；“新建笔记”和“编辑笔记”进入 `editor.html`，不再在摘要弹层中编辑。外部 Provider 沿用自己的 `openNote` 与创建流程。
 
-- 左侧编辑、右侧实时预览，复用 `PCRichText` 的 Markdown / LaTeX 子集；窄屏上下展示。
+- 左侧编辑、右侧实时预览，复用 `PCRichText` 的 Markdown / LaTeX 子集；窄屏上下展示。工具栏可像 Word 一样为选中文字设置字体、字号、颜色、下划线和段落对齐。
 - 新建使用 `POST /api/v1/notes`；已有笔记通过 `PATCH /api/v1/notes/:id` 保存，支持标题、正文、标签、格式及状态，携带 `expectedUpdatedAt` 检测冲突。
 - 原有附件、来源和日历关联保留；正文不进入浏览器缓存。
 - 紧凑顶栏直接编辑标题；标签、附件说明和外观选项收进“属性”，不占用常驻标题区。

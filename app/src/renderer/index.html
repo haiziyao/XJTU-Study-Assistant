@@ -39,6 +39,9 @@
     <link rel="icon" href="assets/app-icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="assets/app-icon.svg" />
     <script src="kit/theme.js?v=20261019-1"></script>
+    <!-- 手机外壳开关：必须在 <head> 里尽早执行，给 <html> 挂 `m-app`，
+         否则首帧会先画出桌面三栏再切走（闪一下）。见 mobile/detect.js -->
+    <script src="mobile/detect.js"></script>
 
     <!-- 样式：外壳 → 各视图自带的样式（新增功能在这里加一行 link） -->
     <link rel="stylesheet" href="shell/shell.css?v=20261019-5" />
@@ -48,7 +51,7 @@
     <link rel="stylesheet" href="views/academic.css" />
     <!-- 「课表导入」：选课 / 导入到第几周 / 删除课程三件事都在这一页（见 views/timetable.js） -->
     <link rel="stylesheet" href="views/timetable.css" />
-    <link rel="stylesheet" href="views/notes/notes.css?v=20261019-17" />
+    <link rel="stylesheet" href="views/notes/notes.css?v=20261021-1" />
     <link rel="stylesheet" href="views/auth.css?v=20261017-1" />
     <link rel="stylesheet" href="shell/theme.css" />
     <link rel="stylesheet" href="views/knowledge-settings.css" />
@@ -62,6 +65,9 @@
     <link rel="stylesheet" href="views/account.css" />
     <!-- 「设置 → 多端同步」：账号数据在桌面/服务器/手机之间双向同步（见 views/sync.js） -->
     <link rel="stylesheet" href="views/sync.css" />
+    <!-- 手机外壳与手机组件库的样式。**放最后**：它只在 `html.m-app` 下生效，
+         但需要压过前面那些窄屏补丁（同特异度靠顺序取胜）。见 mobile/mobile.css -->
+    <link rel="stylesheet" href="mobile/mobile.css" />
   </head>
   <body>
     <div class="app">
@@ -177,7 +183,7 @@
     <script src="kit/labels.js"></script>
     <script src="kit/dom.js"></script>
     <!-- 富文本：Markdown 子集 + LaTeX 子集 + ```svg 图形（零依赖，见 kit/richtext.js） -->
-    <script src="kit/richtext.js"></script>
+    <script src="kit/richtext.js?v=20261021-1"></script>
     <script src="kit/qrcode.js"></script>
     <script src="kit/pwa.js"></script>
 
@@ -191,7 +197,7 @@
     <script src="views/academic.js"></script>
     <!-- 「课表导入」独立页面：三段式（登录与学期 / 预览与选择 / 已导入） -->
     <script src="views/timetable.js"></script>
-    <script src="views/notes/notes.js?v=20261019-18"></script>
+    <script src="views/notes/notes.js?v=20261021-1"></script>
     <!-- 全局登录只往「设置」里加一块卡片，不占左栏入口（见 views/auth-settings.js） -->
     <script src="views/auth-settings.js"></script>
     <!-- 知识库同样只占「设置」里的一块：语料概况 / 栏目表 / 重读索引 / 自检（见 views/knowledge-settings.js） -->
@@ -217,5 +223,18 @@
     <!-- 「设置 → 侧边栏」：自定义排序与「更多」，本身只加一块设置卡片 + 一个弹窗 -->
     <script src="shell/sidebar-customize.js"></script>
     <script src="shell/app.js?v=20261019-1"></script>
+    <!-- 手机外壳：必须在 app.js **之后**（它要读 window.PC 与 PCModules），
+         且 detect.js 没挂上 `m-app` 时自己直接 return，桌面端不产生任何副作用 -->
+    <script src="mobile/logic.js"></script>
+    <script src="mobile/ui.js"></script>
+    <!-- 手机端新页面：日历 / 待办（按 iOS 系统日历的形态重建） -->
+    <script src="mobile/pages.js"></script>
+    <!-- 手机端 AI 页：顶栏（历史 / 新对话）与历史对话列表，消息仍走桌面对话列 -->
+    <script src="mobile/ai.js"></script>
+    <!-- 手机端笔记：列表 / 阅读 / 编辑，保存仍走 notes 模块 -->
+    <script src="mobile/notes.js"></script>
+    <!-- 手机端功能页：番茄钟 / 通知 / 课表 / 思源学堂 / 学业 / 传输 / 设置 -->
+    <script src="mobile/modules.js"></script>
+    <script src="mobile/shell.js"></script>
   </body>
 </html>

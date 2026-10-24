@@ -58,7 +58,7 @@ function corsHeaders(req) {
   return {
     'Access-Control-Allow-Origin': req?.headers?.origin ?? '*',
     'Access-Control-Allow-Methods': 'GET,POST,PATCH,PUT,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type,X-Potato-Token',
+    'Access-Control-Allow-Headers': 'Content-Type,X-Potato-Token,X-File-Name,X-File-Type',
     'Access-Control-Max-Age': '600',
   };
 }
@@ -138,13 +138,15 @@ function compile(pattern) {
 export function createRouter() {
   const routes = [];
 
-  const register = (method, pattern, handler) => {
-    routes.push({ method, pattern, handler, ...compile(pattern) });
+  const register = (method, pattern, handler, options = {}) => {
+    routes.push({ method, pattern, handler, rawBody: Boolean(options.rawBody), ...compile(pattern) });
   };
 
   return {
     get: (p, h) => register('GET', p, h),
     post: (p, h) => register('POST', p, h),
+    /** 文件等大请求体由业务路由流式读取，避免先被 JSON 解析器整份载入内存。 */
+    postRaw: (p, h) => register('POST', p, h, { rawBody: true }),
     patch: (p, h) => register('PATCH', p, h),
     put: (p, h) => register('PUT', p, h),
     delete: (p, h) => register('DELETE', p, h),
@@ -174,7 +176,7 @@ export function createRouter() {
           params[name] = values[i];
         });
         const query = Object.fromEntries(url.searchParams.entries());
-        const body = ['POST', 'PATCH', 'PUT'].includes(req.method) ? await readBody(req) : undefined;
+        const body = ['POST', 'PATCH', 'PUT'].includes(req.method) && !match.rawBody ? await readBody(req) : undefined;
         const result = await match.handler({
           req,
           res,

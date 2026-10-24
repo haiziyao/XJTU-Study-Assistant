@@ -92,6 +92,19 @@ test('Markdown：标题 / 列表 / 引用 / 分隔线 / 粗斜体 / 行内代码
   assert.match(html, /<del>删<\/del>/);
 });
 
+test('笔记排版：安全渲染字体、字号、颜色、下划线与段落对齐', () => {
+  const html = rt.toHtml('{align:center}{font:kai}{size:24}{color:blue}{u}重点标题{/u}{/color}{/size}{/font}');
+  assert.match(html, /rt-align-center/);
+  assert.match(html, /rt-font-kai/);
+  assert.match(html, /rt-size-24/);
+  assert.match(html, /rt-color-blue/);
+  assert.match(html, /<u>重点标题<\/u>/);
+
+  const unsafe = rt.toHtml('{color:expression(alert(1))}内容{/color}');
+  assert.equal(unsafe.includes('style='), false);
+  assert.equal(unsafe.includes('expression('), true, '非法格式标记应作为普通文字保留');
+});
+
 test('Markdown：Obsidian Wiki 链接安全渲染标题、章节与别名', () => {
   const html = rt.toHtml('参见 [[牛顿定律#第二定律|F=ma]] 与 [[动量]]');
   assert.match(html, /class="rt-wikilink"/);

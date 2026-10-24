@@ -110,7 +110,7 @@ test('上传限制在调用 Provider 前生效，查看纯文本不会注入 HTM
     uploadNotes: () => { uploads += 1; return summary(); },
     readNote: () => ({ format: 'text', text: '<img src=x onerror=alert(1)>' }),
   });
-  await assert.rejects(() => notes.upload([{ name: 'too-large.pdf', size: 6 * 1024 * 1024 + 1 }]), /超过 6 MB/);
+  await assert.rejects(() => notes.upload([{ name: 'too-large.pdf', size: 200 * 1024 * 1024 + 1 }]), /超过 200 MB/);
   assert.equal(uploads, 0);
   const result = await notes.read('note-1');
   assert.equal(result.format, 'text'); assert.equal(result.text, '<img src=x onerror=alert(1)>');

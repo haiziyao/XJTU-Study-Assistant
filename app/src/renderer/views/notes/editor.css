@@ -19,6 +19,9 @@
 .note-editor-tools { display: flex; align-items: center; gap: 8px; flex: none; padding: 5px 20px; border-bottom: 1px solid var(--line); }
 .note-editor-tool-group { display: flex; align-items: center; gap: 2px; border-right: 1px solid var(--line); padding-right: 8px; }
 .note-editor-tools button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 32px; height: 32px; padding: 5px 7px; background: transparent; border: 0; border-radius: 5px; color: var(--fg-2); font-size: 13px; }
+.note-editor-tools select { height: 30px; min-width: 70px; padding: 3px 24px 3px 7px; border: 0; border-radius: 5px; background-color: var(--bg-surface); color: var(--fg-2); font-size: 12px; }
+.note-editor-tools select:hover,.note-editor-tools select:focus { background-color: var(--bg-hover); color: var(--fg); outline: 1px solid color-mix(in srgb,var(--blue) 45%,transparent); }
+.note-editor-word-tools #note-font-family { width: 100px; }.note-editor-word-tools #note-font-size { width: 62px; min-width: 62px; }.note-editor-word-tools #note-font-color { width: 88px; }
 .note-editor-tools button:hover:not(:disabled) { color: var(--blue); background: var(--bg-base); }
 .note-editor-tools button:disabled { opacity: .35; }
 .note-editor-tools .note-editor-heading-tool { padding-inline: 9px; }
@@ -109,3 +112,16 @@
 .note-editor-media object { width: 100%; height: 60vh; min-height: 420px; border: 1px solid var(--line); border-radius: 8px; background: white; }
 .note-editor-media p { color: var(--fg-3); }
 .note-editor-attachments a:hover { text-decoration: underline; }
+.note-editor[data-view='file'] .note-editor-workspace { grid-template-columns: minmax(0,1fr); overflow: hidden; }
+.note-editor[data-view='file'] .note-editor-source,
+.note-editor[data-view='file'] .note-editor-preview,
+.note-editor[data-view='file'] .note-editor-inspector,
+.note-editor[data-view='file'] .note-editor-pane-head,
+.note-editor[data-view='file'] .note-editor-tool-group,
+.note-editor[data-view='file'] .note-editor-footer { display: none; }
+.note-editor[data-view='file'] .note-editor-tools { padding-block: 3px; }
+.note-editor[data-view='file'] .note-editor-output { min-height: 0; overflow: hidden; }
+.note-editor[data-view='file'] .note-editor-media { display: flex; flex: 1; min-height: 0; overflow: auto; padding: 0; }
+.note-editor[data-view='file'] .note-editor-media object { flex: 1; width: 100%; height: 100%; min-height: 0; border: 0; border-radius: 0; }
+.note-editor[data-view='file'] .note-editor-media img { max-height: none; object-fit: contain; }
+.note-editor-view-tabs button[hidden] { display: none; }

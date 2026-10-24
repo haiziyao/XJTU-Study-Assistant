@@ -272,6 +272,10 @@ window.PCRichText = (function () {
     out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
     out = out.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+    out = out.replace(/\{u\}([\s\S]*?)\{\/u\}/g, '<u>$1</u>');
+    out = out.replace(/\{color:(blue|purple|green|red|orange|black)\}([\s\S]*?)\{\/color\}/g, '<span class="rt-color-$1">$2</span>');
+    out = out.replace(/\{size:(12|14|16|18|24|32)\}([\s\S]*?)\{\/size\}/g, '<span class="rt-size-$1">$2</span>');
+    out = out.replace(/\{font:(sans|song|hei|kai|mono)\}([\s\S]*?)\{\/font\}/g, '<span class="rt-font-$1">$2</span>');
     out = out.replace(
       /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
       '<a class="rt-link" href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
@@ -392,6 +396,13 @@ window.PCRichText = (function () {
       }
 
       // 标题
+      const aligned = line.match(/^\{align:(left|center|right|justify)\}([\s\S]*)$/);
+      if (aligned) {
+        flushParagraph(); flushList();
+        blocks.push(`<p class="rt-p rt-align-${aligned[1]}">${restoreMath(renderInline(protectMath(aligned[2], store)), store)}</p>`);
+        continue;
+      }
+
       const heading = line.match(/^\s*(#{1,6})\s+(.*)$/);
       if (heading) {
         flushParagraph();

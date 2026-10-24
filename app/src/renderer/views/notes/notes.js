@@ -7,10 +7,10 @@
   const GRAPH_LEVEL_PALETTE = ['#4776e6', '#2fb779', '#9b66df', '#ed923c', '#e65b65', '#20a7bd', '#d95f9f', '#c99a18', '#6f7fe5', '#3d9b91', '#b86b42', '#7c71b8'];
   const CACHE_TTL = 7 * 86400000;
   const CACHE_LIMIT = 100;
-  const IMPORT_ACCEPT = '.md,.markdown,.txt,.html,.htm,.pdf,.doc,.docx,.ppt,.pptx,.png,.jpg,.jpeg,.webp,.gif';
-  const MAX_IMPORT_FILES = 8;
-  const MAX_IMPORT_FILE_BYTES = 6 * 1024 * 1024;
-  const MAX_IMPORT_TOTAL_BYTES = 10 * 1024 * 1024;
+  const IMPORT_ACCEPT = '.md,.markdown,.txt,.html,.htm,.pdf,.doc,.docx,.xls,.xlsx,.csv,.ppt,.pptx,.png,.jpg,.jpeg,.webp,.gif';
+  const MAX_IMPORT_FILES = 20;
+  const MAX_IMPORT_FILE_BYTES = 200 * 1024 * 1024;
+  const MAX_IMPORT_TOTAL_BYTES = 1024 * 1024 * 1024;
   const STATUS = { draft: '草稿', unorganized: '未整理', processing: '整理中', ready: '已整理', failed: '处理失败', archived: '已归档' };
   const SOURCE = { manual: '手动', snapshot: '随手拍', import: '导入' };
   const EMPTY_CAPS = { connected: false, search: false, markdown: false, view: false, edit: false, manage: false, upload: false, aiRead: false, export: false, capture: false, subscriptions: false };
@@ -116,8 +116,35 @@
     });
   }
 
+  function attachmentHref(file) {
+    if (file?.dataUrl) return file.dataUrl;
+    if (file?.url) return `${String(window.PC?.state?.apiBase || `${location.origin}/api/v1`).replace(/\/$/, '')}${file.url}`;
+    return '#';
+  }
+
   function createLocalProvider(api) {
     const request = (path, options) => api(path, options);
+    const rawUpload = (file, input = {}, onProgress) => new Promise((resolve, reject) => {
+      const base = String(window.PC?.state?.apiBase || `${location.origin}/api/v1`).replace(/\/$/, '');
+      const query = new URLSearchParams({ name: file.name || '导入文件', type: file.type || 'application/octet-stream' });
+      if (input.title) query.set('title', input.title);
+      if (input.tags?.length) query.set('tags', input.tags.join(','));
+      if (input.anchor) query.set('anchor', JSON.stringify(input.anchor));
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${base}/notes/import?${query}`);
+      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable) onProgress?.(Math.min(1, event.loaded / event.total));
+      });
+      xhr.addEventListener('load', () => {
+        let payload = {}; try { payload = JSON.parse(xhr.responseText || '{}'); } catch {}
+        if (xhr.status < 200 || xhr.status >= 300 || payload.ok === false) return reject(new Error(payload?.error?.message || `上传失败（${xhr.status}）`));
+        resolve(payload.summary);
+      });
+      xhr.addEventListener('error', () => reject(new Error('上传连接中断，请检查主程序是否仍在运行')));
+      xhr.addEventListener('abort', () => reject(new Error('上传已取消')));
+      xhr.send(file);
+    });
     const queryString = (filters = {}) => {
       const params = new URLSearchParams();
       for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== null && value !== '') params.set(key, value);
@@ -158,16 +185,12 @@
       },
       async uploadNotes(files, input) {
         const out = [];
-        for (const file of files) {
-          const textFile = /^text\//.test(file.type ?? '') || /\.(md|markdown|txt|html?|csv|json|ya?ml|log|tex)$/i.test(file.name ?? '');
-          const body = textFile ? await readFile(file, 'text') : '';
-          const attachments = textFile ? [] : [{ name: file.name, type: file.type, size: file.size, dataUrl: await readFile(file, 'data') }];
-          const title = input.title && files.length === 1 ? input.title : input.title ? `${input.title} · ${file.name}` : file.name;
-          const result = await request('/notes', {
-            method: 'POST',
-            body: { ...input, title, body, attachments, source: 'import', status: 'ready', format: /\.txt$/i.test(file.name ?? '') ? 'text' : 'markdown' },
-          });
-          out.push(result.summary);
+        const list = Array.from(files ?? []);
+        for (let index = 0; index < list.length; index += 1) {
+          const file = list[index];
+          const title = input.title && list.length === 1 ? input.title : input.title ? `${input.title} · ${file.name}` : '';
+          const summary = await rawUpload(file, { ...input, title }, (progress) => input.onProgress?.({ index, count: list.length, file, progress }));
+          out.push(summary);
         }
         return out;
       },
@@ -186,7 +209,7 @@
       },
       async readNote(id) {
         const note = (await request(`/notes/${encodeURIComponent(id)}`)).note;
-        return { format: note.format === 'text' ? 'text' : 'markdown', text: note.body || '（空白笔记）', attachments: note.attachments ?? [] };
+        return { format: note.format === 'text' ? 'text' : 'markdown', text: note.body || '（空白笔记）', attachments: note.attachments ?? [], annotations: note.annotations ?? { strokes: [] }, updatedAt: note.updatedAt };
       },
       async renderMarkdown(id) { return (await this.readNote(id)).text; },
       async readNotesForAI(input) { return (await request('/notes/ai-context', { method: 'POST', body: input })).items ?? []; },
@@ -389,9 +412,9 @@
     if (state.caps.view && typeof state.provider?.readNote === 'function') result = await state.provider.readNote(String(id));
     else if (state.caps.markdown && typeof state.provider?.renderMarkdown === 'function') result = await state.provider.renderMarkdown(String(id));
     else throw new Error('AI 智学主程序尚未提供查看笔记能力');
-    if (typeof result === 'string') return { format: 'markdown', text: result, attachments: [] };
+    if (typeof result === 'string') return { format: 'markdown', text: result, attachments: [], annotations: { strokes: [] } };
     const text = [result?.text, result?.markdown, result?.content].find((value) => typeof value === 'string') ?? '';
-    return { format: result?.format === 'text' ? 'text' : 'markdown', text, attachments: Array.isArray(result?.attachments) ? result.attachments : [] };
+    return { format: result?.format === 'text' ? 'text' : 'markdown', text, attachments: Array.isArray(result?.attachments) ? result.attachments : [], annotations: result?.annotations ?? { strokes: [] }, updatedAt: result?.updatedAt };
   }
 
   async function upload(files, input = {}) {
@@ -404,13 +427,14 @@
     let total = 0;
     for (const file of list) {
       const size = Math.max(0, Number(file?.size) || 0); total += size;
-      if (size > MAX_IMPORT_FILE_BYTES) throw new Error(`“${file?.name ?? '文件'}”超过 6 MB`);
+      if (size > MAX_IMPORT_FILE_BYTES) throw new Error(`“${file?.name ?? '文件'}”超过 200 MB`);
     }
-    if (total > MAX_IMPORT_TOTAL_BYTES) throw new Error('本次上传文件总大小超过 10 MB');
+    if (total > MAX_IMPORT_TOTAL_BYTES) throw new Error('本次批量导入的文件总大小超过 1 GB');
     const result = await state.provider.uploadNotes(list, {
       title: String(input.title ?? '').trim(),
       tags: Array.isArray(input.tags) ? input.tags.map(String).map((value) => value.trim()).filter(Boolean) : [],
       anchor: anchorOf(input.anchor),
+      onProgress: input.onProgress,
     });
     const values = Array.isArray(result) ? result : Array.isArray(result?.items) ? result.items : result?.summary ? [result.summary] : result ? [result] : [];
     if (!values.length) throw new Error('主程序未返回上传后的笔记摘要');
@@ -551,9 +575,14 @@
       if (state.caps.edit && state.provider?.openNote) state.provider.openNote(null);
       else openComposer('manual', create);
     });
+    const importFile = mk('button', 'ghost-btn notes-import-button', '⇧ 导入文件');
+    importFile.type = 'button';
+    importFile.disabled = !state.provider || state.offline || !state.caps.upload || !state.provider.uploadNotes;
+    importFile.title = '导入 Word、Excel、PPT、PDF、文本或图片；单个文件最大 200MB';
+    importFile.addEventListener('click', () => openComposer('import', importFile));
     const focus = mk('button', 'ghost-btn', document.body.classList.contains('notes-focus') ? '退出专注' : '专注模式'); focus.type = 'button';
     focus.addEventListener('click', () => { document.body.classList.toggle('notes-focus'); render(); });
-    first.append(seg, mk('span', 'spacer'), connection, capture, focus, create);
+    first.append(seg, mk('span', 'spacer'), connection, capture, focus, importFile, create);
 
     const second = mk('div', 'toolbar-row notes-filter-row');
     const search = mk('input', 'notes-search');
@@ -599,13 +628,78 @@
     host.appendChild(list);
   }
 
+  function setupAnnotationLayer(stage, item, result, foot) {
+    if (!state.provider?.updateNote) return;
+    const canvas = mk('canvas', 'notes-annotation-canvas'); stage.appendChild(canvas);
+    const toolbar = mk('div', 'notes-annotation-tools');
+    const pen = mk('button', 'ghost-btn', '✎ 画笔'); const eraser = mk('button', 'ghost-btn', '⌫ 橡皮');
+    const width = mk('select', 'notes-annotation-width');
+    [['2', '细'], ['4', '中'], ['7', '粗']].forEach(([value, label]) => width.appendChild(option(value, label, value === '4')));
+    const colors = mk('div', 'notes-annotation-colors');
+    const palette = ['#2f63d8', '#7d48b5', '#16845b', '#d23f57', '#e49a1c', '#202733'];
+    let color = palette[0]; let mode = null; let drawing = null;
+    const strokes = (result.annotations?.strokes ?? []).map((stroke) => ({ ...stroke, points: stroke.points.map((point) => ({ ...point })) }));
+    const setMode = (next) => {
+      mode = mode === next ? null : next;
+      pen.classList.toggle('active', mode === 'pen'); eraser.classList.toggle('active', mode === 'eraser');
+      canvas.classList.toggle('is-active', Boolean(mode)); stage.classList.toggle('is-annotating', Boolean(mode));
+    };
+    pen.type = eraser.type = 'button'; pen.addEventListener('click', () => setMode('pen')); eraser.addEventListener('click', () => setMode('eraser'));
+    for (const value of palette) {
+      const button = mk('button', `notes-annotation-color${value === color ? ' active' : ''}`); button.type = 'button'; button.style.setProperty('--annotation-color', value); button.title = value;
+      button.addEventListener('click', () => { color = value; colors.querySelectorAll('button').forEach((node) => node.classList.toggle('active', node === button)); setMode('pen'); });
+      colors.appendChild(button);
+    }
+    const pointOf = (event) => { const rect = canvas.getBoundingClientRect(); return { x: Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width))), y: Math.max(0, Math.min(1, (event.clientY - rect.top) / Math.max(1, rect.height))) }; };
+    const paint = () => {
+      const rect = stage.getBoundingClientRect(); const ratio = Math.min(2, window.devicePixelRatio || 1);
+      if (!rect.width || !rect.height) return;
+      canvas.width = Math.round(rect.width * ratio); canvas.height = Math.round(rect.height * ratio); canvas.style.width = `${rect.width}px`; canvas.style.height = `${rect.height}px`;
+      const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      for (const stroke of strokes) {
+        if (stroke.points.length < 2) continue;
+        ctx.beginPath(); ctx.strokeStyle = stroke.color; ctx.lineWidth = stroke.width;
+        stroke.points.forEach((point, index) => { const x = point.x * rect.width; const y = point.y * rect.height; if (!index) ctx.moveTo(x, y); else ctx.lineTo(x, y); }); ctx.stroke();
+      }
+    };
+    const eraseAt = (point) => {
+      for (let index = strokes.length - 1; index >= 0; index -= 1) {
+        if (strokes[index].points.some((candidate) => Math.hypot(candidate.x - point.x, candidate.y - point.y) < 0.025)) strokes.splice(index, 1);
+      }
+      paint();
+    };
+    canvas.addEventListener('pointerdown', (event) => {
+      if (!mode) return; event.preventDefault(); canvas.setPointerCapture?.(event.pointerId); const point = pointOf(event);
+      if (mode === 'eraser') return eraseAt(point);
+      drawing = { color, width: Number(width.value), points: [point] }; strokes.push(drawing);
+    });
+    canvas.addEventListener('pointermove', (event) => {
+      if (!(event.buttons & 1) || !mode) return; const point = pointOf(event);
+      if (mode === 'eraser') return eraseAt(point);
+      if (drawing) { drawing.points.push(point); paint(); }
+    });
+    const stop = () => { drawing = null; };
+    canvas.addEventListener('pointerup', stop); canvas.addEventListener('pointercancel', stop);
+    const clear = mk('button', 'ghost-btn danger', '清空批注'); clear.type = 'button'; clear.addEventListener('click', () => { if (strokes.length && window.confirm('清空这篇笔记的全部批注？')) { strokes.splice(0); paint(); } });
+    const save = mk('button', 'primary-btn', '保存批注'); save.type = 'button'; save.addEventListener('click', async () => {
+      save.disabled = true;
+      try { const updated = await state.provider.updateNote(item.id, { annotations: { strokes }, versionReason: 'annotation' }); merge(updated); state.ctx?.toast?.('批注已保存'); }
+      catch (error) { state.ctx?.toast?.(`批注保存失败：${error.message}`); }
+      finally { save.disabled = false; }
+    });
+    toolbar.append(pen, eraser, colors, width, clear, save); foot.prepend(toolbar);
+    requestAnimationFrame(paint); setTimeout(paint, 180);
+  }
+
   async function openNoteViewer(item, trigger) {
     const mask = modal(`查看笔记 · ${item.title}`, trigger);
     const body = mask.querySelector('.modal-body');
     const foot = mask.querySelector('.modal-foot');
+    const stage = mk('div', 'notes-document-stage');
+    const layer = mk('div', 'notes-document-layer');
     const preview = mk('div', 'notes-note-viewer richtext');
     preview.appendChild(mk('div', 'loading', '正在由 AI 智学读取正文…'));
-    body.appendChild(preview);
+    layer.appendChild(preview); stage.appendChild(layer); body.appendChild(stage);
     const close = mk('button', 'ghost-btn', '关闭');
     close.type = 'button'; close.addEventListener('click', mask._close); foot.appendChild(close);
     try {
@@ -618,18 +712,19 @@
         files.appendChild(mk('strong', '', '原始附件'));
         for (const file of result.attachments) {
           if ((file.type || '').startsWith('image/')) {
-            const image = mk('img', 'notes-attachment-image'); image.src = file.dataUrl; image.alt = file.name; files.appendChild(image);
+            const image = mk('img', 'notes-attachment-image'); image.src = attachmentHref(file); image.alt = file.name; files.appendChild(image);
           } else if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')) {
-            const object = mk('object', 'notes-attachment-pdf'); object.data = file.dataUrl; object.type = 'application/pdf'; object.setAttribute('aria-label', `PDF 预览：${file.name}`); files.appendChild(object);
+            const object = mk('object', 'notes-attachment-pdf'); object.data = attachmentHref(file); object.type = 'application/pdf'; object.setAttribute('aria-label', `PDF 预览：${file.name}`); files.appendChild(object);
           } else if (/\.(doc|ppt)$/i.test(file.name || '')) {
             files.appendChild(mk('p', 'notes-import-warning', '这是旧版 Office 格式，网页暂时不能提取正文，请下载原文件查看。'));
           }
           const link = mk('a', 'ghost-btn', `下载/打开 ${file.name}`);
-          link.href = file.dataUrl; link.download = file.name; link.rel = 'noopener';
+          link.href = attachmentHref(file); link.download = file.name; link.rel = 'noopener';
           files.appendChild(link);
         }
-        body.appendChild(files);
+        layer.appendChild(files);
       }
+      setupAnnotationLayer(stage, item, result, foot);
     } catch (reason) {
       preview.innerHTML = '';
       preview.appendChild(errorBox(`预览失败：${reason.message}`));
@@ -755,17 +850,35 @@
 
   function openComposer(source, trigger) {
     const capture = source === 'snapshot'; const importing = source === 'import';
-    const mask = modal(capture ? '随手拍到笔记' : importing ? '手动上传笔记' : '新建笔记', trigger);
+    const mask = modal(capture ? '随手拍到笔记' : importing ? '导入文件到笔记' : '新建笔记', trigger);
     const body = mask.querySelector('.modal-body'); const foot = mask.querySelector('.modal-foot');
     const title = mk('input', 'notes-title-input'); title.placeholder = '未命名笔记';
     const tags = mk('input', 'notes-tags-input'); tags.placeholder = '标签用逗号分隔';
     const files = mk('input', 'notes-file-input'); files.type = 'file'; files.multiple = !capture; files.accept = capture ? 'image/*' : IMPORT_ACCEPT; if (capture) files.setAttribute('capture', 'environment');
-    const fileSummary = mk('div', 'notes-file-summary', capture ? '点击后拍照或从相册选择一张图片。' : '支持 Markdown、文本、PDF、DOCX、PPTX 和常见图片；最多 8 个文件，单个 6 MB。');
+    let selectedFiles = [];
+    const fileSummary = mk('div', 'notes-file-summary', capture ? '点击后拍照或从相册选择一张图片。' : '支持 Word、Excel、PPT、PDF、文本和图片；最多 20 个文件，单个 200 MB。');
+    const progress = mk('div', 'notes-import-progress'); progress.hidden = true;
+    const progressBar = mk('span', 'notes-import-progress-bar'); progress.append(progressBar, mk('strong', '', '准备上传'));
+    const dropZone = mk('label', 'notes-import-dropzone');
+    if (importing) {
+      files.classList.add('notes-file-input-hidden');
+      dropZone.append(mk('span', 'notes-import-drop-icon', '⇧'), mk('strong', '', '拖动文件到这里，或点击选择'), mk('small', '', 'Word · Excel · PPT · PDF · 图片 · 文本'), files);
+      const setFiles = (values) => {
+        selectedFiles = Array.from(values ?? []);
+        save.disabled = !selectedFiles.length;
+        fileSummary.textContent = selectedFiles.length ? `已选择 ${selectedFiles.length} 个文件 · ${selectedFiles.map((file) => file.name).join('、')}` : '尚未选择文件';
+      };
+      files.addEventListener('change', () => setFiles(files.files));
+      for (const name of ['dragenter', 'dragover']) dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.add('is-dragging'); });
+      for (const name of ['dragleave', 'drop']) dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.remove('is-dragging'); });
+      dropZone.addEventListener('drop', (event) => setFiles(event.dataTransfer?.files));
+    }
     const mode = mk('select', 'notes-anchor-mode'); mode.append(option('none', '不关联日历', true), option('date', '关联某一天'), option('schedule', '关联某条日程'));
     const date = mk('input', 'notes-anchor-date'); date.type = 'date'; date.value = today(); date.disabled = true;
     const schedules = mk('select', 'notes-schedule-select'); schedules.disabled = true; schedules.appendChild(option('', '请先选择日期'));
     const error = mk('div', 'modal-error hidden');
-    if (importing || capture) body.append(field(capture ? '拍照或选择图片' : '选择文件', files), fileSummary);
+    if (importing) body.append(dropZone, fileSummary, progress);
+    else if (capture) body.append(field('拍照或选择图片', files), fileSummary);
     body.appendChild(field(importing || capture ? '笔记标题（可选）' : '标题', title));
     body.append(field('标签', tags), field('关联方式', mode), field('日期', date), field('日程', schedules), error);
     async function loadSchedules() {
@@ -781,9 +894,9 @@
     date.addEventListener('change', () => { if (mode.value === 'schedule') loadSchedules(); });
     const cancel = mk('button', 'ghost-btn', '取消'); cancel.type = 'button'; cancel.addEventListener('click', mask._close);
     const save = mk('button', 'primary-btn', capture ? '保存到笔记' : importing ? '上传并查看' : '创建并打开'); save.type = 'button'; save.disabled = importing || capture; foot.append(cancel, save);
-    files.addEventListener('change', () => {
-      const selected = Array.from(files.files ?? []); save.disabled = !selected.length;
-      fileSummary.textContent = selected.length ? `已选择 ${selected.length} 个文件 · ${selected.map((file) => file.name).join('、')}` : '尚未选择文件';
+    if (!importing) files.addEventListener('change', () => {
+      selectedFiles = Array.from(files.files ?? []); save.disabled = !selectedFiles.length;
+      fileSummary.textContent = selectedFiles.length ? `已选择 ${selectedFiles.length} 个文件 · ${selectedFiles.map((file) => file.name).join('、')}` : '尚未选择文件';
     });
     save.addEventListener('click', async () => {
       let anchor = null;
@@ -793,7 +906,12 @@
       try {
         const input = { source, anchor, tags: tags.value.split(/[,，]/).map((v) => v.trim()).filter(Boolean), title: title.value.trim() };
         if (importing) {
-          const items = await upload(files.files, input); files.value = ''; mask._close();
+          progress.hidden = false;
+          input.onProgress = ({ index, count, file, progress: ratio }) => {
+            const percent = Math.round(((index + ratio) / count) * 100);
+            progressBar.style.width = `${percent}%`; progress.querySelector('strong').textContent = `正在导入 ${file.name} · ${percent}%`;
+          };
+          const items = await upload(selectedFiles, input); files.value = ''; selectedFiles = []; mask._close();
           if (items[0] && ((state.caps.view && state.provider?.readNote) || (state.caps.markdown && state.provider?.renderMarkdown))) await openNoteViewer(items[0], trigger);
           return;
         }

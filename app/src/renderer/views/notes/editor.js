@@ -36,6 +36,7 @@
   let past = [];
   let future = [];
   let previousBody = { text: body.value, start: 0, end: 0 };
+  const attachmentHref = (file) => file?.dataUrl || (file?.url ? `${apiBase}${file.url}` : '#');
   const snapshot = () => JSON.stringify({ title: title.value, body: body.value });
   const dirty = () => snapshot() !== saved;
 
@@ -61,13 +62,17 @@
 
   function setStatus(text, state = '') { status.textContent = text; status.dataset.state = state; }
   function showError(message = '') { errorBox.textContent = message; errorBox.hidden = !message; }
+  function setView(view) {
+    editor.dataset.view = view;
+    document.querySelectorAll('button[data-view]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.view === view)));
+  }
   function renderAttachmentPreviews(files = []) {
     attachmentPreview.innerHTML = ''; attachmentPreview.hidden = !files.length;
     for (const file of files) {
       if ((file.type || '').startsWith('image/')) {
-        const image = document.createElement('img'); image.src = file.dataUrl; image.alt = file.name; attachmentPreview.appendChild(image);
+        const image = document.createElement('img'); image.src = attachmentHref(file); image.alt = file.name; attachmentPreview.appendChild(image);
       } else if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')) {
-        const object = document.createElement('object'); object.data = file.dataUrl; object.type = 'application/pdf'; object.setAttribute('aria-label', `PDF 预览：${file.name}`); attachmentPreview.appendChild(object);
+        const object = document.createElement('object'); object.data = attachmentHref(file); object.type = 'application/pdf'; object.setAttribute('aria-label', `PDF 预览：${file.name}`); attachmentPreview.appendChild(object);
       } else if (/\.(doc|ppt)$/i.test(file.name || '')) {
         const hint = document.createElement('p'); hint.textContent = '旧版 Office 文件无法在网页中提取正文，请使用上方“下载/打开”查看原文件。'; attachmentPreview.appendChild(hint);
       }
@@ -182,8 +187,7 @@
   undoButton.addEventListener('click', () => restoreEdit(past, future));
   redoButton.addEventListener('click', () => restoreEdit(future, past));
   document.querySelectorAll('button[data-view]').forEach((button) => button.addEventListener('click', () => {
-    editor.dataset.view = button.dataset.view;
-    document.querySelectorAll('button[data-view]').forEach((item) => item.setAttribute('aria-pressed', String(item === button)));
+    setView(button.dataset.view);
     if (button.dataset.view === 'read') renderPreview();
   }));
   document.addEventListener('keydown', (event) => {
@@ -208,7 +212,7 @@
     const start = body.selectionStart; const end = body.selectionEnd;
     const selected = body.value.slice(start, end);
     const formats = {
-      heading: ['## ', '', '标题'], bold: ['**', '**', '粗体文字'], italic: ['*', '*', '斜体文字'],
+      heading: ['## ', '', '标题'], bold: ['**', '**', '粗体文字'], italic: ['*', '*', '斜体文字'], underline: ['{u}', '{/u}', '下划线文字'],
       list: ['- ', '', '列表项'], quote: ['> ', '', '引用内容'], code: ['```\n', '\n```', '代码'],
       link: ['[', '](https://example.com)', '链接文字'], wiki: ['[[', ']]', '关联笔记'],
       strike: ['~~', '~~', '文字'], table: ['| 列一 | 列二 |\n| --- | --- |\n| ', ' | 内容 |\n', '内容'],
@@ -219,6 +223,20 @@
     body.setRangeText(`${newline}${before}${selected || sample}${after}`, start, end, 'end');
     body.focus(); body.setSelectionRange(start + newline.length + before.length, start + newline.length + before.length + (selected || sample).length);
     changed();
+  }));
+  function applyRichToken(before, after, sample = '文字') {
+    if (!loaded) return;
+    captureSelection(); const start = body.selectionStart; const end = body.selectionEnd; const selected = body.value.slice(start, end) || sample;
+    body.setRangeText(`${before}${selected}${after}`, start, end, 'end'); body.focus(); body.setSelectionRange(start + before.length, start + before.length + selected.length); changed();
+  }
+  document.getElementById('note-font-family')?.addEventListener('change', (event) => applyRichToken(`{font:${event.target.value}}`, '{/font}'));
+  document.getElementById('note-font-size')?.addEventListener('change', (event) => applyRichToken(`{size:${event.target.value}}`, '{/size}'));
+  document.getElementById('note-font-color')?.addEventListener('change', (event) => applyRichToken(`{color:${event.target.value}}`, '{/color}'));
+  document.querySelectorAll('[data-align]').forEach((button) => button.addEventListener('click', () => {
+    if (!loaded) return;
+    captureSelection(); const start = body.selectionStart; const end = body.selectionEnd; const selected = body.value.slice(start, end) || '段落内容';
+    const prefix = start > 0 && body.value[start - 1] !== '\n' ? '\n' : '';
+    body.setRangeText(`${prefix}{align:${button.dataset.align}}${selected}`, start, end, 'end'); body.focus(); changed();
   }));
   let syncing = false;
   for (const [source, target] of [[body, preview], [preview, body]]) source.addEventListener('scroll', () => {
@@ -265,11 +283,16 @@
         attachments.hidden = false; attachments.textContent = '';
         const label = document.createElement('span'); label.textContent = '原始附件：'; attachments.appendChild(label);
         for (const file of note.attachments) {
-          const link = document.createElement('a'); link.href = file.dataUrl; link.download = file.name; link.rel = 'noopener'; link.textContent = `下载/打开 ${file.name}`;
+          const link = document.createElement('a'); link.href = attachmentHref(file); link.download = file.name; link.rel = 'noopener'; link.textContent = `下载/打开 ${file.name}`;
           attachments.appendChild(link);
         }
       }
       renderAttachmentPreviews(note.attachments ?? []);
+      const hasFilePreview = (note.attachments ?? []).some((file) => file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '') || (file.type || '').startsWith('image/'));
+      const fileView = document.getElementById('note-file-view');
+      if (fileView) fileView.hidden = !hasFilePreview;
+      if (hasFilePreview) setView('file');
+      else if (note.source === 'import' && hasAttachments) setView('read');
       setStatus('所有更改已保存', 'saved'); renderPreview();
       if (enhancedUi) await refreshRelations();
       title.disabled = body.disabled = false; saveButton.disabled = false;
