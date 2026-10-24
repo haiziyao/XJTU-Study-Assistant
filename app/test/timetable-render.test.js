@@ -77,6 +77,55 @@ function previewPayload() {
   };
 }
 
+/**
+ * 作息切换夹具：材料力学周一 5-6 节 1-16 周，后端按 10/1 切成两段。
+ * `seasonSplit` 是 `decorateCourse` 真实会返回的形状（见 timetable.test.js）。
+ */
+function seasonSplitPreviewPayload() {
+  const weeks = Array.from({ length: 16 }, (_, index) => index + 1);
+  return {
+    term: TERM,
+    termLabel: '2026-2027 学年 · 第 1 学期',
+    termStart: '2026-09-14',
+    startSource: 'ehall',
+    totalWeeks: 18,
+    maxWeek: 18,
+    count: 1,
+    courses: [
+      {
+        id: 'ttc-mech',
+        name: '材料力学',
+        teacher: '吴老师',
+        location: '主D-101',
+        weekDays: [1],
+        periodRange: [5, 6],
+        weeks: { list: weeks, runs: [{ start: 1, end: 16 }], min: 1, max: 16 },
+        slots: [{ weekDay: 1, startPeriod: 5, endPeriod: 6, weeks }],
+        eventCount: 2,
+        schedulePreviews: [
+          { weekDay: 1, startTime: '14:30', endTime: '16:20', weeks: { start: 1, end: 3 }, date: '2026-09-14', season: 'summer', periodRange: [5, 6] },
+          { weekDay: 1, startTime: '14:00', endTime: '15:50', weeks: { start: 4, end: 16 }, date: '2026-10-05', season: 'winter', periodRange: [5, 6] },
+        ],
+        seasonSplit: {
+          runs: 1,
+          segments: 2,
+          extraEvents: 1,
+          groups: [
+            {
+              weekDay: 1,
+              periodRange: [5, 6],
+              parts: [
+                { weeks: { start: 1, end: 3 }, season: 'summer', date: '2026-09-14', startTime: '14:30', endTime: '16:20' },
+                { weeks: { start: 4, end: 16 }, season: 'winter', date: '2026-10-05', startTime: '14:00', endTime: '15:50' },
+              ],
+            },
+          ],
+        },
+      },
+    ],
+  };
+}
+
 function importedPayload() {
   return {
     term: TERM,
@@ -177,10 +226,22 @@ test('timetable 渲染：三段式 + 每门一个默认勾选的勾选框 + 导�
 
   const count = mount.querySelector('.tt-count');
   assert.equal(count.textContent, '将写入 3 条日程', '1 + 2 条周次段日程');
+  assert.doesNotMatch(page, /因作息切换/, '没被切段的课程不该显示切段说明');
 
   const importButton = findButton(mount, '开始导入');
   assert.ok(importButton, '应有「开始导入」按钮');
   assert.equal(importButton.disabled, false);
+});
+
+test('timetable 渲染：作息切换拆段在课程行如实说明（因作息切换拆为 2 条）', async () => {
+  const { api } = makeApi({ '/timetable/preview': seasonSplitPreviewPayload() });
+  const ctx = bootRenderer({ api });
+  const mount = await ctx.render('timetable', { wait: 40 });
+
+  const page = text(mount);
+  assert.match(page, /因作息切换拆为 2 条/, '用户要知道多出来的日程不是重复导入');
+  assert.match(page, /周一 第5-6节：第1-3周 夏季 14:30起 \/ 第4-16周 冬季 14:00起/);
+  assert.equal(mount.querySelector('.tt-count').textContent, '将写入 2 条日程', '切出来的两段都算进条数');
 });
 
 test('timetable 渲染：调小「导入到第几周」后条数实时变化', async () => {
