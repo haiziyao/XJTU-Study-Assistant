@@ -17,6 +17,13 @@ import { EhallApi, TIMETABLE_ERROR, normalizeTimetableRow, parseEhallDate } from
 import { candidateTerms, resolveTimetableConfig, termLabel } from '../src/modules/timetable/config.js';
 import { courseIdOf, groupCourses, mergeRows } from '../src/modules/timetable/merge.js';
 import {
+  SUMMER_PERIODS,
+  WINTER_PERIODS,
+  getClassTimeOfSeason,
+  getPeriodTime,
+  seasonOfDate,
+} from '../src/modules/timetable/periods.js';
+import {
   bitmapToWeeks,
   describeWeeks,
   guessTermStart,
@@ -33,6 +40,7 @@ import {
   groupImportedSchedules,
   isTimetableExternalId,
   parseExternalId,
+  splitRunBySeason,
 } from '../src/modules/timetable/to-calendar.js';
 import { defaultTimetableRows, startMockTimetable } from './helpers/timetable-mock.js';
 
@@ -261,6 +269,78 @@ test('timetable：学期编号、候选学期（前后各 3 个）与起始日�
   assert.equal(weekToDate(TERM_START, 8, 3), '2026-10-28');
 });
 
+/* ------------------------------------------------------------------ 官方作息表回归 */
+
+/**
+ * 教务处作息时间表：https://jwc.xjtu.edu.cn/xxfw/zxsj.htm
+ * 每学年两套，切换日 5/1、10/1；官方表只列到第 10 节。
+ *
+ * 这张表是**外部事实**，改 periods.js 的数值时必须同步核对这里 ——
+ * 手滑把 14:00 写成 14:30 会让整学期的下午课错半小时，而单测里其它断言只看相对关系。
+ */
+const OFFICIAL_PERIODS = Object.freeze({
+  summer: Object.freeze([
+    ['08:00', '08:50'],
+    ['09:00', '09:50'],
+    ['10:10', '11:00'],
+    ['11:10', '12:00'],
+    ['14:30', '15:20'],
+    ['15:30', '16:20'],
+    ['16:40', '17:30'],
+    ['17:40', '18:30'],
+    ['19:40', '20:30'],
+    ['20:40', '21:30'],
+  ]),
+  winter: Object.freeze([
+    ['08:00', '08:50'],
+    ['09:00', '09:50'],
+    ['10:10', '11:00'],
+    ['11:10', '12:00'],
+    ['14:00', '14:50'],
+    ['15:00', '15:50'],
+    ['16:10', '17:00'],
+    ['17:10', '18:00'],
+    ['19:10', '20:00'],
+    ['20:10', '21:00'],
+  ]),
+});
+
+test('timetable：官方作息表回归 —— 第 1-10 节与教务处表逐值相等', () => {
+  for (const [season, table] of Object.entries(OFFICIAL_PERIODS)) {
+    assert.equal(table.length, 10, '官方表只列到第 10 节（之后是就寝 / 熄灯）');
+    table.forEach(([startTime, endTime], index) => {
+      const period = index + 1;
+      const info = getClassTimeOfSeason(period, period, season);
+      assert.equal(info.startTime, startTime, `${season} 第 ${period} 节的开始时刻`);
+      assert.equal(info.endTime, endTime, `${season} 第 ${period} 节的结束时刻`);
+    });
+  }
+
+  // 上午 1-4 节两套逐值相同 —— 这是「上午课不切段」的前提
+  for (let period = 1; period <= 4; period += 1) {
+    assert.deepEqual(SUMMER_PERIODS[period - 1], WINTER_PERIODS[period - 1], `第 ${period} 节两套作息应相同`);
+  }
+  // 第 5 节起整体差 30 分钟（5-10 节，官方表范围内）
+  const toMinutes = (clock) => Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5));
+  for (let period = 5; period <= 10; period += 1) {
+    const summer = getClassTimeOfSeason(period, period, 'summer');
+    const winter = getClassTimeOfSeason(period, period, 'winter');
+    assert.equal(toMinutes(summer.startTime) - toMinutes(winter.startTime), 30, `第 ${period} 节夏季应比冬季晚 30 分钟`);
+  }
+
+  // 切换日：4/30 冬季、5/1 夏季、9/30 夏季、10/1 冬季
+  assert.equal(seasonOfDate('2026-04-30'), 'winter');
+  assert.equal(seasonOfDate('2026-05-01'), 'summer');
+  assert.equal(seasonOfDate('2026-09-30'), 'summer');
+  assert.equal(seasonOfDate('2026-10-01'), 'winter');
+  assert.equal(getPeriodTime(5, '2026-05-01').startTime, '14:30');
+  assert.equal(getPeriodTime(5, '2026-10-01').startTime, '14:00');
+
+  // 第 11 节官方未列，保留为兜底（旧实现 2026-01 真机核对值）
+  assert.equal(getPeriodTime(11, '2026-01-01').startTime, '21:10');
+  assert.equal(getPeriodTime(11, '2026-06-01').startTime, '21:40');
+});
+
 /* ------------------------------------------------------------------ 合并 */
 
 test('timetable：相邻同名课程合并成一条（1-2 + 3-4 → 1-4）', () => {
@@ -336,6 +416,7 @@ test('timetable：周次跨段 1-8 与 10-16 → 两条日程，repeat.until 各
   const [course] = groupCourses(slots);
   const decorated = decorateCourse(course, { term: TERM, termStart: TERM_START });
   assert.equal(decorated.eventCount, 2);
+  assert.equal(decorated.seasonSplit, undefined, '上午课不因作息切换多切');
   assert.deepEqual(decorated.schedulePreviews.map((item) => item.weeks), [
     { start: 1, end: 8 },
     { start: 10, end: 16 },
@@ -369,6 +450,140 @@ test('timetable：untilWeek=8 截断 —— 后半段去掉；整门被截掉的
   assert.equal(cut.events.length, 0);
   assert.equal(cut.skipped.length, 1);
   assert.match(cut.skipped[0].reason, /第 8 周/);
+});
+
+/* ------------------------------------------------------------------ 作息切换日切段 */
+
+test('timetable：作息切换日切段 —— 秋季下午课在 10/1 所在周后切成两段', () => {
+  const termStart = '2026-09-14';
+  // 材料力学：周一 5-6 节、1-16 周。第 3 周周一 9/28（夏季）、第 4 周周一 10/5（冬季），
+  // 10/1 落在第 3 周（9/28 ~ 10/4）内 → 第 1-3 周夏季、第 4-16 周冬季。
+  const { slots } = mergeRows([
+    row({ courseName: '材料力学', weekDay: 1, startPeriod: 5, endPeriod: 6, weeksBitmap: '111111111111111100' }),
+  ]);
+  const [course] = groupCourses(slots);
+  const decorated = decorateCourse(course, { term: TERM, termStart });
+  assert.equal(decorated.eventCount, 2, '一条下午课切成两条日程');
+  assert.equal(decorated.seasonSplit.runs, 1);
+  assert.equal(decorated.seasonSplit.segments, 2);
+  assert.equal(decorated.seasonSplit.extraEvents, 1);
+  assert.deepEqual(
+    decorated.seasonSplit.groups[0].parts.map((part) => [part.weeks, part.season, part.startTime, part.endTime, part.date]),
+    [
+      [{ start: 1, end: 3 }, 'summer', '14:30', '16:20', '2026-09-14'],
+      [{ start: 4, end: 16 }, 'winter', '14:00', '15:50', '2026-10-05'],
+    ],
+  );
+  assert.deepEqual(
+    decorated.schedulePreviews.map((item) => [item.weeks.start, item.weeks.end, item.startTime]),
+    [
+      [1, 3, '14:30'],
+      [4, 16, '14:00'],
+    ],
+  );
+
+  const { events, skipped } = buildEventsForCourse(course, { term: TERM, termStart });
+  assert.equal(skipped.length, 0);
+  assert.equal(events.length, 2);
+  assert.equal(events[0].payload.startTime, '14:30', '夏季段第 5 节 14:30 开始');
+  assert.equal(events[0].payload.repeat.until.date, '2026-09-28', '第 3 周周一：切点');
+  assert.equal(events[1].payload.startTime, '14:00', '冬季段第 5 节 14:00 开始');
+  assert.equal(events[1].date, '2026-10-05', '第 4 周周一');
+  assert.equal(events[1].payload.repeat.until.date, '2026-12-28', '第 16 周周一');
+  assert.notEqual(events[0].externalId, events[1].externalId, '切出来的两段幂等键必须不同');
+  assert.match(events[0].payload.description, /夏季作息/);
+  assert.match(events[1].payload.description, /冬季作息/);
+  assert.equal(events[0].payload.tags.find((tag) => tag.startsWith('weeks:')), 'weeks:1-3');
+  assert.equal(events[1].payload.tags.find((tag) => tag.startsWith('weeks:')), 'weeks:4-16');
+
+  // 幂等：同一份输入再算一次，两段的键与条数完全一样（切分点稳定）
+  const again = buildEventsForCourse(course, { term: TERM, termStart });
+  assert.equal(again.events.length, 2);
+  assert.deepEqual(
+    again.events.map((event) => event.externalId),
+    events.map((event) => event.externalId),
+  );
+});
+
+test('timetable：上午课（1-4 节）不切 —— 两套作息逐值相同', () => {
+  const termStart = '2026-09-14';
+  const { slots } = mergeRows([
+    row({ courseName: '高等数学', weekDay: 1, startPeriod: 1, endPeriod: 4, weeksBitmap: '111111111111111100' }),
+  ]);
+  const [course] = groupCourses(slots);
+  const decorated = decorateCourse(course, { term: TERM, termStart });
+  assert.equal(decorated.eventCount, 1, '上午课不该因为跨 10/1 多出一条');
+  assert.equal(decorated.seasonSplit, undefined, '没切就不带说明字段');
+  assert.deepEqual(decorated.schedulePreviews[0].weeks, { start: 1, end: 16 });
+  assert.equal(decorated.schedulePreviews[0].startTime, '08:00');
+
+  const { events } = buildEventsForCourse(course, { term: TERM, termStart });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].payload.startTime, '08:00');
+  assert.equal(events[0].payload.repeat.until.date, '2026-12-28');
+});
+
+test('timetable：春季学期跨 5/1 —— 切在 5 月 1 日所在周（按周一判定）', () => {
+  const springTerm = '2026-2027-2';
+  const termStart = '2027-02-22';
+  const { slots } = mergeRows([
+    row({ courseName: '材料力学', term: springTerm, weekDay: 1, startPeriod: 5, endPeriod: 6, weeksBitmap: '111111111111111100' }),
+  ]);
+  const [course] = groupCourses(slots);
+  const { events } = buildEventsForCourse(course, { term: springTerm, termStart });
+  assert.deepEqual(
+    events.map((event) => [event.weeks.start, event.weeks.end, event.date, event.payload.startTime]),
+    [
+      [1, 10, '2027-02-22', '14:00'],
+      [11, 16, '2027-05-03', '14:30'],
+    ],
+  );
+  assert.equal(events[0].payload.repeat.until.date, '2027-04-26', '第 10 周周一是 4/26，5/1 在这一周');
+  assert.equal(events[1].payload.repeat.until.date, '2027-06-07');
+  assert.notEqual(events[0].externalId, events[1].externalId);
+});
+
+test('timetable：非连续周次（1-8 + 10-16）叠加作息切段 —— 2 条变 3 条', () => {
+  const termStart = '2026-09-14';
+  // 真实夹具形状：程序设计周三 5-6 节，1-8 周 + 10-16 周。
+  // 第一段被 10/1 切成 1-3 + 4-8，第二段（10-16）整段在冬季，不切。
+  const { slots } = mergeRows([
+    row({ courseName: '程序设计', weekDay: 3, startPeriod: 5, endPeriod: 6, weeksBitmap: '111111110111111100' }),
+  ]);
+  const [course] = groupCourses(slots);
+  assert.equal(course.weeks.runs.length, 2);
+  const decorated = decorateCourse(course, { term: TERM, termStart });
+  assert.equal(decorated.eventCount, 3);
+  assert.deepEqual(
+    decorated.schedulePreviews.map((item) => [item.weeks.start, item.weeks.end, item.startTime, item.season]),
+    [
+      [1, 3, '14:30', 'summer'],
+      [4, 8, '14:00', 'winter'],
+      [10, 16, '14:00', 'winter'],
+    ],
+  );
+  assert.equal(decorated.seasonSplit.runs, 1, '只有第一个连续段跨切换日');
+  assert.equal(decorated.seasonSplit.segments, 2);
+  assert.equal(decorated.seasonSplit.extraEvents, 1);
+});
+
+test('timetable：切换日正好是周一 —— 该周直接算新作息（不早一周、不晚一周）', () => {
+  assert.equal(isoWeekday('2029-10-01'), 1, '2029-10-01 是周一（夹具前提）');
+  const segments = splitRunBySeason({
+    termStart: '2029-09-03',
+    startPeriod: 5,
+    endPeriod: 6,
+    run: { start: 1, end: 8 },
+  });
+  assert.deepEqual(segments, [
+    { run: { start: 1, end: 4 }, season: 'summer' },
+    { run: { start: 5, end: 8 }, season: 'winter' },
+  ]);
+  // 上午课即使跨切换日也不切
+  assert.deepEqual(
+    splitRunBySeason({ termStart: '2029-09-03', startPeriod: 1, endPeriod: 4, run: { start: 1, end: 8 } }),
+    [{ run: { start: 1, end: 8 }, season: 'summer' }],
+  );
 });
 
 /* ------------------------------------------------------------------ 幂等键 */
@@ -516,12 +731,29 @@ test('timetable HTTP：登录后 status / preview（真实字段夹具）', asyn
     assert.deepEqual(byName.get('高等数学').periodRange, [1, 4], '1-2 + 3-4 应合并为 1-4');
     assert.equal(byName.get('高等数学').eventCount, 1);
     assert.equal(byName.get('线性代数').slots.length, 2, '1-2 与 5-6 不连续，保持两段');
-    assert.equal(byName.get('线性代数').eventCount, 2);
+    assert.equal(byName.get('线性代数').eventCount, 3, '上午段 1 条 + 下午段被 10/1 切成 2 条');
+    assert.deepEqual(
+      byName.get('线性代数').seasonSplit.groups[0].parts.map((part) => [part.weeks.start, part.weeks.end, part.startTime]),
+      [
+        [1, 4, '14:30'],
+        [5, 16, '14:00'],
+      ],
+      '学期起始 9/7：第 4 周周一是 9/28（夏季），第 5 周周一是 10/5（冬季）',
+    );
+    assert.equal(byName.get('大学物理').eventCount, 2, '周一 5-6 节 1-16 周同样跨 10/1');
+    assert.deepEqual(
+      byName.get('大学物理').seasonSplit.groups[0].parts.map((part) => part.weeks),
+      [
+        { start: 1, end: 4 },
+        { start: 5, end: 16 },
+      ],
+    );
     assert.deepEqual(byName.get('程序设计').weeks.runs, [
       { start: 1, end: 8 },
       { start: 10, end: 16 },
     ]);
     assert.equal(byName.get('程序设计').eventCount, 2);
+    assert.equal(byName.get('程序设计').seasonSplit, undefined, '上午课不切');
     assert.deepEqual(byName.get('物理实验').weeks.list, [10, 11, 12, 13, 14, 15, 16]);
 
     // 起始日接口带对了 XN / XQ（这是 cxjcs.do 的必填参数）
@@ -576,12 +808,12 @@ test('timetable HTTP：导入幂等 —— 第二次 created:0 / updated>0，日
     assert.equal(first.status, 200);
     assert.equal(first.body.skippedCount, 1, '物理实验只有 10-16 周，截到第 8 周后应跳过');
     assert.match(first.body.skipped[0].reason, /第 8 周/);
-    assert.equal(first.body.created, 7);
+    assert.equal(first.body.created, 10);
     assert.equal(first.body.updated, 0);
-    assert.equal(first.body.events, 7);
+    assert.equal(first.body.events, 10);
 
     const countAfterFirst = timetableSchedules(app).length;
-    assert.equal(countAfterFirst, 7);
+    assert.equal(countAfterFirst, 10);
 
     const second = await call('POST', '/timetable/import', { term: TERM, courseIds, untilWeek: 8 });
     assert.equal(second.body.created, 0, '第二次不应新建');
@@ -592,13 +824,13 @@ test('timetable HTTP：导入幂等 —— 第二次 created:0 / updated>0，日
     // 重新按整学期导入：补齐后半段，仍然不产生重复
     const full = await call('POST', '/timetable/import', { term: TERM, courseIds });
     assert.equal(full.body.created, 2, '程序设计后半段 + 物理实验');
-    assert.equal(full.body.updated, 7);
-    assert.equal(timetableSchedules(app).length, 9);
+    assert.equal(full.body.updated, 10);
+    assert.equal(timetableSchedules(app).length, 12);
 
     const fullAgain = await call('POST', '/timetable/import', { term: TERM, courseIds });
     assert.equal(fullAgain.body.created, 0);
-    assert.equal(fullAgain.body.updated, 9);
-    assert.equal(timetableSchedules(app).length, 9);
+    assert.equal(fullAgain.body.updated, 12);
+    assert.equal(timetableSchedules(app).length, 12);
   } finally {
     await app.close();
     await mock.close();
@@ -611,13 +843,13 @@ test('timetable HTTP：调小 untilWeek 重新导入会清掉多余的旧日程�
     const preview = await call('GET', `/timetable/preview?term=${TERM}`);
     const courseIds = preview.body.courses.map((course) => course.id);
     const full = await call('POST', '/timetable/import', { term: TERM, courseIds });
-    assert.equal(full.body.events, 9);
+    assert.equal(full.body.events, 12);
 
     const truncated = await call('POST', '/timetable/import', { term: TERM, courseIds, untilWeek: 8 });
-    assert.equal(truncated.body.updated, 7);
+    assert.equal(truncated.body.updated, 10);
     assert.equal(truncated.body.removed, 2, '程序设计第 10-16 周与物理实验应被清掉');
     const remaining = timetableSchedules(app);
-    assert.equal(remaining.length, 7);
+    assert.equal(remaining.length, 10);
     assert.ok(remaining.every((item) => !item.externalId.includes('物理实验')));
   } finally {
     await app.close();
@@ -663,20 +895,20 @@ test('timetable HTTP：按课程删 / all 只删 timetable: 前缀，手建日�
     const preview = await call('GET', `/timetable/preview?term=${TERM}`);
     const courseIds = preview.body.courses.map((course) => course.id);
     await call('POST', '/timetable/import', { term: TERM, courseIds });
-    assert.equal(timetableSchedules(app).length, 9);
+    assert.equal(timetableSchedules(app).length, 12);
 
     // 按课程删：只删「高等数学」
     const math = preview.body.courses.find((course) => course.name === '高等数学');
     const one = await call('POST', '/timetable/remove', { term: TERM, courseIds: [math.id] });
     assert.equal(one.status, 200);
     assert.equal(one.body.removed, 1);
-    assert.equal(timetableSchedules(app).length, 8);
+    assert.equal(timetableSchedules(app).length, 11);
     assert.ok(app.store.schedules.get(manual.id), '手建日程必须还在');
     assert.ok(app.store.schedules.get(foreign.id), '非 timetable: 前缀的记录也不能被删');
 
     // 全部删除（当前学期）
     const all = await call('POST', '/timetable/remove', { term: TERM, all: true });
-    assert.equal(all.body.removed, 8);
+    assert.equal(all.body.removed, 11);
     assert.equal(timetableSchedules(app).length, 0);
     assert.ok(app.store.schedules.get(manual.id), '手建日程必须还在（all 也不行）');
     assert.ok(app.store.schedules.get(foreign.id), '别的来源必须还在');
@@ -684,6 +916,106 @@ test('timetable HTTP：按课程删 / all 只删 timetable: 前缀，手建日�
     const imported = await call('GET', `/timetable/imported?term=${TERM}`);
     assert.equal(imported.body.total, 0);
     assert.deepEqual(imported.body.courses, []);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
+
+test('timetable HTTP：作息切段 —— 两段都写入、重复导入不重复、删除两段一起删', async () => {
+  const rows = [
+    {
+      KCM: '材料力学',
+      SKJS: '吴老师',
+      JASMC: '主D-101',
+      SKXQ: '1',
+      KSJC: '5',
+      JSJC: '6',
+      SKZC: '111111111111111100',
+      XNXQDM: '2026-2027-1',
+      KCH: 'ME1001',
+    },
+  ];
+  // 起始日 2026-09-14：第 3 周（9/28 ~ 10/4）含 10/1，按周一判定切在第 3 / 4 周之间。
+  const { app, call, mock } = await loggedIn({ termStart: '2026-09-14', rows });
+  try {
+    const preview = await call('GET', `/timetable/preview?term=${TERM}`);
+    assert.equal(preview.status, 200);
+    assert.equal(preview.body.termStart, '2026-09-14');
+    assert.equal(preview.body.count, 1);
+    const [course] = preview.body.courses;
+    assert.equal(course.eventCount, 2);
+    assert.deepEqual(
+      course.seasonSplit.groups[0].parts.map((part) => [part.weeks.start, part.weeks.end, part.startTime]),
+      [
+        [1, 3, '14:30'],
+        [4, 16, '14:00'],
+      ],
+    );
+
+    const first = await call('POST', '/timetable/import', { term: TERM, courseIds: [course.id] });
+    assert.equal(first.body.created, 2, '一条课切成两条日程');
+    const idsAfterFirst = timetableSchedules(app)
+      .map((item) => item.externalId)
+      .sort();
+    assert.equal(idsAfterFirst.length, 2);
+    assert.deepEqual(
+      timetableSchedules(app)
+        .map((item) => [item.date, item.startTime])
+        .sort(),
+      [
+        ['2026-09-14', '14:30'],
+        ['2026-10-05', '14:00'],
+      ].sort(),
+    );
+
+    // 「已导入」按课程分组：两段都归到同一门课，周次并集仍是 1-16 周
+    const imported = await call('GET', `/timetable/imported?term=${TERM}`);
+    assert.equal(imported.body.total, 2);
+    assert.equal(imported.body.courses.length, 1);
+    assert.equal(imported.body.courses[0].count, 2);
+    assert.equal(imported.body.courses[0].weeks.min, 1);
+    assert.equal(imported.body.courses[0].weeks.max, 16);
+
+    // 同一份参数再导一次：两段的 externalId 稳定，条数不变
+    const second = await call('POST', '/timetable/import', { term: TERM, courseIds: [course.id] });
+    assert.equal(second.body.created, 0, '第二次不应新建');
+    assert.equal(second.body.updated, 2);
+    assert.deepEqual(
+      timetableSchedules(app)
+        .map((item) => item.externalId)
+        .sort(),
+      idsAfterFirst,
+      '切分点的 externalId 稳定',
+    );
+
+    // 只导入到第 3 周：冬季段（第 4-16 周）被清掉，夏季段只更新
+    const truncated = await call('POST', '/timetable/import', {
+      term: TERM,
+      courseIds: [course.id],
+      untilWeek: 3,
+    });
+    assert.equal(truncated.body.updated, 1);
+    assert.equal(truncated.body.removed, 1, '冬季段被清掉');
+    assert.deepEqual(
+      timetableSchedules(app).map((item) => [item.date, item.startTime]),
+      [['2026-09-14', '14:30']],
+    );
+
+    // 再导回整学期：冬季段用同一个 externalId 重建（created 1），不会变成两条重复
+    const restored = await call('POST', '/timetable/import', { term: TERM, courseIds: [course.id] });
+    assert.equal(restored.body.created, 1);
+    assert.deepEqual(
+      timetableSchedules(app)
+        .map((item) => item.externalId)
+        .sort(),
+      idsAfterFirst,
+    );
+
+    // 删除一门课 → 切出来的两条都被删掉（remove 按 courseId 匹配；两段哈希不同但课程相同）
+    const removed = await call('POST', '/timetable/remove', { term: TERM, courseIds: [course.id] });
+    assert.equal(removed.body.removed, 2);
+    assert.equal(timetableSchedules(app).length, 0);
   } finally {
     await app.close();
     await mock.close();
