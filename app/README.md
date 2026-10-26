@@ -21,6 +21,7 @@
 | `lms` | 20 | 思源学堂：课程/作业/网课（直播 + 回放）拉取、**按学期 → 课程 → 活动三级分类**、**课程页**（课程信息 / 回放 / 作业 / 资料 / 直播，可折叠）、**回放下载**（录播站三步取链，落盘本地）、自动同步、**作业自动变成待办**（默认只同步本学期，带回截止日、已提交标完成）；**登录已交给 `auth`**（本视图没有密码表单，也**不展示账号信息**）；给 AI 的工具契约 **11 个已实现 + 5 个预置未实现** | ✅ |
 | `timetable` | **23** | **智能导入课表**（独立页面，三段式）：从 `ehall / jwapp / wdkb` 选学期 → 预览课程 → **逐门勾选** → **导入到第几周** → 写入日历日程；相邻同名课程自动合并、周次跨段拆多条；**幂等**（`externalId = timetable:<学期>:<课程名>:<星期>:<起-止节>:<周次段哈希>`）；已导入按课程分组，可逐门 / 全部删除（**只删 `timetable:` 前缀，绝不碰手建日程**）；**登录复用 `auth`**；给 AI 的工具契约 5 个已实现 | ✅ |
 | `academic` | 30 | **学业情况查询**：从本科教务系统拉取官方成绩单（四步授权握手），学分绩 / 加权平均分计算，**每一项都可单独选择是否计入学分绩（也支持整个学期一键计入/屏蔽）**，同步后出 AI 学情分析（未配密钥时退化为本地统计摘要）；**登录已交给 `auth`**；给 AI 的工具契约 **11 个已实现** | ✅ |
+| `growth` | **50** | **成长**：从 Brain Online 整体移植的后端 —— 六维状态评分（精力/睡眠/情绪/压力/专注/身体）→ 就绪度/模式/可投入分钟数；确定性任务表单生成器（预算硬约束、最低配比、同类上限、可复现）；任务打卡与角色成长（经验/等级/属性/连击/成就）；模板库可编辑；会话开机载入与关机存档；周报/趋势/Markdown 导出；提醒与跨天顺延；备份恢复与数据自检；AI 简报/复盘/解读（**密钥统一走 XJTU `services.ai`，成长模块不存 key**） | ✅ 后端 |
 | `knowledge` | 70 | **知识库**：教务处政策语料（148 篇 / 18 栏 / 11.5 万字，仓库内 `knowledge/dean/`）的关键词检索与原文读取；**只读、不联网**、每条结果都带来源 URL；具体条款先检索（片段带 `offset`），需要原文再按 `offset` / `section` 续读，**不整篇回灌**；给 AI 的工具契约 2 个 | ✅ |
 | `transfer` | 75 | **局域网直传**：设备之间直接传数据（不走服务器）。独立 **8886** 端口上的 4 条协议路由 + UDP 发现 + 6 位配对码；集合可勾选、分批（≤2 MB）、幂等、疑似重复清单；**不新增集合**（日志与幂等账本在 `data/transfer-log.json`，0600）。同一个 8886 上还有**默认关**的**局域网网关**（`/app` 静态托管 + `/api` 反向代理 + `/ws` WebSocket 代理，配对码换 HttpOnly Cookie），让手机/平板能真的打开本程序。用法见下文「局域网直传」与「手机/平板在局域网里用这个程序（PWA）」 | ✅ |
 | `account` | 88 | **账号登录**（桌面端「设置」里的一块）：登录/注册**公开服务端**的账号。后端做桥（渲染层 ↔ `serverUrl/auth/**`），令牌只存后端 `data/account.json`（0600）、`GET /account` 不回传；可测试连接（服务名/版本/LMS 是否可用）并给出中文人话错误。**不提供任何 AI 工具/查询**（账号是用户的事）。用法见下文「设置 → 账号登录」 | ✅ |
@@ -477,6 +478,58 @@ node scripts/lms-probe.js
 > 与思源学堂是**两套独立会话**（同一套 CAS，但票据不共用）：退出其一不影响另一个。
 > 思源学堂的 `lms_grades` 是学堂视角的「课程总分与各项得分」，**不是**官方成绩单；
 > 学分、绩点、学分绩只由本模块提供 —— 提示词里特意点明了这个区别，避免模型混用。
+
+### 成长模块（`growth`，order 50）
+
+把「今天状态怎么样、今天该做什么、做完有什么积累」做成一个闭环。后端整体移植自本地另一份
+完整项目 **Brain Online**，行为与 HTTP 接口保持等价；数据全部落在 XJTU 自己的 `app/data/`，
+不读 Brain Online 的数据目录。模块只有后端，界面由渲染层另行接入（左栏「成长」）。
+
+- **六维状态**：精力 0.30 / 睡眠时长 0.15 / 睡眠质量 0.15 / 情绪 0.15 / 压力 0.15（反向）/ 身体 0.10，
+  再乘 `0.9 + 专注 × 0.2` 的专注乘数，夹到 0–100。公式是纯函数，可直接单测。
+- **模式与预算**：≥70 推进（难度目标 4）、45–69.9 稳态（目标 3）、<45 修复（目标 2）；
+  可投入分钟数 = `60 + 2.4 × 就绪度`（60–300）。
+- **任务表单生成器**：预算硬约束、最低配比（推进日 2 深度 + 1 认知 + 1 身体；修复日 2 恢复 + 1 身体）、
+  同类上限、最近三天做过的任务权重 ×0.35、随机种子来自输入（同输入永远同一份表单）。
+- **任务与角色**：任务只有 `todo/done/skipped`；完成加经验与属性，**撤销会扣回**；连击按本地日期算，
+  今天还没打卡不算断；成就 11 个。逾期只提醒不惩罚，并提供「改期」出口。
+- **模板库**：内置 36 条 + 自定义模板；可停用/删除自定义；自定义会进入生成器候选池。
+- **会话与存档**：启动（`restore`，listen 之前）补记上次未关闭的会话并开新会话；关闭（`stop`）停提醒并写
+  `data/archive/<日期>-<会话号>.json` 快照；也支持手动 `/system/snapshot`。存档失败只记日志，不阻断关机。
+- **周报 / 导出**：每日趋势、7 天周报（完成率、投入、模式分布、按类配比、结论、最多 3 条洞察）；
+  Markdown 导出单日或最多 31 天区间（直接回文件，不走 JSON 包装）。
+- **备份 / 恢复**：导出格式仍是 `app: "brain-online"`（兼容旧 Brain Online 备份），恢复前自动写
+  `pre-restore-*.json`；**AI key 不进入成长模块的备份**（见下）。
+- **AI 配置打通**：优先读 XJTU `services.ai` 的 `baseUrl/apiKey/model`（与 AI 模块共用一份密钥）；
+  取不到密钥时回落到成长模块自己的 `growthSettings`（**只放 baseUrl/model/enabled/temperature/timeoutMs，
+  不放 apiKey**，因此 keyless 的本地 Ollama 端点也能用）。`GET /growth/ai/status` 只回 `hasKey` 与
+  `keyMask`（`***` + 末四位），永不回原值；`POST /growth/ai/config` 里的 `apiKey` 会委托给 AI 模块保存，
+  成长模块的集合与备份里都不会出现密钥。
+- **推送**：不再有 Brain Online 的 SSE `/api/events`；所有变更走 WebSocket
+  `{ type: "data_changed", module: "growth", payload: { target, event?, action?, at, ... } }`，
+  `target` 取值 `state / tasks / templates / plan / character / session / reminders / nudge / day / restore / settings / ai / maintenance`。
+
+集合（均在 `app/data/`，由框架 JsonStore 统一原子写；命名必须是 camelCase，框架契约不允许短横线）：
+
+| 集合 | 文件 | 内容 |
+| --- | --- | --- |
+| `growthStates` | `growth-states.json` | 每日状态（`date`、六维原始值、派生 `score/capacity/mode`） |
+| `growthPlans` | `growth-plans.json` | 每日计划（`date/mode/budget/usedMinutes/rationale/taskIds`） |
+| `growthTasks` | `growth-tasks.json` | 任务（`date/planId/title/kind/estimateMin/difficulty/status/dueAt/xp/postponed*`） |
+| `growthSessions` | `growth-sessions.json` | 会话（`startedAt/endedAt/closedBy/trigger/host/platform`） |
+| `growthLogs` | `growth-logs.json` | 日志流（`at/sessionId/type/message/data`，上限 5000 条） |
+| `growthRpg` | `growth-rpg.json` | 角色档案（单文档：`name/totalXp/attrs/streak/counters/achievements`） |
+| `growthTemplates` | `growth-templates.json` | 模板覆盖（单文档：`custom[] / disabled[]`） |
+| `growthSettings` | `growth-settings.json` | 设置（单文档：提醒时间/跨天策略/自检开关）+ AI 回落配置（`id=ai` 的另一条记录，**无 apiKey**） |
+
+接口全部挂在 **`/api/v1/growth`** 下，源项目路径原样保留（`/state` → `/api/v1/growth/state`、
+`/ai/probe` → `/api/v1/growth/ai/probe`）。完整清单见 `src/modules/growth/routes.js` 与交付报告；
+测试用 `node --test test/growth-*.test.js`（105 个用例：98 个源用例 + 存储并发/AI mock 等新增）。
+
+> 与源项目的已知差异（都是有意的）：没有 SSE（改走 WebSocket `data_changed`）；`POST /system/shutdown`
+> 不会因 `stop:true` 退出进程（那是 XJTU 主程序的进程）；业务集合由框架按 0644 落盘，仅存档快照是
+> 0600；备份里的 AI key 恒为空（密钥归 AI 模块）；JSON 响应由框架统一带 `ok:true`；
+> `GET /system/status` 的 `dataCounts` 只统计成长模块自己的集合。
 
 ### 课表导入（移动教务 wdkb）
 
